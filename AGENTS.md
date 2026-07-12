@@ -55,3 +55,11 @@ mem recall --hint-format --root <project-root> [--context-files a.ts,b.ts]
 Returns `TGMEM/1` header + lines: `pref  fresh=affirmed|unverified|contradicted  id=abc  display="..."`. Token-goat surfaces `display` verbatim; trust caveat is embedded in the payload, not something the consumer reconstructs. Contested/low-trust facts excluded from `--hint-format` entirely.
 
 If `mem` is missing, the binary times out, or parsing fails, token-goat treats it as "no hints" — fail-open to no memory (safe).
+
+**Cheap polling:** `mem epoch` prints a monotonic integer bumped on every write and left alone otherwise — the recommended cache-invalidation key for a host tool that wants to avoid re-running `mem recall` (which re-opens the DB and re-does retrieval) on every turn. Pattern: poll `mem epoch`, only call `mem recall --hint-format` when the value changed since the last poll.
+
+```bash
+last_epoch=$(mem epoch)
+current_epoch=$(mem epoch)
+[ "$current_epoch" != "$last_epoch" ] && mem recall --hint-format --root <project-root>
+```

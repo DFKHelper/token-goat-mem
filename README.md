@@ -173,6 +173,22 @@ Mem works standalone. When token-goat is on PATH, token-goat can call `mem recal
 
 The seam is one-directional (Mem reads nothing from token-goat), stateless (live calls, no caching), and self-caveating (display strings include their own trust caveats). Contested or low-trust facts are excluded from `--hint-format` entirely — only ground-truth-eligible or explicitly-caveated hints are emitted. Mem does not cache results; forget/edit reflect instantly. If mem is not on PATH or the call times out, token-goat falls back to no hints (fail-open).
 
+### Cheap polling with `mem epoch`
+
+Re-running `mem recall --hint-format` on every host-tool turn works, but it re-opens the DB and re-runs retrieval every time even when nothing changed. `mem epoch` is the cheap alternative: it prints a single monotonic integer that is bumped by every write (`remember`, `edit`, `forget`, `pin`, `review --promote`/`--reject`, the `epoch --gc` retention pass) and left untouched otherwise. A host tool can poll it and only pay for a full `mem recall` when the value actually moved:
+
+```bash
+last_epoch=$(mem epoch)
+# ... later, on each turn ...
+current_epoch=$(mem epoch)
+if [ "$current_epoch" != "$last_epoch" ]; then
+  mem recall --hint-format --root "$project_root"
+  last_epoch="$current_epoch"
+fi
+```
+
+`mem epoch` with no flags never mutates state (no GC pass, no writes) — it is safe to call as often as you like as a cache-invalidation key.
+
 ## Works with
 
 Integration guides in [`docs/integrations/`](docs/integrations/):
