@@ -37,6 +37,15 @@ const MS_PER_DAY = 86_400_000;
  * are expected to run fully offline (no network) — mem's zero-network guarantee is a property of
  * what the caller chooses to inject, not something this module can enforce, so callers building a
  * concrete backend must honor it themselves.
+ *
+ * TODO(deferred, spec'd): no concrete embedding backend ships in v1 — the CLI never wires one, so
+ * retrieval runs BM25-only in practice. This is deliberate, per the locked "BM25-first, embeddings
+ * optional" decision: a real local ONNX/transformers.js-class provider is a heavyweight
+ * native/model dependency the design plan names no spec for (model, cache path, license), and a
+ * half-wired one risks pulling a network-capable package into a zero-network tool (P7) or blocking
+ * `remember`/`recall` when the model is unavailable. When one is added, it must be injected
+ * through this interface (lazy, optional, timeout-bounded — the fail-open behavior is already
+ * enforced by tests/unit/retrieval.test.ts), never imported eagerly by this module.
  */
 export interface EmbeddingBackend {
   embed(text: string): Promise<Float32Array> | Float32Array;
@@ -272,6 +281,28 @@ function isDecayedBelowGroundTruth(fact: Fact, now: Date): boolean {
 /**
  * Two-gate trust classification (P8). Relevance already decided this fact was worth considering;
  * this decides how it may be surfaced.
+ *
+ * Precedence spec (normative): when the three trust signals -- lifecycle `status`/contradiction
+ * outcome, anchor `freshness`, and decay-adjusted `confidence` -- conflict, they are consulted in
+ * this strict order, and an earlier rule always wins over every later one:
+ *
+ *   1. status / contradiction (strongest): `status="pending"` (S9), or a contradiction outcome of
+ *      `superseded`/`contested` (P4) => "withheld". No freshness verdict or confidence can rescue a
+ *      fact the lifecycle/dedup layer has excluded. (`superseded` facts are also filtered out of
+ *      the candidate pool by `retrieve()` before this function runs; the check here is defensive
+ *      for any direct caller.)
+ *   2. anchor freshness `contradicted` (P3/S1) => "withheld" -- including for `pinned` facts
+ *      (S8: a pin exempts a fact from time-decay only, never from anchor suppression).
+ *   3. anchor freshness `affirmed` => "ground-truth", unless the decay-adjusted confidence of a
+ *      non-pinned preference has fallen below `GROUND_TRUTH_CONFIDENCE_FLOOR` (Section 6), in
+ *      which case => "hint". Confidence/decay is the weakest signal: it can only ever downgrade an
+ *      affirmed fact to a hint -- it never withholds, and never upgrades anything.
+ *   4. anchor freshness `unverified` (the fallthrough) => "hint" regardless of confidence: a fact
+ *      whose proposition cannot currently be confirmed is never ground truth, no matter how
+ *      confident (P1/P3).
+ *
+ * `buildDisplay` mirrors this exact precedence order when choosing its caveat wording, so the
+ * trust level and the self-caveating display string can never disagree about which signal won.
  */
 function classifyTrust(fact: Fact, freshness: AnchorVerdict, contradiction: ContradictionOutcome, now: Date): TrustLevel {
   if (fact.status === "pending" || contradiction !== "none") {

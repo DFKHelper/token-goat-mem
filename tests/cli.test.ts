@@ -286,6 +286,97 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────── exit-code / stream contract ───────────────────────────────────────────────────────────────────────────
+
+describe("exit-code and stderr/stdout contract (cli.ts module doc)", () => {
+  it("maps an internal failure (unopenable DB) to exit code 2 with a single `mem: ...` stderr line and no stdout", async () => {
+    // TOKEN_GOAT_MEM_HOME points at a *file*, so mkdir/open of mem.db inside it fails -- an
+    // environment failure, not a usage error, and must be distinguishable from one (exit 2, not 1).
+    const brokenHome = join(mkdtempSync(join(tmpdir(), "mem-cli-internal-")), "not-a-directory");
+    writeFileSync(brokenHome, "this is a file, not a mem home directory");
+    process.env["TOKEN_GOAT_MEM_HOME"] = brokenHome;
+
+    try {
+      const result = await runCli(["list"]);
+      expect(result.exitCode).toBe(2);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toMatch(/^mem: /u);
+      expect(result.stderr.trim().split("\n")).toHaveLength(1);
+    } finally {
+      rmSync(join(brokenHome, ".."), { recursive: true, force: true });
+    }
+  });
+
+  it("maps user errors to exit code 1 with diagnostics on stderr and nothing on stdout", async () => {
+    // Unknown fact id.
+    const unknownId = await runCli(["forget", "no-such-id"]);
+    expect(unknownId.exitCode).toBe(1);
+    expect(unknownId.stdout).toBe("");
+    expect(unknownId.stderr).toBe("mem: no such fact: no-such-id\n");
+
+    // Invalid option value.
+    const badScope = await runCli(["remember", "x", "--kind", "fact", "--scope", "galaxy"]);
+    expect(badScope.exitCode).toBe(1);
+    expect(badScope.stderr).toContain('invalid scope "galaxy"');
+
+    // Commander-level parse failure (unknown command).
+    const unknownCommand = await runCli(["frobnicate"]);
+    expect(unknownCommand.exitCode).toBe(1);
+    expect(unknownCommand.stdout).toBe("");
+    expect(unknownCommand.stderr.length).toBeGreaterThan(0);
+  });
+
+  it("treats --help as success (exit 0)", async () => {
+    const result = await runCli(["--help"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("Usage:");
+  });
+
+  it("keeps data on stdout and stderr empty on success", async () => {
+    const remembered = await runCli(["remember", "stdout only", "--kind", "fact"]);
+    expect(remembered.exitCode).toBe(0);
+    expect(remembered.stderr).toBe("");
+
+    const listed = await runCli(["list"]);
+    expect(listed.exitCode).toBe(0);
+    expect(listed.stderr).toBe("");
+    expect(listed.stdout).toContain("stdout only");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── mem doctor ───────────────────────────────────────────────────────────────────────────
+
+describe("mem doctor (read-only health check)", () => {
+  it("reports db path, WAL mode, schema tables, epoch, and zeroed fact counts on a fresh home", async () => {
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(`db: ${join(home, "mem.db")}`);
+    expect(result.stdout).toContain("journal_mode: wal");
+    expect(result.stdout).toContain("foreign_keys: on");
+    for (const table of ["audit_log", "facts", "meta", "sources"]) {
+      expect(result.stdout).toContain(table);
+    }
+    expect(result.stdout).toContain("epoch: 0");
+    expect(result.stdout).toContain("active=0");
+    expect(result.stdout).toContain("(total 0)");
+  });
+
+  it("reflects writes in its counts without performing any itself", async () => {
+    await runCli(["remember", "doctor sees me", "--kind", "preference"]);
+
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("epoch: 1");
+    expect(result.stdout).toContain("active=1");
+    expect(result.stdout).toContain("(total 1)");
+
+    // Read-only: a doctor run must not bump the epoch or write anything.
+    const epochAfter = await runCli(["epoch"]);
+    expect(epochAfter.stdout.trim()).toBe("1");
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────── integration-seam.ts fail-open via `mem recall --hint-format` ───────────────────────────────────────────────────────────────────────────
 
 describe("--hint-format fails open on internal error (integration-seam.ts, review S2/S3)", () => {

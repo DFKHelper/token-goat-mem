@@ -47,7 +47,41 @@ import { openDb, resolveDbPath } from "./db.js";
 import { retrieve, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
-/** Current TGMEM wire protocol version emitted by this build (design plan Section 4). */
+/**
+ * TGMEM/1 wire-format grammar (normative for this producer; design plan Section 4).
+ *
+ * A `mem recall --hint-format` response is a UTF-8 text stream of LF-terminated
+ * lines (ABNF, RFC 5234 core rules):
+ *
+ *   response      = header LF *( line LF )
+ *   header        = "TGMEM/" version        ; version = 1*DIGIT; this build emits "1"
+ *   line          = tag SEP fresh-field SEP id-field SEP display-field
+ *   tag           = "pref" / "dec" / "fact" / "corr"
+ *   SEP           = 2%x20                   ; exactly two ASCII spaces
+ *   fresh-field   = "fresh=" verdict
+ *   verdict       = "affirmed" / "unverified" / "contradicted"
+ *   id-field      = "id=" 1*VCHAR           ; the fact id (a UUID); never contains whitespace
+ *   display-field = "display=" json-string  ; an RFC 8259 string literal produced by
+ *                                           ; JSON.stringify: double-quoted, with all inner
+ *                                           ; quotes/backslashes/control characters escaped,
+ *                                           ; so it can never contain a raw LF or a bare `"`
+ *
+ * Consumer parsing rules (token-goat or any other consumer):
+ * - An unknown/greater header version, missing binary, timeout, or total parse
+ *   failure is treated as "no hints" -- fail-open to no-memory (Section 4).
+ * - An individual line not matching the grammar is dropped (and may be
+ *   logged), never guessed at.
+ * - Field order is fixed. A consumer MAY parse a line with the regex
+ *   `^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$`
+ *   and `JSON.parse` the final capture group to recover `display`.
+ * - The decoded `display` string MUST be surfaced verbatim: the trust caveat is
+ *   part of the payload, not something the consumer reconstructs (review S3).
+ *
+ * Version policy: any change to line shape, field order, the separator, or the
+ * escaping of `display` -- and any addition to the closed `tag`/`verdict` sets,
+ * since consumers validate against them -- bumps the integer version
+ * (`TGMEM/2`, ...). Consumers treat versions they don't know as "no hints".
+ */
 export const TGMEM_PROTOCOL_VERSION = 1;
 
 /** Header line every hint-format response starts with. */

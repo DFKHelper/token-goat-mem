@@ -28,6 +28,15 @@ export type FactSourceType = "user" | "derived";
  * - `contested` — ambiguous subject+value contradiction; withheld from ground truth entirely (P4).
  * - `pinned` — exempt from time-decay, still eligible for ground-truth surfacing, still subject to
  *   contradiction suppression (Section 6 / S8).
+ *
+ * NAMING — do not conflate `contested` with `contradicted`. They are near-synonymous words for two
+ * entirely different mechanisms:
+ * - `contested` is a *status* (this enum): two stored facts share a `subject`+scope with different
+ *   `value`s and tied precedence — deterministic fact-vs-fact dedup (P4, src/contradiction.ts).
+ * - `contradicted` is a *freshness verdict* (`FreshnessVerdict`, never stored in this column): one
+ *   fact's own anchor predicate, re-evaluated against the live filesystem/git, positively denied
+ *   its proposition — fact-vs-world re-verification (P3, src/anchors.ts).
+ * A fact can be either, both, or neither; both independently exclude it from ground truth.
  */
 export type FactStatus = "active" | "pending" | "superseded" | "contested" | "pinned";
 
@@ -73,6 +82,9 @@ export interface Fact {
  * surface only as a hint-to-verify; `contradicted` means the anchor
  * positively denied the proposition and the fact must be suppressed from
  * ground-truth surfacing and flagged in `review`.
+ *
+ * NAMING — `contradicted` (this verdict, computed fresh per query, never persisted) is a different
+ * mechanism from the persisted `contested` status: see the note on `FactStatus` above.
  */
 export type FreshnessVerdict = "affirmed" | "unverified" | "contradicted";
 
