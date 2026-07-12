@@ -1,0 +1,68 @@
+{
+  "name": "token-goat-mem",
+  "version": "0.1.0",
+  "description": "Long-term conversational memory companion for Claude Code and AI coding agents",
+  "type": "module",
+  "main": "./dist/token-goat-mem.mjs",
+  "bin": {
+    "mem": "./dist/token-goat-mem.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DFKHelper/token-goat-mem.git"
+  },
+  "homepage": "https://github.com/DFKHelper/token-goat-mem#readme",
+  "bugs": {
+    "url": "https://github.com/DFKHelper/token-goat-mem/issues"
+  },
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:guards": "vitest run tests/guards",
+    "test:watch": "vitest",
+    "lint": "eslint src tests",
+    "dev": "tsx src/main.ts"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "copilot",
+    "ai",
+    "memory",
+    "agent-memory",
+    "coding-assistant",
+    "llm",
+    "conversational-memory",
+    "context-management"
+  ],
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "commander": "^12.1.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "eslint": "^10.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "typescript-eslint": "^8.62.0",
+    "vitest": "^2.1.0"
+  },
+  "optionalDependencies": {
+    "sqlite-vec": "^0.1.9"
+  }
+}
