@@ -122,6 +122,16 @@ function parseFactScope(raw: string): FactScope {
   return raw as FactScope;
 }
 
+const HINT_STYLES = ["full", "terse"] as const;
+type HintStyle = (typeof HINT_STYLES)[number];
+
+function parseHintStyle(raw: string): HintStyle {
+  if (!HINT_STYLES.includes(raw as HintStyle)) {
+    throw new UsageError(`invalid --hint-style "${raw}" (expected one of ${HINT_STYLES.join(", ")})`);
+  }
+  return raw as HintStyle;
+}
+
 function parseFactStatusList(raw: string): FactStatus | readonly FactStatus[] {
   const values = raw
     .split(",")
@@ -396,6 +406,7 @@ interface RecallCliOptions {
   readonly limit?: number;
   readonly root?: string;
   readonly stable?: boolean;
+  readonly hintStyle?: string;
 }
 
 interface ListCliOptions {
@@ -476,8 +487,11 @@ export function buildProgram(): Command {
     .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
     .option("--root <path>", "Project root for anchor evaluation")
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
+    .option("--hint-style <full|terse>", "Display verbosity: full (default, unchanged) or terse (no CTA, short kind labels)", "full")
     .action(
       guard(async (query: string | undefined, options: RecallCliOptions) => {
+        const hintStyle = options.hintStyle !== undefined ? parseHintStyle(options.hintStyle) : "full";
+
         if (options.hintFormat === true) {
           if (typeof options.root !== "string" || options.root.trim().length === 0) {
             throw new UsageError("recall --hint-format requires --root <path>");
@@ -487,6 +501,7 @@ export function buildProgram(): Command {
             root: options.root,
             ...(contextFiles !== undefined ? { contextFiles } : {}),
             ...(options.stable === true ? { stable: true } : {}),
+            ...(hintStyle !== "full" ? { hintStyle } : {}),
           };
           const result = await buildHintFormat(hintOptions);
           process.stdout.write(`${result.header}\n`);
@@ -506,6 +521,7 @@ export function buildProgram(): Command {
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
           ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
+          ...(hintStyle !== "full" ? { hintStyle } : {}),
         };
         // No embeddingBackend is wired: retrieval is BM25-only in v1 (see the
         // TODO(deferred, spec'd) note on retrieval.ts's EmbeddingBackend).

@@ -170,6 +170,8 @@ export interface HintFormatOptions {
    * which facts are included or how caps are applied.
    */
   readonly stable?: boolean | undefined;
+  /** Threaded straight through to `retrieve()`'s `RetrievalOptions.hintStyle` -- see retrieval.ts's doc comment. Defaults to `"full"`. */
+  readonly hintStyle?: "full" | "terse" | undefined;
 }
 
 export interface HintFormatResult {
@@ -228,6 +230,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc
     // comment above); TGMEM/1 keeps its original per-line CTA verbatim.
     includeDisplayCta: protocolVersion === 1,
+    ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
   const elapsed = Date.now() - start;

@@ -114,6 +114,49 @@ describe("retrieve", () => {
     expect(result?.display).toBe("decision: chose Postgres over Mongo");
   });
 
+  it("hintStyle 'full' (default/explicit) is byte-identical to today's format", async () => {
+    writeFileSync(join(root, "present.txt"), "x");
+    const facts = [
+      makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
+    ];
+    const [defaulted] = await retrieve(facts, { query: "postgres", root });
+    const [explicit] = await retrieve(facts, { query: "postgres", root, hintStyle: "full" });
+    expect(defaulted?.display).toBe("decision: chose Postgres over Mongo — mem show 1");
+    expect(explicit?.display).toBe(defaulted?.display);
+  });
+
+  it("hintStyle 'terse' drops the CTA and shortens kind labels to the wire-tag set (pref/dec/fact/corr)", async () => {
+    writeFileSync(join(root, "present.txt"), "x");
+    const facts = [
+      makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
+      makeFact({ id: "2", text: "never run npm install here", kind: "correction" }),
+      makeFact({ id: "3", text: "staging DB host is db.internal", kind: "fact" }),
+    ];
+    const results = await retrieve(facts, { query: "", root, hintStyle: "terse" });
+    const byId = new Map(results.map((result) => [result.fact.id, result.display]));
+    expect(byId.get("1")).toBe("dec: chose Postgres over Mongo");
+    expect(byId.get("2")).toContain("corr (unverified, 2026-01): never run npm install here");
+    expect(byId.get("2")).not.toContain("—");
+    expect(byId.get("3")).not.toContain("—");
+  });
+
+  it("hintStyle 'terse' still applies the (verify) caveat to preferences, just without the CTA", async () => {
+    writeFileSync(join(root, "pnpm-lock.yaml"), "x");
+    const facts = [
+      makeFact({
+        id: "1",
+        text: "uses pnpm not npm",
+        kind: "preference",
+        anchor: "file-exists pnpm-lock.yaml",
+        subject: "package-manager",
+        value: "pnpm",
+      }),
+    ];
+    const now = new Date("2026-01-01T00:00:01.000Z");
+    const [result] = await retrieve(facts, { query: "pnpm", root, now, hintStyle: "terse" });
+    expect(result?.display).toBe("stored pref (verify): uses pnpm not npm");
+  });
+
   it("always caveats a preference with (verify), even when affirmed", async () => {
     writeFileSync(join(root, "pnpm-lock.yaml"), "x");
     const facts = [
