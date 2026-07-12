@@ -1,6 +1,6 @@
 # GitHub Copilot CLI + Token-Goat Mem Integration
 
-Direct shell-out patterns and hook wiring for GitHub Copilot CLI.
+Shell-out patterns and instruction wiring for GitHub Copilot CLI.
 
 ## Installation
 
@@ -8,96 +8,74 @@ Mem must be on PATH for Copilot CLI to invoke it:
 
 ```bash
 npm install -g token-goat-mem
-mem doctor  # verify installation
+mem --version   # verify installation
+mem epoch       # confirms the CLI and SQLite store are wired (prints a number)
 ```
-
-Confirm in your terminal: `echo $(mem epoch)` returns a number.
 
 ## Direct invocation from shell
 
-Use `mem` as a regular CLI in Copilot CLI's shell tools or in your own terminal:
+Use `mem` as a regular CLI in Copilot CLI's shell tool or in your own terminal. `--kind` is required on every `remember`:
 
 **Remember a preference:**
 ```bash
-mem remember "uses pnpm not npm" --kind preference --scope project --anchor "file-newer-than pnpm-lock.yaml package-lock.json"
+mem remember "uses pnpm not npm" --kind preference --scope project --root . \
+  --anchor "file-newer-than pnpm-lock.yaml package-lock.json"
 ```
 
 **Recall project facts:**
 ```bash
-mem recall --kind preference --scope project --hint-format
+mem recall --kind preference --scope project --hint-format --root .
 ```
 
-**Show one fact:**
+**Show one fact / list all facts:**
 ```bash
-mem show abc123
-```
-
-**List all facts:**
-```bash
+mem show <id>
 mem list
 ```
 
-See `mem --help` and `README.md` for full CLI reference.
+See `mem --help` and the README for the full CLI reference.
 
-## Hook integration via AGENTS.md
+## Instruction wiring via AGENTS.md
 
-Copilot CLI honors the AGENTS.md convention for agent-coordination directives. Mem can be wired into pre/post-session hooks by adding a `hooks` stanza to your project's `.agents.md` or by configuring your Copilot CLI settings:
+Copilot CLI reads the project's `AGENTS.md` as custom instructions. The reliable integration is prose that tells the agent when to read and write memory — not a hook schema. Add to your project's `AGENTS.md`:
 
-**In `.agents.md` (project-level):**
-```yaml
-hooks:
-  pre-session:
-    - label: Load project memory
-      run: mem recall --kind preference --scope project --hint-format
-  post-session:
-    - label: Archive session decisions
-      run: mem remember "$SESSION_SUMMARY" --kind decision --scope project
+```markdown
+## Memory
+
+This machine has token-goat-mem installed (`mem` on PATH).
+
+- At the start of a task, run `mem recall --hint-format --root .` and treat
+  each returned line's `display` string as a prior fact, honoring its
+  embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+- When the user states a durable preference, decision, or correction, persist
+  it: `mem remember "<short fact>" --kind preference|decision|fact|correction
+  --scope project --root .`. Use --subject/--value for anything that can be
+  contradicted later.
 ```
 
-**Copilot CLI extensions/hooks (via GitHub Copilot settings):**
+## Session pre-loading via a wrapper
 
-Copilot CLI supports extension points and environment-driven configuration. To wire Mem into Copilot's initialization, set an environment variable or add to your shell profile:
+To surface memory before Copilot even starts, wrap the launch in a shell function (`~/.bashrc`, `~/.zshrc`, or equivalent):
 
 ```bash
-# In ~/.bashrc, ~/.zshrc, or equivalent
-export COPILOT_MEM_RECALL="mem recall --kind preference --scope global --limit 10"
+copilot-mem() {
+  mem recall --hint-format --root . 2>/dev/null
+  copilot "$@"
+}
 ```
 
-Then reference it in Copilot commands or in a custom CLI wrapper that pre-loads facts before invoking `copilot`.
-
-**Declarative approach (if supported):**
-
-If your project has a `.copilot/config` or similar configuration directory, add a hooks section:
-
-```yaml
-# .copilot/config or similar
-memory:
-  recall-on-start: true
-  scope: project
-  hint-format: true
-  kinds:
-    - preference
-    - decision
-```
-
-Then create a wrapper script that Copilot CLI invokes on startup:
-
-```bash
-#!/bin/bash
-# .copilot/hooks/pre-session.sh
-mem recall --kind preference --kind decision --scope project --hint-format
-```
+The recall output lands in your terminal scrollback where you (or the agent, on request) can reference it.
 
 ## Embedding memory into token-goat
 
-When both Mem and token-goat are installed, Mem's optional seam embeds memory hints into token-goat's manifest automatically. No wiring needed — token-goat calls `mem recall --hint-format --root <project-root>` internally.
+When both Mem and token-goat are installed, token-goat calls `mem recall --hint-format --root <project-root>` internally to embed memory hints into its manifest. No wiring needed.
 
 To verify the seam is live:
 ```bash
 mem recall --hint-format --root .
 ```
 
-Should return `TGMEM/1` header + facts. If not, run `mem doctor` to diagnose.
+Returns a `TGMEM/1` header plus one line per fact, or `no matching facts` on an empty store.
 
 ## Fail-open behavior
 
@@ -105,55 +83,39 @@ If `mem` is missing, times out, or returns unparseable output, Copilot CLI conti
 
 ## Typical workflow
 
-1. **Start of session:** Manually or via hook, call `mem recall --kind preference --scope project` to surface 5–10 project preferences.
-2. **During work:** Write facts as you make decisions: `mem remember "chose Postgres for this query because of JOIN semantics"`.
-3. **End of session or before cleanup:** Optional: `mem review` to audit what's been stored and resolve any contradictions.
-4. **Next session:** Same facts re-surface, with freshness verdicts so Copilot knows which ones to re-verify.
+1. **Start of session:** manually or via the AGENTS.md instruction, `mem recall --kind preference --scope project --root .` surfaces prior project preferences.
+2. **During work:** write facts as decisions land: `mem remember "chose Postgres for JOIN semantics" --kind decision --scope project`.
+3. **End of session:** optional `mem review --root .` to audit what's stored and resolve pending or anchor-contradicted facts.
+4. **Next session:** the same facts re-surface, with freshness verdicts telling Copilot which ones to re-verify.
 
-## Shell quoting and special characters
+## Shell quoting
 
-Use double quotes for Bash and single quotes for fact text to avoid shell expansion:
+Fact text is a single positional argument. Single-quote it to avoid shell expansion; double-quote when you *want* expansion:
 
 ```bash
 mem remember 'uses pnpm not npm' --kind preference
 mem remember "Picked $FRAMEWORK for perf" --kind decision
 ```
 
-For multi-line facts or complex anchors, use heredocs or echo piping:
+`file-contains` anchors take free-text substrings, so quote the whole predicate:
 
 ```bash
-echo "Chose Postgres over Mongo because JOINs are critical to the auth model" | \
-  mem remember --kind decision --anchor "file-contains schema.sql CREATE INDEX"
+mem remember "auth schema is indexed" --kind fact --root . \
+  --anchor 'file-contains schema.sql CREATE INDEX'
 ```
 
 ## Debugging
 
-**Check if Mem is working:**
 ```bash
-mem epoch
-mem list
-mem doctor
-```
-
-**Review stored facts:**
-```bash
-mem review
-```
-
-Shows all facts, their anchor verdicts (affirmed/unverified/contradicted), and any conflicts.
-
-**Show full provenance of one fact:**
-```bash
-mem show <id>
-```
-
-**Manually purge a stale fact:**
-```bash
-mem forget <id>
+mem epoch       # store reachable? prints the write epoch
+mem list        # everything stored, one line each
+mem review      # pending / contested / anchor-contradicted facts
+mem show <id>   # full provenance of one fact
+mem forget <id> # soft-delete a stale fact
 ```
 
 ## See also
 
-- `README.md` — full CLI and feature reference
-- `AGENTS.md` — agent-coordination conventions
-- `docs/integrations/claude-code.md` — Claude Code patterns (similar hooks model)
+- `README.md` — full CLI and anchor-predicate reference
+- `AGENTS.md` — agent-facing command and data-model summary
+- `docs/integrations/claude-code.md` — Claude Code patterns (adds a real hooks system)

@@ -1,7 +1,7 @@
 {
   "name": "token-goat-mem",
   "version": "0.1.0",
-  "description": "Long-term conversational memory companion for Claude Code and AI coding agents",
+  "description": "Local-first long-term memory for AI coding agents (Claude Code, Copilot, Codex): durable facts with trust levels and anchor-based staleness detection",
   "type": "module",
   "main": "./dist/token-goat-mem.mjs",
   "bin": {
@@ -35,7 +35,9 @@
     "coding-assistant",
     "llm",
     "conversational-memory",
-    "context-management"
+    "context-management",
+    "local-first",
+    "sqlite"
   ],
   "files": [
     "dist/",

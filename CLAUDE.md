@@ -13,7 +13,7 @@ npm run lint                         # Lint (eslint src tests)
 npm run typecheck                    # Type check (tsc --noEmit)
 ```
 
-CI runs on `ubuntu-latest` with Node 22, as two gating jobs: `lint` (lint + typecheck) and `test` (full `npm test`). Both must pass.
+No CI workflow is wired yet. The gate is manual: `npm run lint`, `npm run typecheck`, and full `npm test` must all pass before pushing.
 
 ## Architecture
 
@@ -22,14 +22,14 @@ Token-Goat Mem preserves durable conversational knowledge across AI coding sessi
 ### Data flow
 
 1. **Explicit capture** — user or agent says "remember that X". Fact is stored `active` after secret screening.
-2. **Suggested capture** — conservative extractor proposes candidates in `pending` status. Pending facts never auto-promote; only explicit confirmation or consistent use-without-correction moves them to `active`.
+2. **Suggested capture** — `captureSuggested` (library seam in `src/capture.ts`, not yet exposed as a CLI command) stores candidates in `pending` status, always — no caller can request `active`. Pending facts never auto-promote; `mem review --promote <id>` / `--reject <id>` resolve them.
 3. **Staleness detection** — anchors are pure read-only predicates (file-newer-than, glob match, git-tracked) evaluated against an explicit `--root`. Three-valued verdict: `affirmed` (predicate confirms), `unverified` (can't confirm or deny), `contradicted` (predicate denies). Only `affirmed` surfaces as ground truth.
 4. **Contradiction resolution** — deterministic `subject`+`value` keying. Two active facts, same subject + scope, different value = mark loser `superseded`, prefer newer + higher-provenance. If genuinely ambiguous, mark `contested` and withhold from ground-truth surfacing.
-5. **Recall** — hybrid BM25 + embedding rank fusion for relevance, then correctness gate (freshness re-validation, trust filtering, contradiction/contested exclusion). Output annotated with kind, trust level, freshness verdict, and date.
+5. **Recall** — BM25 ranking for relevance (an embedding backend is an injectable seam in `src/retrieval.ts`, but no concrete backend ships in v1, so retrieval runs BM25-only in practice), then correctness gate (freshness re-validation, trust filtering, contradiction/contested exclusion). Output annotated with kind, trust level, freshness verdict, and date.
 
 ### Storage
 
-- **facts** table — the primary store. Columns: id, text, kind, subject, value, scope, source_type, source_ref, captured_at, anchor, status, confidence, embedding.
+- **facts** table — the primary store. Columns: id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding.
 - **sources** table — redacted previews for audit/provenance; full content never persisted. GC'd after N days.
 - SQLite WAL mode for durability. Short-lived CLI processes + transactional single-writer.
 
@@ -43,4 +43,4 @@ One-directional, pull-based, stateless function call. `token-goat` optionally ca
 
 ### Reference
 
-For full design reasoning, adversarial review findings, and open questions, read the design plan at the project root.
+Shared agent conventions (commands, data model, integration seam) live in [AGENTS.md](AGENTS.md); this file adds only Claude-Code-specific guidance. For full design reasoning, adversarial review findings, and open questions, consult the memory-companion design plan (kept outside this repository).

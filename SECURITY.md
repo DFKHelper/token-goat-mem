@@ -41,6 +41,10 @@ The following are not treated as security issues unless paired with a working pr
 - Issues that require an already-compromised local user account
 - Anchor false negatives (a stale fact is not detected as stale) without an attack vector
 
+## Known advisories
+
+`npm audit` currently reports advisories in dev-only transitive dependencies (the esbuild/vite/vitest toolchain). These affect the local dev server only; none of the packages are runtime dependencies or present in the shipped `dist/token-goat-mem.mjs` bundle. Details and status are tracked in [CONTRIBUTING.md](CONTRIBUTING.md#known-dev-dependency-advisories).
+
 ## License
 
 Token-Goat Mem is source-available under the PolyForm Noncommercial License 1.0.0. Submitting a security report does not grant the reporter any license to Mem's code beyond what PolyForm Noncommercial already permits. See LICENSE for the full terms.

@@ -1,63 +1,61 @@
 # Codex + Token-Goat Mem Integration
 
-Use token-goat-mem to carry durable facts, preferences, and decisions across Codex peer review sessions.
+Use token-goat-mem to carry durable facts, preferences, and decisions across Codex sessions.
 
 ## Shell-out invocation
 
-Codex spawns as a separate agent session. Shell out to `mem` directly to capture and retrieve facts:
+Codex runs as a separate agent session with shell access. Shell out to `mem` directly to capture and retrieve facts. `--kind` is required on every `remember`:
 
 ```bash
 # Capture a code review decision during a Codex session
 mem remember "Prefer reduce + map over nested loops for readability" \
   --kind decision \
-  --subject "loop-style" \
+  --subject loop-style \
+  --value reduce-map \
   --scope global
 
 # Retrieve all design decisions for the current review
 mem recall --kind decision
 
-# Retrieve with trust caveats (shows freshness verdict and confidence)
+# Retrieve preferences with trust caveats (freshness verdict embedded in each line)
 mem recall --kind preference --limit 5
 ```
 
-## Wiring via AGENTS.md hooks
+`--kind` takes exactly one value per call. To pre-load multiple kinds, run one `recall` per kind, or omit `--kind` to recall across all kinds.
 
-Token-goat-mem integrates via AGENTS.md `pre-agent-spawn` and `post-session-end` hooks. Add to your `.claude/AGENTS.md` or project `AGENTS.md`:
+## Instruction wiring via AGENTS.md
 
-```yaml
-hooks:
-  pre-agent-spawn:
-    - run: "mem recall --hint-format --root {{root}} --kind preference,decision"
-      label: "Load prior review heuristics"
-      env-var: "CODEX_MEMORY_HINTS"
-      on-timeout: ignore  # fail-open; no memory hints if mem unavailable
+Codex reads the project's `AGENTS.md` as instructions. The reliable integration is prose telling the agent when to read and write memory:
 
-  post-session-end:
-    - run: "mem remember {{review_decision}} --kind decision --scope project"
-      label: "Archive peer review findings"
-      condition: "review_decision is not empty"
+```markdown
+## Memory
+
+This machine has token-goat-mem installed (`mem` on PATH).
+
+- Before analysis, run `mem recall --hint-format --root .` and honor each
+  line's embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+- When a review reaches a durable decision, persist it:
+  `mem remember "<short fact>" --kind decision --scope project --root .`
 ```
 
-Each pre-spawn call emits `TGMEM/1` formatted facts (one per line) with embedded trust caveats. Codex can inject these into its system prompt or context directly without parsing.
-
-## Direct CLI usage in Codex
-
-Use within a Codex script or review template:
+## Direct CLI usage in a review script
 
 ```bash
 #!/bin/bash
 # Load preferences before analysis
-PREFS=$(mem recall --kind preference --hint-format)
+PREFS=$(mem recall --kind preference --hint-format --root .)
 echo "Prefs in scope: $PREFS"
 
 # Run your analysis
 # ...
 
-# Capture the finding
+# Capture the finding (anchor keeps it honest: contradicted if the file loses its pattern)
 mem remember "Found N+1 query pattern; prefer DataLoader wrapper" \
   --kind correction \
-  --subject "query-patterns" \
-  --anchor "file-newer-than src/queries.ts"
+  --subject query-patterns \
+  --value dataloader \
+  --scope project --root . \
+  --anchor 'file-contains src/queries.ts DataLoader'
 ```
 
 ## Codex-specific patterns
@@ -67,10 +65,10 @@ Before invoking `/codex` for a peer review, pre-load facts:
 
 ```bash
 mem remember "Team prefers immutable data structures" --kind preference --scope global
-mem remember "Use structured logging via pino, not console.log" --kind decision --scope project
+mem remember "Use structured logging via pino, not console.log" --kind decision --scope project --root .
 ```
 
-Then invoke Codex. Its peer review will surface these via `mem recall` if wired into hooks.
+Then invoke Codex with an instruction to run `mem recall` first (via AGENTS.md as above, or inline in the prompt).
 
 **Continuous review archive:**
 After each Codex session, capture high-level verdicts:
@@ -78,28 +76,31 @@ After each Codex session, capture high-level verdicts:
 ```bash
 mem remember "Agreed: async errors must propagate, never swallow" \
   --kind decision \
-  --subject "error-handling" \
-  --anchor "file-newer-than src/error-handler.ts"
+  --subject error-handling \
+  --value propagate \
+  --scope project --root .
 ```
 
-Over time, `mem review` accumulates a log of team design decisions that Codex learns from.
+Over time, `mem list --kind decision` accumulates a log of team design decisions any future session can recall.
 
 ## Trust caveats in output
 
 `mem recall --hint-format` returns self-annotated display strings:
 
 ```
-pref  fresh=affirmed  id=abc123  display="Prefer map+reduce; file affirmed 2d ago"
-decision  fresh=contradicted  id=def456  display="DO NOT USE: old webpack config (verify with master branch)"
+TGMEM/1
+pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager — mem show 7ac43f22-..."
+pref  fresh=unverified  id=21a1330e-...  display="stored pref (unverified, 2026-07): switched to bun — verify; mem show 21a1330e-..."
 ```
 
-Codex sees the caveat in `display` — "verify", "contradicted", "unverified" — and treats low-trust facts accordingly. High-confidence facts (fresh=affirmed) are safe for direct application.
+The caveat lives inside `display` — "verify", "unverified", "contradicted, excluded" — so Codex treats low-trust facts accordingly without parsing anything. Anchor-contradicted facts are excluded from ground truth and routed to `mem review`.
 
 ## Fail-open guarantee
 
-If `mem` is not installed or the call times out:
-- Pre-spawn hooks skip silently (no memory hints injected)
-- Post-spawn hooks skip silently (no facts captured)
+If `mem` is not installed or a call fails:
+
+- Recall steps produce no hints (a missing binary is a command-not-found the agent can ignore)
+- Capture steps fail loudly but harmlessly (nothing is stored)
 - Codex continues with no degradation
 
 No dependency on token-goat-mem for Codex to function. Memory is purely optional and benefits accumulate over sessions.
@@ -108,4 +109,4 @@ No dependency on token-goat-mem for Codex to function. Memory is purely optional
 
 - [AGENTS.md](../../AGENTS.md) — token-goat-mem data model and commands
 - [README.md](../../README.md) — CLI reference and anchor predicates
-- `/codex` skill — Claude's peer review agent
+- `docs/integrations/claude-code.md` — the same patterns for Claude Code (adds a real hooks system)
