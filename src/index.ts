@@ -69,6 +69,16 @@ export {
 } from "./capture.js";
 
 export {
+  extractMarkdownBullets,
+  importFromMarkdown,
+  type ImportCandidate,
+  type ImportFromMarkdownOptions,
+  type ImportOutcome,
+  type ImportResult,
+  type MarkdownBullet,
+} from "./import.js";
+
+export {
   AGGRESSIVE_RECALL_BOOST,
   DEFAULT_ANCHOR_TIME_BUDGET_MS,
   DEFAULT_EMBEDDING_TIMEOUT_MS,

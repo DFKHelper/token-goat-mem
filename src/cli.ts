@@ -50,6 +50,7 @@ import {
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
+import { importFromMarkdown, type ImportOutcome } from "./import.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
 import {
   GROUND_TRUTH_CONFIDENCE_FLOOR,
@@ -235,6 +236,39 @@ function formatSection(title: string, facts: readonly Fact[]): string {
     return "";
   }
   return [`-- ${title} (${facts.length}) --`, ...facts.map(formatFactSummary)].join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────── import ───────────────────────────────────────────────────────────────────────────
+
+function formatImportOutcomeLine(outcome: ImportOutcome): string {
+  const { candidate } = outcome;
+  const where = `${candidate.sourceRef}`;
+  switch (outcome.status) {
+    case "dry_run":
+      return `  would-import  ${where}  "${candidate.text}"`;
+    case "imported":
+      return `  imported      ${where}  ${outcome.fact.id}  "${candidate.text}"`;
+    case "skipped_duplicate":
+      return `  skipped (duplicate)  ${where}  "${candidate.text}"`;
+    case "skipped_error":
+      return `  skipped (${outcome.reason})  ${where}  "${candidate.text}"`;
+  }
+}
+
+function formatImportResult(result: { filePath: string; outcomes: readonly ImportOutcome[] }, dryRun: boolean): string {
+  if (result.outcomes.length === 0) {
+    return `no qualifying bullets found in ${result.filePath}`;
+  }
+  const lines = result.outcomes.map(formatImportOutcomeLine);
+  if (dryRun) {
+    return [`would import ${result.outcomes.length} candidate fact(s) from ${result.filePath} (dry run -- nothing written):`, ...lines].join("\n");
+  }
+  const imported = result.outcomes.filter((outcome) => outcome.status === "imported").length;
+  return [
+    `imported ${imported} of ${result.outcomes.length} candidate fact(s) from ${result.filePath} as pending ` +
+      "(never auto-promoted -- confirm each via `mem review --promote <id>`):",
+    ...lines,
+  ].join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────── review ───────────────────────────────────────────────────────────────────────────
@@ -432,6 +466,14 @@ interface RememberCliOptions {
   readonly root?: string;
 }
 
+interface ImportCliOptions {
+  readonly fromMd: string;
+  readonly root?: string;
+  readonly scope?: string;
+  readonly kind?: string;
+  readonly dryRun?: boolean;
+}
+
 interface RecallCliOptions {
   readonly kind?: string;
   readonly subject?: string;
@@ -511,6 +553,41 @@ export function buildProgram(): Command {
         };
         const { fact } = await withDb((db) => captureExplicit(db, input));
         process.stdout.write(`remembered ${fact.kind} fact ${fact.id}\n`);
+      })
+    );
+
+  program
+    .command("import")
+    .description(
+      "Advisory import: parse a markdown file (CLAUDE.md-style) for preference/decision-shaped bullets and " +
+        "store each as a pending fact -- never auto-promoted, same trust path as any other suggested/derived fact " +
+        "(confirm via `mem review --promote <id>`)"
+    )
+    .requiredOption("--from-md <path>", "Markdown file to import bullet-list candidates from")
+    .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
+    .option("--scope <scope>", "global, project, or path", "project")
+    .option("--kind <kind>", "preference, decision, fact, or correction", "preference")
+    .option("--dry-run", "Report what would be imported without writing anything")
+    .action(
+      guard(async (options: ImportCliOptions) => {
+        const root = resolveRoot(options.root);
+        const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
+        const kind = options.kind !== undefined ? parseFactKind(options.kind) : undefined;
+        const dryRun = options.dryRun === true;
+
+        // A fresh DB connection is opened even for --dry-run: importFromMarkdown's dry-run branch
+        // returns before touching `db` at all (no writes, no reads), but withDb's open/close is
+        // cheap and keeps this action's shape identical to every other db-backed command.
+        const result = await withDb((db) =>
+          importFromMarkdown(db, {
+            path: options.fromMd,
+            root,
+            ...(dryRun ? { dryRun: true } : {}),
+            ...(scope !== undefined ? { scope } : {}),
+            ...(kind !== undefined ? { kind } : {}),
+          })
+        );
+        process.stdout.write(`${formatImportResult(result, dryRun)}\n`);
       })
     );
 

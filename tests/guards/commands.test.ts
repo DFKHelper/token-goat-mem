@@ -14,6 +14,7 @@ const EXPECTED_COMMANDS = [
   "edit",
   "epoch",
   "forget",
+  "import",
   "list",
   "pin",
   "recall",
