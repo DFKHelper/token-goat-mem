@@ -1,30 +1,32 @@
 # GitHub Copilot + Mem in VS Code
 
-Use Mem to store durable project facts and preferences that survive VS Code sessions. Copilot sees memory hints in chat context and respects them across workflows.
+Use Mem to store durable project facts and preferences that survive VS Code sessions. Recall output lands in the integrated terminal, where Copilot Chat can pick it up as context.
 
 ## Shell invocation
 
-The simplest pattern. Open VS Code terminal and invoke Mem directly:
+The simplest pattern. Open the VS Code terminal and invoke Mem directly. `--kind` is required on every `remember`:
 
 ```bash
 # Store a preference
-mem remember "project uses pnpm, not npm"
+mem remember "project uses pnpm, not npm" --kind preference --scope project --root .
 
-# Store a decision with confidence anchor
+# Store a decision with a staleness anchor
 mem remember "auth service owns all database migrations" \
-  --subject "db-migrations" \
-  --value "auth-service" \
+  --kind decision \
+  --subject db-migrations \
+  --value auth-service \
+  --scope project --root . \
   --anchor 'file-contains src/auth/migrations.ts migration'
 
 # Recall facts before starting a session
-mem recall --hint-format --scope project
+mem recall --hint-format --scope project --root .
 ```
 
-Copilot can see the output and incorporate it into subsequent chats. No special setup required.
+No special setup required.
 
 ## VS Code tasks
 
-Add Mem commands to `.vscode/tasks.json` for quick access:
+Add Mem commands to `.vscode/tasks.json` for quick access (**Terminal > Run Task**):
 
 ```json
 {
@@ -34,100 +36,103 @@ Add Mem commands to `.vscode/tasks.json` for quick access:
       "label": "Mem: Recall project facts",
       "type": "shell",
       "command": "mem",
-      "args": ["recall", "--hint-format", "--scope", "project"],
+      "args": ["recall", "--hint-format", "--scope", "project", "--root", "${workspaceFolder}"],
       "presentation": { "reveal": "always" }
     },
     {
-      "label": "Mem: Remember",
+      "label": "Mem: Remember a preference",
       "type": "shell",
       "command": "mem",
-      "args": ["remember"],
-      "presentation": { "reveal": "always" },
-      "promptOnClose": false
+      "args": ["remember", "${input:factText}", "--kind", "preference", "--scope", "project", "--root", "${workspaceFolder}"],
+      "presentation": { "reveal": "always" }
     },
     {
       "label": "Mem: Review facts",
       "type": "shell",
       "command": "mem",
-      "args": ["review"],
+      "args": ["review", "--root", "${workspaceFolder}"],
       "presentation": { "reveal": "always" }
+    }
+  ],
+  "inputs": [
+    {
+      "id": "factText",
+      "type": "promptString",
+      "description": "Fact to remember"
     }
   ]
 }
 ```
 
-Run via **Terminal > Run Task** (Ctrl+Shift+D). Copilot chat sees the terminal output.
-
 ## Keybindings for quick memory
 
-Add to `.vscode/keybindings.json`:
+Add to `keybindings.json` (Command Palette > "Preferences: Open Keyboard Shortcuts (JSON)"):
 
 ```json
 [
   {
     "key": "ctrl+shift+m",
     "command": "workbench.action.terminal.sendSequence",
-    "args": { "text": "mem recall --hint-format" }
+    "args": { "text": "mem recall --hint-format --root .\u000d" }
   },
   {
     "key": "ctrl+shift+n",
     "command": "workbench.action.terminal.sendSequence",
-    "args": { "text": "mem remember " }
+    "args": { "text": "mem remember \"\" --kind preference " }
   }
 ]
 ```
 
-- **Ctrl+Shift+M** — recall facts (output to terminal, Copilot sees it)
-- **Ctrl+Shift+N** — start a `mem remember` command (complete in terminal)
+- **Ctrl+Shift+M** — runs recall immediately (the trailing `\u000d` is Enter)
+- **Ctrl+Shift+N** — types a `mem remember` skeleton into the terminal for you to complete
 
 ## How Copilot sees memory hints
 
-When you run `mem recall --hint-format` in the terminal during a Copilot chat session, the output is visible in the chat context. Copilot can reference it:
+Run `mem recall --hint-format` in the integrated terminal, then reference the output in Copilot Chat (select it, or use Copilot's terminal-context affordances):
 
 ```
-You (terminal):
-$ mem recall --hint-format --scope project
-
-Mem (output):
+$ mem recall --hint-format --scope project --root .
 TGMEM/1
-pref  fresh=affirmed  id=abc123  display="uses pnpm not npm (verified)"
-fact  fresh=affirmed  id=def456  display="auth service owns migrations (file-backed)"
+pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager — mem show 7ac43f22-..."
 ```
 
-Then in Copilot chat:
+Then in chat:
 
 > **You:** Based on the memory I just recalled, add a dependency to package.json
 >
-> **Copilot:** I see from memory that the project uses pnpm. I'll add it via `pnpm add ...`
+> **Copilot:** The recalled preference says the project uses pnpm, so: `pnpm add ...`
 
-Copilot reads the terminal output and grounds its response in the memory facts.
+Each `display` string embeds its own trust caveat ("verify", "unverified", "contradicted, excluded"), so Copilot knows how much weight to give it.
 
 ## AGENTS.md compliance
 
-Mem's `AGENTS.md` convention is compatible with VS Code's agent discovery. When Copilot or other agents open this workspace, they read `AGENTS.md` to understand that Mem is available as a local CLI:
+Copilot's agent mode reads a workspace `AGENTS.md`. Document Mem there so agents discover it without extra configuration:
 
-```bash
-mem remember "..."      # capture facts
-mem recall --hint-format # retrieve with trust levels
-mem review              # audit facts and contradictions
+```markdown
+## Memory
+
+token-goat-mem is installed (`mem` on PATH).
+- `mem recall --hint-format --root .` — retrieve prior facts with trust caveats
+- `mem remember "<fact>" --kind preference|decision|fact|correction --scope project --root .` — persist new facts
+- `mem review --root .` — audit facts and contradictions
 ```
 
-No special extension or configuration in VS Code needed. The CLI is a standard tool like `npm` or `git`.
+No extension needed. The CLI is a standard tool like `npm` or `git`.
 
 ## Workflow example
 
 1. **Start session** — open VS Code
-2. **Recall facts** — `mem recall --hint-format --scope project` (Ctrl+Shift+M)
-3. **Chat with Copilot** — Copilot sees the output in your terminal
-4. **Discover a new preference** — use Copilot to explore, then store it: `mem remember "no default exports in barrel files"` (Ctrl+Shift+N, complete it)
+2. **Recall facts** — Ctrl+Shift+M (or Run Task > "Mem: Recall project facts")
+3. **Chat with Copilot** — reference the recalled facts from the terminal
+4. **Discover a new preference** — store it: `mem remember "no default exports in barrel files" --kind preference` (Ctrl+Shift+N, complete it)
 5. **Next session** — repeat step 2; Copilot has continuity
 
 ## Fail-open: what happens if Mem is missing
 
-If `mem` is not on PATH or the call times out, the terminal shows an error. Copilot proceeds without memory hints — no fallback penalty, and your chat continues normally. Run `mem doctor` to verify the install is correct.
+If `mem` is not on PATH, the terminal shows a command-not-found error and Copilot proceeds without memory hints — no fallback penalty. Verify the install with `mem --version` and `mem epoch`.
 
 ## See also
 
 - `mem --help` — full CLI reference
-- `mem review` — audit all stored facts and contradiction flags
-- README: Token-Goat Seam section for deeper integration with other tools
+- `README.md` — anchor predicates and the token-goat seam
+- `docs/integrations/copilot-cli.md` — the same patterns for Copilot CLI

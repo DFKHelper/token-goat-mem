@@ -17,29 +17,28 @@ npm run lint        # ESLint
 npm run build       # bundle to dist/token-goat-mem.mjs
 ```
 
-Tests run in two tiers:
+Tests run in two tiers (no hook manager is wired yet — run these manually):
 
-- **`pre-commit` (fast, ~2s)** — lint + typecheck + `npm run test:guards`. The guards are pure-introspection invariants that catch the structural bug class (unregistered command, broken fact schema) *before the commit lands*.
-- **`pre-push` / CI (full)** — the entire suite, including end-to-end tests that exercise the full CLI and the shipped `dist/token-goat-mem.mjs` binary.
+- **Before committing (fast, ~2s)** — lint + typecheck + `npm run test:guards`. The guards are pure-introspection invariants that catch the structural bug class (unregistered command, broken fact schema) *before the commit lands*.
+- **Before pushing (full)** — the entire suite (`npm test`), including end-to-end tests that exercise the full CLI and the shipped `dist/token-goat-mem.mjs` binary.
 
 ## Commands and operations
 
 All memory operations are explicit and auditable:
 
-- `mem remember <text>` — capture a user-stated fact into active storage
-- `mem recall [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings
-- `mem review` — view pending, contested, or contradicted facts for human resolution
-- `mem forget <id>` — delete a fact and audit log it
+- `mem remember <text> --kind <kind>` — capture a user-stated fact into active storage (`--kind` is required: preference/decision/fact/correction)
+- `mem recall [query] [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings
+- `mem review` — view pending, contested, or anchor-contradicted facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts)
+- `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
-- `mem unpin <id>` — remove a pin
-- `mem edit <id>` — modify fact text, subject, or value
+- `mem edit <id>` — modify fact text, subject/value, anchor, or scope
 - `mem show <id>` — view a fact and its full provenance
-- `mem list` — all facts, filtered by status/kind
-- `mem epoch` — emit a monotonic version number (for cache invalidation)
+- `mem list` — all facts, filtered by status/kind/subject/scope
+- `mem epoch` — emit a monotonic version number (for cache invalidation); `--gc` runs the retention pass first
 
 ## Data model
 
-**facts** table: `id`, `text`, `kind` (preference/decision/fact/correction), `subject`, `value`, `scope` (global/project/path), `source_type` (user/derived), `source_ref`, `captured_at`, `anchor`, `status` (active/pending/superseded/contested/pinned), `confidence`, `embedding`.
+**facts** table: `id`, `text`, `kind` (preference/decision/fact/correction), `subject`, `value`, `scope` (global/project/path), `scope_root`, `source_type` (user/derived), `source_ref`, `captured_at`, `anchor`, `status` (active/pending/superseded/contested/pinned), `confidence`, `embedding`.
 
 **sources** table: `fact_id`, `excerpt` (redacted preview, full content never persisted in sources table), `stored_at`.
 

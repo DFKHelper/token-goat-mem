@@ -8,7 +8,7 @@ You tell your AI "we use pnpm not npm" and it forgets. Every session. Then it ru
 
 Mem stores them. Locally, in your own SQLite database. Each fact carries a trust level and an anchor (a read-only predicate that tests whether the fact is still true). On recall, Mem re-validates anchors and surfaces only the facts that are fresh and trustworthy, with a confidence caveat so your agent never treats a hint as ground truth when it should not.
 
-Works with **Claude Code**, **Copilot CLI**, **Cursor**, **Windsurf**, **Cline**, and **Aider**. Optional one-way seam with **token-goat** for embedding memory hints into the token-reduction manifest.
+Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). Optional one-way seam with **token-goat** for embedding memory hints into the token-reduction manifest.
 
 **Install in one command:**
 
@@ -21,7 +21,7 @@ mem --help
 
 > Built and maintained by [DFK Helper](https://dfkhelper.com). Free under PolyForm Noncommercial. If it saves your tokens, or your sanity, drop a star at the top of this page.
 
-[Install](#install) · [CLI](#cli) · [How it works](#how-it-works) · [Token-goat integration](#optional-token-goat-seam) · [Disclaimer & License](#disclaimer)
+[Install](#install) · [CLI](#cli) · [Walkthrough](#walkthrough) · [How it works](#how-it-works) · [Anchors](#anchors) · [Token-goat integration](#optional-token-goat-seam) · [Disclaimer & License](#disclaimer)
 
 ---
 
@@ -42,20 +42,20 @@ The defining engineering problem is not *retrieval* — it is **correctness and 
 
 | Before | After |
 |--------|-------|
-| Agent re-reads the same preference every session | "Stored pref (verify): uses pnpm, not npm — mem show <id>" — one-line hint with confidence |
-| Agent does the wrong thing because it forgot a decision | `mem remember "Postgres chosen over Mongo for relational JOIN queries"` persists it; `mem recall` surfaces it with provenance and age |
-| Mixed signals on project setup (old README says npm, lockfile says pnpm) | Anchor predicates test the *actual state* (which lockfile is newer, git history); contradicted facts surface only in `mem review` for human resolution, never as ground truth |
+| Agent re-reads the same preference every session | `stored pref (verify): uses pnpm, not npm — mem show <id>` — one-line hint with confidence |
+| Agent does the wrong thing because it forgot a decision | `mem remember "Postgres chosen over Mongo for relational JOIN queries" --kind decision` persists it; `mem recall` surfaces it with provenance and age |
+| Mixed signals on project setup (old README says npm, lockfile says pnpm) | Anchor predicates test the *actual state* (which lockfile is newer, git history); anchor-contradicted facts are excluded from recall and flagged in `mem review` for human resolution, never surfaced as ground truth |
 | Every session starts cold | `mem recall --hint-format` embeds prior facts into your AI context at startup (~5-10 lines per session) |
-| Session compaction forgets preferences | Preferences are marked active/pinned and survive compaction; confidence decays over time if not re-affirmed |
-| Stale facts invisible until they cause damage | `mem review` flags anchors that contradict stored facts before they become silent bugs |
+| Session compaction forgets preferences | Facts live in SQLite, outside any context window; `mem pin <id>` additionally exempts a fact from time-decay. Unpinned preferences decay in confidence over time if not re-affirmed |
+| Stale facts invisible until they cause damage | `mem review` flags anchor-contradicted facts before they become silent bugs |
 
 ## How it works
 
-1. **Explicit capture** — `mem remember "uses pnpm not npm"` stores a fact with a source reference and timestamp.
-2. **Optional anchors** — Add an anchor: `mem remember "uses pnpm" --anchor 9'file-newer-than pnpm-lock.yaml package-lock.json9'`. The anchor is a read-only predicate; on recall, Mem tests it and returns one of three verdicts: `affirmed` (ground truth), `unverified` (hint to verify), or `contradicted` (suppressed, flagged in review).
-3. **Recall with trust levels** — `mem recall --kind preference` returns active facts sorted by recency, with each fact annotated by trust level, freshness verdict, and age. Low-trust facts are marked "verify" so your AI never mistakes a hint for ground truth.
-4. **Review and resolution** — `mem review` shows all facts, their anchor verdicts, and any contradictions (same subject, different values, both active). Contradictions are never surfaced as ground truth — they appear here for you to resolve.
-5. **Forget and edit** — `mem forget <id>` deletes a fact; `mem edit <id>` updates text or anchor. Both bumps an internal epoch so the token-goat seam always sees the latest state.
+1. **Explicit capture** — `mem remember "uses pnpm not npm" --kind preference` stores a fact with a source reference and timestamp. `--kind` is required: `preference`, `decision`, `fact`, or `correction`.
+2. **Optional anchors** — Add an anchor: `mem remember "uses pnpm" --kind preference --anchor 'file-newer-than pnpm-lock.yaml package-lock.json'`. The anchor is a read-only predicate; on recall, Mem tests it and returns one of three verdicts: `affirmed` (ground truth), `unverified` (hint to verify), or `contradicted` (suppressed, flagged in review).
+3. **Recall with trust levels** — `mem recall --kind preference` returns active facts annotated by trust level, freshness verdict, and age. Low-trust facts are marked "verify" so your AI never mistakes a hint for ground truth.
+4. **Review and resolution** — `mem review` lists pending, contested, and anchor-contradicted facts. Contradictions (same subject + scope, different values, ambiguous winner) are never surfaced as ground truth — they appear here for you to resolve.
+5. **Forget and edit** — `mem forget <id>` soft-deletes a fact (marks it superseded, kept for audit); `mem edit <id>` updates text, subject/value, anchor, or scope. Both bump an internal epoch so the token-goat seam always sees the latest state.
 
 ## Install
 
@@ -68,43 +68,121 @@ mem --help
 
 That's it. No daemon, no tray icon, no setup wizard. Mem is a short-lived CLI process.
 
+### From source
+
+```
+git clone https://github.com/DFKHelper/token-goat-mem.git
+cd token-goat-mem
+npm install
+npm run build
+npm link
+```
+
 ### Verify the install
 
 ```
-mem doctor
+mem --version
+mem epoch
 ```
 
-Confirms the database is readable and the CLI is wired correctly.
+`mem --version` prints the installed version; `mem epoch` prints a number (creating the database on first run), which confirms the CLI and the SQLite store are wired correctly.
+
+### Where data lives
+
+Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_GOAT_MEM_HOME` to relocate it (the test suite uses this to isolate itself from your real data). No network calls, ever.
 
 ## CLI
 
 | Command | What it does |
 |---------|-------------|
-| `mem remember <text>` | Store a new fact. --kind preference or decision or fact or correction, --subject key (for contradiction detection), --value value, --anchor predicate (optional), --scope global or project or path. |
-| `mem recall [filter]` | List facts by kind/subject/scope. --kind, --subject, --scope, --hint-format (TGMEM/1 for token-goat), --age-days N, --limit N. Returns facts sorted by freshness + recency. |
-| `mem show <id>` | Show one fact in full: text, source, anchor, verdicts, history. |
-| `mem review` | Show all facts with freshness verdicts and contradiction flags. |
-| `mem forget <id>` | Delete a fact (soft delete). Bumps epoch. |
-| `mem edit <id>` | Change a fact's text or anchor. Bumps epoch. |
-| `mem pin <id>` | Exempt a fact from time-decay, but still subject to anchor contradiction. |
-| `mem list` | Show fact IDs and a one-line summary. |
-| `mem epoch` | Print the current epoch (bumped on every write). |
-| `mem doctor` | Verify database integrity and anchor evaluation. |
+| `mem remember <text>` | Store a new fact. `--kind preference\|decision\|fact\|correction` (required), `--subject <key>` + `--value <value>` (paired, for contradiction detection), `--anchor <predicate>` (optional), `--scope global\|project\|path` (default global), `--source-ref <ref>`, `--root <path>`. |
+| `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/1 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>`, `--root <path>`. |
+| `mem list` | Fact IDs and one-line summaries. `--kind`, `--status` (comma-separated), `--subject`, `--scope`, `--limit`. |
+| `mem show <id>` | One fact in full: text, provenance, anchor and its current freshness verdict. `--root <path>`. |
+| `mem review` | Pending, contested, and anchor-contradicted facts for human resolution. `--promote <id>` / `--reject <id>` act on pending facts; `--root <path>`. |
+| `mem forget <id>` | Soft-delete a fact (marks superseded, kept for audit) and audit-log it. Bumps epoch. |
+| `mem edit <id>` | Change a fact's `--text`, `--subject`/`--value` (paired), `--anchor`, or `--scope`. Bumps epoch. |
+| `mem pin <id>` | Exempt a fact from time-decay (still subject to contradiction/anchor suppression). |
+| `mem epoch` | Print the current write epoch (monotonic, bumped on every write). `--gc` runs the retention pass first: persists contradiction resolutions, prunes superseded facts/sources/audit rows, applies preference decay. |
+
+Every command supports `--help` for the authoritative flag list.
+
+## Walkthrough
+
+Paste this into a terminal (uses a throwaway home so it never touches your real data):
+
+```bash
+export TOKEN_GOAT_MEM_HOME=$(mktemp -d)
+
+mem remember "uses pnpm, not npm" --kind preference --subject package-manager --value pnpm
+# remembered preference fact 79bce136-679f-471b-8ccb-fd18df7d2b36
+
+mem remember "switched to bun" --kind preference --subject package-manager --value bun
+# remembered preference fact 21a1330e-95d3-453c-81f0-49c792e1488f
+
+mem recall
+# stored pref (unverified, 2026-07): switched to bun — verify; mem show 21a1330e-...
+```
+
+Both facts share the subject `package-manager` with different values — a contradiction. Recall already prefers the newer fact and hides the loser; `epoch --gc` persists that resolution:
+
+```bash
+mem epoch --gc
+# epoch=3  contradictions_resolved=1  preferences_decayed_below_floor=0  pruned_superseded_facts=0  pruned_sources=0  pruned_audit_log_rows=0
+
+mem list
+# 21a1330e-...  [preference/active] package-manager=bun  switched to bun
+# 79bce136-...  [preference/superseded] package-manager=pnpm  uses pnpm, not npm
+```
+
+Anchored facts are re-validated on every recall. An anchor that tests false excludes the fact from ground truth and routes it to review:
+
+```bash
+mem remember "repo has a yarn.lock" --kind fact --anchor "file-exists yarn.lock" --scope project --root .
+
+mem recall --root . --scope project
+# fact (contradicted, excluded): repo has a yarn.lock — resolve via mem review
+
+mem review --root .
+# -- anchor-contradicted (suppressed from ground truth) (1) --
+# 888ba2c0-...  [fact/active]  repo has a yarn.lock
+```
+
+(IDs are random UUIDs; yours will differ.)
+
+## Anchors
+
+Anchors are pure, read-only filesystem/git predicates — no shell-out, no network, bounded I/O, and paths are confined to the given `--root`:
+
+| Predicate | Affirms when |
+|-----------|--------------|
+| `file-exists <path>` | the file exists under root |
+| `file-absent <path>` | the file does not exist |
+| `file-newer-than <a> <b>` | `a` is the currently-active file relative to `b` (e.g. the newest lockfile is pnpm's) |
+| `file-contains <path> <substring>` | the file contains the substring (bounded read) |
+| `file-not-contains <path> <substring>` | the file does not contain the substring |
+| `glob-exists <pattern>` | some file matches the glob (`*`, `?` segments) |
+| `git-branch-is <branch>` | the repo's current branch matches |
+| `git-tracked <path>` | the path is tracked in the git index |
+
+Each evaluation yields `affirmed`, `unverified` (missing file, no repo, malformed predicate — cannot confirm or deny), or `contradicted`. Only `affirmed` is ground-truth eligible.
 
 ## Optional token-goat seam
 
 Mem works standalone. When token-goat is on PATH, token-goat can call `mem recall --hint-format --root <project-root>` to embed memory hints into its token-reduction manifest.
 
-The seam is one-directional (Mem reads nothing from token-goat), stateless (live calls, no caching), and self-caveating (display strings include their own trust caveats). Contested or low-trust facts are excluded from --hint-format entirely — only ground-truth-eligible or explicitly-caveated hints are emitted. Mem does not cache results; forget/edit reflect instantly. If mem is not on PATH or the call times out, token-goat falls back to no hints (fail-open).
+The seam is one-directional (Mem reads nothing from token-goat), stateless (live calls, no caching), and self-caveating (display strings include their own trust caveats). Contested or low-trust facts are excluded from `--hint-format` entirely — only ground-truth-eligible or explicitly-caveated hints are emitted. Mem does not cache results; forget/edit reflect instantly. If mem is not on PATH or the call times out, token-goat falls back to no hints (fail-open).
 
 ## Works with
 
-- Claude Code
-- Copilot CLI
-- Cursor
-- Windsurf (including Cascade AI patterns)
-- Cline
-- Aider
+Integration guides in [`docs/integrations/`](docs/integrations/):
+
+- [Claude Code](docs/integrations/claude-code.md)
+- [Copilot CLI](docs/integrations/copilot-cli.md)
+- [Copilot in VS Code](docs/integrations/copilot-vscode.md)
+- [Codex](docs/integrations/codex.md)
+
+Any other agent that can run a shell command (Cursor, Windsurf, Cline, Aider, ...) can use the same patterns: `mem recall --hint-format` at session start, `mem remember` as decisions land.
 
 ## Disclaimer
 
