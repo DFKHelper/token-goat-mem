@@ -96,7 +96,7 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | Command | What it does |
 |---------|-------------|
 | `mem remember <text>` | Store a new fact. `--kind preference\|decision\|fact\|correction` (required), `--subject <key>` + `--value <value>` (paired, for contradiction detection), `--anchor <predicate>` (optional), `--scope global\|project\|path` (default global), `--source-ref <ref>`, `--root <path>`. |
-| `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/1 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>`, `--root <path>`. |
+| `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/2 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>`, `--root <path>`, `--stable` (deterministic id-sorted output instead of relevance/recency order). |
 | `mem list` | Fact IDs and one-line summaries. `--kind`, `--status` (comma-separated), `--subject`, `--scope`, `--limit`. |
 | `mem show <id>` | One fact in full: text, provenance, anchor and its current freshness verdict. `--root <path>`. |
 | `mem review` | Pending, contested, and anchor-contradicted facts for human resolution. `--promote <id>` / `--reject <id>` act on pending facts; `--root <path>`. |
@@ -172,6 +172,14 @@ Each evaluation yields `affirmed`, `unverified` (missing file, no repo, malforme
 Mem works standalone. When token-goat is on PATH, token-goat can call `mem recall --hint-format --root <project-root>` to embed memory hints into its token-reduction manifest.
 
 The seam is one-directional (Mem reads nothing from token-goat), stateless (live calls, no caching), and self-caveating (display strings include their own trust caveats). Contested or low-trust facts are excluded from `--hint-format` entirely — only ground-truth-eligible or explicitly-caveated hints are emitted. Mem does not cache results; forget/edit reflect instantly. If mem is not on PATH or the call times out, token-goat falls back to no hints (fail-open).
+
+### TGMEM wire format
+
+`--hint-format` emits `TGMEM/2` by default: a header line, then one line per fact (`pref  fresh=affirmed|unverified|contradicted  id=<uuid>  display="<caveated text>"`), then — only when at least one fact line was emitted — a single shared footer line: `footer  mem show <id> for detail; mem review to resolve contested/pending`.
+
+TGMEM/2 moved the per-fact follow-up hint (`mem show <id>`, `resolve via mem review`, ...) out of every `display` string and into that one footer line, since repeating the same CTA on every line was pure overhead once a consumer already knows the pattern. `display` itself is unchanged otherwise — still self-caveating, still meant to be surfaced verbatim.
+
+`TGMEM/1` (the original format: per-line CTA baked into `display`, no footer line) remains fully supported for callers that still parse it — pass `protocolVersion: 1` to `buildHintFormat()` when calling the programmatic seam directly. The CLI itself always emits the current default version.
 
 ### Cheap polling with `mem epoch`
 

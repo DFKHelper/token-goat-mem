@@ -81,6 +81,14 @@ export interface RetrievalOptions {
   readonly embeddingTimeoutMs?: number;
   /** Hard overall budget for anchor re-evaluation across all candidates. Default `DEFAULT_ANCHOR_TIME_BUDGET_MS`. */
   readonly anchorTimeBudgetMs?: number;
+  /**
+   * When `false`, `display` omits its trailing `" — <follow-up command>"` suffix (the "CTA"),
+   * emitting only the bare caveated fact text. Defaults to `true` (today's exact display format,
+   * unchanged). integration-seam.ts's TGMEM/2 wire format sets this `false` and instead emits one
+   * shared footer line summarizing follow-up commands once, rather than repeating the same CTA on
+   * every line (see integration-seam.ts's version-2 grammar doc comment).
+   */
+  readonly includeDisplayCta?: boolean;
 }
 
 export interface RetrievedFact {
@@ -330,32 +338,33 @@ const KIND_LABEL: Record<FactKind, string> = {
  * kinds, so they are always presented as hints-to-verify, never as a bald assertion) — decisions and
  * facts, which the agent won't invent a wrong default for on a miss, are shown plainly once affirmed.
  */
-function buildDisplay(fact: Fact, freshness: AnchorVerdict, contradiction: ContradictionOutcome): string {
+function buildDisplay(fact: Fact, freshness: AnchorVerdict, contradiction: ContradictionOutcome, includeCta: boolean = true): string {
   const label = KIND_LABEL[fact.kind];
   const showCommand = `mem show ${fact.id}`;
+  const withCta = (body: string, cta: string): string => (includeCta ? `${body} — ${cta}` : body);
 
   if (fact.status === "pending") {
-    return `${label} (pending, unconfirmed): ${fact.text} — confirm via mem review`;
+    return withCta(`${label} (pending, unconfirmed): ${fact.text}`, "confirm via mem review");
   }
   if (contradiction === "superseded") {
-    return `${label} (superseded, excluded): ${fact.text} — see mem review for history`;
+    return withCta(`${label} (superseded, excluded): ${fact.text}`, "see mem review for history");
   }
   if (contradiction === "contested") {
-    return `${label} (contested, excluded): ${fact.text} — resolve via mem review`;
+    return withCta(`${label} (contested, excluded): ${fact.text}`, "resolve via mem review");
   }
   if (freshness === "contradicted") {
     const tag = fact.status === "pinned" ? "pinned but contradicted" : "contradicted, excluded";
-    return `${label} (${tag}): ${fact.text} — resolve via mem review`;
+    return withCta(`${label} (${tag}): ${fact.text}`, "resolve via mem review");
   }
 
   const alwaysCaveat = fact.kind === "preference" || fact.kind === "correction";
 
   if (freshness === "affirmed") {
-    return alwaysCaveat ? `stored ${label} (verify): ${fact.text} — ${showCommand}` : `${label}: ${fact.text} — ${showCommand}`;
+    return alwaysCaveat ? withCta(`stored ${label} (verify): ${fact.text}`, showCommand) : withCta(`${label}: ${fact.text}`, showCommand);
   }
 
   const month = fact.captured_at.slice(0, 7);
-  return `stored ${label} (unverified, ${month}): ${fact.text} — verify; ${showCommand}`;
+  return withCta(`stored ${label} (unverified, ${month}): ${fact.text}`, `verify; ${showCommand}`);
 }
 
 function applyKindBoost(fact: Fact, score: number): number {
@@ -439,7 +448,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       freshness,
       contradiction,
       trust,
-      display: buildDisplay(fact, freshness, contradiction),
+      display: buildDisplay(fact, freshness, contradiction, options.includeDisplayCta ?? true),
     };
   });
 

@@ -48,14 +48,14 @@ import { retrieve, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
 /**
- * TGMEM/1 wire-format grammar (normative for this producer; design plan Section 4).
+ * TGMEM wire-format grammar (normative for this producer; design plan Section 4).
  *
  * A `mem recall --hint-format` response is a UTF-8 text stream of LF-terminated
  * lines (ABNF, RFC 5234 core rules):
  *
- *   response      = header LF *( line LF )
- *   header        = "TGMEM/" version        ; version = 1*DIGIT; this build emits "1"
- *   line          = tag SEP fresh-field SEP id-field SEP display-field
+ *   response      = header LF *( fact-line LF ) [ footer-line LF ]   ; footer-line is TGMEM/2+ only
+ *   header        = "TGMEM/" version        ; version = 1*DIGIT
+ *   fact-line     = tag SEP fresh-field SEP id-field SEP display-field
  *   tag           = "pref" / "dec" / "fact" / "corr"
  *   SEP           = 2%x20                   ; exactly two ASCII spaces
  *   fresh-field   = "fresh=" verdict
@@ -71,7 +71,7 @@ import type { Fact, FactKind } from "./types.js";
  *   failure is treated as "no hints" -- fail-open to no-memory (Section 4).
  * - An individual line not matching the grammar is dropped (and may be
  *   logged), never guessed at.
- * - Field order is fixed. A consumer MAY parse a line with the regex
+ * - Field order is fixed. A consumer MAY parse a fact-line with the regex
  *   `^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$`
  *   and `JSON.parse` the final capture group to recover `display`.
  * - The decoded `display` string MUST be surfaced verbatim: the trust caveat is
@@ -79,13 +79,39 @@ import type { Fact, FactKind } from "./types.js";
  *
  * Version policy: any change to line shape, field order, the separator, or the
  * escaping of `display` -- and any addition to the closed `tag`/`verdict` sets,
- * since consumers validate against them -- bumps the integer version
- * (`TGMEM/2`, ...). Consumers treat versions they don't know as "no hints".
+ * since consumers validate against them -- bumps the integer version. Consumers
+ * treat versions they don't know as "no hints".
+ *
+ * TGMEM/1 (superseded default, still fully supported -- see `protocolVersion`
+ * below): every fact-line's `display` carries its own trailing
+ * `" — <follow-up command>"` CTA (e.g. `— mem show <id>`, `— verify; mem show
+ * <id>`, `— resolve via mem review`). No footer-line.
+ *
+ * TGMEM/2 (current default): this bumped because of two additive-but-
+ * grammar-changing facts -- `display` no longer carries a per-line CTA
+ * (bare caveated fact text only), and a response with at least one fact-line
+ * now ends with exactly one `footer-line` summarizing the available
+ * follow-up commands once, instead of repeating one on every line:
+ *
+ *   footer-line   = "footer" SEP footer-text
+ *   footer-text   = "mem show <id> for detail; mem review to resolve contested/pending"
+ *
+ * A footer-line is only emitted when the response has at least one fact-line
+ * (an empty hint set has nothing to follow up on). `footer` is a fixed
+ * constant, not JSON-escaped -- callers should treat it as informational
+ * text, not something to `JSON.parse`.
  */
-export const TGMEM_PROTOCOL_VERSION = 1;
+export const TGMEM_PROTOCOL_VERSION = 2;
 
-/** Header line every hint-format response starts with. */
+/** Header line every hint-format response starts with, for the default protocol version. */
 export const TGMEM_HEADER = `TGMEM/${TGMEM_PROTOCOL_VERSION}`;
+
+/** The one fixed footer line TGMEM/2+ appends after fact-lines, when there is at least one. */
+export const TGMEM_FOOTER_LINE = "footer  mem show <id> for detail; mem review to resolve contested/pending";
+
+function tgmemHeaderFor(protocolVersion: number): string {
+  return `TGMEM/${protocolVersion}`;
+}
 
 /**
  * Self-imposed soft time budget (ms) for a hint-format retrieval (design
@@ -131,6 +157,19 @@ export interface HintFormatOptions {
   readonly dbPath?: string | undefined;
   /** Test override for "now", used for freshness/decay evaluation. */
   readonly now?: Date | undefined;
+  /**
+   * Which TGMEM wire-format version to emit. Defaults to `TGMEM_PROTOCOL_VERSION` (2). `1` is fully
+   * supported for backward-compatible consumers (per-line CTA, no footer-line). Any value other than
+   * exactly `1` is treated as the default version -- this function never throws on a bad value.
+   */
+  readonly protocolVersion?: 1 | 2 | undefined;
+  /**
+   * When `true`, sorts the emitted fact-lines by fact id (ascending) instead of the default
+   * relevance/recency order -- a deterministic, reproducible ordering for callers (tests, snapshot
+   * diffing) that need stable output across runs. Strictly additive: only changes ordering, never
+   * which facts are included or how caps are applied.
+   */
+  readonly stable?: boolean | undefined;
 }
 
 export interface HintFormatResult {
@@ -142,7 +181,10 @@ export interface HintFormatResult {
   readonly truncated: boolean;
 }
 
-const EMPTY_RESULT: HintFormatResult = { header: TGMEM_HEADER, lines: [], truncated: false };
+/** Resolves the effective protocol version for a call: exactly `1` selects TGMEM/1; anything else (including `undefined`) is the current default. Never throws on a bad value -- fail-open. */
+function resolveProtocolVersion(requested: 1 | 2 | undefined): 1 | 2 {
+  return requested === 1 ? 1 : TGMEM_PROTOCOL_VERSION;
+}
 
 /**
  * Builds the `--hint-format` payload for `mem recall --hint-format`. Never
@@ -154,7 +196,7 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
     return await buildHintFormatUnsafe(options);
   } catch (error) {
     logWarning(`hint-format failed internally, returning empty hint set: ${errorMessage(error)}`);
-    return EMPTY_RESULT;
+    return { header: tgmemHeaderFor(resolveProtocolVersion(options.protocolVersion)), lines: [], truncated: false };
   }
 }
 
@@ -163,6 +205,8 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const root = resolvePath(options.root);
   const contextFiles = (options.contextFiles ?? []).map((file) => resolvePath(root, file));
   const now = options.now ?? new Date();
+  const protocolVersion = resolveProtocolVersion(options.protocolVersion);
+  const stable = options.stable === true;
 
   const db = openDb(options.dbPath ?? resolveDbPath());
   let allFacts: Fact[];
@@ -181,6 +225,9 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     hintFormat: true,
     now,
     anchorTimeBudgetMs,
+    // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc
+    // comment above); TGMEM/1 keeps its original per-line CTA verbatim.
+    includeDisplayCta: protocolVersion === 1,
   });
 
   const elapsed = Date.now() - start;
@@ -194,9 +241,17 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const aggressive = results.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, aggressiveCap);
   const precision = results.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, precisionCap);
 
-  const lines = [...aggressive, ...precision].map(formatLine);
+  const ordered = [...aggressive, ...precision];
+  if (stable) {
+    ordered.sort((a, b) => a.fact.id.localeCompare(b.fact.id));
+  }
 
-  return { header: TGMEM_HEADER, lines, truncated };
+  const lines = ordered.map(formatLine);
+  if (protocolVersion === 2 && lines.length > 0) {
+    lines.push(TGMEM_FOOTER_LINE);
+  }
+
+  return { header: tgmemHeaderFor(protocolVersion), lines, truncated };
 }
 
 interface RawFactRow {

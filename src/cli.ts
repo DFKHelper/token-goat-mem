@@ -395,6 +395,7 @@ interface RecallCliOptions {
   readonly ageDays?: number;
   readonly limit?: number;
   readonly root?: string;
+  readonly stable?: boolean;
 }
 
 interface ListCliOptions {
@@ -474,6 +475,7 @@ export function buildProgram(): Command {
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
     .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
     .option("--root <path>", "Project root for anchor evaluation")
+    .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
     .action(
       guard(async (query: string | undefined, options: RecallCliOptions) => {
         if (options.hintFormat === true) {
@@ -484,6 +486,7 @@ export function buildProgram(): Command {
           const hintOptions: HintFormatOptions = {
             root: options.root,
             ...(contextFiles !== undefined ? { contextFiles } : {}),
+            ...(options.stable === true ? { stable: true } : {}),
           };
           const result = await buildHintFormat(hintOptions);
           process.stdout.write(`${result.header}\n`);
@@ -511,7 +514,10 @@ export function buildProgram(): Command {
           process.stdout.write("no matching facts\n");
           return;
         }
-        for (const result of results) {
+        // --stable is a strictly-additive output-ordering override: same facts, same caps, just a
+        // deterministic id order instead of the default relevance/recency order.
+        const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
+        for (const result of ordered) {
           process.stdout.write(`${result.display}\n`);
         }
       })
