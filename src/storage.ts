@@ -89,6 +89,13 @@ export function ensureStorageSchema(db: Db): void {
   db.pragma("foreign_keys = ON");
   db.exec(STORAGE_SCHEMA);
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+  // `mem review --since-epoch <n>` (design plan Section 4/6) needs to know which write epoch each
+  // fact was last touched at. A `NOT NULL DEFAULT 0` backfill is deliberate, not just SQLite's usual
+  // ADD COLUMN behavior: rows written before this migration existed have no recorded epoch, and `0`
+  // is the correct "predates every real write" sentinel -- the epoch counter itself starts at `0` and
+  // only strictly increases (`bumpEpoch`), so no real write can ever be stamped `0` again, and
+  // `epoch > n` for any `n >= 0` correctly excludes pre-migration rows without a separate NULL case.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0");
 }
 
 /**
@@ -150,6 +157,7 @@ interface FactRow {
   status: string;
   confidence: number;
   embedding: Buffer | null;
+  epoch: number;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -168,6 +176,7 @@ function rowToFact(row: FactRow): Fact {
     status: row.status as Fact["status"],
     confidence: row.confidence,
     embedding: row.embedding === null ? null : unpackEmbedding(row.embedding),
+    epoch: row.epoch,
   };
 }
 
@@ -189,11 +198,12 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
+    const epoch = bumpEpoch(db);
     insert.run(
       id,
       fact.text,
@@ -208,9 +218,9 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       fact.anchor ?? null,
       status,
       confidence,
-      embeddingBlob
+      embeddingBlob,
+      epoch
     );
-    bumpEpoch(db);
   });
   tx();
 
@@ -265,6 +275,10 @@ function buildFactFilterClause(filter: FactFilter): { where: string; params: unk
   if (filter.capturedAfter !== undefined) {
     clauses.push("captured_at > ?");
     params.push(filter.capturedAfter);
+  }
+  if (filter.epochAfter !== undefined) {
+    clauses.push("epoch > ?");
+    params.push(filter.epochAfter);
   }
 
   const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
@@ -351,12 +365,12 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
     return getFactById(db, id);
   }
 
-  params.push(id);
+  sets.push("epoch = ?");
   const sql = `UPDATE facts SET ${sets.join(", ")} WHERE id = ?`;
 
   const tx = db.transaction((): void => {
-    db.prepare(sql).run(...params);
-    bumpEpoch(db);
+    const epoch = bumpEpoch(db);
+    db.prepare(sql).run(...params, epoch, id);
   });
   tx();
 
@@ -375,8 +389,8 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
  */
 export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | undefined {
   const tx = db.transaction((): void => {
-    db.prepare("UPDATE facts SET status = ? WHERE id = ?").run(status, id);
-    bumpEpoch(db);
+    const epoch = bumpEpoch(db);
+    db.prepare("UPDATE facts SET status = ?, epoch = ? WHERE id = ?").run(status, epoch, id);
   });
   tx();
   return getFactById(db, id);
@@ -447,8 +461,17 @@ export function getEpoch(db: Db): number {
   return row === undefined ? 0 : Number(row.value);
 }
 
-/** Increments the write epoch by 1. Callers must run this inside the same transaction as the fact write it accompanies (every exported fact-write function in this module already does). Not exported: bumping the epoch outside of an actual write would desynchronize it from what it is meant to describe. */
-function bumpEpoch(db: Db): void {
+/**
+ * Increments the write epoch by 1 and returns the new value. Callers must run this inside the same
+ * transaction as the fact write it accompanies (every exported fact-write function in this module
+ * already does), and use the returned value to stamp that write's `facts.epoch` column so a fact's
+ * recorded epoch is always exactly the epoch its own write produced -- never a stale read from
+ * before or after. Not exported: bumping the epoch outside of an actual write would desynchronize it
+ * from what it is meant to describe.
+ */
+function bumpEpoch(db: Db): number {
   const current = getEpoch(db);
-  db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(current + 1));
+  const next = current + 1;
+  db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+  return next;
 }

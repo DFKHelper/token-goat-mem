@@ -13,6 +13,13 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 - **TGMEM/2** is now the default `--hint-format` wire-format version. Per-fact `display` strings no longer carry a trailing `" — <follow-up command>"` CTA; instead, one shared `footer` line (`footer  mem show <id> for detail; mem review to resolve contested/pending`) is appended after the fact lines, when there is at least one. `TGMEM/1` (original per-line CTA, no footer) remains fully supported via `protocolVersion: 1`.
 
+### Added
+
+- `mem recall --hint-style <full|terse>` (default `full`) — `terse` drops the footer/CTA content and shortens kind labels to `pref`/`dec`/`fact`/`corr`. `full` is byte-identical to the pre-existing default format.
+- `mem review --summary` — prints per-bucket fact counts (`pending`, `contested`, `contradicted`, `pins`) instead of the full listing.
+- `mem review --section <pending|contested|contradicted|pins>` — restricts output to a single bucket.
+- `mem review --since-epoch <n>` — only includes facts written after write-epoch `n`. Backed by a new `facts.epoch` column (idempotent migration in `ensureStorageSchema`; pre-migration rows default to `0`), stamped from the same monotonic epoch counter used by `mem epoch` on every insert/update/status change.
+
 ## [0.1.0] - 2026-07-12
 
 Initial build: a local-first, correctness-focused long-term memory CLI for AI coding agents (Claude Code, Copilot CLI, Copilot in VS Code, Codex).
