@@ -11,10 +11,27 @@
  * Commander program without going through `process.argv`/`process.exit` (mirrors token-goat's own
  * `src/cli.ts` convention). `run()` is the actual entry point `src/main.ts` calls.
  *
- * Every action is wrapped in `guard()`, which maps a thrown error to a single `mem: <message>` stderr
- * line and `process.exitCode = 1` -- never a partial stack trace, never a hard `process.exit()` (that
- * would truncate buffered stdout on Windows pipes; letting the event loop drain naturally, same as
- * token-goat's `main.ts` shim, guarantees output flushes first).
+ * Exit-code / stream contract (normative for every command):
+ *   - exit 0 -- success. All requested data goes to **stdout**; stderr is empty. "Nothing found"
+ *     outcomes (`no matching facts`, `no facts stored`, `nothing needs review`) are successes, not
+ *     errors. `--hint-format` additionally *always* exits 0, even on internal failure -- the seam
+ *     fails open to an empty, well-formed TGMEM payload by design (Section 4).
+ *   - exit 1 -- user/usage error: invalid arguments or option values, unknown fact id, an invalid
+ *     state transition (e.g. promoting a non-pending fact), input rejected by secret screening, or
+ *     a Commander parse error (unknown command, missing argument). The input was wrong; retrying
+ *     the same invocation will fail the same way.
+ *   - exit 2 -- internal/unexpected error: DB open/IO failure, or any bug-class exception. The
+ *     input may have been fine; the environment or mem itself is what failed.
+ *   Diagnostics always go to **stderr** as a single `mem: <message>` line (Commander writes its own
+ *   usage diagnostics to stderr in its own format); stdout carries data only, so piping stdout is
+ *   always safe. `--help`/`--version` are successes (exit 0).
+ *
+ * Every action is wrapped in `guard()`, which enforces that contract: it maps a thrown error to a
+ * single `mem: <message>` stderr line and `process.exitCode` 1 or 2 (`UsageError` and the capture
+ * module's validation/secret errors are user errors; everything else is internal) -- never a
+ * partial stack trace, never a hard `process.exit()` (that would truncate buffered stdout on
+ * Windows pipes; letting the event loop drain naturally, same as token-goat's `main.ts` shim,
+ * guarantees output flushes first).
  */
 
 import { Command } from "commander";
@@ -24,13 +41,15 @@ import type Database from "better-sqlite3";
 import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
 import {
   captureExplicit,
+  CaptureValidationError,
+  InvalidAnchorError,
   loadAllowlist,
   screenForSecrets,
   SecretDetectedError,
   type CaptureExplicitInput,
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
-import { insertAuditLog } from "./db.js";
+import { insertAuditLog, resolveDbPath } from "./db.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
 import {
   GROUND_TRUTH_CONFIDENCE_FLOOR,
@@ -39,6 +58,7 @@ import {
   type RetrievalOptions,
 } from "./retrieval.js";
 import {
+  countFacts,
   deleteFact,
   deleteSourcesOlderThan,
   getEpoch,
@@ -53,6 +73,35 @@ import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Sou
 
 const MS_PER_DAY = 86_400_000;
 
+// ─────────────────────────────────────────────────────────────────────────── Exit-code contract ───────────────────────────────────────────────────────────────────────────
+
+/** See the module doc comment for the full normative contract. */
+export const EXIT_SUCCESS = 0;
+export const EXIT_USER_ERROR = 1;
+export const EXIT_INTERNAL_ERROR = 2;
+
+/**
+ * A user/usage error: the invocation itself was wrong (bad option value, unknown fact id, invalid
+ * state transition, ...). Maps to `EXIT_USER_ERROR`; anything else thrown from a command action is
+ * treated as internal (`EXIT_INTERNAL_ERROR`).
+ */
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UsageError";
+  }
+}
+
+/** Classifies a thrown error per the exit-code contract: deliberate input-rejection errors are user errors; everything else (sqlite failures, bugs) is internal. */
+function exitCodeForError(error: unknown): number {
+  return error instanceof UsageError ||
+    error instanceof CaptureValidationError ||
+    error instanceof InvalidAnchorError ||
+    error instanceof SecretDetectedError
+    ? EXIT_USER_ERROR
+    : EXIT_INTERNAL_ERROR;
+}
+
 // ─────────────────────────────────────────────────────────────────────────── CLI-boundary validation ───────────────────────────────────────────────────────────────────────────
 
 const FACT_KINDS: readonly FactKind[] = ["preference", "decision", "fact", "correction"];
@@ -61,14 +110,14 @@ const FACT_STATUSES: readonly FactStatus[] = ["active", "pending", "superseded",
 
 function parseFactKind(raw: string): FactKind {
   if (!FACT_KINDS.includes(raw as FactKind)) {
-    throw new Error(`invalid kind "${raw}" (expected one of ${FACT_KINDS.join(", ")})`);
+    throw new UsageError(`invalid kind "${raw}" (expected one of ${FACT_KINDS.join(", ")})`);
   }
   return raw as FactKind;
 }
 
 function parseFactScope(raw: string): FactScope {
   if (!FACT_SCOPES.includes(raw as FactScope)) {
-    throw new Error(`invalid scope "${raw}" (expected one of ${FACT_SCOPES.join(", ")})`);
+    throw new UsageError(`invalid scope "${raw}" (expected one of ${FACT_SCOPES.join(", ")})`);
   }
   return raw as FactScope;
 }
@@ -80,7 +129,7 @@ function parseFactStatusList(raw: string): FactStatus | readonly FactStatus[] {
     .filter((value) => value.length > 0);
   for (const value of values) {
     if (!FACT_STATUSES.includes(value as FactStatus)) {
-      throw new Error(`invalid status "${value}" (expected one of ${FACT_STATUSES.join(", ")})`);
+      throw new UsageError(`invalid status "${value}" (expected one of ${FACT_STATUSES.join(", ")})`);
     }
   }
   const [only] = values;
@@ -123,18 +172,18 @@ function extractErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-/** Wraps a command action so any thrown error maps to one `mem: <message>` stderr line + exit code 1, and success to exit code 0 (unless the handler already set a different `process.exitCode`). Mirrors token-goat's own `cli.ts` guard. */
+/** Wraps a command action so any thrown error maps to one `mem: <message>` stderr line + the contract exit code (1 user error, 2 internal -- see `exitCodeForError`), and success to exit code 0 (unless the handler already set a different `process.exitCode`). Mirrors token-goat's own `cli.ts` guard. */
 function guard(fn: (...args: never[]) => void | Promise<void>): (...args: unknown[]) => Promise<void> {
   return async (...args: unknown[]): Promise<void> => {
     process.exitCode = undefined;
     try {
       await fn(...(args as never[]));
       if (process.exitCode === undefined) {
-        process.exitCode = 0;
+        process.exitCode = EXIT_SUCCESS;
       }
     } catch (error) {
       err(`mem: ${extractErrorMessage(error)}`);
-      process.exitCode = 1;
+      process.exitCode = exitCodeForError(error);
     }
   };
 }
@@ -186,10 +235,10 @@ const PIN_RECONFIRM_DAYS = 182;
 function promotePending(db: Database.Database, id: string): void {
   const fact = getFactById(db, id);
   if (fact === undefined) {
-    throw new Error(`no such fact: ${id}`);
+    throw new UsageError(`no such fact: ${id}`);
   }
   if (fact.status !== "pending") {
-    throw new Error(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
+    throw new UsageError(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
   }
   setFactStatus(db, id, "active");
   insertAuditLog(db, { event: "review_promote", factId: id, detail: "promoted pending fact to active via explicit review" });
@@ -198,10 +247,10 @@ function promotePending(db: Database.Database, id: string): void {
 function rejectPending(db: Database.Database, id: string): void {
   const fact = getFactById(db, id);
   if (fact === undefined) {
-    throw new Error(`no such fact: ${id}`);
+    throw new UsageError(`no such fact: ${id}`);
   }
   if (fact.status !== "pending") {
-    throw new Error(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
+    throw new UsageError(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
   }
   setFactStatus(db, id, "superseded");
   insertAuditLog(db, { event: "review_reject", factId: id, detail: "rejected pending fact (superseded) via explicit review" });
@@ -251,7 +300,13 @@ function formatReview(db: Database.Database, root: string): string {
 const GC_SUPERSEDED_MAX_AGE_DAYS = 90;
 const GC_SUPERSEDED_MAX_ROWS = 1000;
 const GC_SOURCES_MAX_AGE_DAYS = 90;
-/** Section 6: "Audit log rotates." */
+/**
+ * Section 6: "Audit log rotates." Deliberately an *independent* retention window from the
+ * superseded-fact/sources GC bounds above -- and intentionally longer -- so that pruning a fact or
+ * its source excerpts never silently prunes the audit history describing how that fact was
+ * captured, edited, contradicted, and eventually GC'd. Audit rows outlive the rows they describe
+ * (design principle 5: "No black box"); only age rotates them, never a fact-side GC decision.
+ */
 const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
 
 /**
@@ -423,7 +478,7 @@ export function buildProgram(): Command {
       guard(async (query: string | undefined, options: RecallCliOptions) => {
         if (options.hintFormat === true) {
           if (typeof options.root !== "string" || options.root.trim().length === 0) {
-            throw new Error("recall --hint-format requires --root <path>");
+            throw new UsageError("recall --hint-format requires --root <path>");
           }
           const contextFiles = parseContextFiles(options.contextFiles);
           const hintOptions: HintFormatOptions = {
@@ -449,6 +504,8 @@ export function buildProgram(): Command {
           ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
         };
+        // No embeddingBackend is wired: retrieval is BM25-only in v1 (see the
+        // TODO(deferred, spec'd) note on retrieval.ts's EmbeddingBackend).
         const results = await retrieve(facts, retrievalOptions);
         if (results.length === 0) {
           process.stdout.write("no matching facts\n");
@@ -497,7 +554,7 @@ export function buildProgram(): Command {
         const output = await withDb((db) => {
           const fact = getFactById(db, id);
           if (fact === undefined) {
-            throw new Error(`no such fact: ${id}`);
+            throw new UsageError(`no such fact: ${id}`);
           }
           const root = resolveRoot(options.root ?? fact.scopeRoot ?? undefined);
           const freshness = evaluateAnchor(fact.anchor, root);
@@ -516,7 +573,7 @@ export function buildProgram(): Command {
         await withDb((db) => {
           const existing = getFactById(db, id);
           if (existing === undefined) {
-            throw new Error(`no such fact: ${id}`);
+            throw new UsageError(`no such fact: ${id}`);
           }
           setFactStatus(db, id, "superseded");
           insertAuditLog(db, { event: "forget", factId: id, detail: `forgot fact (was ${existing.status})` });
@@ -533,7 +590,7 @@ export function buildProgram(): Command {
         await withDb((db) => {
           const existing = getFactById(db, id);
           if (existing === undefined) {
-            throw new Error(`no such fact: ${id}`);
+            throw new UsageError(`no such fact: ${id}`);
           }
           setFactStatus(db, id, "pinned");
           insertAuditLog(db, { event: "pin", factId: id, detail: `pinned fact (was ${existing.status})` });
@@ -556,7 +613,7 @@ export function buildProgram(): Command {
         const hasSubject = options.subject !== undefined;
         const hasValue = options.value !== undefined;
         if (hasSubject !== hasValue) {
-          throw new Error("--subject and --value must be provided together");
+          throw new UsageError("--subject and --value must be provided together");
         }
         const root = resolveRoot(options.root);
         const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
@@ -569,13 +626,13 @@ export function buildProgram(): Command {
           ...(scope !== undefined ? { scopeRoot: scope === "global" ? null : root } : {}),
         };
         if (Object.keys(patch).length === 0) {
-          throw new Error("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");
+          throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");
         }
 
         const updated = await withDb((db) => {
           const existing = getFactById(db, id);
           if (existing === undefined) {
-            throw new Error(`no such fact: ${id}`);
+            throw new UsageError(`no such fact: ${id}`);
           }
           const allowlist = loadAllowlist(root);
           const matches = screenForSecrets({ text: patch.text, subject: patch.subject, value: patch.value, anchor: patch.anchor }, allowlist);
@@ -584,7 +641,7 @@ export function buildProgram(): Command {
           }
           const fact = updateFact(db, id, patch);
           if (fact === undefined) {
-            throw new Error(`no such fact: ${id}`);
+            throw new UsageError(`no such fact: ${id}`);
           }
           insertAuditLog(db, { event: "edit", factId: id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
           return fact;
@@ -602,7 +659,7 @@ export function buildProgram(): Command {
     .action(
       guard(async (options: ReviewCliOptions) => {
         if (options.promote !== undefined && options.reject !== undefined) {
-          throw new Error("--promote and --reject cannot be used together");
+          throw new UsageError("--promote and --reject cannot be used together");
         }
         if (options.promote !== undefined) {
           const id = options.promote;
@@ -639,6 +696,40 @@ export function buildProgram(): Command {
       })
     );
 
+  program
+    .command("doctor")
+    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status")
+    .action(
+      guard(async () => {
+        const dbPath = resolveDbPath();
+        const output = await withDb((db) => {
+          const journalMode = db.pragma("journal_mode", { simple: true }) as string;
+          const foreignKeys = db.pragma("foreign_keys", { simple: true }) as number;
+          const tables = db
+            .prepare<[], { name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .all()
+            .map((row) => row.name)
+            .filter((name) => !name.startsWith("sqlite_"));
+          const statusCounts = FACT_STATUSES.map((status) => `${status}=${countFacts(db, { status })}`).join("  ");
+          const totalFacts = countFacts(db, {});
+          const sourceRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM sources").get()?.c ?? 0;
+          const auditRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM audit_log").get()?.c ?? 0;
+          const epoch = getEpoch(db);
+          return [
+            `db: ${dbPath}`,
+            `journal_mode: ${journalMode}`,
+            `foreign_keys: ${foreignKeys === 1 ? "on" : "off"}`,
+            `tables: ${tables.join(", ")}`,
+            `epoch: ${epoch}`,
+            `facts: ${statusCounts}  (total ${totalFacts})`,
+            `sources: ${sourceRows}`,
+            `audit_log rows: ${auditRows}`,
+          ].join("\n");
+        });
+        process.stdout.write(`${output}\n`);
+      })
+    );
+
   return program;
 }
 
@@ -656,15 +747,23 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   } catch (error) {
     const code = (error as { code?: string }).code;
     if (code === "commander.helpDisplayed" || code === "commander.version" || code === "commander.help") {
-      process.exitCode = 0;
+      process.exitCode = EXIT_SUCCESS;
       return;
     }
     if (code === "commander.unknownCommand" || code === "commander.missingArgument" || code === "commander.missingMandatoryOptionValue") {
       // Commander already wrote its diagnostic to stderr.
-      process.exitCode = 1;
+      process.exitCode = EXIT_USER_ERROR;
       return;
     }
+    if (typeof code === "string" && code.startsWith("commander.")) {
+      // Any other Commander parse failure (invalid option, excess arguments, ...) is still a
+      // usage error; Commander already wrote its diagnostic to stderr.
+      process.exitCode = EXIT_USER_ERROR;
+      return;
+    }
+    // Non-Commander errors escaping an action can only be bugs (guard() catches everything a
+    // handler throws), so classify per the contract rather than assuming user error.
     err(`mem: ${extractErrorMessage(error)}`);
-    process.exitCode = 1;
+    process.exitCode = exitCodeForError(error);
   }
 }

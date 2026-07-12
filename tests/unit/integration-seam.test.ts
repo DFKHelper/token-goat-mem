@@ -295,4 +295,62 @@ describe("buildHintFormat", () => {
     const displayJson = match?.[1] ?? "";
     expect(() => JSON.parse(displayJson)).not.toThrow();
   });
+
+  it("emits every line conforming to the normative TGMEM/1 grammar (integration-seam.ts doc comment)", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "g-pref",
+        text: 'pref with "quotes" and — a dash',
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "g-corr",
+        text: "never run npm install here",
+        kind: "correction",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "g-dec",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-03T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "g-fact",
+        text: "staging DB host is db.internal",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-04T00:00:00.000Z",
+        status: "pinned",
+      },
+    ]);
+
+    const result = await buildHintFormat({ root, dbPath });
+    expect(result.header).toBe("TGMEM/1");
+    expect(result.lines).toHaveLength(4);
+
+    // The exact consumer-side regex the grammar doc comment publishes. Every produced line must
+    // match it, and the final capture must JSON.parse to a non-empty display string -- if this
+    // test breaks, either fix the producer or bump TGMEM_PROTOCOL_VERSION and the grammar together.
+    const grammar = /^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$/u;
+    for (const line of result.lines) {
+      const match = grammar.exec(line);
+      expect(match, `line does not match TGMEM/1 grammar: ${line}`).not.toBeNull();
+      expect(line).not.toContain("\n");
+      const display: unknown = JSON.parse(match?.[4] ?? "null");
+      expect(typeof display).toBe("string");
+      expect((display as string).length).toBeGreaterThan(0);
+    }
+  });
 });

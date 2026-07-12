@@ -94,4 +94,4 @@ export {
   type HintFormatResult,
 } from "./integration-seam.js";
 
-export { buildProgram, run } from "./cli.js";
+export { buildProgram, EXIT_INTERNAL_ERROR, EXIT_SUCCESS, EXIT_USER_ERROR, run, UsageError } from "./cli.js";

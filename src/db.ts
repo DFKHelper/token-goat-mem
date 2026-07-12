@@ -56,6 +56,10 @@ CREATE TABLE IF NOT EXISTS facts (
   source_ref TEXT,
   captured_at TEXT NOT NULL,
   anchor TEXT,
+  -- NOTE: 'contested' here (a persisted status from deterministic subject+value fact-vs-fact
+  -- contradiction detection, P4) is a different mechanism from the 'contradicted' freshness
+  -- verdict (computed per query by re-evaluating a fact's anchor, P3 -- never stored in this
+  -- column). See the FactStatus/FreshnessVerdict docs in src/types.ts.
   status TEXT NOT NULL CHECK (status IN ('active','pending','superseded','contested','pinned')) DEFAULT 'active',
   confidence REAL NOT NULL DEFAULT 1.0,
   embedding BLOB
