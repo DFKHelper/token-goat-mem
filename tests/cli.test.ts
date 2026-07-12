@@ -225,7 +225,7 @@ describe("contradiction handling surfaced through the CLI (contradiction.ts, P4)
     // agent as an unresolved either/or it would have to gamble on (Section 4).
     const hintFormat = await runCli(["recall", "--hint-format", "--root", home]);
     expect(hintFormat.exitCode).toBe(0);
-    expect(hintFormat.stdout.startsWith("TGMEM/1\n")).toBe(true);
+    expect(hintFormat.stdout.startsWith("TGMEM/2\n")).toBe(true);
     expect(hintFormat.stdout).not.toContain("uses pnpm");
     expect(hintFormat.stdout).not.toContain("uses npm");
   });
@@ -392,7 +392,7 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     try {
       const result = await runCli(["recall", "--hint-format", "--root", home]);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toBe("TGMEM/1\n");
+      expect(result.stdout).toBe("TGMEM/2\n");
       expect(result.stderr).toBe("");
     } finally {
       rmSync(join(brokenHome, ".."), { recursive: true, force: true });
@@ -407,5 +407,40 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     const blankRoot = await runCli(["recall", "--hint-format", "--root", "   "]);
     expect(blankRoot.exitCode).toBe(1);
     expect(blankRoot.stderr).toContain("recall --hint-format requires --root <path>");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── recall --stable ───────────────────────────────────────────────────────────────────────────
+
+describe("recall --stable (deterministic id-sorted ordering, strictly additive)", () => {
+  it("sorts plain `mem recall` output by fact id ascending instead of recency", async () => {
+    await runCli(["remember", "captured earlier", "--kind", "fact"]);
+    await runCli(["remember", "captured later", "--kind", "fact"]);
+
+    const defaultOrder = await runCli(["recall"]);
+    const stableOrder = await runCli(["recall", "--stable"]);
+
+    // Same set of lines either way -- --stable only changes ordering, never which facts are included.
+    expect([...stableOrder.stdout.split("\n")].sort()).toEqual([...defaultOrder.stdout.split("\n")].sort());
+
+    const ids = stableOrder.stdout
+      .split("\n")
+      .map((line) => /mem show (\S+)/.exec(line)?.[1])
+      .filter((id): id is string => id !== undefined);
+    expect(ids.length).toBeGreaterThan(0);
+    expect([...ids].sort()).toEqual(ids);
+  });
+
+  it("sorts `mem recall --hint-format --stable` fact-lines by fact id ascending", async () => {
+    await runCli(["remember", "fact z", "--kind", "fact", "--scope", "global"]);
+    await runCli(["remember", "fact a", "--kind", "fact", "--scope", "global"]);
+
+    const result = await runCli(["recall", "--hint-format", "--root", home, "--stable"]);
+    expect(result.exitCode).toBe(0);
+    const ids = result.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("fact  "))
+      .map((line) => /id=(\S+)/.exec(line)?.[1] ?? "");
+    expect([...ids].sort()).toEqual(ids);
   });
 });

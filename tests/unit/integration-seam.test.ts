@@ -3,8 +3,14 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/db.js";
-import { buildHintFormat, TGMEM_HEADER } from "../../src/integration-seam.js";
+import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
+import type { HintFormatResult } from "../../src/integration-seam.js";
+
+/** TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the fact caps/ordering that predate the footer line. */
+function factLines(result: HintFormatResult): readonly string[] {
+  return result.lines.filter((line) => line !== TGMEM_FOOTER_LINE);
+}
 
 interface FactSeed {
   readonly id: string;
@@ -98,7 +104,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
     expect(result.lines).toHaveLength(1);
     expect(result.lines[0]).toContain("pref  fresh=unverified  id=pref-1");
     expect(result.lines[0]).toContain("verify");
@@ -120,9 +126,10 @@ describe("buildHintFormat", () => {
     ]);
 
     const result = await buildHintFormat({ root, dbPath });
-    expect(result.lines).toHaveLength(1);
+    expect(factLines(result)).toHaveLength(1);
     expect(result.lines[0]).toContain("dec  fresh=affirmed  id=dec-1");
     expect(result.lines[0]).not.toContain("(verify)");
+    expect(result.lines[result.lines.length - 1]).toBe(TGMEM_FOOTER_LINE);
   });
 
   it("excludes a fact whose anchor is contradicted", async () => {
@@ -210,7 +217,7 @@ describe("buildHintFormat", () => {
     expect(resultForRoot.lines).toEqual([]);
 
     const resultForOtherRoot = await buildHintFormat({ root: otherRoot, dbPath });
-    expect(resultForOtherRoot.lines).toHaveLength(1);
+    expect(factLines(resultForOtherRoot)).toHaveLength(1);
   });
 
   it("includes a path-scoped fact only when a matching --context-files entry is passed", async () => {
@@ -232,7 +239,7 @@ describe("buildHintFormat", () => {
     expect(withoutContext.lines).toEqual([]);
 
     const withContext = await buildHintFormat({ root, dbPath, contextFiles: ["src/auth.ts"] });
-    expect(withContext.lines).toHaveLength(1);
+    expect(factLines(withContext)).toHaveLength(1);
   });
 
   it("caps aggressively-recalled kinds (preference/correction) at 8", async () => {
@@ -251,7 +258,7 @@ describe("buildHintFormat", () => {
     seedFacts(dbPath, seeds);
 
     const result = await buildHintFormat({ root, dbPath });
-    expect(result.lines).toHaveLength(8);
+    expect(factLines(result)).toHaveLength(8);
   });
 
   it("caps precision-recalled kinds (decision/fact) at 4", async () => {
@@ -270,7 +277,7 @@ describe("buildHintFormat", () => {
     seedFacts(dbPath, seeds);
 
     const result = await buildHintFormat({ root, dbPath });
-    expect(result.lines).toHaveLength(4);
+    expect(factLines(result)).toHaveLength(4);
   });
 
   it("emits a well-formed TGMEM/1 line whose display field is valid JSON", async () => {
@@ -286,7 +293,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
     expect(result.lines).toHaveLength(1);
     const line = result.lines[0];
     expect(line).toBeDefined();
@@ -336,7 +343,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
     expect(result.header).toBe("TGMEM/1");
     expect(result.lines).toHaveLength(4);
 
@@ -352,5 +359,92 @@ describe("buildHintFormat", () => {
       expect(typeof display).toBe("string");
       expect((display as string).length).toBeGreaterThan(0);
     }
+  });
+
+  it("TGMEM/2 (default): strips the per-line CTA and appends one shared footer line", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "dec-cta",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+        anchor: "file-exists schema.sql",
+      },
+    ]);
+    writeFileSync(join(root, "schema.sql"), "-- postgres schema");
+
+    const result = await buildHintFormat({ root, dbPath });
+    expect(result.header).toBe("TGMEM/2");
+    expect(result.lines).toHaveLength(2);
+    expect(result.lines[0]).toBe('dec  fresh=affirmed  id=dec-cta  display="decision: chose Postgres over Mongo"');
+    expect(result.lines[1]).toBe(TGMEM_FOOTER_LINE);
+  });
+
+  it("TGMEM/2: omits the footer line when there are no fact-lines", async () => {
+    const result = await buildHintFormat({ root, dbPath });
+    expect(result.header).toBe("TGMEM/2");
+    expect(result.lines).toEqual([]);
+  });
+
+  it("TGMEM/1 (explicit protocolVersion: 1): no footer line, per-line CTA preserved", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "dec-v1",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+        anchor: "file-exists schema.sql",
+      },
+    ]);
+    writeFileSync(join(root, "schema.sql"), "-- postgres schema");
+
+    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
+    expect(result.header).toBe("TGMEM/1");
+    expect(result.lines).toHaveLength(1);
+    expect(result.lines[0]).toBe('dec  fresh=affirmed  id=dec-v1  display="decision: chose Postgres over Mongo — mem show dec-v1"');
+  });
+
+  it("--stable sorts fact-lines by id ascending, independent of relevance/recency order", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "z-newest",
+        text: "captured most recently",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-03T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "a-oldest",
+        text: "captured earliest",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "m-middle",
+        text: "captured in between",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    const defaultOrder = await buildHintFormat({ root, dbPath });
+    expect(factLines(defaultOrder).map((line) => line.split("  ")[2])).toEqual(["id=z-newest", "id=m-middle", "id=a-oldest"]);
+
+    const stableOrder = await buildHintFormat({ root, dbPath, stable: true });
+    expect(factLines(stableOrder).map((line) => line.split("  ")[2])).toEqual(["id=a-oldest", "id=m-middle", "id=z-newest"]);
   });
 });

@@ -4,6 +4,15 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+### Added
+
+- `mem recall --stable` — forces deterministic id-sorted output ordering (both plain `recall` and `--hint-format`), overriding the default relevance/recency order. Strictly additive: same facts, same caps, only the ordering changes.
+- `HintFormatOptions.protocolVersion` on the programmatic token-goat seam (`buildHintFormat()`) — selects `TGMEM/1` or `TGMEM/2` explicitly. The CLI always emits the current default.
+
+### Changed
+
+- **TGMEM/2** is now the default `--hint-format` wire-format version. Per-fact `display` strings no longer carry a trailing `" — <follow-up command>"` CTA; instead, one shared `footer` line (`footer  mem show <id> for detail; mem review to resolve contested/pending`) is appended after the fact lines, when there is at least one. `TGMEM/1` (original per-line CTA, no footer) remains fully supported via `protocolVersion: 1`.
+
 ## [0.1.0] - 2026-07-12
 
 Initial build: a local-first, correctness-focused long-term memory CLI for AI coding agents (Claude Code, Copilot CLI, Copilot in VS Code, Codex).

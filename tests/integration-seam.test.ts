@@ -89,9 +89,9 @@ describe("buildHintFormat (integration seam)", () => {
     const result = await buildHintFormat({ root, dbPath });
 
     expect(result.header).toBe(TGMEM_HEADER);
-    expect(result.header).toBe("TGMEM/1");
+    expect(result.header).toBe("TGMEM/2");
     expect(result.truncated).toBe(false);
-    expect(result.lines).toHaveLength(1);
+    expect(result.lines).toHaveLength(2); // fact-line + TGMEM/2's shared footer-line
 
     const line = result.lines[0];
     expect(line).toBeDefined();
@@ -202,7 +202,7 @@ describe("buildHintFormat (integration seam)", () => {
 
     const result = await buildHintFormat({ root, dbPath });
 
-    expect(result.lines).toHaveLength(1);
+    expect(result.lines).toHaveLength(2); // fact-line + TGMEM/2's shared footer-line
     expect(result.lines[0]).toContain("id=unrelated-1");
     expect(result.lines.some((line) => line.includes("tie-a") || line.includes("tie-b"))).toBe(false);
   });

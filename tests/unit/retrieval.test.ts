@@ -105,6 +105,15 @@ describe("retrieve", () => {
     expect(result?.display).toBe("decision: chose Postgres over Mongo — mem show 1");
   });
 
+  it("omits the trailing CTA from display when includeDisplayCta is false (integration-seam.ts TGMEM/2)", async () => {
+    writeFileSync(join(root, "present.txt"), "x");
+    const facts = [
+      makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
+    ];
+    const [result] = await retrieve(facts, { query: "postgres", root, includeDisplayCta: false });
+    expect(result?.display).toBe("decision: chose Postgres over Mongo");
+  });
+
   it("always caveats a preference with (verify), even when affirmed", async () => {
     writeFileSync(join(root, "pnpm-lock.yaml"), "x");
     const facts = [

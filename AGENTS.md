@@ -52,7 +52,7 @@ Mem's integration into token-goat is stateless, live, and fail-open:
 mem recall --hint-format --root <project-root> [--context-files a.ts,b.ts]
 ```
 
-Returns `TGMEM/1` header + lines: `pref  fresh=affirmed|unverified|contradicted  id=abc  display="..."`. Token-goat surfaces `display` verbatim; trust caveat is embedded in the payload, not something the consumer reconstructs. Contested/low-trust facts excluded from `--hint-format` entirely.
+Returns `TGMEM/2` header + one line per fact (`pref  fresh=affirmed|unverified|contradicted  id=abc  display="..."`), then one shared footer line (`footer  mem show <id> for detail; mem review to resolve contested/pending`) when at least one fact line was emitted. Token-goat surfaces `display` verbatim; trust caveat is embedded in the payload, not something the consumer reconstructs. Contested/low-trust facts excluded from `--hint-format` entirely. `TGMEM/1` (per-line CTA, no footer) is still fully supported by the programmatic seam via `protocolVersion: 1`.
 
 If `mem` is missing, the binary times out, or parsing fails, token-goat treats it as "no hints" — fail-open to no memory (safe).
 
