@@ -71,6 +71,15 @@ export interface Fact {
   readonly confidence: number;
   /** Embedding vector for hybrid retrieval, or null when embeddings are unavailable (BM25-only mode). */
   readonly embedding: Float32Array | null;
+  /**
+   * The write epoch (src/storage.ts's monotonic `getEpoch`/`bumpEpoch`) this fact was last inserted
+   * or updated at -- the backing field for `mem review --since-epoch <n>`. Optional, same rationale
+   * as `scopeRoot` above: existing `Fact` object literals that predate this field (mostly test
+   * fixtures) keep typechecking without updating every one of them; readers should treat a missing
+   * value the same as `0` ("epoch unknown / predates the epoch column"). storage.ts's `rowToFact`
+   * always populates it from the real `facts.epoch` column.
+   */
+  readonly epoch?: number;
 }
 
 /**
@@ -148,6 +157,8 @@ export interface FactFilter {
   capturedBefore?: string;
   /** ISO 8601 timestamp, exclusive lower bound on `captured_at`. */
   capturedAfter?: string;
+  /** Exclusive lower bound on `epoch` -- the backing filter for `mem review --since-epoch <n>`. */
+  epochAfter?: number;
   limit?: number;
 }
 

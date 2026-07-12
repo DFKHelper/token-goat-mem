@@ -473,3 +473,59 @@ describe("recall --hint-style full|terse", () => {
     expect(result.stderr).toContain('invalid --hint-style "verbose"');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── review --summary / --section / --since-epoch ───────────────────────────────────────────────────────────────────────────
+
+describe("review --summary, --section, --since-epoch", () => {
+  it("--summary prints counts per bucket instead of full listings", async () => {
+    const db = openStorage(resolveDbPath());
+    captureSuggested(db, { text: "a pending candidate", kind: "fact", root: home });
+    db.close();
+
+    const result = await runCli(["review", "--summary"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+  });
+
+  it("--section restricts the full listing to a single bucket", async () => {
+    const db = openStorage(resolveDbPath());
+    captureSuggested(db, { text: "a pending candidate", kind: "fact", root: home });
+    db.close();
+
+    const result = await runCli(["review", "--section", "pending"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("pending (never auto-promoted -- confirm with --promote/--reject)");
+    expect(result.stdout).not.toContain("contested (ambiguous contradiction");
+    expect(result.stdout).not.toContain("anchor-contradicted");
+    expect(result.stdout).not.toContain("pins due for re-confirmation");
+  });
+
+  it("rejects an invalid --section value at the CLI boundary", async () => {
+    const result = await runCli(["review", "--section", "bogus"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('invalid --section "bogus"');
+  });
+
+  it("--since-epoch only includes facts written after the given epoch", async () => {
+    const dbBefore = openStorage(resolveDbPath());
+    captureSuggested(dbBefore, { text: "captured before the cutoff", kind: "fact", root: home });
+    dbBefore.close();
+
+    const cutoff = await runCli(["epoch"]);
+    const cutoffEpoch = cutoff.stdout.trim();
+
+    const dbAfter = openStorage(resolveDbPath());
+    captureSuggested(dbAfter, { text: "captured after the cutoff", kind: "fact", root: home });
+    dbAfter.close();
+
+    const summarySinceCutoff = await runCli(["review", "--summary", "--since-epoch", cutoffEpoch]);
+    expect(summarySinceCutoff.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+
+    const fullSinceCutoff = await runCli(["review", "--section", "pending", "--since-epoch", cutoffEpoch]);
+    expect(fullSinceCutoff.stdout).toContain("captured after the cutoff");
+    expect(fullSinceCutoff.stdout).not.toContain("captured before the cutoff");
+
+    const summaryFromZero = await runCli(["review", "--summary", "--since-epoch", "0"]);
+    expect(summaryFromZero.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0");
+  });
+});

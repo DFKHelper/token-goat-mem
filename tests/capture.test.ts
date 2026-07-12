@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { openDb } from "../src/db.js";
+import { openStorage } from "../src/storage.js";
 import {
   captureExplicit,
   captureSuggested,
@@ -19,7 +19,11 @@ let db: Database.Database;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-capture-test-"));
-  db = openDb(join(root, "mem.db"));
+  // storage.ts's insertFact (which capture.ts writes through) needs the full storage schema
+  // (facts.epoch, added by ensureStorageSchema's migration) -- openStorage() is what every real
+  // `mem` invocation actually opens with (cli.ts's withDb), so tests exercising capture.ts should
+  // too, not the narrower db.ts-only openDb().
+  db = openStorage(join(root, "mem.db"));
 });
 
 afterEach(() => {

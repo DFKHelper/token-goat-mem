@@ -22,6 +22,7 @@ import {
   deleteSourcesOlderThan,
   getEpoch,
 } from "../src/storage.js";
+import { openDb } from "../src/db.js";
 import type { NewFact } from "../src/types.js";
 
 let root: string;
@@ -75,6 +76,74 @@ describe("openStorage / ensureStorageSchema", () => {
 
     deleteFact(db, fact.id);
     expect(listSourcesForFact(db, fact.id)).toHaveLength(0);
+  });
+});
+
+describe("facts.epoch migration (ensureStorageSchema, pre-migration database)", () => {
+  it("backfills epoch=0 on pre-existing rows without touching their other columns, and is a no-op re-applied", () => {
+    // Simulate a database written by a pre-migration build: open via db.ts's bare openDb() (which
+    // creates `facts` from FACTS_SCHEMA -- no `epoch` column) and insert directly with raw SQL that
+    // matches that old schema exactly, bypassing storage.ts's insertFact entirely (insertFact now
+    // requires the epoch column and would fail against this schema, which is the point). Uses its
+    // own file, separate from the `db`/`root` opened in `beforeEach`.
+    const preMigrationPath = join(root, "pre-migration.db");
+    const preMigrationDb = openDb(preMigrationPath);
+    const columnsBefore = preMigrationDb
+      .prepare("PRAGMA table_info(facts)")
+      .all() as { name: string }[];
+    expect(columnsBefore.map((c) => c.name)).not.toContain("epoch");
+
+    preMigrationDb
+      .prepare(
+        `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)
+         VALUES (@id, @text, @kind, @subject, @value, @scope, @scopeRoot, @source_type, @source_ref, @captured_at, @anchor, @status, @confidence)`
+      )
+      .run({
+        id: "pre-migration-fact",
+        text: "uses npm not pnpm",
+        kind: "preference",
+        subject: "package-manager",
+        value: "npm",
+        scope: "global",
+        scopeRoot: null,
+        source_type: "user",
+        source_ref: null,
+        captured_at: "2025-01-01T00:00:00.000Z",
+        anchor: null,
+        status: "active",
+        confidence: 1,
+      });
+    preMigrationDb.close();
+
+    // Re-open through storage.ts's real entry point -- this is what runs the migration in production
+    // (cli.ts's withDb -> openStorage -> ensureStorageSchema).
+    const migrated = openStorage(preMigrationPath);
+    try {
+      const columnsAfter = migrated.prepare("PRAGMA table_info(facts)").all() as { name: string }[];
+      expect(columnsAfter.map((c) => c.name)).toContain("epoch");
+
+      const preExisting = getFactById(migrated, "pre-migration-fact");
+      expect(preExisting).toBeDefined();
+      expect(preExisting?.text).toBe("uses npm not pnpm");
+      expect(preExisting?.subject).toBe("package-manager");
+      expect(preExisting?.status).toBe("active");
+      expect(preExisting?.captured_at).toBe("2025-01-01T00:00:00.000Z");
+      expect(preExisting?.epoch).toBe(0); // pre-migration sentinel, never a real write's epoch
+
+      // Idempotent: re-running the migration against an already-migrated database is a no-op, not a
+      // "duplicate column" crash, and does not disturb the backfilled row.
+      expect(() => ensureStorageSchema(migrated)).not.toThrow();
+      expect(getFactById(migrated, "pre-migration-fact")?.epoch).toBe(0);
+
+      // A real write against the migrated database stamps a genuine (non-zero) epoch, always
+      // strictly greater than the pre-migration sentinel -- so `--since-epoch 0` can distinguish
+      // "written before the epoch column existed" from "written since".
+      const fresh = insertFact(migrated, baseFact({ text: "fresh fact after migration" }));
+      expect(fresh.epoch).toBeGreaterThan(0);
+      expect(listFacts(migrated, { epochAfter: 0 }).map((f) => f.id)).toEqual([fresh.id]);
+    } finally {
+      migrated.close();
+    }
   });
 });
 
@@ -178,6 +247,15 @@ describe("listFacts / countFacts", () => {
     insertFact(db, baseFact({ text: "b" }));
     expect(countFacts(db, { limit: 1 })).toBe(2);
     expect(listFacts(db, { limit: 1 })).toHaveLength(1);
+  });
+
+  it("epochAfter filters to facts written strictly after a given epoch (mem review --since-epoch)", () => {
+    const first = insertFact(db, baseFact({ text: "first" })); // epoch 1
+    const epochAfterFirst = first.epoch ?? 0;
+    const second = insertFact(db, baseFact({ text: "second" })); // epoch 2
+    expect(listFacts(db, { epochAfter: epochAfterFirst }).map((f) => f.id)).toEqual([second.id]);
+    expect(countFacts(db, { epochAfter: epochAfterFirst })).toBe(1);
+    expect(listFacts(db, { epochAfter: second.epoch ?? 0 })).toEqual([]);
   });
 });
 

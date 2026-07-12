@@ -99,7 +99,7 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/2 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>`, `--root <path>`, `--stable` (deterministic id-sorted output instead of relevance/recency order), `--hint-style <full\|terse>` (default `full`; `terse` drops the CTA and shortens kind labels to `pref`/`dec`/`fact`/`corr`). |
 | `mem list` | Fact IDs and one-line summaries. `--kind`, `--status` (comma-separated), `--subject`, `--scope`, `--limit`. |
 | `mem show <id>` | One fact in full: text, provenance, anchor and its current freshness verdict. `--root <path>`. |
-| `mem review` | Pending, contested, and anchor-contradicted facts for human resolution. `--promote <id>` / `--reject <id>` act on pending facts; `--root <path>`. |
+| `mem review` | Pending, contested, and anchor-contradicted facts for human resolution. `--promote <id>` / `--reject <id>` act on pending facts; `--root <path>`; `--summary` (print per-bucket counts instead of full listings); `--section <pending|contested|contradicted|pins>` (restrict output to one bucket); `--since-epoch <n>` (only include facts written after write-epoch `n`). |
 | `mem forget <id>` | Soft-delete a fact (marks superseded, kept for audit) and audit-log it. Bumps epoch. |
 | `mem edit <id>` | Change a fact's `--text`, `--subject`/`--value` (paired), `--anchor`, or `--scope`. Bumps epoch. |
 | `mem pin <id>` | Exempt a fact from time-decay (still subject to contradiction/anchor suppression). |

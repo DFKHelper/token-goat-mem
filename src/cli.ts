@@ -242,6 +242,26 @@ function formatSection(title: string, facts: readonly Fact[]): string {
 /** Section 6 / review finding S8: "Pins get a re-confirmation nudge in review after N months so a year-old forgotten pin can't stay maximally-trusted forever." ~6 months. */
 const PIN_RECONFIRM_DAYS = 182;
 
+/** The four `mem review` buckets, in listing order. `formatReview`'s `--summary`/`--section` options validate against exactly this set. */
+const REVIEW_SECTIONS = ["pending", "contested", "contradicted", "pins"] as const;
+type ReviewSection = (typeof REVIEW_SECTIONS)[number];
+
+function parseReviewSection(raw: string): ReviewSection {
+  if (!REVIEW_SECTIONS.includes(raw as ReviewSection)) {
+    throw new UsageError(`invalid --section "${raw}" (expected one of ${REVIEW_SECTIONS.join(", ")})`);
+  }
+  return raw as ReviewSection;
+}
+
+interface ReviewOptions {
+  /** Print counts per bucket instead of full listings. */
+  readonly summary?: boolean;
+  /** Restrict output to a single bucket's full listing (still full, just skips the other buckets). */
+  readonly section?: ReviewSection;
+  /** Only include facts with `epoch > sinceEpoch` -- see storage.ts's `epoch` column / `mem epoch`. */
+  readonly sinceEpoch?: number;
+}
+
 function promotePending(db: Database.Database, id: string): void {
   const fact = getFactById(db, id);
   if (fact === undefined) {
@@ -266,16 +286,30 @@ function rejectPending(db: Database.Database, id: string): void {
   insertAuditLog(db, { event: "review_reject", factId: id, detail: "rejected pending fact (superseded) via explicit review" });
 }
 
+/** `formatReview`'s long, human-facing section titles, keyed by the short bucket names `--section`/`--summary` validate against. */
+const REVIEW_SECTION_TITLES: Record<ReviewSection, string> = {
+  pending: "pending (never auto-promoted -- confirm with --promote/--reject)",
+  contested: "contested (ambiguous contradiction -- withheld from ground truth)",
+  contradicted: "anchor-contradicted (suppressed from ground truth)",
+  pins: "pins due for re-confirmation",
+};
+
 /**
  * Builds the `mem review` listing: pending facts (never auto-promoted, S9), contested facts
  * (deterministic contradiction detection re-run fresh over the live active/pinned pool, never
  * trusting a possibly-stale `status` column -- same discipline as retrieval.ts), anchor-contradicted
  * facts (including pins -- S8: a pin is exempt from decay, never from contradiction/anchor
  * suppression), and pins overdue for re-confirmation.
+ *
+ * `options.sinceEpoch` restricts every bucket to facts with `epoch > sinceEpoch` (applied at the
+ * source -- pending/groundTruth queries -- so contested/contradicted/pins, which are derived from
+ * groundTruth, inherit the filter automatically). `options.section` restricts the output to one
+ * bucket. `options.summary` prints per-bucket counts instead of full listings.
  */
-function formatReview(db: Database.Database, root: string): string {
-  const pending = listFacts(db, { status: "pending" });
-  const groundTruth = listFacts(db, { status: ["active", "pinned"] });
+function formatReview(db: Database.Database, root: string, options: ReviewOptions = {}): string {
+  const epochFilter: FactFilter = options.sinceEpoch !== undefined ? { epochAfter: options.sinceEpoch } : {};
+  const pending = listFacts(db, { status: "pending", ...epochFilter });
+  const groundTruth = listFacts(db, { status: ["active", "pinned"], ...epochFilter });
 
   const { groups } = detectContradictions(groundTruth);
   const contestedIds = new Set(groups.filter((group) => group.resolution === "contested").flatMap((group) => group.factIds));
@@ -294,12 +328,14 @@ function formatReview(db: Database.Database, root: string): string {
     return Number.isFinite(ageDays) && ageDays >= PIN_RECONFIRM_DAYS;
   });
 
-  const sections = [
-    formatSection("pending (never auto-promoted -- confirm with --promote/--reject)", pending),
-    formatSection("contested (ambiguous contradiction -- withheld from ground truth)", contested),
-    formatSection("anchor-contradicted (suppressed from ground truth)", contradicted),
-    formatSection("pins due for re-confirmation", pinsDue),
-  ].filter((section) => section.length > 0);
+  const buckets: Record<ReviewSection, readonly Fact[]> = { pending, contested, contradicted, pins: pinsDue };
+  const shown: readonly ReviewSection[] = options.section !== undefined ? [options.section] : REVIEW_SECTIONS;
+
+  if (options.summary === true) {
+    return shown.map((name) => `${name}: ${buckets[name].length}`).join(", ");
+  }
+
+  const sections = shown.map((name) => formatSection(REVIEW_SECTION_TITLES[name], buckets[name])).filter((section) => section.length > 0);
 
   return sections.length === 0 ? "nothing needs review" : sections.join("\n\n");
 }
@@ -434,6 +470,9 @@ interface ReviewCliOptions {
   readonly promote?: string;
   readonly reject?: string;
   readonly root?: string;
+  readonly summary?: boolean;
+  readonly section?: string;
+  readonly sinceEpoch?: number;
 }
 
 interface EpochCliOptions {
@@ -678,6 +717,9 @@ export function buildProgram(): Command {
     .option("--promote <id>", "Promote a pending fact to active")
     .option("--reject <id>", "Reject a pending fact (marks superseded)")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: current directory)")
+    .option("--summary", "Print counts per bucket (pending/contested/contradicted/pins) instead of full listings")
+    .option("--section <pending|contested|contradicted|pins>", "Only show one bucket's full listing")
+    .option("--since-epoch <n>", "Only include facts with epoch greater than n (see `mem epoch`)", (v) => parseInt(v, 10))
     .action(
       guard(async (options: ReviewCliOptions) => {
         if (options.promote !== undefined && options.reject !== undefined) {
@@ -697,7 +739,12 @@ export function buildProgram(): Command {
         }
 
         const root = resolveRoot(options.root);
-        const output = await withDb((db) => formatReview(db, root));
+        const reviewOptions: ReviewOptions = {
+          ...(options.summary === true ? { summary: true } : {}),
+          ...(options.section !== undefined ? { section: parseReviewSection(options.section) } : {}),
+          ...(options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { sinceEpoch: options.sinceEpoch } : {}),
+        };
+        const output = await withDb((db) => formatReview(db, root, reviewOptions));
         process.stdout.write(`${output}\n`);
       })
     );
