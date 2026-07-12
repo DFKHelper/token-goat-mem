@@ -444,3 +444,32 @@ describe("recall --stable (deterministic id-sorted ordering, strictly additive)"
     expect([...ids].sort()).toEqual(ids);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── recall --hint-style ───────────────────────────────────────────────────────────────────────────
+
+describe("recall --hint-style full|terse", () => {
+  it("defaults to full (byte-identical to omitting the flag)", async () => {
+    await runCli(["remember", "chose Postgres over Mongo", "--kind", "decision"]);
+    const defaulted = await runCli(["recall"]);
+    const explicitFull = await runCli(["recall", "--hint-style", "full"]);
+    expect(explicitFull.stdout).toBe(defaulted.stdout);
+    expect(defaulted.stdout).toContain("stored decision (unverified,");
+    expect(defaulted.stdout).toContain("mem show");
+  });
+
+  it("terse drops the CTA and shortens the kind label", async () => {
+    await runCli(["remember", "chose Postgres over Mongo", "--kind", "decision"]);
+    const terse = await runCli(["recall", "--hint-style", "terse"]);
+    expect(terse.exitCode).toBe(0);
+    expect(terse.stdout).toContain("stored dec (unverified,");
+    expect(terse.stdout).toContain("chose Postgres over Mongo");
+    expect(terse.stdout).not.toContain("mem show");
+    expect(terse.stdout).not.toContain("decision");
+  });
+
+  it("rejects an invalid --hint-style value at the CLI boundary", async () => {
+    const result = await runCli(["recall", "--hint-style", "verbose"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('invalid --hint-style "verbose"');
+  });
+});

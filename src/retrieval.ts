@@ -89,6 +89,15 @@ export interface RetrievalOptions {
    * every line (see integration-seam.ts's version-2 grammar doc comment).
    */
   readonly includeDisplayCta?: boolean;
+  /**
+   * Controls `display`'s verbosity. `"full"` (default) is today's exact format: the full-word kind
+   * label (`decision`, `correction`; `pref`/`fact` were already short) plus, when `includeDisplayCta`
+   * allows it, the trailing CTA. `"terse"` drops the CTA unconditionally (the caller is assumed to
+   * already know the follow-up commands) and shortens every kind label to its 4-character wire tag
+   * (`pref`/`dec`/`fact`/`corr`, matching integration-seam.ts's `PROTOCOL_KIND_TAG`) for a
+   * single-line-per-fact recall a human can scan quickly.
+   */
+  readonly hintStyle?: "full" | "terse";
 }
 
 export interface RetrievedFact {
@@ -332,14 +341,28 @@ const KIND_LABEL: Record<FactKind, string> = {
   correction: "correction",
 };
 
+/** `hintStyle: "terse"`'s shortest-unambiguous-label set, matching integration-seam.ts's wire-format `PROTOCOL_KIND_TAG`. */
+const TERSE_KIND_LABEL: Record<FactKind, string> = {
+  preference: "pref",
+  decision: "dec",
+  fact: "fact",
+  correction: "corr",
+};
+
 /**
  * Builds the self-caveating `display` string for a fact (S3). Preferences and corrections always
  * carry a "(verify)"-style caveat regardless of trust level (P6 — under-recall is unsafe for these
  * kinds, so they are always presented as hints-to-verify, never as a bald assertion) — decisions and
  * facts, which the agent won't invent a wrong default for on a miss, are shown plainly once affirmed.
  */
-function buildDisplay(fact: Fact, freshness: AnchorVerdict, contradiction: ContradictionOutcome, includeCta: boolean = true): string {
-  const label = KIND_LABEL[fact.kind];
+function buildDisplay(
+  fact: Fact,
+  freshness: AnchorVerdict,
+  contradiction: ContradictionOutcome,
+  includeCta: boolean = true,
+  terse: boolean = false
+): string {
+  const label = terse ? TERSE_KIND_LABEL[fact.kind] : KIND_LABEL[fact.kind];
   const showCommand = `mem show ${fact.id}`;
   const withCta = (body: string, cta: string): string => (includeCta ? `${body} — ${cta}` : body);
 
@@ -448,7 +471,13 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       freshness,
       contradiction,
       trust,
-      display: buildDisplay(fact, freshness, contradiction, options.includeDisplayCta ?? true),
+      display: buildDisplay(
+        fact,
+        freshness,
+        contradiction,
+        (options.includeDisplayCta ?? true) && options.hintStyle !== "terse",
+        options.hintStyle === "terse"
+      ),
     };
   });
 
