@@ -529,3 +529,92 @@ describe("review --summary, --section, --since-epoch", () => {
     expect(summaryFromZero.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── import --from-md ───────────────────────────────────────────────────────────────────────────
+
+describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)", () => {
+  function writeFixture(contents: string): string {
+    const path = join(home, "CLAUDE.md");
+    writeFileSync(path, contents, "utf8");
+    return path;
+  }
+
+  it("imports qualifying bullets as pending facts, confirmable only via `mem review --promote`", async () => {
+    const path = writeFixture(["## Preferences", "- Always use pnpm, never npm.", "- Prefer tabs over spaces."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("imported 2 of 2 candidate fact(s)");
+    expect(result.stdout).toContain("never auto-promoted -- confirm each via `mem review --promote <id>`");
+
+    const listed = await runCli(["list", "--status", "pending"]);
+    expect(listed.stdout).toContain("Always use pnpm, never npm.");
+    expect(listed.stdout).toContain("Prefer tabs over spaces.");
+    expect(listed.stdout).not.toContain("[preference/active]");
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0");
+  });
+
+  it("skips non-bullet content", async () => {
+    const path = writeFixture(["Just a paragraph.", "", "Another sentence, no bullets here."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("no qualifying bullets found");
+
+    const listed = await runCli(["list"]);
+    expect(listed.stdout.trim()).toBe("no facts stored");
+  });
+
+  it("--dry-run reports candidates without writing any facts", async () => {
+    const path = writeFixture(["- Always use pnpm, never npm."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home, "--dry-run"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("would import 1 candidate fact(s)");
+    expect(result.stdout).toContain("nothing written");
+
+    const listed = await runCli(["list"]);
+    expect(listed.stdout.trim()).toBe("no facts stored");
+  });
+
+  it("re-importing the same file does not create duplicate facts", async () => {
+    const path = writeFixture(["- Always use pnpm, never npm."].join("\n"));
+
+    const first = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(first.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+    const second = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("imported 0 of 1 candidate fact(s)");
+    expect(second.stdout).toContain("skipped (duplicate)");
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+  });
+
+  it("promoting an imported fact goes through the exact same `mem review --promote` path as any other pending fact", async () => {
+    const path = writeFixture(["- Always use pnpm, never npm."].join("\n"));
+    const imported = await runCli(["import", "--from-md", path, "--root", home]);
+    const match = /imported\s+\S+\s+(\S+)\s+"/u.exec(imported.stdout);
+    expect(match?.[1]).toBeDefined();
+    const id = match?.[1] ?? "";
+
+    const promoted = await runCli(["review", "--promote", id]);
+    expect(promoted.exitCode).toBe(0);
+    expect(promoted.stdout.trim()).toBe(`promoted ${id}`);
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("status: active");
+  });
+
+  it("requires --from-md", async () => {
+    // Commander's own required-option enforcement fires here (before this command's `guard()`
+    // action ever runs), same pre-existing exitOverride/subcommand interaction every other
+    // `requiredOption` command (e.g. `remember --kind`) has -- not specific to `import`, so this
+    // only asserts non-success rather than a precise exit code.
+    const result = await runCli(["import"]);
+    expect(result.exitCode).not.toBe(0);
+  });
+});
