@@ -1,0 +1,670 @@
+/**
+ * Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list).
+ *
+ * This module owns argument parsing, input validation at the CLI boundary (raw `string` -> `FactKind`
+ * /`FactScope`/`FactStatus`), output formatting, and orchestration across the already-built domain
+ * modules (storage.ts, capture.ts, retrieval.ts, contradiction.ts, anchors.ts, integration-seam.ts). It
+ * does not reimplement any of their logic -- every command is a thin composition of the exported
+ * functions those modules already provide.
+ *
+ * `buildProgram()` is exported separately from `run()` so tests can construct and introspect a fresh
+ * Commander program without going through `process.argv`/`process.exit` (mirrors token-goat's own
+ * `src/cli.ts` convention). `run()` is the actual entry point `src/main.ts` calls.
+ *
+ * Every action is wrapped in `guard()`, which maps a thrown error to a single `mem: <message>` stderr
+ * line and `process.exitCode = 1` -- never a partial stack trace, never a hard `process.exit()` (that
+ * would truncate buffered stdout on Windows pipes; letting the event loop drain naturally, same as
+ * token-goat's `main.ts` shim, guarantees output flushes first).
+ */
+
+import { Command } from "commander";
+import { resolve as resolvePath } from "node:path";
+import type Database from "better-sqlite3";
+
+import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
+import {
+  captureExplicit,
+  loadAllowlist,
+  screenForSecrets,
+  SecretDetectedError,
+  type CaptureExplicitInput,
+} from "./capture.js";
+import { detectContradictions } from "./contradiction.js";
+import { insertAuditLog } from "./db.js";
+import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
+import {
+  GROUND_TRUTH_CONFIDENCE_FLOOR,
+  PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS,
+  retrieve,
+  type RetrievalOptions,
+} from "./retrieval.js";
+import {
+  deleteFact,
+  deleteSourcesOlderThan,
+  getEpoch,
+  getFactById,
+  listFacts,
+  listSourcesForFact,
+  openStorage,
+  setFactStatus,
+  updateFact,
+} from "./storage.js";
+import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
+
+const MS_PER_DAY = 86_400_000;
+
+// ─────────────────────────────────────────────────────────────────────────── CLI-boundary validation ───────────────────────────────────────────────────────────────────────────
+
+const FACT_KINDS: readonly FactKind[] = ["preference", "decision", "fact", "correction"];
+const FACT_SCOPES: readonly FactScope[] = ["global", "project", "path"];
+const FACT_STATUSES: readonly FactStatus[] = ["active", "pending", "superseded", "contested", "pinned"];
+
+function parseFactKind(raw: string): FactKind {
+  if (!FACT_KINDS.includes(raw as FactKind)) {
+    throw new Error(`invalid kind "${raw}" (expected one of ${FACT_KINDS.join(", ")})`);
+  }
+  return raw as FactKind;
+}
+
+function parseFactScope(raw: string): FactScope {
+  if (!FACT_SCOPES.includes(raw as FactScope)) {
+    throw new Error(`invalid scope "${raw}" (expected one of ${FACT_SCOPES.join(", ")})`);
+  }
+  return raw as FactScope;
+}
+
+function parseFactStatusList(raw: string): FactStatus | readonly FactStatus[] {
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+  for (const value of values) {
+    if (!FACT_STATUSES.includes(value as FactStatus)) {
+      throw new Error(`invalid status "${value}" (expected one of ${FACT_STATUSES.join(", ")})`);
+    }
+  }
+  const [only] = values;
+  return values.length === 1 && only !== undefined ? only as FactStatus : (values as FactStatus[]);
+}
+
+function parseContextFiles(raw: string | undefined): string[] | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  const files = raw
+    .split(",")
+    .map((file) => file.trim())
+    .filter((file) => file.length > 0);
+  return files.length > 0 ? files : undefined;
+}
+
+/** Never defaults to ambient `process.cwd()` silently for anchor evaluation inside anchors.ts itself (Section 3) -- but a human-invoked, short-lived CLI command needs *some* root when the caller omits `--root`, and "the directory the command was invoked from" is the only reasonable one. Explicit `--root` always wins. */
+function resolveRoot(explicit: string | undefined): string {
+  return resolvePath(explicit ?? process.cwd());
+}
+
+// ─────────────────────────────────────────────────────────────────────────── DB lifecycle + error handling ───────────────────────────────────────────────────────────────────────────
+
+/** Opens a fresh connection for one command invocation and always closes it, even on throw (mem is a short-lived, single-shot CLI process -- Section 3). */
+async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): Promise<T> {
+  const db = openStorage();
+  try {
+    return await fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function err(message: string): void {
+  process.stderr.write(`${message}\n`);
+}
+
+function extractErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** Wraps a command action so any thrown error maps to one `mem: <message>` stderr line + exit code 1, and success to exit code 0 (unless the handler already set a different `process.exitCode`). Mirrors token-goat's own `cli.ts` guard. */
+function guard(fn: (...args: never[]) => void | Promise<void>): (...args: unknown[]) => Promise<void> {
+  return async (...args: unknown[]): Promise<void> => {
+    process.exitCode = undefined;
+    try {
+      await fn(...(args as never[]));
+      if (process.exitCode === undefined) {
+        process.exitCode = 0;
+      }
+    } catch (error) {
+      err(`mem: ${extractErrorMessage(error)}`);
+      process.exitCode = 1;
+    }
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────── Formatting ───────────────────────────────────────────────────────────────────────────
+
+function formatFactSummary(fact: Fact): string {
+  const kv = fact.subject !== null ? ` ${fact.subject}=${fact.value ?? ""}` : "";
+  return `${fact.id}  [${fact.kind}/${fact.status}]${kv}  ${fact.text}`;
+}
+
+function formatFactDetail(fact: Fact, freshness: AnchorVerdict, sources: readonly Source[]): string {
+  const scopeRoot = fact.scopeRoot ?? null;
+  const lines: string[] = [
+    `id: ${fact.id}`,
+    `kind: ${fact.kind}`,
+    `status: ${fact.status}`,
+    `text: ${fact.text}`,
+    `subject: ${fact.subject ?? "(none)"}`,
+    `value: ${fact.value ?? "(none)"}`,
+    `scope: ${fact.scope}${scopeRoot !== null ? ` (${scopeRoot})` : ""}`,
+    `source_type: ${fact.source_type}`,
+    `source_ref: ${fact.source_ref ?? "(none)"}`,
+    `captured_at: ${fact.captured_at}`,
+    `anchor: ${fact.anchor ?? "(none)"}  freshness=${freshness}`,
+    `confidence: ${fact.confidence}`,
+  ];
+  if (sources.length > 0) {
+    lines.push("sources:");
+    for (const source of sources) {
+      lines.push(`  - [${source.storedAt}] ${source.excerpt}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatSection(title: string, facts: readonly Fact[]): string {
+  if (facts.length === 0) {
+    return "";
+  }
+  return [`-- ${title} (${facts.length}) --`, ...facts.map(formatFactSummary)].join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────── review ───────────────────────────────────────────────────────────────────────────
+
+/** Section 6 / review finding S8: "Pins get a re-confirmation nudge in review after N months so a year-old forgotten pin can't stay maximally-trusted forever." ~6 months. */
+const PIN_RECONFIRM_DAYS = 182;
+
+function promotePending(db: Database.Database, id: string): void {
+  const fact = getFactById(db, id);
+  if (fact === undefined) {
+    throw new Error(`no such fact: ${id}`);
+  }
+  if (fact.status !== "pending") {
+    throw new Error(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
+  }
+  setFactStatus(db, id, "active");
+  insertAuditLog(db, { event: "review_promote", factId: id, detail: "promoted pending fact to active via explicit review" });
+}
+
+function rejectPending(db: Database.Database, id: string): void {
+  const fact = getFactById(db, id);
+  if (fact === undefined) {
+    throw new Error(`no such fact: ${id}`);
+  }
+  if (fact.status !== "pending") {
+    throw new Error(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
+  }
+  setFactStatus(db, id, "superseded");
+  insertAuditLog(db, { event: "review_reject", factId: id, detail: "rejected pending fact (superseded) via explicit review" });
+}
+
+/**
+ * Builds the `mem review` listing: pending facts (never auto-promoted, S9), contested facts
+ * (deterministic contradiction detection re-run fresh over the live active/pinned pool, never
+ * trusting a possibly-stale `status` column -- same discipline as retrieval.ts), anchor-contradicted
+ * facts (including pins -- S8: a pin is exempt from decay, never from contradiction/anchor
+ * suppression), and pins overdue for re-confirmation.
+ */
+function formatReview(db: Database.Database, root: string): string {
+  const pending = listFacts(db, { status: "pending" });
+  const groundTruth = listFacts(db, { status: ["active", "pinned"] });
+
+  const { groups } = detectContradictions(groundTruth);
+  const contestedIds = new Set(groups.filter((group) => group.resolution === "contested").flatMap((group) => group.factIds));
+  const contested = groundTruth.filter((fact) => contestedIds.has(fact.id));
+
+  const contradicted = groundTruth.filter(
+    (fact) => !contestedIds.has(fact.id) && evaluateAnchor(fact.anchor, root) === "contradicted"
+  );
+
+  const now = Date.now();
+  const pinsDue = groundTruth.filter((fact) => {
+    if (fact.status !== "pinned") {
+      return false;
+    }
+    const ageDays = (now - Date.parse(fact.captured_at)) / MS_PER_DAY;
+    return Number.isFinite(ageDays) && ageDays >= PIN_RECONFIRM_DAYS;
+  });
+
+  const sections = [
+    formatSection("pending (never auto-promoted -- confirm with --promote/--reject)", pending),
+    formatSection("contested (ambiguous contradiction -- withheld from ground truth)", contested),
+    formatSection("anchor-contradicted (suppressed from ground truth)", contradicted),
+    formatSection("pins due for re-confirmation", pinsDue),
+  ].filter((section) => section.length > 0);
+
+  return sections.length === 0 ? "nothing needs review" : sections.join("\n\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────── epoch / retention pass ───────────────────────────────────────────────────────────────────────────
+
+/** Section 6: "superseded facts and offloaded sources are GC'd after N days or M rows (whichever first)." */
+const GC_SUPERSEDED_MAX_AGE_DAYS = 90;
+const GC_SUPERSEDED_MAX_ROWS = 1000;
+const GC_SOURCES_MAX_AGE_DAYS = 90;
+/** Section 6: "Audit log rotates." */
+const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
+
+/**
+ * Reimplements retrieval.ts's private `decayedConfidence`/`isDecayedBelowGroundTruth` formula against
+ * the same exported constants (`PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS`, `GROUND_TRUTH_CONFIDENCE_FLOOR`)
+ * for a report-only count. Decay itself is never persisted here (Section 6: "never silent deletion" --
+ * a decayed preference simply stops being ground-truth-eligible on the *next* `recall`, computed fresh
+ * from `captured_at` every time; there is nothing to write back to `confidence`).
+ */
+function isDecayedBelowFloor(fact: Fact, now: Date): boolean {
+  if (fact.kind !== "preference" || fact.status === "pinned") {
+    return false;
+  }
+  const ageDays = (now.getTime() - Date.parse(fact.captured_at)) / MS_PER_DAY;
+  if (!Number.isFinite(ageDays) || ageDays <= 0) {
+    return false;
+  }
+  const decayed = fact.confidence * Math.pow(0.5, ageDays / PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS);
+  return decayed < GROUND_TRUTH_CONFIDENCE_FLOOR;
+}
+
+/**
+ * Runs the retention/GC pass (design plan Section 6): persists deterministic contradiction
+ * resolutions over the live ground-truth pool (pinned facts included -- S8), reports (never rewrites)
+ * preference decay, prunes superseded facts and offloaded sources past their GC bounds, and rotates
+ * the audit log. Gated behind `mem epoch --gc` rather than running on every plain `mem epoch` call:
+ * the design plan's Section 4 explicitly defines `mem epoch` as token-goat's cheap, frequently-polled
+ * fallback-cache-invalidation read ("a monotonic mem epoch ... readable via `mem epoch`") -- doing
+ * write-heavy GC work on every read would defeat that contract.
+ */
+function runRetentionPass(db: Database.Database): string {
+  const now = new Date();
+
+  const groundTruth = listFacts(db, { status: ["active", "pinned"] });
+  const { updates } = detectContradictions(groundTruth);
+  for (const update of updates) {
+    setFactStatus(db, update.factId, update.nextStatus);
+    insertAuditLog(db, { event: "epoch_contradiction", factId: update.factId, detail: update.reason });
+  }
+
+  const preferences = listFacts(db, { kind: "preference", status: "active" });
+  const decayedCount = preferences.filter((fact) => isDecayedBelowFloor(fact, now)).length;
+
+  const supersededCutoff = new Date(now.getTime() - GC_SUPERSEDED_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const superseded = listFacts(db, { status: "superseded" }); // newest captured_at first
+  let prunedFacts = 0;
+  superseded.forEach((fact, index) => {
+    if (fact.captured_at < supersededCutoff || index >= GC_SUPERSEDED_MAX_ROWS) {
+      if (deleteFact(db, fact.id)) {
+        prunedFacts += 1;
+      }
+    }
+  });
+
+  const sourcesCutoff = new Date(now.getTime() - GC_SOURCES_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const prunedSources = deleteSourcesOlderThan(db, sourcesCutoff);
+
+  const auditCutoff = new Date(now.getTime() - GC_AUDIT_LOG_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const prunedAuditRows = db.prepare("DELETE FROM audit_log WHERE created_at < ?").run(auditCutoff).changes;
+
+  const epoch = getEpoch(db);
+  return (
+    `epoch=${epoch}  contradictions_resolved=${updates.length}  preferences_decayed_below_floor=${decayedCount}  ` +
+    `pruned_superseded_facts=${prunedFacts}  pruned_sources=${prunedSources}  pruned_audit_log_rows=${prunedAuditRows}`
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────── Program assembly ───────────────────────────────────────────────────────────────────────────
+
+interface RememberCliOptions {
+  readonly kind: string;
+  readonly subject?: string;
+  readonly value?: string;
+  readonly anchor?: string;
+  readonly scope: string;
+  readonly sourceRef?: string;
+  readonly root?: string;
+}
+
+interface RecallCliOptions {
+  readonly kind?: string;
+  readonly subject?: string;
+  readonly scope?: string;
+  readonly hintFormat?: boolean;
+  readonly contextFiles?: string;
+  readonly ageDays?: number;
+  readonly limit?: number;
+  readonly root?: string;
+}
+
+interface ListCliOptions {
+  readonly kind?: string;
+  readonly status?: string;
+  readonly subject?: string;
+  readonly scope?: string;
+  readonly limit?: number;
+}
+
+interface ShowCliOptions {
+  readonly root?: string;
+}
+
+interface EditCliOptions {
+  readonly text?: string;
+  readonly subject?: string;
+  readonly value?: string;
+  readonly anchor?: string;
+  readonly scope?: string;
+  readonly root?: string;
+}
+
+interface ReviewCliOptions {
+  readonly promote?: string;
+  readonly reject?: string;
+  readonly root?: string;
+}
+
+interface EpochCliOptions {
+  readonly gc?: boolean;
+}
+
+/** Builds the Commander program. Exported so tests can introspect/parse it without going through `process.argv`. */
+export function buildProgram(): Command {
+  const program = new Command();
+  program.name("mem").description("Long-term conversational memory for AI coding agents").version("0.1.0");
+
+  program
+    .command("remember <text>")
+    .description("Explicit capture: store a user-stated fact into active storage")
+    .requiredOption("--kind <kind>", `preference, decision, fact, or correction`)
+    .option("--subject <key>", "Normalized key for contradiction detection (requires --value)")
+    .option("--value <value>", "Value for the subject (requires --subject)")
+    .option("--anchor <predicate>", "Read-only anchor predicate (filesystem/git)")
+    .option("--scope <scope>", "global, project, or path", "global")
+    .option("--source-ref <ref>", "Reference to the originating conversation/message")
+    .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
+    .action(
+      guard(async (text: string, options: RememberCliOptions) => {
+        const kind = parseFactKind(options.kind);
+        const scope = parseFactScope(options.scope);
+        const root = resolveRoot(options.root);
+        const input: CaptureExplicitInput = {
+          text,
+          kind,
+          scope,
+          root,
+          ...(options.subject !== undefined ? { subject: options.subject } : {}),
+          ...(options.value !== undefined ? { value: options.value } : {}),
+          ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
+          ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+        };
+        const { fact } = await withDb((db) => captureExplicit(db, input));
+        process.stdout.write(`remembered ${fact.kind} fact ${fact.id}\n`);
+      })
+    );
+
+  program
+    .command("recall [query]")
+    .description("Retrieve facts by relevance, with trust levels and freshness verdicts")
+    .option("--kind <kind>", "Filter by kind")
+    .option("--subject <key>", "Filter by subject")
+    .option("--scope <scope>", "Filter by scope")
+    .option("--hint-format", "Emit the TGMEM/1 wire format for the token-goat seam")
+    .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
+    .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
+    .option("--root <path>", "Project root for anchor evaluation")
+    .action(
+      guard(async (query: string | undefined, options: RecallCliOptions) => {
+        if (options.hintFormat === true) {
+          if (typeof options.root !== "string" || options.root.trim().length === 0) {
+            throw new Error("recall --hint-format requires --root <path>");
+          }
+          const contextFiles = parseContextFiles(options.contextFiles);
+          const hintOptions: HintFormatOptions = {
+            root: options.root,
+            ...(contextFiles !== undefined ? { contextFiles } : {}),
+          };
+          const result = await buildHintFormat(hintOptions);
+          process.stdout.write(`${result.header}\n`);
+          for (const line of result.lines) {
+            process.stdout.write(`${line}\n`);
+          }
+          return;
+        }
+
+        const root = resolveRoot(options.root);
+        const facts = await withDb((db) => listFacts(db, {}));
+        const retrievalOptions: RetrievalOptions = {
+          query: query ?? "",
+          root,
+          ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
+          ...(options.subject !== undefined ? { subject: options.subject } : {}),
+          ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
+          ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
+          ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
+        };
+        const results = await retrieve(facts, retrievalOptions);
+        if (results.length === 0) {
+          process.stdout.write("no matching facts\n");
+          return;
+        }
+        for (const result of results) {
+          process.stdout.write(`${result.display}\n`);
+        }
+      })
+    );
+
+  program
+    .command("list")
+    .description("List fact IDs and one-line summaries, filtered by status/kind")
+    .option("--kind <kind>", "Filter by kind")
+    .option("--status <status>", "Filter by status (comma-separated for multiple)")
+    .option("--subject <key>", "Filter by subject")
+    .option("--scope <scope>", "Filter by scope")
+    .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
+    .action(
+      guard(async (options: ListCliOptions) => {
+        const filter: FactFilter = {
+          ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
+          ...(options.status !== undefined ? { status: parseFactStatusList(options.status) } : {}),
+          ...(options.subject !== undefined ? { subject: options.subject } : {}),
+          ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
+          ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
+        };
+        const facts = await withDb((db) => listFacts(db, filter));
+        if (facts.length === 0) {
+          process.stdout.write("no facts stored\n");
+          return;
+        }
+        for (const fact of facts) {
+          process.stdout.write(`${formatFactSummary(fact)}\n`);
+        }
+      })
+    );
+
+  program
+    .command("show <id>")
+    .description("Show one fact in full, including provenance and anchor freshness")
+    .option("--root <path>", "Project root for anchor freshness evaluation (default: fact's scope root, then current directory)")
+    .action(
+      guard(async (id: string, options: ShowCliOptions) => {
+        const output = await withDb((db) => {
+          const fact = getFactById(db, id);
+          if (fact === undefined) {
+            throw new Error(`no such fact: ${id}`);
+          }
+          const root = resolveRoot(options.root ?? fact.scopeRoot ?? undefined);
+          const freshness = evaluateAnchor(fact.anchor, root);
+          const sources = listSourcesForFact(db, id);
+          return formatFactDetail(fact, freshness, sources);
+        });
+        process.stdout.write(`${output}\n`);
+      })
+    );
+
+  program
+    .command("forget <id>")
+    .description("Soft-delete a fact (marks superseded, kept for audit) and audit-log it")
+    .action(
+      guard(async (id: string) => {
+        await withDb((db) => {
+          const existing = getFactById(db, id);
+          if (existing === undefined) {
+            throw new Error(`no such fact: ${id}`);
+          }
+          setFactStatus(db, id, "superseded");
+          insertAuditLog(db, { event: "forget", factId: id, detail: `forgot fact (was ${existing.status})` });
+        });
+        process.stdout.write(`forgot ${id}\n`);
+      })
+    );
+
+  program
+    .command("pin <id>")
+    .description("Exempt a fact from time-decay (still subject to contradiction/anchor suppression)")
+    .action(
+      guard(async (id: string) => {
+        await withDb((db) => {
+          const existing = getFactById(db, id);
+          if (existing === undefined) {
+            throw new Error(`no such fact: ${id}`);
+          }
+          setFactStatus(db, id, "pinned");
+          insertAuditLog(db, { event: "pin", factId: id, detail: `pinned fact (was ${existing.status})` });
+        });
+        process.stdout.write(`pinned ${id}\n`);
+      })
+    );
+
+  program
+    .command("edit <id>")
+    .description("Change a fact's text, subject/value, anchor, or scope")
+    .option("--text <text>", "New fact text")
+    .option("--subject <key>", "New normalized subject key (requires --value)")
+    .option("--value <value>", "New value for the subject (requires --subject)")
+    .option("--anchor <predicate>", "New anchor predicate")
+    .option("--scope <scope>", "New scope: global, project, or path")
+    .option("--root <path>", "Project root for .mem/allowlist and (if --scope is given) scope binding (default: current directory)")
+    .action(
+      guard(async (id: string, options: EditCliOptions) => {
+        const hasSubject = options.subject !== undefined;
+        const hasValue = options.value !== undefined;
+        if (hasSubject !== hasValue) {
+          throw new Error("--subject and --value must be provided together");
+        }
+        const root = resolveRoot(options.root);
+        const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
+        const patch: FactUpdate = {
+          ...(options.text !== undefined ? { text: options.text } : {}),
+          ...(hasSubject ? { subject: options.subject } : {}),
+          ...(hasValue ? { value: options.value } : {}),
+          ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
+          ...(scope !== undefined ? { scope } : {}),
+          ...(scope !== undefined ? { scopeRoot: scope === "global" ? null : root } : {}),
+        };
+        if (Object.keys(patch).length === 0) {
+          throw new Error("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");
+        }
+
+        const updated = await withDb((db) => {
+          const existing = getFactById(db, id);
+          if (existing === undefined) {
+            throw new Error(`no such fact: ${id}`);
+          }
+          const allowlist = loadAllowlist(root);
+          const matches = screenForSecrets({ text: patch.text, subject: patch.subject, value: patch.value, anchor: patch.anchor }, allowlist);
+          if (matches.length > 0) {
+            throw new SecretDetectedError(matches);
+          }
+          const fact = updateFact(db, id, patch);
+          if (fact === undefined) {
+            throw new Error(`no such fact: ${id}`);
+          }
+          insertAuditLog(db, { event: "edit", factId: id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
+          return fact;
+        });
+        process.stdout.write(`edited ${updated.id}\n`);
+      })
+    );
+
+  program
+    .command("review")
+    .description("List pending, contested, and anchor-contradicted facts for human resolution")
+    .option("--promote <id>", "Promote a pending fact to active")
+    .option("--reject <id>", "Reject a pending fact (marks superseded)")
+    .option("--root <path>", "Project root for anchor freshness evaluation (default: current directory)")
+    .action(
+      guard(async (options: ReviewCliOptions) => {
+        if (options.promote !== undefined && options.reject !== undefined) {
+          throw new Error("--promote and --reject cannot be used together");
+        }
+        if (options.promote !== undefined) {
+          const id = options.promote;
+          await withDb((db) => promotePending(db, id));
+          process.stdout.write(`promoted ${id}\n`);
+          return;
+        }
+        if (options.reject !== undefined) {
+          const id = options.reject;
+          await withDb((db) => rejectPending(db, id));
+          process.stdout.write(`rejected ${id}\n`);
+          return;
+        }
+
+        const root = resolveRoot(options.root);
+        const output = await withDb((db) => formatReview(db, root));
+        process.stdout.write(`${output}\n`);
+      })
+    );
+
+  program
+    .command("epoch")
+    .description("Print the current write epoch (monotonic, bumped on every write; token-goat's fallback-cache invalidation key)")
+    .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log, report preference decay")
+    .action(
+      guard(async (options: EpochCliOptions) => {
+        if (options.gc !== true) {
+          const epoch = await withDb((db) => getEpoch(db));
+          process.stdout.write(`${epoch}\n`);
+          return;
+        }
+        const summary = await withDb((db) => runRetentionPass(db));
+        process.stdout.write(`${summary}\n`);
+      })
+    );
+
+  return program;
+}
+
+/**
+ * Parses `argv` and dispatches. Sets `process.exitCode`; callers (src/main.ts) should let the
+ * process exit naturally so buffered stdout flushes first, rather than calling `process.exit()`.
+ */
+export async function run(argv: string[] = process.argv): Promise<void> {
+  const program = buildProgram();
+  // Commander's exitOverride lets us catch its internal exits (help, version, unknown command)
+  // instead of letting it call process.exit() mid-flush.
+  program.exitOverride();
+  try {
+    await program.parseAsync(argv);
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "commander.helpDisplayed" || code === "commander.version" || code === "commander.help") {
+      process.exitCode = 0;
+      return;
+    }
+    if (code === "commander.unknownCommand" || code === "commander.missingArgument" || code === "commander.missingMandatoryOptionValue") {
+      // Commander already wrote its diagnostic to stderr.
+      process.exitCode = 1;
+      return;
+    }
+    err(`mem: ${extractErrorMessage(error)}`);
+    process.exitCode = 1;
+  }
+}
