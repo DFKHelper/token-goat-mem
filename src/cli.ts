@@ -50,7 +50,7 @@ import {
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
-import { importFromMarkdown, type ImportOutcome } from "./import.js";
+import { importFromMarkdown, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
   getToolWiring,
   TOOL_NAMES,
@@ -638,18 +638,19 @@ export function buildProgram(): Command {
         const kind = options.kind !== undefined ? parseFactKind(options.kind) : undefined;
         const dryRun = options.dryRun === true;
 
-        // A fresh DB connection is opened even for --dry-run: importFromMarkdown's dry-run branch
-        // returns before touching `db` at all (no writes, no reads), but withDb's open/close is
-        // cheap and keeps this action's shape identical to every other db-backed command.
-        const result = await withDb((db) =>
-          importFromMarkdown(db, {
-            path: options.fromMd,
-            root,
-            ...(dryRun ? { dryRun: true } : {}),
-            ...(scope !== undefined ? { scope } : {}),
-            ...(kind !== undefined ? { kind } : {}),
-          })
-        );
+        // --dry-run opens no database on purpose: openDb() would mkdirSync + create the db file,
+        // WAL sidecars, and schema on disk, which contradicts --dry-run's "nothing written". The
+        // dry-run computation (planImportFromMarkdown) needs only the markdown file, no db.
+        const result = dryRun
+          ? planImportFromMarkdown({ path: options.fromMd })
+          : await withDb((db) =>
+              importFromMarkdown(db, {
+                path: options.fromMd,
+                root,
+                ...(scope !== undefined ? { scope } : {}),
+                ...(kind !== undefined ? { kind } : {}),
+              })
+            );
         process.stdout.write(`${formatImportResult(result, dryRun)}\n`);
       })
     );

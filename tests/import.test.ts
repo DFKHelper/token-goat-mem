@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { openStorage } from "../src/storage.js";
-import { extractMarkdownBullets, importFromMarkdown } from "../src/import.js";
+import { extractMarkdownBullets, importFromMarkdown, planImportFromMarkdown } from "../src/import.js";
 
 // ─────────────────────────────────────────────────────────────────────────── extractMarkdownBullets (pure, no disk) ───────────────────────────────────────────────────────────────────────────
 
@@ -47,6 +47,28 @@ describe("extractMarkdownBullets", () => {
   it("still imports top-level bullets directly under a structural heading", () => {
     const bullets = extractMarkdownBullets(["## File Structure", "- keep configs in the root directory"].join("\n"));
     expect(bullets.map((b) => b.text)).toEqual(["keep configs in the root directory"]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── planImportFromMarkdown (dry-run, DB-free) ───────────────────────────────────────────────────────────────────────────
+
+describe("planImportFromMarkdown", () => {
+  it("produces dry_run outcomes for every candidate without opening a database (the CLI --dry-run path)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-plan-"));
+    const path = join(dir, "CLAUDE.md");
+    writeFileSync(path, ["# Notes", "- Always use pnpm, never npm.", "- Prefer tabs over spaces."].join("\n"), "utf8");
+    try {
+      const result = planImportFromMarkdown({ path });
+      expect(result.candidates).toHaveLength(2);
+      expect(result.outcomes.every((o) => o.status === "dry_run")).toBe(true);
+      expect(result.outcomes.map((o) => o.candidate.text)).toEqual([
+        "Always use pnpm, never npm.",
+        "Prefer tabs over spaces.",
+      ]);
+      expect(result.candidates.every((c) => c.sourceRef.startsWith(resolve(path)))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

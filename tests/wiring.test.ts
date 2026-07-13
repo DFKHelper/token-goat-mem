@@ -130,6 +130,53 @@ describe("claudeCode wiring", () => {
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
   });
 
+  it("aborts with WiringConflictError (not a raw TypeError) when hooks is null", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, JSON.stringify({ hooks: null }));
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError (not a raw TypeError) when the settings.json root is not an object", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, "5");
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError (not a raw TypeError) when SessionStart contains a null element", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [null] } }));
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError (not a raw TypeError) when a SessionStart entry's hooks is not an array", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [{ hooks: "not-an-array" }] } }));
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("uninstall on a SessionStart holding a null element does not crash and leaves the file untouched", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const seeded = JSON.stringify({ hooks: { SessionStart: [null] } });
+    seed(settingsPath, seeded);
+    expect(() => claudeCode.uninstall({ root, homeDir: home })).not.toThrow();
+    expect(read(settingsPath)).toBe(seeded);
+  });
+
+  it("uninstall on a settings.json whose root is null does not crash and leaves the file untouched", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, "null");
+    expect(() => claudeCode.uninstall({ root, homeDir: home })).not.toThrow();
+    expect(read(settingsPath)).toBe("null");
+  });
+
+  it("treats a pre-existing but blank (whitespace-only) settings.json the same as a missing file", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, "   \n\t");
+    expect(() => claudeCode.install({ root, homeDir: home })).not.toThrow();
+    const settings = JSON.parse(read(settingsPath));
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+  });
+
   it("uninstall on a file with nothing stamped is a no-op, not an error", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     const original = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo one" }] }] } };
@@ -326,6 +373,26 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
       expect(plan.entries[0]?.detail).toContain("remove shared block entirely");
     });
   });
+
+  describe("malformed/orphaned markers", () => {
+    it("an orphaned start marker (no matching end) earlier in the file does not blind uninstall to a valid block further down", () => {
+      const agentsPath = join(root, "AGENTS.md");
+      seed(agentsPath, "# hi\n\n<!-- token-goat-mem:start tools=codex -->\norphaned, no end marker for this one\n");
+      codex.install({ root, homeDir: home }); // no resolvable block found -> appends a fresh, valid one below
+
+      const afterInstall = read(agentsPath);
+      expect(afterInstall).toContain("orphaned, no end marker for this one");
+      expect(afterInstall.split("<!-- token-goat-mem:start").length - 1).toBe(2);
+
+      codex.uninstall({ root, homeDir: home });
+      const afterUninstall = read(agentsPath);
+      // The valid block (the one uninstall can actually act on) is gone...
+      expect(afterUninstall).not.toContain("<!-- token-goat-mem:end -->");
+      expect(afterUninstall).not.toContain("## Memory");
+      // ...but the unrelated, pre-existing orphaned content is left untouched, not swallowed.
+      expect(afterUninstall).toContain("orphaned, no end marker for this one");
+    });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── copilotVscode ───────────────────────────────────────────────────────────────────────────
@@ -366,6 +433,64 @@ describe("copilotVscode wiring", () => {
     copilotVscode.install({ root, homeDir: home });
     const second = copilotVscode.install({ root, homeDir: home });
     expect(second.changes.every((c) => c.action === "noop")).toBe(true);
+  });
+
+  it("treats a pre-existing but blank (0-byte) tasks.json and keybindings.json the same as missing files", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    seed(tasksPath, "");
+    seed(keybindingsPath, "   ");
+
+    expect(() => copilotVscode.install({ root, homeDir: home })).not.toThrow();
+    expect(JSON.parse(read(tasksPath)).tasks).toHaveLength(3);
+    expect(JSON.parse(read(keybindingsPath))).toHaveLength(2);
+  });
+
+  it("aborts with WiringConflictError (not a raw Error from jsonc-parser) when tasks.json's root is not an object", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    seed(tasksPath, "5");
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("uninstall on a tasks.json whose root is not an object does not crash and leaves the file untouched", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    seed(tasksPath, "5");
+    expect(() => copilotVscode.uninstall({ root, homeDir: home })).not.toThrow();
+    expect(read(tasksPath)).toBe("5");
+  });
+
+  it("aborts with WiringConflictError (not a raw jsonc-parser Error) when tasks.json's tasks is not an array", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    seed(tasksPath, JSON.stringify({ version: "2.0.0", tasks: "oops" }));
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError (not a raw jsonc-parser Error) when tasks.json's inputs is not an array", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    seed(tasksPath, JSON.stringify({ version: "2.0.0", tasks: [], inputs: {} }));
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError (not a raw jsonc-parser Error) when keybindings.json parses to literal null", () => {
+    // Regression: a `null` root slipped past the array check via a `null ?? []` coercion, then reached
+    // jsonc-parser's modify() on a null root -- which throws a raw "Can not add property to parent of
+    // type null" Error instead of the documented WiringConflictError contract.
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    seed(keybindingsPath, "null");
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError when keybindings.json's root is a JSON object, not an array", () => {
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    seed(keybindingsPath, JSON.stringify({ not: "an array" }));
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("uninstall on a keybindings.json whose root is not an array does not crash and leaves the file untouched", () => {
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    seed(keybindingsPath, "null");
+    expect(() => copilotVscode.uninstall({ root, homeDir: home })).not.toThrow();
+    expect(read(keybindingsPath)).toBe("null");
   });
 
   it("uninstall removes only the stamped tasks/inputs/keybindings, preserving a pre-existing unrelated task", () => {
