@@ -110,6 +110,31 @@ describe("captureExplicit (happy path)", () => {
     ).toThrow(InvalidAnchorError);
   });
 
+  it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long nested-path anchor argument", () => {
+    // A perfectly ordinary file-exists anchor over a deeply nested path has no secret in it, but its
+    // path argument alone is a >=32-char mixed-case/slash/dash token whose entropy clears the generic
+    // heuristic's threshold -- this must not block the capture (regression: this exact mechanism was
+    // already found and fixed for sourceRef; anchor needed the same fix).
+    const { fact } = captureExplicit(db, {
+      text: "uses this component",
+      kind: "fact",
+      anchor: "file-exists src/components/very-long-nested-directory-name/AnotherComponent.tsx",
+      root,
+    });
+    expect(fact.anchor).toBe("file-exists src/components/very-long-nested-directory-name/AnotherComponent.tsx");
+  });
+
+  it("still catches a named secret pattern (not just the generic heuristic) embedded in an anchor argument", () => {
+    expect(() =>
+      captureExplicit(db, {
+        text: "suspicious anchor",
+        kind: "fact",
+        anchor: "file-exists AKIAIOSFODNN7EXAMPLE",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
   it("blocks a fact containing a known secret pattern, persists nothing, and audits the block", () => {
     const before = (db.prepare("SELECT COUNT(*) AS n FROM facts").get() as { n: number }).n;
 

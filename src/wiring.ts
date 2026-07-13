@@ -271,7 +271,7 @@ function markdownFile(path: string, tool: string, body: string): ManagedFile {
 
 // ─────────────────────────────────────────────────────────────────────────── Markdown shared, reference-counted marker block ───────────────────────────────────────────────────────────────────────────
 
-const SHARED_BLOCK_START_RE = /<!-- token-goat-mem:start tools=([a-z0-9,-]+) -->/;
+const SHARED_BLOCK_START_RE = /<!-- token-goat-mem:start tools=([a-z0-9,-]+) -->/g;
 const SHARED_BLOCK_END = "<!-- token-goat-mem:end -->";
 
 /** Sorted, deduplicated, comma-joined `tools=` attribute value, for deterministic marker output (and thus deterministic tests/diffs) regardless of install order. */
@@ -290,20 +290,48 @@ interface SharedBlockLocation {
   readonly tools: readonly string[];
 }
 
-/** Locates the shared marker block (if any) and parses its `tools=` list. `startLineEndIdx` is the index of the newline terminating the start-marker line, used to rewrite just that line without touching the body. */
+/**
+ * Locates the shared marker block (if any) and parses its `tools=` list. `startLineEndIdx` is the
+ * index of the newline terminating the start-marker line, used to rewrite just that line without
+ * touching the body.
+ *
+ * Scans *every* `start` marker occurrence (not just the first) and returns the first one that
+ * resolves to a complete block (a matching `end` marker somewhere after it). This matters because a
+ * hand-edit, crashed write, or merge conflict can leave an orphaned/malformed start marker with no
+ * end marker earlier in the file; stopping at the first occurrence (as a non-global regex would)
+ * would make every later install/uninstall permanently blind to a perfectly valid block further
+ * down -- installs would keep appending duplicate blocks, and uninstall could never find the real
+ * one to strip.
+ */
 function findSharedBlock(content: string): SharedBlockLocation | undefined {
-  const match = SHARED_BLOCK_START_RE.exec(content);
-  if (match === null || match.index === undefined) {
-    return undefined;
+  SHARED_BLOCK_START_RE.lastIndex = 0;
+  const starts: Array<{ index: number; tools: readonly string[] }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = SHARED_BLOCK_START_RE.exec(content)) !== null) {
+    starts.push({ index: match.index, tools: (match[1] ?? "").split(",").filter((t) => t.length > 0) });
   }
-  const startIdx = match.index;
-  const startLineEndIdx = content.indexOf("\n", startIdx);
-  const endIdx = content.indexOf(SHARED_BLOCK_END, startIdx);
-  if (startLineEndIdx === -1 || endIdx === -1 || endIdx < startLineEndIdx) {
-    return undefined;
+
+  for (let i = 0; i < starts.length; i++) {
+    const start = starts[i];
+    if (start === undefined) {
+      continue;
+    }
+    const startIdx = start.index;
+    const startLineEndIdx = content.indexOf("\n", startIdx);
+    const endIdx = startLineEndIdx === -1 ? -1 : content.indexOf(SHARED_BLOCK_END, startLineEndIdx);
+    if (startLineEndIdx === -1 || endIdx === -1) {
+      continue;
+    }
+    // A block can't legitimately contain another block's start marker: if one does, the `end` found
+    // above doesn't actually belong to this `start` (it belongs to the later block), so this `start`
+    // is orphaned/malformed. Skip it and let the next candidate resolve against its own end marker.
+    const nextStart = starts[i + 1];
+    if (nextStart !== undefined && nextStart.index < endIdx) {
+      continue;
+    }
+    return { startIdx, startLineEndIdx, endIdx, tools: start.tools };
   }
-  const tools = (match[1] ?? "").split(",").filter((t) => t.length > 0);
-  return { startIdx, startLineEndIdx, endIdx, tools };
+  return undefined;
 }
 
 /**
@@ -421,6 +449,11 @@ function isBlank(content: string | undefined): boolean {
   return content === undefined || content.trim().length === 0;
 }
 
+/** True only for a non-null, non-array object -- i.e. a valid JSON "object" value. Used to guard every `.property` access/assignment on parsed JSON before it happens: JSON.parse legally produces `null`, an array, or a primitive at any level (a hand-edited `{"hooks": null}` or a root of `null`/`5`/`[1,2]` all parse without error), and unguarded property access/assignment on those throws in ES-module strict mode instead of surfacing the intended `WiringConflictError`. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function parseJsonOrConflict(current: string, label: string): unknown {
   try {
     return JSON.parse(current) as unknown;
@@ -450,7 +483,14 @@ interface ClaudeSettings {
 }
 
 function installClaudeSettings(current: string | undefined, path: string): string | undefined {
-  const parsed: ClaudeSettings = isBlank(current) ? {} : (parseJsonOrConflict(current as string, path) as ClaudeSettings);
+  const rawParsed: unknown = isBlank(current) ? {} : parseJsonOrConflict(current as string, path);
+  if (!isPlainObject(rawParsed)) {
+    throw new WiringConflictError(`${path} does not contain a JSON object at its root; refusing to modify a hand-edited config`);
+  }
+  const parsed = rawParsed as ClaudeSettings;
+  if (parsed.hooks !== undefined && !isPlainObject(parsed.hooks)) {
+    throw new WiringConflictError(`hooks in ${path} is not an object; refusing to modify a hand-edited config`);
+  }
   if (parsed.hooks === undefined) {
     parsed.hooks = {};
   }
@@ -460,10 +500,24 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   if (!Array.isArray(parsed.hooks.SessionStart)) {
     throw new WiringConflictError(`hooks.SessionStart in ${path} is not an array; refusing to modify a hand-edited config`);
   }
-  const sessionStart = parsed.hooks.SessionStart as ClaudeHookGroup[];
+  const sessionStart = parsed.hooks.SessionStart as unknown[];
+
+  // Guard every element before touching `.hooks`: a hand-edited SessionStart can legally hold a
+  // `null`, a primitive, or a group whose `hooks` isn't an array. Unguarded access below would throw
+  // a raw TypeError instead of the documented WiringConflictError contract (same failure class the
+  // root/hooks/SessionStart-array checks above already cover, one level deeper).
+  for (const group of sessionStart) {
+    if (!isPlainObject(group)) {
+      throw new WiringConflictError(`hooks.SessionStart in ${path} contains a non-object entry; refusing to modify a hand-edited config`);
+    }
+    if (group["hooks"] !== undefined && !Array.isArray(group["hooks"])) {
+      throw new WiringConflictError(`a hooks.SessionStart entry in ${path} has a non-array "hooks"; refusing to modify a hand-edited config`);
+    }
+  }
+  const groups = sessionStart as ClaudeHookGroup[];
 
   let stampedHook: ClaudeHook | undefined;
-  for (const group of sessionStart) {
+  for (const group of groups) {
     const found = (group.hooks ?? []).find((hook) => isStamped(hook));
     if (found !== undefined) {
       stampedHook = found;
@@ -471,7 +525,7 @@ function installClaudeSettings(current: string | undefined, path: string): strin
     }
   }
 
-  const hasUnstampedConflict = sessionStart.some((group) =>
+  const hasUnstampedConflict = groups.some((group) =>
     (group.hooks ?? []).some((hook) => !isStamped(hook) && hook.command === CLAUDE_HOOK_COMMAND)
   );
   if (hasUnstampedConflict && stampedHook === undefined) {
@@ -485,7 +539,7 @@ function installClaudeSettings(current: string | undefined, path: string): strin
     (stampedHook as { type: string; command: string }).type = "command";
     (stampedHook as { type: string; command: string }).command = CLAUDE_HOOK_COMMAND;
   } else {
-    sessionStart.push({ hooks: [{ type: "command", command: CLAUDE_HOOK_COMMAND, [STAMP_KEY]: true }] });
+    groups.push({ hooks: [{ type: "command", command: CLAUDE_HOOK_COMMAND, [STAMP_KEY]: true }] });
   }
 
   return `${JSON.stringify(parsed, null, 2)}\n`;
@@ -495,7 +549,12 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
   if (isBlank(current)) {
     return undefined;
   }
-  const parsed = parseJsonOrConflict(current as string, path) as ClaudeSettings;
+  const rawParsed: unknown = parseJsonOrConflict(current as string, path);
+  if (!isPlainObject(rawParsed)) {
+    // Nothing mem could have stamped inside a non-object root; leave it untouched rather than crash.
+    return current;
+  }
+  const parsed = rawParsed as ClaudeSettings;
   const sessionStart = parsed.hooks?.SessionStart;
   if (!Array.isArray(sessionStart)) {
     return current;
@@ -503,16 +562,19 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
 
   let changed = false;
   const filtered: ClaudeHookGroup[] = [];
-  for (const group of sessionStart as ClaudeHookGroup[]) {
-    const hooks = group.hooks;
+  for (const group of sessionStart as unknown[]) {
+    // Access `.hooks` only through an isPlainObject guard: a hand-edited SessionStart may hold a
+    // `null`/primitive element, and `null.hooks` would throw a raw TypeError. Uninstall stays lenient
+    // (leave anything mem didn't stamp untouched) rather than crashing on such an entry.
+    const hooks = isPlainObject(group) ? group["hooks"] : undefined;
     if (!Array.isArray(hooks) || !hooks.some((hook) => isStamped(hook))) {
-      filtered.push(group);
+      filtered.push(group as ClaudeHookGroup);
       continue;
     }
     changed = true;
     const remaining = hooks.filter((hook) => !isStamped(hook));
     if (remaining.length > 0) {
-      filtered.push({ ...group, hooks: remaining });
+      filtered.push({ ...(group as ClaudeHookGroup), hooks: remaining });
     }
     // else: this group was entirely mem's addition -- drop it whole.
   }
@@ -624,10 +686,25 @@ function parseJsoncOrConflict(current: string, path: string): unknown {
 
 function installTasksJson(current: string | undefined, path: string): string | undefined {
   let text = isBlank(current) ? "{\n  \"version\": \"2.0.0\",\n  \"tasks\": [],\n  \"inputs\": []\n}\n" : (current as string);
-  const parsed = isBlank(current) ? {} : ((parseJsoncOrConflict(current as string, path) as Record<string, unknown>) ?? {});
+  const rawParsed: unknown = isBlank(current) ? {} : parseJsoncOrConflict(current as string, path);
+  if (!isBlank(current) && !isPlainObject(rawParsed)) {
+    throw new WiringConflictError(`${path} does not contain a JSON object at its root; refusing to modify a hand-edited config`);
+  }
+  const parsed = (rawParsed ?? {}) as Record<string, unknown>;
 
   if (typeof parsed["version"] !== "string") {
     text = applyEdits(text, modify(text, ["version"], "2.0.0", JSONC_FORMAT));
+  }
+
+  // A present-but-non-array `tasks`/`inputs` is a hand-edited config mem can't reason about: appending
+  // to it via jsonc-parser's `modify(..., [key, -1], ...)` would throw a raw "Can not add property to
+  // parent of type ..." Error, not the documented WiringConflictError contract. Reject it explicitly,
+  // matching how installClaudeSettings treats a non-array `hooks.SessionStart`. Absent keys stay fine.
+  if (parsed["tasks"] !== undefined && !Array.isArray(parsed["tasks"])) {
+    throw new WiringConflictError(`"tasks" in ${path} is not an array; refusing to modify a hand-edited config`);
+  }
+  if (parsed["inputs"] !== undefined && !Array.isArray(parsed["inputs"])) {
+    throw new WiringConflictError(`"inputs" in ${path} is not an array; refusing to modify a hand-edited config`);
   }
 
   const tasks = Array.isArray(parsed["tasks"]) ? (parsed["tasks"] as unknown[]) : [];
@@ -643,7 +720,12 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
   if (isBlank(current)) {
     return undefined;
   }
-  const parsed = (parseJsoncOrConflict(current as string, path) as Record<string, unknown>) ?? {};
+  const rawParsed: unknown = parseJsoncOrConflict(current as string, path);
+  if (!isPlainObject(rawParsed)) {
+    // Nothing mem could have stamped inside a non-object root; leave it untouched rather than crash.
+    return current;
+  }
+  const parsed = rawParsed;
   let text = current as string;
   let anyChanged = false;
 
@@ -678,12 +760,17 @@ const VSCODE_KEYBINDINGS: ReadonlyArray<Record<string, unknown>> = [
 
 function installKeybindings(current: string | undefined, path: string): string | undefined {
   const text = isBlank(current) ? "[]\n" : (current as string);
-  const parsed = isBlank(current) ? [] : ((parseJsoncOrConflict(current as string, path) as unknown[]) ?? []);
-  if (!Array.isArray(parsed) && !isBlank(current)) {
+  // Guard the raw parsed value against a `?? []` coercion: a keybindings.json holding literally
+  // `null` parses to JS `null`, and `null ?? []` would silently masquerade as an empty array, slip
+  // past the array check, then reach jsonc-parser's `modify(text, [-1], ...)` on a `null` root --
+  // which throws a raw "Can not add property to parent of type null" Error instead of the documented
+  // WiringConflictError contract. Every non-array root (null, number, string, boolean, object) must
+  // abort with WiringConflictError, matching how installTasksJson rejects a non-object root.
+  const parsed: unknown = isBlank(current) ? [] : parseJsoncOrConflict(current as string, path);
+  if (!Array.isArray(parsed)) {
     throw new WiringConflictError(`${path} does not contain a JSON array; refusing to modify a hand-edited config`);
   }
-  const existing = Array.isArray(parsed) ? parsed : [];
-  const next = upsertJsoncArrayEntries(text, [], existing, VSCODE_KEYBINDINGS, "key", path, "keybinding");
+  const next = upsertJsoncArrayEntries(text, [], parsed, VSCODE_KEYBINDINGS, "key", path, "keybinding");
   return next === current ? current : next;
 }
 

@@ -156,6 +156,20 @@ function shannonEntropy(value: string): number {
   return entropy;
 }
 
+/**
+ * Fields whose value is a structurally-constrained fs/git predicate string (an anchor), never
+ * free-text/user-authored content, so they are excluded from the *generic* high-entropy-token
+ * heuristic below -- same false-positive mechanism, and same fix, already applied to `sourceRef`
+ * (see the comment in `screenInputOrThrow`): `GENERIC_TOKEN`'s alphabet includes "/", so any
+ * plausible, entirely benign `file-exists <long/nested/path.tsx>` or `glob-exists <pattern>`
+ * argument over ~32 chars can exceed the entropy threshold purely from directory-name variety, with
+ * no secret present at all. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) still run against
+ * these fields -- those are specific enough that a real credential embedded in an anchor argument
+ * (e.g. a malicious `derived` fact's anchor smuggling a literal key) is still caught; only the noisy
+ * generic-entropy catch-all is skipped.
+ */
+const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor"]);
+
 function scanField(field: string, value: string): SecretMatch[] {
   const matches: SecretMatch[] = [];
 
@@ -171,14 +185,16 @@ function scanField(field: string, value: string): SecretMatch[] {
     }
   }
 
-  GENERIC_TOKEN.lastIndex = 0;
-  let g = GENERIC_TOKEN.exec(value);
-  while (g !== null) {
-    const token = g[0];
-    if (!HEX_ONLY.test(token) && !DIGITS_ONLY.test(token) && shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD) {
-      matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
+  if (!GENERIC_ENTROPY_EXEMPT_FIELDS.has(field)) {
+    GENERIC_TOKEN.lastIndex = 0;
+    let g = GENERIC_TOKEN.exec(value);
+    while (g !== null) {
+      const token = g[0];
+      if (!HEX_ONLY.test(token) && !DIGITS_ONLY.test(token) && shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD) {
+        matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
+      }
+      g = GENERIC_TOKEN.exec(value);
     }
-    g = GENERIC_TOKEN.exec(value);
   }
 
   return matches;
@@ -249,7 +265,7 @@ const ANCHOR_ARITY: Readonly<Record<string, number>> = {
 
 const DISALLOWED_ANCHOR_ARG_LITERALS = ";&|`$<>";
 
-/** True if `arg` contains a control character or one of the shell-metacharacter literals above. Defense-in-depth only -- anchors.ts always shells out via execFileSync's argv-array form (never shell-string interpolation), so this is not load-bearing for injection safety, but a stray control byte or shell metacharacter in an anchor argument is never legitimate for a plain fs path. */
+/** True if `arg` contains a control character or one of the shell-metacharacter literals above. Defense-in-depth only -- anchors.ts never shells out at all (it reads `.git/HEAD`/`.git/index` directly, per its own header comment), so this is not load-bearing for injection safety, but a stray control byte or shell metacharacter in an anchor argument is never legitimate for a plain fs path. */
 function hasDisallowedAnchorChar(arg: string): boolean {
   for (const ch of arg) {
     const code = ch.codePointAt(0) ?? 0;

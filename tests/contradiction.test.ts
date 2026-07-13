@@ -76,6 +76,36 @@ describe("detectContradictions", () => {
     expect(result.updates).toHaveLength(0);
   });
 
+  it("keeps identical subject+scope in different project roots independent (no cross-project contradiction)", () => {
+    // Regression: mem's store is shared across every project, so two project-scoped facts with the
+    // same subject but bound to *different* roots must not collide into one contradiction bucket --
+    // otherwise `mem review` / `mem epoch --gc` would persist a supersede transition, silently
+    // clobbering one project's fact because an unrelated project chose a different value.
+    const facts = [
+      makeFact({ id: "proj-a", subject: "package-manager", value: "npm", scope: "project", scopeRoot: "/home/me/project-a" }),
+      makeFact({ id: "proj-b", subject: "package-manager", value: "pnpm", scope: "project", scopeRoot: "/home/me/project-b" }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(0);
+    expect(result.updates).toHaveLength(0);
+  });
+
+  it("still resolves a conflict between two project-scoped facts bound to the SAME root", () => {
+    const facts = [
+      makeFact({ id: "old", subject: "package-manager", value: "npm", scope: "project", scopeRoot: "/home/me/project-a", captured_at: "2026-01-01T00:00:00.000Z" }),
+      makeFact({ id: "new", subject: "package-manager", value: "pnpm", scope: "project", scopeRoot: "/home/me/project-a", captured_at: "2026-03-01T00:00:00.000Z" }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.resolution).toBe("resolved");
+    expect(result.groups[0]?.winnerId).toBe("new");
+    expect(result.updates).toEqual([expect.objectContaining({ factId: "old", nextStatus: "superseded" })]);
+  });
+
   it("resolves same subject+scope, conflicting value by provenance: user beats derived regardless of timestamp", () => {
     const facts = [
       makeFact({

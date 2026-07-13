@@ -394,11 +394,23 @@ function applyKindBoost(fact: Fact, score: number): number {
   return fact.kind === "preference" || fact.kind === "correction" ? score * AGGRESSIVE_RECALL_BOOST : score;
 }
 
+/**
+ * Mirrors storage.ts's `normalizeSubject` (trim + lowercase) exactly. Duplicated rather than
+ * imported: every stored `Fact.subject` already passed through storage.ts's normalization at
+ * write time, but an `options.subject` filter value comes straight from a caller (e.g. the CLI's
+ * raw `--subject` string) and is never normalized before reaching this module. Without this, a
+ * naturally-cased `--subject Package-Manager` would silently match zero facts against a subject
+ * stored as `"package-manager"` -- an exact `!==` comparison, no error, just an empty result.
+ */
+function normalizeSubjectForFilter(subject: string): string {
+  return subject.trim().toLowerCase();
+}
+
 function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boolean {
   if (options.kind !== undefined && fact.kind !== options.kind) {
     return false;
   }
-  if (options.subject !== undefined && fact.subject !== options.subject) {
+  if (options.subject !== undefined && fact.subject !== normalizeSubjectForFilter(options.subject)) {
     return false;
   }
   if (options.scope !== undefined && fact.scope !== options.scope) {

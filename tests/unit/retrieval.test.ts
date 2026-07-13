@@ -316,6 +316,13 @@ describe("retrieve", () => {
     const bySubject = await retrieve(facts, { query: "", root, subject: "package-manager", now });
     expect(bySubject.map((r) => r.fact.id)).toEqual(["1"]);
 
+    // Regression: a subject filter typed with different casing/whitespace than how storage.ts
+    // normalized and stored it (trim + lowercase) must still match -- a raw, un-normalized `!==`
+    // comparison here would silently return zero results for a perfectly valid, naturally-typed
+    // `--subject Package-Manager`.
+    const bySubjectDifferentCasing = await retrieve(facts, { query: "", root, subject: "  Package-Manager  ", now });
+    expect(bySubjectDifferentCasing.map((r) => r.fact.id)).toEqual(["1"]);
+
     const byScope = await retrieve(facts, { query: "", root, scope: "global", now });
     expect(byScope.map((r) => r.fact.id)).toEqual(["2"]);
 
