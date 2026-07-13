@@ -5,11 +5,11 @@
   "type": "module",
   "main": "./dist/token-goat-mem.mjs",
   "bin": {
-    "mem": "./dist/token-goat-mem.mjs"
+    "mem": "dist/token-goat-mem.mjs"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/DFKHelper/token-goat-mem.git"
+    "url": "git+https://github.com/DFKHelper/token-goat-mem.git"
   },
   "homepage": "https://github.com/DFKHelper/token-goat-mem#readme",
   "bugs": {
