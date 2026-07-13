@@ -371,13 +371,18 @@ function screenInputOrThrow(
   auditEvent: string
 ): void {
   const allowlist = loadAllowlist(root);
+  // sourceRef is never free-form/user-authored content -- it's always a programmatically
+  // constructed "<resolved path>:<line>" provenance pointer (see import.ts) -- so it's excluded
+  // from screening. Scanning it was also actively broken: GENERIC_TOKEN's alphabet includes "/"
+  // (needed to catch real base64 secrets, which legitimately contain "/"), so any long
+  // forward-slash-delimited path (any Linux/macOS path over ~32 chars) could false-positive as a
+  // "high-entropy secret" purely from directory-name entropy, with no secret present at all.
   const matches = screenForSecrets(
     {
       text: input.text,
       subject: input.subject,
       value: input.value,
       anchor: input.anchor,
-      sourceRef: input.sourceRef,
     },
     allowlist
   );
