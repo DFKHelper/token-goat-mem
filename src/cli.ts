@@ -597,7 +597,7 @@ export function buildProgram(): Command {
     .option("--kind <kind>", "Filter by kind")
     .option("--subject <key>", "Filter by subject")
     .option("--scope <scope>", "Filter by scope")
-    .option("--hint-format", "Emit the TGMEM/1 wire format for the token-goat seam")
+    .option("--hint-format", "Emit the TGMEM/2 wire format for the token-goat seam")
     .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
     .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
