@@ -232,4 +232,4 @@ Full terms in LICENSE.
 
 ---
 
-Built and maintained by DFK Helper. Inspired by Karpathy's LLM Council and the memory-companion design by the token-goat team. If it saves your tokens or your sanity, a star means the world.
+Built and maintained by DFK Helper. If it saves your tokens or your sanity, a star means the world.
