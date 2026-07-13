@@ -85,8 +85,10 @@ The complement to the hook: tell Claude *when to write*. Add to your project's `
 ```markdown
 ## Memory
 
-This machine has token-goat-mem installed. When I state a durable preference,
-decision, or correction, persist it:
+This machine has token-goat-mem installed. Do not wait to be asked to run
+`mem remember` — when I say things like "remember that...", "always...",
+"from now on...", "never...", "don't...", or otherwise state a durable
+preference, decision, or correction, persist it yourself, right then:
 `mem remember "<short fact>" --kind preference|decision|fact|correction --scope project --root .`
 Use --subject/--value for anything that can be contradicted later
 (e.g. --subject package-manager --value pnpm).
