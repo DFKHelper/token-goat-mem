@@ -51,6 +51,15 @@ import {
 import { detectContradictions } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
 import { importFromMarkdown, type ImportOutcome } from "./import.js";
+import {
+  getToolWiring,
+  TOOL_NAMES,
+  WiringConflictError,
+  type ToolName,
+  type WiringOpts,
+  type WiringPlan,
+  type WiringResult,
+} from "./wiring.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
 import {
   GROUND_TRUTH_CONFIDENCE_FLOOR,
@@ -98,7 +107,8 @@ function exitCodeForError(error: unknown): number {
   return error instanceof UsageError ||
     error instanceof CaptureValidationError ||
     error instanceof InvalidAnchorError ||
-    error instanceof SecretDetectedError
+    error instanceof SecretDetectedError ||
+    error instanceof WiringConflictError
     ? EXIT_USER_ERROR
     : EXIT_INTERNAL_ERROR;
 }
@@ -145,6 +155,13 @@ function parseFactStatusList(raw: string): FactStatus | readonly FactStatus[] {
   }
   const [only] = values;
   return values.length === 1 && only !== undefined ? only as FactStatus : (values as FactStatus[]);
+}
+
+function parseToolName(raw: string): ToolName {
+  if (!TOOL_NAMES.includes(raw as ToolName)) {
+    throw new UsageError(`invalid tool "${raw}" (expected one of ${TOOL_NAMES.join(", ")})`);
+  }
+  return raw as ToolName;
 }
 
 function parseContextFiles(raw: string | undefined): string[] | undefined {
@@ -236,6 +253,29 @@ function formatSection(title: string, facts: readonly Fact[]): string {
     return "";
   }
   return [`-- ${title} (${facts.length}) --`, ...facts.map(formatFactSummary)].join("\n");
+}
+
+// ─────────────────────────────────────────────────────────────────────────── init / uninstall ───────────────────────────────────────────────────────────────────────────
+
+function formatWiringResult(result: WiringResult): string {
+  if (result.changes.length === 0) {
+    return "nothing to do";
+  }
+  return result.changes.map((change) => `  ${change.action.padEnd(6)} ${change.path}  (${change.detail})`).join("\n");
+}
+
+function formatWiringPlanForInit(plan: WiringPlan): string {
+  if (plan.entries.every((entry) => entry.installAction === "noop")) {
+    return "  already installed; nothing would change";
+  }
+  return plan.entries.map((entry) => `  ${entry.installAction.padEnd(6)} ${entry.path}  (${entry.detail})`).join("\n");
+}
+
+function formatWiringPlanForUninstall(plan: WiringPlan): string {
+  if (plan.entries.every((entry) => entry.uninstallAction === "noop")) {
+    return "  nothing to remove";
+  }
+  return plan.entries.map((entry) => `  ${entry.uninstallAction.padEnd(6)} ${entry.path}  (${entry.detail})`).join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────── import ───────────────────────────────────────────────────────────────────────────
@@ -519,6 +559,29 @@ interface ReviewCliOptions {
 
 interface EpochCliOptions {
   readonly gc?: boolean;
+}
+
+interface InitCliOptions {
+  readonly root?: string;
+  readonly user?: boolean;
+  readonly dryRun?: boolean;
+}
+
+interface UninstallCliOptions {
+  readonly all?: boolean;
+  readonly root?: string;
+  readonly user?: boolean;
+  readonly dryRun?: boolean;
+}
+
+/** `TOKEN_GOAT_MEM_WIRING_HOME` overrides the home directory user-level wiring (Claude Code's user `settings.json`, VS Code's user `keybindings.json`) resolves under -- same override-for-tests purpose as `TOKEN_GOAT_MEM_HOME` in db.ts, kept as a separate variable since it names a different directory (a coding tool's home, not mem's own data home). */
+function toWiringOpts(options: { readonly root?: string; readonly user?: boolean }): WiringOpts {
+  const homeOverride = process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+  return {
+    ...(options.root !== undefined ? { root: options.root } : {}),
+    ...(options.user === true ? { user: true } : {}),
+    ...(typeof homeOverride === "string" && homeOverride.trim().length > 0 ? { homeDir: homeOverride } : {}),
+  };
 }
 
 /** Builds the Commander program. Exported so tests can introspect/parse it without going through `process.argv`. */
@@ -873,6 +936,60 @@ export function buildProgram(): Command {
           ].join("\n");
         });
         process.stdout.write(`${output}\n`);
+      })
+    );
+
+  program
+    .command("init <tool>")
+    .description(
+      `Wire mem into a coding tool's config (one of ${TOOL_NAMES.join(", ")}) -- automates what docs/integrations/*.md ` +
+        "otherwise asks you to hand-copy. Idempotent: re-running upgrades mem's own entries in place, never duplicates them."
+    )
+    .option("--root <path>", "Project root to write project-level config into (default: current directory)")
+    .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")
+    .option("--dry-run", "Print what would be written without touching disk")
+    .action(
+      guard(async (tool: string, options: InitCliOptions) => {
+        const wiring = getToolWiring(parseToolName(tool));
+        const wiringOpts = toWiringOpts(options);
+        if (options.dryRun === true) {
+          process.stdout.write(`${formatWiringPlanForInit(wiring.describe(wiringOpts))}\n`);
+          return;
+        }
+        process.stdout.write(`${formatWiringResult(wiring.install(wiringOpts))}\n`);
+      })
+    );
+
+  program
+    .command("uninstall [tool]")
+    .description(
+      `Remove mem's wiring from a coding tool's config, written by \`mem init\` (one of ${TOOL_NAMES.join(", ")}, or --all). ` +
+        "Only removes mem-authored content; a no-op (not an error) if nothing to remove."
+    )
+    .option("--all", "Uninstall from every supported tool")
+    .option("--root <path>", "Project root the project-level config lives under (default: current directory)")
+    .option("--user", "Also target the tool's user-level config, where the tool has both")
+    .option("--dry-run", "Print what would be removed without touching disk")
+    .action(
+      guard(async (tool: string | undefined, options: UninstallCliOptions) => {
+        if (options.all === true && tool !== undefined) {
+          throw new UsageError("cannot combine a tool name with --all");
+        }
+        if (options.all !== true && tool === undefined) {
+          throw new UsageError(`uninstall requires a tool name (${TOOL_NAMES.join(", ")}) or --all`);
+        }
+        const names: readonly ToolName[] = options.all === true ? TOOL_NAMES : [parseToolName(tool as string)];
+        const wiringOpts = toWiringOpts(options);
+        const lines: string[] = [];
+        for (const name of names) {
+          const wiring = getToolWiring(name);
+          if (options.dryRun === true) {
+            lines.push(`${name}:`, formatWiringPlanForUninstall(wiring.describe(wiringOpts)));
+          } else {
+            lines.push(`${name}:`, formatWiringResult(wiring.uninstall(wiringOpts)));
+          }
+        }
+        process.stdout.write(`${lines.join("\n")}\n`);
       })
     );
 

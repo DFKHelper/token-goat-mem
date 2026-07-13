@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -616,5 +616,139 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     // only asserts non-success rather than a precise exit code.
     const result = await runCli(["import"]);
     expect(result.exitCode).not.toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── mem init / uninstall ───────────────────────────────────────────────────────────────────────────
+
+describe("mem init/uninstall", () => {
+  let toolRoot: string;
+  let toolHome: string;
+
+  beforeEach(() => {
+    // Separate fixture dirs from `home` (mem's own TOKEN_GOAT_MEM_HOME data dir) -- these are the
+    // fake "other tool" config root and home the wiring commands read/write, and must never
+    // resolve to the real ~/.claude, real VS Code config, or real project files.
+    toolRoot = mkdtempSync(join(tmpdir(), "mem-cli-wiring-root-"));
+    toolHome = mkdtempSync(join(tmpdir(), "mem-cli-wiring-home-"));
+    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
+  });
+
+  afterEach(() => {
+    delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    rmSync(toolRoot, { recursive: true, force: true });
+    rmSync(toolHome, { recursive: true, force: true });
+  });
+
+  it("rejects an unknown tool name", async () => {
+    const result = await runCli(["init", "not-a-real-tool", "--root", toolRoot]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("invalid tool");
+  });
+
+  it("--dry-run reports what would be written without touching disk", async () => {
+    const result = await runCli(["init", "codex", "--root", toolRoot, "--dry-run"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("create");
+    expect(existsSync(join(toolRoot, "AGENTS.md"))).toBe(false);
+  });
+
+  it("dry-run then real run: the real run matches what dry-run predicted, and produces no duplication on a second `init`", async () => {
+    const dryRun = await runCli(["init", "claude-code", "--root", toolRoot, "--dry-run"]);
+    expect(dryRun.exitCode).toBe(0);
+    expect(dryRun.stdout).toContain(join(toolRoot, ".claude", "settings.json"));
+    expect(dryRun.stdout).toContain(join(toolRoot, "CLAUDE.md"));
+
+    const realRun = await runCli(["init", "claude-code", "--root", toolRoot]);
+    expect(realRun.exitCode).toBe(0);
+    expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(true);
+    expect(existsSync(join(toolRoot, "CLAUDE.md"))).toBe(true);
+
+    const settings = JSON.parse(readFileSync(join(toolRoot, ".claude", "settings.json"), "utf8"));
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.SessionStart[0].hooks[0].__token_goat_mem).toBe(true);
+    const claudeMdAfterFirstInit = readFileSync(join(toolRoot, "CLAUDE.md"), "utf8");
+
+    // Second init: no duplication (upgrade-in-place), matches the manual smoke test in the task spec.
+    const second = await runCli(["init", "claude-code", "--root", toolRoot]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("noop");
+    const settingsAfterSecond = JSON.parse(readFileSync(join(toolRoot, ".claude", "settings.json"), "utf8"));
+    expect(settingsAfterSecond.hooks.SessionStart).toHaveLength(1);
+    expect(readFileSync(join(toolRoot, "CLAUDE.md"), "utf8")).toBe(claudeMdAfterFirstInit);
+  });
+
+  it("uninstall returns the file to its pre-install state and touches nothing else", async () => {
+    writeFileSync(join(toolRoot, "unrelated.txt"), "leave me alone\n", "utf8");
+
+    await runCli(["init", "claude-code", "--root", toolRoot]);
+    const uninstallDryRun = await runCli(["uninstall", "claude-code", "--root", toolRoot, "--dry-run"]);
+    expect(uninstallDryRun.exitCode).toBe(0);
+    expect(uninstallDryRun.stdout).toContain("remove");
+
+    const uninstalled = await runCli(["uninstall", "claude-code", "--root", toolRoot]);
+    expect(uninstalled.exitCode).toBe(0);
+
+    const settings = JSON.parse(readFileSync(join(toolRoot, ".claude", "settings.json"), "utf8"));
+    expect(settings.hooks.SessionStart).toEqual([]);
+    const claudeMd = readFileSync(join(toolRoot, "CLAUDE.md"), "utf8");
+    expect(claudeMd).not.toContain("token-goat-mem");
+    expect(readFileSync(join(toolRoot, "unrelated.txt"), "utf8")).toBe("leave me alone\n");
+
+    // Uninstalling again is a no-op, not an error.
+    const again = await runCli(["uninstall", "claude-code", "--root", toolRoot]);
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain("noop");
+  });
+
+  it("--user writes/removes the user-level settings.json (under the isolated TOKEN_GOAT_MEM_WIRING_HOME) instead of the project one", async () => {
+    await runCli(["init", "claude-code", "--root", toolRoot, "--user"]);
+    expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+    expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(true);
+
+    await runCli(["uninstall", "claude-code", "--root", toolRoot, "--user"]);
+    const settings = JSON.parse(readFileSync(join(toolHome, ".claude", "settings.json"), "utf8"));
+    expect(settings.hooks.SessionStart).toEqual([]);
+  });
+
+  it("uninstall --all removes every tool's wiring in one call", async () => {
+    for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
+      const result = await runCli(["init", tool, "--root", toolRoot]);
+      expect(result.exitCode).toBe(0);
+    }
+
+    const result = await runCli(["uninstall", "--all", "--root", toolRoot]);
+    expect(result.exitCode).toBe(0);
+    for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
+      expect(result.stdout).toContain(`${tool}:`);
+    }
+    expect(readFileSync(join(toolRoot, "AGENTS.md"), "utf8")).not.toContain("token-goat-mem");
+  });
+
+  it("uninstall requires a tool name or --all, and rejects combining them", async () => {
+    const missing = await runCli(["uninstall", "--root", toolRoot]);
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("requires a tool name");
+
+    const both = await runCli(["uninstall", "claude-code", "--all", "--root", toolRoot]);
+    expect(both.exitCode).toBe(1);
+    expect(both.stderr).toContain("cannot combine");
+  });
+
+  it("copilot-vscode init writes tasks.json, keybindings.json (under the isolated home), and AGENTS.md", async () => {
+    const result = await runCli(["init", "copilot-vscode", "--root", toolRoot]);
+    expect(result.exitCode).toBe(0);
+    expect(existsSync(join(toolRoot, ".vscode", "tasks.json"))).toBe(true);
+    expect(existsSync(join(toolRoot, "AGENTS.md"))).toBe(true);
+
+    const keybindingsPath =
+      process.platform === "win32"
+        ? join(toolHome, "AppData", "Roaming", "Code", "User", "keybindings.json")
+        : process.platform === "darwin"
+          ? join(toolHome, "Library", "Application Support", "Code", "User", "keybindings.json")
+          : join(toolHome, ".config", "Code", "User", "keybindings.json");
+    expect(existsSync(keybindingsPath)).toBe(true);
+    const keybindings = JSON.parse(readFileSync(keybindingsPath, "utf8"));
+    expect(keybindings).toHaveLength(2);
   });
 });

@@ -13,10 +13,12 @@ const config = {
   // uses a dynamic `require("node:events")` internally that esbuild cannot
   // statically resolve into an ESM-format bundle (it falls back to a runtime
   // require shim that doesn't exist in real ESM, so the built binary throws
-  // "Dynamic require of node:events is not supported" on startup). Both are
-  // real npm "dependencies" (see package.json), so Node resolves them from
+  // "Dynamic require of node:events is not supported" on startup). jsonc-parser
+  // ships a UMD build with its own internal dynamic require ("./impl/format")
+  // that hits the same failure mode once bundled into ESM. All three are real
+  // npm "dependencies" (see package.json), so Node resolves them from
   // node_modules at runtime same as it would for any external import.
-  external: ["better-sqlite3", "commander"],
+  external: ["better-sqlite3", "commander", "jsonc-parser"],
   define: {
     "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "production"),
   },
