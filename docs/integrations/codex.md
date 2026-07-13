@@ -2,6 +2,17 @@
 
 Use token-goat-mem to carry durable facts, preferences, and decisions across Codex sessions.
 
+## Quick start: `mem init codex`
+
+Wires the `AGENTS.md` instructions documented below in one command:
+
+```bash
+mem init codex --root .        # writes/upgrades a marked block in AGENTS.md
+mem init codex --dry-run       # preview without touching disk
+```
+
+Safe to re-run (upgrades mem's own block in place, never duplicates it) and coexists cleanly with `mem init copilot-cli` in the same `AGENTS.md` (each tool owns its own marked block). `mem uninstall codex` removes exactly that block. The rest of this doc is what `mem init codex` writes, if you'd rather do it by hand.
+
 ## Shell-out invocation
 
 Codex runs as a separate agent session with shell access. Shell out to `mem` directly to capture and retrieve facts. `--kind` is required on every `remember`:

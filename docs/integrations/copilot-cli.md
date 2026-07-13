@@ -2,6 +2,17 @@
 
 Shell-out patterns and instruction wiring for GitHub Copilot CLI.
 
+## Quick start: `mem init copilot-cli`
+
+Wires the `AGENTS.md` instructions documented below in one command:
+
+```bash
+mem init copilot-cli --root .        # writes/upgrades a marked block in AGENTS.md
+mem init copilot-cli --dry-run       # preview without touching disk
+```
+
+Safe to re-run (upgrades mem's own block in place, never duplicates it) and coexists cleanly with `mem init codex` in the same `AGENTS.md` (each tool owns its own marked block). `mem uninstall copilot-cli` removes exactly that block. The rest of this doc is what `mem init copilot-cli` writes (minus the shell-wrapper pattern below, which `init` doesn't automate since it's a shell profile edit, not a config file).
+
 ## Installation
 
 Mem must be on PATH for Copilot CLI to invoke it:

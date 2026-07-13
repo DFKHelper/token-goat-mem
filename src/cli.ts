@@ -587,7 +587,7 @@ function toWiringOpts(options: { readonly root?: string; readonly user?: boolean
 /** Builds the Commander program. Exported so tests can introspect/parse it without going through `process.argv`. */
 export function buildProgram(): Command {
   const program = new Command();
-  program.name("mem").description("Long-term conversational memory for AI coding agents").version("0.1.0");
+  program.name("mem").description("Long-term conversational memory for AI coding agents").version("0.2.0");
 
   program
     .command("remember <text>")

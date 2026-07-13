@@ -6,6 +6,15 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 Nothing yet.
 
+## [0.2.0] - 2026-07-13
+
+### Added
+
+- **`mem init <tool>` / `mem uninstall <tool>`** — automates the wiring docs/integrations/*.md previously asked a human to hand-copy, for `claude-code`, `codex`, `copilot-cli`, and `copilot-vscode`. `init` writes each tool's documented config exactly (Claude Code: `SessionStart` hook in `.claude/settings.json` project or `~/.claude/settings.json` user via `--user`, plus `CLAUDE.md`; Codex/Copilot CLI: `AGENTS.md`; Copilot VS Code: `.vscode/tasks.json`, user `keybindings.json`, plus `AGENTS.md`); `uninstall` reverses exactly what `init` wrote and nothing else. `--dry-run` on either command previews every file it would touch without writing. `--all` on `uninstall` removes every tool's wiring in one call (a safe no-op on tools that were never installed).
+- Idempotent by construction: re-running `init` upgrades mem's own entries in place rather than duplicating them. Markdown files (`CLAUDE.md`, `AGENTS.md`) use a per-tool HTML-comment marker pair so Codex and Copilot CLI can both write instructions into the same `AGENTS.md` without clobbering each other; JSON/JSONC files (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`) stamp every object mem writes with an inert `__token_goat_mem` key, which install upgrades/skips and uninstall strips — surviving content drift across mem versions. An unstamped entry already occupying the same identity (hook command, task label, keybinding key) aborts the write with a conflict error instead of duplicating or silently overwriting hand-written config.
+- Every write is atomic (temp file + rename), takes a one-time `.bak` snapshot of a pre-existing file before its first write (never overwritten on a later re-init), and retries once against freshly-read content if the file changed underneath the write.
+- New dependency: `jsonc-parser` (zero transitive deps), used to edit `tasks.json`/`keybindings.json` via its `modify()`/`applyEdits()` API so a user's existing comments and formatting survive.
+
 ## [0.1.0] - 2026-07-13
 
 Initial release: a local-first, correctness-focused long-term memory CLI for AI coding agents (Claude Code, Copilot CLI, Copilot in VS Code, Codex).

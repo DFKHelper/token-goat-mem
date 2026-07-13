@@ -2,6 +2,17 @@
 
 Use Mem to store durable project facts and preferences that survive VS Code sessions. Recall output lands in the integrated terminal, where Copilot Chat can pick it up as context.
 
+## Quick start: `mem init copilot-vscode`
+
+Wires the `tasks.json`, user `keybindings.json`, and `AGENTS.md` snippets documented below in one command:
+
+```bash
+mem init copilot-vscode --root .        # writes .vscode/tasks.json, ~/…/Code/User/keybindings.json, AGENTS.md
+mem init copilot-vscode --dry-run       # preview without touching disk
+```
+
+Safe to re-run: mem's own tasks/keybinding entries and `AGENTS.md` block are upgraded in place, never duplicated, and a pre-existing hand-written task/keybinding with the same label/key aborts the write with a conflict error instead of being overwritten. `mem uninstall copilot-vscode` removes exactly those entries, preserving any other tasks/keybindings you've added. The rest of this doc is what `mem init copilot-vscode` writes, if you'd rather do it by hand.
+
 ## Shell invocation
 
 The simplest pattern. Open the VS Code terminal and invoke Mem directly. `--kind` is required on every `remember`:
