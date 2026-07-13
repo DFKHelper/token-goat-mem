@@ -2,6 +2,20 @@
 
 Shell-out patterns and hook wiring for Claude Code.
 
+## Quick start: `mem init claude-code`
+
+Once `mem` is on PATH (see Installation below), wire it into Claude Code in one command:
+
+```bash
+mem init claude-code --root .          # writes .claude/settings.json + CLAUDE.md
+mem init claude-code --user            # writes ~/.claude/settings.json instead (no CLAUDE.md)
+mem init claude-code --dry-run         # preview what would be written, without touching disk
+```
+
+This writes exactly the `SessionStart` hook and `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
+
+The rest of this doc is the manual version -- what `mem init claude-code` does under the hood, and useful if you want to wire it by hand or understand exactly what changed.
+
 ## Installation
 
 Mem must be on PATH for Claude Code to invoke it:
