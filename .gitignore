@@ -10,3 +10,4 @@ coverage/
 *~
 .vscode/
 .idea/
+*.token-goat-mem.bak

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code when working with code in this reposi
 npm install                          # Install dependencies
 npm run build                        # Build the shipping bundle (dist/token-goat-mem.mjs)
 npm test                             # Run all tests (vitest run)
-npx vitest run tests/db.test.ts      # Run a single test file
+npx vitest run tests/storage.test.ts # Run a single test file
 npm run lint                         # Lint (eslint src tests)
 npm run typecheck                    # Type check (tsc --noEmit)
 ```
@@ -36,6 +36,10 @@ Token-Goat Mem preserves durable conversational knowledge across AI coding sessi
 ### Testing
 
 Test setup via `tests/setup/` points to an isolated temp `TOKEN_GOAT_MEM_HOME` so tests never touch a real `~/.mem`. All end-to-end tests exercise the real DB and wiring, not mocks. A command with no E2E test coverage fails the gate by design.
+
+### Tool wiring (`mem init` / `mem uninstall`)
+
+`src/wiring.ts` installs/removes mem's integration block in a coding tool's own config (CLAUDE.md, AGENTS.md, `~/.claude/settings.json`, etc.) for a supported tool name. Writes are atomic (temp file + rename) and take a one-time `<file>.token-goat-mem.bak` snapshot before the first write; that backup pattern is gitignored. `mem uninstall` reverses only what `mem init` wrote, via reference-counted markers, so it does not clobber unrelated edits to the same file.
 
 ### Token-goat integration
 
