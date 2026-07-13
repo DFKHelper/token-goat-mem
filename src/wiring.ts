@@ -7,21 +7,21 @@
  *
  * Two idempotency/authorship mechanisms, chosen per file format:
  *
- * - **Markdown, single-owner file** (`CLAUDE.md`; also `AGENTS.md` for `copilot-vscode`, the only
- *   other current writer to that file): the inserted block is wrapped in a per-tool marker pair,
- *   `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see
- *   `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair
- *   (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked
- *   block plus the one blank-line separator install adds, leaving everything else untouched.
- * - **Markdown, shared file** (`AGENTS.md` for `codex` and `copilot-cli`): both tools want the same
- *   "## Memory" prose in the same file, so instead of two near-duplicate per-tool blocks they share
- *   one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` /
- *   `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install
- *   creates the block on the first of the two tools and just adds the second tool's name to the
- *   `tools=` list (rewriting only the marker line) on the other; the block body is written once and
- *   never touched again by the second tool's install. Uninstall drops a tool from the `tools=` list
- *   (rewriting only the marker line) while any other tool remains listed, and only removes the whole
- *   block once the last listed tool uninstalls.
+ * - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block
+ *   is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` /
+ *   `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install
+ *   replaces everything between an existing pair (upgrade in place) or appends a new marked block at
+ *   end of file; uninstall strips the marked block plus the one blank-line separator install adds,
+ *   leaving everything else untouched.
+ * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, and `copilot-vscode`): all
+ *   three tools want the same "## Memory" prose in the same file, so instead of near-duplicate
+ *   per-tool blocks they share one reference-counted block,
+ *   `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see
+ *   `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool
+ *   to install and just adds each subsequent tool's name to the `tools=` list (rewriting only the
+ *   marker line); the block body is written once and never touched again by a later tool's install.
+ *   Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other
+ *   tool remains listed, and only removes the whole block once the last listed tool uninstalls.
  * - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object
  *   mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install
  *   upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped*
@@ -704,12 +704,12 @@ Use --subject/--value for anything that can be contradicted later
 
 /**
  * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
- * reference-counted shared block (currently `codex` and `copilot-cli`). Chosen from the more
- * general/tool-agnostic of the two tools' pre-existing wordings (copilot-cli's -- it covers all
- * four fact kinds and the --subject/--value guidance, matching CLAUDE_CODE_CLAUDE_MD_BODY, where
- * codex's was narrower: "decision" kind only, framed around code review specifically), with the
- * trigger clause reworded from "When the user states..." to "When a durable ... is reached" so it
- * reads naturally for either tool's usage pattern.
+ * reference-counted shared block (`codex`, `copilot-cli`, and `copilot-vscode`). Chosen from the
+ * more general/tool-agnostic of the three tools' pre-existing wordings (copilot-cli's/copilot-vscode's
+ * shared shape -- covering all four fact kinds and the --subject/--value guidance, matching
+ * CLAUDE_CODE_CLAUDE_MD_BODY, where codex's was narrower: "decision" kind only, framed around code
+ * review specifically), with the trigger clause reworded from "When the user states..." to "When a
+ * durable ... is reached" so it reads naturally across all three tools' usage patterns.
  */
 const AGENTS_MD_SHARED_BODY = `## Memory
 
@@ -722,13 +722,6 @@ This machine has token-goat-mem installed (\`mem\` on PATH).
   \`mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .\`. Use --subject/--value for anything that can be
   contradicted later.`;
-
-const COPILOT_VSCODE_AGENTS_MD_BODY = `## Memory
-
-token-goat-mem is installed (\`mem\` on PATH).
-- \`mem recall --hint-format --root .\` — retrieve prior facts with trust caveats
-- \`mem remember "<fact>" --kind preference|decision|fact|correction --scope project --root .\` — persist new facts
-- \`mem review --root .\` — audit facts and contradictions`;
 
 /** VS Code's per-user config directory. Derived purely from the (dependency-injected) `homeDir`, never the real `%APPDATA%`/`$HOME` env vars, so tests stay fully isolated regardless of platform. */
 function vscodeUserDir(homeDir: string): string {
@@ -768,7 +761,7 @@ export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir }) => {
   return [
     { path: tasksPath, install: (current) => installTasksJson(current, tasksPath), uninstall: (current) => uninstallTasksJson(current, tasksPath) },
     { path: keybindingsPath, install: (current) => installKeybindings(current, keybindingsPath), uninstall: (current) => uninstallKeybindings(current, keybindingsPath) },
-    markdownFile(agentsMdPath, "copilot-vscode", COPILOT_VSCODE_AGENTS_MD_BODY),
+    sharedMarkdownFile(agentsMdPath, "copilot-vscode", AGENTS_MD_SHARED_BODY),
   ];
 });
 

@@ -124,13 +124,18 @@ Copilot's agent mode reads a workspace `AGENTS.md`. Document Mem there so agents
 ```markdown
 ## Memory
 
-token-goat-mem is installed (`mem` on PATH).
-- `mem recall --hint-format --root .` — retrieve prior facts with trust caveats
-- `mem remember "<fact>" --kind preference|decision|fact|correction --scope project --root .` — persist new facts
-- `mem review --root .` — audit facts and contradictions
+This machine has token-goat-mem installed (`mem` on PATH).
+
+- At the start of a task, run `mem recall --hint-format --root .` and treat
+  each returned line's `display` string as a prior fact, honoring its
+  embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+- When a durable preference, decision, or correction is reached, persist it:
+  `mem remember "<short fact>" --kind preference|decision|fact|correction
+  --scope project --root .`. Use --subject/--value for anything that can be
+  contradicted later.
 ```
 
-No extension needed. The CLI is a standard tool like `npm` or `git`.
+No extension needed. The CLI is a standard tool like `npm` or `git`. If Codex or Copilot CLI have already run `mem init` against the same `AGENTS.md`, `mem init copilot-vscode` joins their same shared "## Memory" block instead of adding a duplicate one — all three tools' installs are tracked by one reference-counted marker, so the file never ends up with more than one "## Memory" section. `mem uninstall copilot-vscode` drops copilot-vscode from that tracking list; the block stays in place until the last tracked tool uninstalls.
 
 ## Workflow example
 

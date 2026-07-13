@@ -157,7 +157,7 @@ describe("claudeCode wiring", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── codex / copilot-cli AGENTS.md shared block ───────────────────────────────────────────────────────────────────────────
 
-describe("codex and copilot-cli wiring (shared, reference-counted AGENTS.md block)", () => {
+describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-counted AGENTS.md block)", () => {
   it("codex install alone creates one shared block with tools=codex", () => {
     codex.install({ root, homeDir: home });
 
@@ -250,6 +250,51 @@ describe("codex and copilot-cli wiring (shared, reference-counted AGENTS.md bloc
     expect(read(join(root, "AGENTS.md"))).toBe(first);
   });
 
+  it("all three tools installed produce exactly one block with tools=codex,copilot-cli,copilot-vscode, sorted", () => {
+    codex.install({ root, homeDir: home });
+    copilotVscode.install({ root, homeDir: home });
+    copilotCli.install({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli,copilot-vscode -->");
+    expect(agentsMd.split("## Memory").length - 1).toBe(1);
+    expect(agentsMd.split("<!-- token-goat-mem:start").length - 1).toBe(1);
+  });
+
+  it("uninstalling all three tools in a different order than they were installed decrements correctly and removes the block only after the last one", () => {
+    copilotVscode.install({ root, homeDir: home });
+    codex.install({ root, homeDir: home });
+    copilotCli.install({ root, homeDir: home });
+
+    copilotVscode.uninstall({ root, homeDir: home });
+    let agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli -->");
+
+    copilotCli.uninstall({ root, homeDir: home });
+    agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex -->");
+    expect(agentsMd).toContain("## Memory");
+
+    codex.uninstall({ root, homeDir: home });
+    agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).not.toContain("token-goat-mem");
+    expect(agentsMd).not.toContain("## Memory");
+  });
+
+  it("copilot-vscode installing third joins the existing two-tool block without touching tasks.json/keybindings.json semantics", () => {
+    codex.install({ root, homeDir: home });
+    copilotCli.install({ root, homeDir: home });
+    const result = copilotVscode.install({ root, homeDir: home });
+
+    const agentsMdChange = result.changes.find((c) => c.path.endsWith("AGENTS.md"));
+    expect(agentsMdChange?.action).toBe("update");
+    expect(read(join(root, "AGENTS.md"))).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli,copilot-vscode -->");
+
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    const tasks = JSON.parse(read(tasksPath));
+    expect(tasks.tasks).toHaveLength(3);
+  });
+
   describe("describe() (dry-run) wording for the shared block", () => {
     it("installing codex when copilot-cli's block already exists describes it as joining, not creating", () => {
       copilotCli.install({ root, homeDir: home });
@@ -294,7 +339,7 @@ describe("copilotVscode wiring", () => {
     expect(keybindings).toHaveLength(2);
     expect(keybindings.every((k: { __token_goat_mem?: boolean }) => k.__token_goat_mem === true)).toBe(true);
 
-    expect(read(join(root, "AGENTS.md"))).toContain("<!-- token-goat-mem:copilot-vscode:start -->");
+    expect(read(join(root, "AGENTS.md"))).toContain("<!-- token-goat-mem:start tools=copilot-vscode -->");
   });
 
   it("edge case (b): a pre-existing unstamped task sharing mem's label makes install abort with a conflict error, without duplicating or overwriting", () => {
