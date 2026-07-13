@@ -80,6 +80,13 @@ describe("claudeCode wiring", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
   });
 
+  it("--user does not touch CLAUDE.md at root (docs promise settings.json only under --user)", () => {
+    claudeCode.install({ root, homeDir: home, user: true });
+    expect(() => read(join(root, "CLAUDE.md"))).toThrow();
+    const result = claudeCode.uninstall({ root, homeDir: home, user: true });
+    expect(result.changes.every((c) => c.path !== join(root, "CLAUDE.md"))).toBe(true);
+  });
+
   it("edge case (a): 2 pre-existing non-mem SessionStart hooks -> install produces 3, uninstall restores exactly the original 2 in order", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     const original = {

@@ -737,11 +737,16 @@ function vscodeUserDir(homeDir: string): string {
 
 export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user }) => {
   const settingsPath = user ? join(homeDir, ".claude", "settings.json") : join(root, ".claude", "settings.json");
+  const settingsEntry: ManagedFile = {
+    path: settingsPath,
+    install: (current) => installClaudeSettings(current, settingsPath),
+    uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
+  };
+  if (user) {
+    return [settingsEntry];
+  }
   const claudeMdPath = join(root, "CLAUDE.md");
-  return [
-    { path: settingsPath, install: (current) => installClaudeSettings(current, settingsPath), uninstall: (current) => uninstallClaudeSettings(current, settingsPath) },
-    markdownFile(claudeMdPath, "claude-code", CLAUDE_CODE_CLAUDE_MD_BODY),
-  ];
+  return [settingsEntry, markdownFile(claudeMdPath, "claude-code", CLAUDE_CODE_CLAUDE_MD_BODY)];
 });
 
 export const codex: ToolWiring = makeToolWiring(({ root }) => {
