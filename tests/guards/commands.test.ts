@@ -15,12 +15,14 @@ const EXPECTED_COMMANDS = [
   "epoch",
   "forget",
   "import",
+  "init",
   "list",
   "pin",
   "recall",
   "remember",
   "review",
   "show",
+  "uninstall",
 ] as const;
 
 describe("Command guards", () => {
