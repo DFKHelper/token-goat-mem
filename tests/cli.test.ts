@@ -758,6 +758,36 @@ describe("mem init/uninstall", () => {
     expect(afterUninstallCodex).toContain("mem recall --hint-format --root .");
   });
 
+  it("init codex, copilot-cli, and copilot-vscode against the same AGENTS.md produces exactly one shared section tracking all three; uninstalling one at a time correctly decrements to zero", async () => {
+    const agentsMdPath = join(toolRoot, "AGENTS.md");
+
+    for (const tool of ["codex", "copilot-cli", "copilot-vscode"]) {
+      const result = await runCli(["init", tool, "--root", toolRoot]);
+      expect(result.exitCode).toBe(0);
+    }
+
+    const afterAllInit = readFileSync(agentsMdPath, "utf8");
+    expect(afterAllInit.split("## Memory").length - 1).toBe(1);
+    expect(afterAllInit).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli,copilot-vscode -->");
+
+    const uninstallCopilotVscode = await runCli(["uninstall", "copilot-vscode", "--root", toolRoot]);
+    expect(uninstallCopilotVscode.exitCode).toBe(0);
+    let current = readFileSync(agentsMdPath, "utf8");
+    expect(current).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli -->");
+    expect(current.split("## Memory").length - 1).toBe(1);
+
+    const uninstallCopilotCli = await runCli(["uninstall", "copilot-cli", "--root", toolRoot]);
+    expect(uninstallCopilotCli.exitCode).toBe(0);
+    current = readFileSync(agentsMdPath, "utf8");
+    expect(current).toContain("<!-- token-goat-mem:start tools=codex -->");
+
+    const uninstallCodex = await runCli(["uninstall", "codex", "--root", toolRoot]);
+    expect(uninstallCodex.exitCode).toBe(0);
+    current = readFileSync(agentsMdPath, "utf8");
+    expect(current).not.toContain("token-goat-mem");
+    expect(current).not.toContain("## Memory");
+  });
+
   it("copilot-vscode init writes tasks.json, keybindings.json (under the isolated home), and AGENTS.md", async () => {
     const result = await runCli(["init", "copilot-vscode", "--root", toolRoot]);
     expect(result.exitCode).toBe(0);
