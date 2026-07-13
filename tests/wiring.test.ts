@@ -15,6 +15,7 @@ import {
   codex,
   copilotCli,
   copilotVscode,
+  vscodeUserDir,
   WiringConflictError,
   writeManagedFile,
 } from "../src/wiring.js";
@@ -341,7 +342,7 @@ describe("copilotVscode wiring", () => {
     expect(tasks.inputs).toHaveLength(1);
     expect(tasks.version).toBe("2.0.0");
 
-    const keybindingsPath = join(home, "AppData", "Roaming", "Code", "User", "keybindings.json");
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     const keybindings = JSON.parse(read(keybindingsPath));
     expect(keybindings).toHaveLength(2);
     expect(keybindings.every((k: { __token_goat_mem?: boolean }) => k.__token_goat_mem === true)).toBe(true);
@@ -381,7 +382,7 @@ describe("copilotVscode wiring", () => {
     expect(tasks.tasks).toEqual([{ label: "Build", type: "shell", command: "npm run build" }]);
     expect(tasks.inputs).toEqual([]);
 
-    const keybindingsPath = join(home, "AppData", "Roaming", "Code", "User", "keybindings.json");
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     expect(JSON.parse(read(keybindingsPath))).toEqual([]);
   });
 });

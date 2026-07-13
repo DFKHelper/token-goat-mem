@@ -728,8 +728,8 @@ This machine has token-goat-mem installed (\`mem\` on PATH).
   --scope project --root .\`. Use --subject/--value for anything that can be
   contradicted later.`;
 
-/** VS Code's per-user config directory. Derived purely from the (dependency-injected) `homeDir`, never the real `%APPDATA%`/`$HOME` env vars, so tests stay fully isolated regardless of platform. */
-function vscodeUserDir(homeDir: string): string {
+/** VS Code's per-user config directory. Derived purely from the (dependency-injected) `homeDir`, never the real `%APPDATA%`/`$HOME` env vars, so tests stay fully isolated regardless of platform. Exported so tests can compute the same platform-dependent path rather than hardcoding one OS's layout. */
+export function vscodeUserDir(homeDir: string): string {
   switch (process.platform) {
     case "win32":
       return join(homeDir, "AppData", "Roaming", "Code", "User");
