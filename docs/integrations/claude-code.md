@@ -24,8 +24,10 @@ mem remember "uses pnpm not npm" --kind preference --scope project --root . \
 
 **Recall project facts:**
 ```bash
-mem recall --kind preference --scope project --hint-format --root .
+mem recall --hint-format --root .
 ```
+
+(`--hint-format` ignores `--kind`/`--scope` filters -- it always returns every in-scope kind under its own per-kind caps. Use `--kind`/`--scope` only on plain `mem recall`, without `--hint-format`.)
 
 **Show one fact / list all facts:**
 ```bash
@@ -60,7 +62,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
 }
 ```
 
-Every new session then opens with the `TGMEM/1` hint block (or `no matching facts` on an empty store, which Claude simply ignores).
+Every new session then opens with the `TGMEM/2` hint block (or just the bare `TGMEM/2` header line on an empty store), which Claude simply ignores when there are no fact lines.
 
 ## Instruction wiring via CLAUDE.md
 
@@ -85,7 +87,7 @@ To verify the seam is live:
 mem recall --hint-format --root .
 ```
 
-Returns a `TGMEM/1` header plus one line per fact, or `no matching facts` on an empty store.
+Returns a `TGMEM/2` header, one line per fact plus a shared `footer` line when at least one fact was returned, or just the bare `TGMEM/2` header line with nothing else on an empty store (`--hint-format` never prints `no matching facts` -- that string is only emitted by plain `mem recall`).
 
 ## Typical workflow
 
@@ -103,11 +105,11 @@ mem remember 'uses pnpm not npm' --kind preference
 mem remember "Picked $FRAMEWORK for perf" --kind decision
 ```
 
-`file-contains` anchors take free-text substrings, so quote the whole predicate:
+Anchor predicates take multiple space-separated arguments, so quote the whole predicate:
 
 ```bash
 mem remember "auth schema is indexed" --kind fact --root . \
-  --anchor 'file-contains schema.sql CREATE INDEX'
+  --anchor 'file-exists schema.sql'
 ```
 
 ## Debugging
