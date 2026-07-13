@@ -308,8 +308,8 @@ function findSharedBlock(content: string): SharedBlockLocation | undefined {
 
 /**
  * Inserts/joins/upgrades the single reference-counted shared block used by tools that write the
- * same "## Memory" prose into the same file (currently `codex` and `copilot-cli`, both targeting
- * `AGENTS.md`). If no block exists yet, creates one with `tools=<thisTool>` and `body`. If a block
+ * same "## Memory" prose into the same file (currently `codex`, `copilot-cli`, and `copilot-vscode`,
+ * all targeting `AGENTS.md`). If no block exists yet, creates one with `tools=<thisTool>` and `body`. If a block
  * exists and `thisTool` is already listed, no-op. If a block exists and `thisTool` isn't listed,
  * adds it to the (sorted) `tools=` list by rewriting only the marker line -- the body, already
  * shared and correct, is left untouched.
@@ -416,6 +416,11 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return aKeys.every((key) => deepEqual(aRecord[key], bRecord[key]));
 }
 
+/** True for `undefined` (file absent) or a file that exists but contains only whitespace -- neither has any hand-written content that could conflict, so both are treated identically to "start fresh" by every JSON/JSONC entry point below. */
+function isBlank(content: string | undefined): boolean {
+  return content === undefined || content.trim().length === 0;
+}
+
 function parseJsonOrConflict(current: string, label: string): unknown {
   try {
     return JSON.parse(current) as unknown;
@@ -445,7 +450,7 @@ interface ClaudeSettings {
 }
 
 function installClaudeSettings(current: string | undefined, path: string): string | undefined {
-  const parsed: ClaudeSettings = current === undefined ? {} : (parseJsonOrConflict(current, path) as ClaudeSettings);
+  const parsed: ClaudeSettings = isBlank(current) ? {} : (parseJsonOrConflict(current as string, path) as ClaudeSettings);
   if (parsed.hooks === undefined) {
     parsed.hooks = {};
   }
@@ -487,10 +492,10 @@ function installClaudeSettings(current: string | undefined, path: string): strin
 }
 
 function uninstallClaudeSettings(current: string | undefined, path: string): string | undefined {
-  if (current === undefined) {
+  if (isBlank(current)) {
     return undefined;
   }
-  const parsed = parseJsonOrConflict(current, path) as ClaudeSettings;
+  const parsed = parseJsonOrConflict(current as string, path) as ClaudeSettings;
   const sessionStart = parsed.hooks?.SessionStart;
   if (!Array.isArray(sessionStart)) {
     return current;
@@ -618,8 +623,8 @@ function parseJsoncOrConflict(current: string, path: string): unknown {
 }
 
 function installTasksJson(current: string | undefined, path: string): string | undefined {
-  let text = current ?? "{\n  \"version\": \"2.0.0\",\n  \"tasks\": [],\n  \"inputs\": []\n}\n";
-  const parsed = current === undefined ? {} : ((parseJsoncOrConflict(current, path) as Record<string, unknown>) ?? {});
+  let text = isBlank(current) ? "{\n  \"version\": \"2.0.0\",\n  \"tasks\": [],\n  \"inputs\": []\n}\n" : (current as string);
+  const parsed = isBlank(current) ? {} : ((parseJsoncOrConflict(current as string, path) as Record<string, unknown>) ?? {});
 
   if (typeof parsed["version"] !== "string") {
     text = applyEdits(text, modify(text, ["version"], "2.0.0", JSONC_FORMAT));
@@ -635,11 +640,11 @@ function installTasksJson(current: string | undefined, path: string): string | u
 }
 
 function uninstallTasksJson(current: string | undefined, path: string): string | undefined {
-  if (current === undefined) {
+  if (isBlank(current)) {
     return undefined;
   }
-  const parsed = (parseJsoncOrConflict(current, path) as Record<string, unknown>) ?? {};
-  let text = current;
+  const parsed = (parseJsoncOrConflict(current as string, path) as Record<string, unknown>) ?? {};
+  let text = current as string;
   let anyChanged = false;
 
   const tasks = Array.isArray(parsed["tasks"]) ? (parsed["tasks"] as unknown[]) : [];
@@ -672,9 +677,9 @@ const VSCODE_KEYBINDINGS: ReadonlyArray<Record<string, unknown>> = [
 ];
 
 function installKeybindings(current: string | undefined, path: string): string | undefined {
-  const text = current ?? "[]\n";
-  const parsed = current === undefined ? [] : ((parseJsoncOrConflict(current, path) as unknown[]) ?? []);
-  if (!Array.isArray(parsed) && current !== undefined) {
+  const text = isBlank(current) ? "[]\n" : (current as string);
+  const parsed = isBlank(current) ? [] : ((parseJsoncOrConflict(current as string, path) as unknown[]) ?? []);
+  if (!Array.isArray(parsed) && !isBlank(current)) {
     throw new WiringConflictError(`${path} does not contain a JSON array; refusing to modify a hand-edited config`);
   }
   const existing = Array.isArray(parsed) ? parsed : [];
@@ -683,12 +688,12 @@ function installKeybindings(current: string | undefined, path: string): string |
 }
 
 function uninstallKeybindings(current: string | undefined, path: string): string | undefined {
-  if (current === undefined) {
+  if (isBlank(current)) {
     return undefined;
   }
-  const parsed = parseJsoncOrConflict(current, path);
+  const parsed = parseJsoncOrConflict(current as string, path);
   const existing = Array.isArray(parsed) ? parsed : [];
-  const { text, changed } = removeStampedJsoncArrayEntries(current, [], existing);
+  const { text, changed } = removeStampedJsoncArrayEntries(current as string, [], existing);
   return changed ? text : current;
 }
 
