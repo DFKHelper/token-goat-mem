@@ -11,7 +11,7 @@ mem init copilot-cli --root .        # writes/upgrades a marked block in AGENTS.
 mem init copilot-cli --dry-run       # preview without touching disk
 ```
 
-Safe to re-run (upgrades mem's own block in place, never duplicates it) and coexists cleanly with `mem init codex` in the same `AGENTS.md` (each tool owns its own marked block). `mem uninstall copilot-cli` removes exactly that block. The rest of this doc is what `mem init copilot-cli` writes (minus the shell-wrapper pattern below, which `init` doesn't automate since it's a shell profile edit, not a config file).
+Safe to re-run (upgrades mem's own block in place, never duplicates it). If `mem init codex` has already run against the same `AGENTS.md`, `mem init copilot-cli` joins that same shared "## Memory" block instead of adding a second one -- both tools' installs are tracked by one reference-counted marker, so the file never ends up with two near-identical "## Memory" sections. `mem uninstall copilot-cli` drops copilot-cli from that tracking list; the block (and codex's install) stays in place until the last tracked tool uninstalls. The rest of this doc is what `mem init copilot-cli` writes (minus the shell-wrapper pattern below, which `init` doesn't automate since it's a shell profile edit, not a config file).
 
 ## Installation
 
@@ -60,11 +60,13 @@ This machine has token-goat-mem installed (`mem` on PATH).
 - At the start of a task, run `mem recall --hint-format --root .` and treat
   each returned line's `display` string as a prior fact, honoring its
   embedded trust caveat ("verify", "unverified", "contradicted, excluded").
-- When the user states a durable preference, decision, or correction, persist
-  it: `mem remember "<short fact>" --kind preference|decision|fact|correction
+- When a durable preference, decision, or correction is reached, persist it:
+  `mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .`. Use --subject/--value for anything that can be
   contradicted later.
 ```
+
+This is the same wording `mem init codex` writes. If both tools are installed against the same `AGENTS.md`, they share this one block -- see "Quick start" above.
 
 ## Session pre-loading via a wrapper
 

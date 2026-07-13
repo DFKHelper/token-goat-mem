@@ -11,7 +11,7 @@ mem init codex --root .        # writes/upgrades a marked block in AGENTS.md
 mem init codex --dry-run       # preview without touching disk
 ```
 
-Safe to re-run (upgrades mem's own block in place, never duplicates it) and coexists cleanly with `mem init copilot-cli` in the same `AGENTS.md` (each tool owns its own marked block). `mem uninstall codex` removes exactly that block. The rest of this doc is what `mem init codex` writes, if you'd rather do it by hand.
+Safe to re-run (upgrades mem's own block in place, never duplicates it). If `mem init copilot-cli` has already run against the same `AGENTS.md`, `mem init codex` joins that same shared "## Memory" block instead of adding a second one -- both tools' installs are tracked by one reference-counted marker, so the file never ends up with two near-identical "## Memory" sections. `mem uninstall codex` drops codex from that tracking list; the block (and copilot-cli's install) stays in place until the last tracked tool uninstalls. The rest of this doc is what `mem init codex` writes, if you'd rather do it by hand.
 
 ## Shell-out invocation
 
@@ -43,11 +43,16 @@ Codex reads the project's `AGENTS.md` as instructions. The reliable integration 
 
 This machine has token-goat-mem installed (`mem` on PATH).
 
-- Before analysis, run `mem recall --hint-format --root .` and honor each
-  line's embedded trust caveat ("verify", "unverified", "contradicted, excluded").
-- When a review reaches a durable decision, persist it:
-  `mem remember "<short fact>" --kind decision --scope project --root .`
+- At the start of a task, run `mem recall --hint-format --root .` and treat
+  each returned line's `display` string as a prior fact, honoring its
+  embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+- When a durable preference, decision, or correction is reached, persist it:
+  `mem remember "<short fact>" --kind preference|decision|fact|correction
+  --scope project --root .`. Use --subject/--value for anything that can be
+  contradicted later.
 ```
+
+This is the same wording `mem init copilot-cli` writes. If both tools are installed against the same `AGENTS.md`, they share this one block -- see "Quick start" above.
 
 ## Direct CLI usage in a review script
 

@@ -7,15 +7,21 @@
  *
  * Two idempotency/authorship mechanisms, chosen per file format:
  *
- * - **Markdown** (`CLAUDE.md`, `AGENTS.md`): the inserted block is wrapped in a per-tool marker
- *   pair, `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see
- *   `upsertMarkedBlock`/`stripMarkedBlock`). The marker is namespaced per tool -- not the bare
- *   `token-goat-mem:start/end` a first reading of the design might suggest -- because Codex and
- *   Copilot CLI both write instructions into the *same* `AGENTS.md` file; a shared marker would
- *   mean installing one silently clobbers the other's block on the next `install()`. Install
- *   replaces everything between an existing pair (upgrade in place) or appends a new marked block
- *   at end of file; uninstall strips the marked block plus the one blank-line separator install
- *   adds, leaving everything else untouched.
+ * - **Markdown, single-owner file** (`CLAUDE.md`; also `AGENTS.md` for `copilot-vscode`, the only
+ *   other current writer to that file): the inserted block is wrapped in a per-tool marker pair,
+ *   `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see
+ *   `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair
+ *   (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked
+ *   block plus the one blank-line separator install adds, leaving everything else untouched.
+ * - **Markdown, shared file** (`AGENTS.md` for `codex` and `copilot-cli`): both tools want the same
+ *   "## Memory" prose in the same file, so instead of two near-duplicate per-tool blocks they share
+ *   one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` /
+ *   `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install
+ *   creates the block on the first of the two tools and just adds the second tool's name to the
+ *   `tools=` list (rewriting only the marker line) on the other; the block body is written once and
+ *   never touched again by the second tool's install. Uninstall drops a tool from the `tools=` list
+ *   (rewriting only the marker line) while any other tool remains listed, and only removes the whole
+ *   block once the last listed tool uninstalls.
  * - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object
  *   mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install
  *   upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped*
@@ -141,6 +147,16 @@ interface ManagedFile {
   readonly path: string;
   readonly install: FileTransform;
   readonly uninstall: FileTransform;
+  /**
+   * Optional override for describe()'s per-entry `detail` string, consulted with the same `current`
+   * content (plus the already-computed install/uninstall actions) used to build the generic
+   * "install would create/update this file" / "already installed; uninstall would strip mem's
+   * content" wording. Returns `undefined` to fall back to that generic wording. Used by the shared
+   * AGENTS.md block (see `sharedMarkdownFile`) to distinguish "join existing shared block" from
+   * "create new block", and "leave shared block in place, drop <tool> from tools=" from "remove
+   * shared block entirely".
+   */
+  readonly describeDetail?: (current: string | undefined, installAction: WiringFileAction, uninstallAction: WiringFileAction) => string | undefined;
 }
 
 function runInstall(files: readonly ManagedFile[]): WiringResult {
@@ -162,7 +178,7 @@ function runDescribe(files: readonly ManagedFile[]): WiringPlan {
     const uninstallNext = file.uninstall(current);
     const uninstallAction: WiringPlanEntry["uninstallAction"] = uninstallNext === undefined || uninstallNext === current ? "noop" : "remove";
 
-    const detail =
+    const defaultDetail =
       installAction !== "noop"
         ? `install would ${installAction} this file`
         : uninstallAction !== "noop"
@@ -170,6 +186,7 @@ function runDescribe(files: readonly ManagedFile[]): WiringPlan {
           : current === undefined
             ? "not installed"
             : "up to date; nothing to remove";
+    const detail = file.describeDetail?.(current, installAction, uninstallAction) ?? defaultDetail;
 
     return { path: file.path, installAction, uninstallAction, detail };
   });
@@ -249,6 +266,122 @@ function markdownFile(path: string, tool: string, body: string): ManagedFile {
     path,
     install: (current) => upsertMarkedBlock(current ?? "", tool, body),
     uninstall: (current) => (current === undefined ? undefined : stripMarkedBlock(current, tool)),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────── Markdown shared, reference-counted marker block ───────────────────────────────────────────────────────────────────────────
+
+const SHARED_BLOCK_START_RE = /<!-- token-goat-mem:start tools=([a-z0-9,-]+) -->/;
+const SHARED_BLOCK_END = "<!-- token-goat-mem:end -->";
+
+/** Sorted, deduplicated, comma-joined `tools=` attribute value, for deterministic marker output (and thus deterministic tests/diffs) regardless of install order. */
+function sortedToolsAttr(tools: readonly string[]): string {
+  return Array.from(new Set(tools)).sort().join(",");
+}
+
+function sharedMarkerStart(tools: readonly string[]): string {
+  return `<!-- token-goat-mem:start tools=${sortedToolsAttr(tools)} -->`;
+}
+
+interface SharedBlockLocation {
+  readonly startIdx: number;
+  readonly startLineEndIdx: number;
+  readonly endIdx: number;
+  readonly tools: readonly string[];
+}
+
+/** Locates the shared marker block (if any) and parses its `tools=` list. `startLineEndIdx` is the index of the newline terminating the start-marker line, used to rewrite just that line without touching the body. */
+function findSharedBlock(content: string): SharedBlockLocation | undefined {
+  const match = SHARED_BLOCK_START_RE.exec(content);
+  if (match === null || match.index === undefined) {
+    return undefined;
+  }
+  const startIdx = match.index;
+  const startLineEndIdx = content.indexOf("\n", startIdx);
+  const endIdx = content.indexOf(SHARED_BLOCK_END, startIdx);
+  if (startLineEndIdx === -1 || endIdx === -1 || endIdx < startLineEndIdx) {
+    return undefined;
+  }
+  const tools = (match[1] ?? "").split(",").filter((t) => t.length > 0);
+  return { startIdx, startLineEndIdx, endIdx, tools };
+}
+
+/**
+ * Inserts/joins/upgrades the single reference-counted shared block used by tools that write the
+ * same "## Memory" prose into the same file (currently `codex` and `copilot-cli`, both targeting
+ * `AGENTS.md`). If no block exists yet, creates one with `tools=<thisTool>` and `body`. If a block
+ * exists and `thisTool` is already listed, no-op. If a block exists and `thisTool` isn't listed,
+ * adds it to the (sorted) `tools=` list by rewriting only the marker line -- the body, already
+ * shared and correct, is left untouched.
+ */
+function upsertSharedMarkedBlock(content: string, tool: string, body: string): string {
+  const found = findSharedBlock(content);
+  if (found !== undefined) {
+    if (found.tools.includes(tool)) {
+      return content;
+    }
+    const newStartLine = sharedMarkerStart([...found.tools, tool]);
+    return content.slice(0, found.startIdx) + newStartLine + content.slice(found.startLineEndIdx);
+  }
+
+  const block = `${sharedMarkerStart([tool])}\n${body.trim()}\n${SHARED_BLOCK_END}`;
+  if (content.trim().length === 0) {
+    return `${block}\n`;
+  }
+  const base = content.endsWith("\n") ? content : `${content}\n`;
+  return `${base}\n${block}\n`;
+}
+
+/**
+ * Removes `thisTool` from the shared block's `tools=` list. If other tools remain listed, rewrites
+ * only the marker line and leaves the block body in place. If `thisTool` was the only tool listed,
+ * removes the whole block plus the one blank-line separator install adds (same rule as
+ * `stripMarkedBlock`). No-op if the block doesn't exist or doesn't list `thisTool`.
+ */
+function stripSharedMarkedBlock(content: string, tool: string): string {
+  const found = findSharedBlock(content);
+  if (found === undefined || !found.tools.includes(tool)) {
+    return content;
+  }
+
+  const remaining = found.tools.filter((t) => t !== tool);
+  if (remaining.length > 0) {
+    const newStartLine = sharedMarkerStart(remaining);
+    return content.slice(0, found.startIdx) + newStartLine + content.slice(found.startLineEndIdx);
+  }
+
+  const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
+  const before = content.slice(0, found.startIdx);
+  const after = content.slice(blockEnd);
+  const beforeStripped = before.endsWith("\n\n") ? before.slice(0, -1) : before;
+  const afterStripped = after.startsWith("\n") ? after.slice(1) : after;
+  return `${beforeStripped}${afterStripped}`;
+}
+
+/** describe() detail override for the shared block: distinguishes "join existing shared block" from a plain create/update, and "leave shared block in place, drop <tool>" from "remove shared block entirely". Falls back to the generic wording (`undefined`) whenever no shared block is present yet. */
+function describeSharedBlockDetail(tool: string, current: string | undefined, installAction: WiringFileAction, uninstallAction: WiringFileAction): string | undefined {
+  const found = current === undefined ? undefined : findSharedBlock(current);
+  if (found === undefined) {
+    return undefined;
+  }
+  if (installAction !== "noop") {
+    return `install would join existing shared block (adds ${tool} to tools=)`;
+  }
+  if (uninstallAction !== "noop") {
+    const remaining = found.tools.filter((t) => t !== tool);
+    return remaining.length > 0
+      ? `already installed; uninstall would leave shared block in place, drop ${tool} from tools= (${remaining.join(",")} remains)`
+      : "already installed; uninstall would remove shared block entirely";
+  }
+  return undefined;
+}
+
+function sharedMarkdownFile(path: string, tool: string, body: string): ManagedFile {
+  return {
+    path,
+    install: (current) => upsertSharedMarkedBlock(current ?? "", tool, body),
+    uninstall: (current) => (current === undefined ? undefined : stripSharedMarkedBlock(current, tool)),
+    describeDetail: (current, installAction, uninstallAction) => describeSharedBlockDetail(tool, current, installAction, uninstallAction),
   };
 }
 
@@ -569,24 +702,24 @@ decision, or correction, persist it:
 Use --subject/--value for anything that can be contradicted later
 (e.g. --subject package-manager --value pnpm).`;
 
-const CODEX_AGENTS_MD_BODY = `## Memory
-
-This machine has token-goat-mem installed (\`mem\` on PATH).
-
-- Before analysis, run \`mem recall --hint-format --root .\` and honor each
-  line's embedded trust caveat ("verify", "unverified", "contradicted, excluded").
-- When a review reaches a durable decision, persist it:
-  \`mem remember "<short fact>" --kind decision --scope project --root .\``;
-
-const COPILOT_CLI_AGENTS_MD_BODY = `## Memory
+/**
+ * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
+ * reference-counted shared block (currently `codex` and `copilot-cli`). Chosen from the more
+ * general/tool-agnostic of the two tools' pre-existing wordings (copilot-cli's -- it covers all
+ * four fact kinds and the --subject/--value guidance, matching CLAUDE_CODE_CLAUDE_MD_BODY, where
+ * codex's was narrower: "decision" kind only, framed around code review specifically), with the
+ * trigger clause reworded from "When the user states..." to "When a durable ... is reached" so it
+ * reads naturally for either tool's usage pattern.
+ */
+const AGENTS_MD_SHARED_BODY = `## Memory
 
 This machine has token-goat-mem installed (\`mem\` on PATH).
 
 - At the start of a task, run \`mem recall --hint-format --root .\` and treat
   each returned line's \`display\` string as a prior fact, honoring its
   embedded trust caveat ("verify", "unverified", "contradicted, excluded").
-- When the user states a durable preference, decision, or correction, persist
-  it: \`mem remember "<short fact>" --kind preference|decision|fact|correction
+- When a durable preference, decision, or correction is reached, persist it:
+  \`mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .\`. Use --subject/--value for anything that can be
   contradicted later.`;
 
@@ -620,12 +753,12 @@ export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user }) =
 
 export const codex: ToolWiring = makeToolWiring(({ root }) => {
   const agentsMdPath = join(root, "AGENTS.md");
-  return [markdownFile(agentsMdPath, "codex", CODEX_AGENTS_MD_BODY)];
+  return [sharedMarkdownFile(agentsMdPath, "codex", AGENTS_MD_SHARED_BODY)];
 });
 
 export const copilotCli: ToolWiring = makeToolWiring(({ root }) => {
   const agentsMdPath = join(root, "AGENTS.md");
-  return [markdownFile(agentsMdPath, "copilot-cli", COPILOT_CLI_AGENTS_MD_BODY)];
+  return [sharedMarkdownFile(agentsMdPath, "copilot-cli", AGENTS_MD_SHARED_BODY)];
 });
 
 export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir }) => {

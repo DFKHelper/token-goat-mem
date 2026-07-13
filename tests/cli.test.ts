@@ -735,6 +735,29 @@ describe("mem init/uninstall", () => {
     expect(both.stderr).toContain("cannot combine");
   });
 
+  it("init codex then init copilot-cli against the same AGENTS.md produces exactly one shared \"## Memory\" section tracking both tools; uninstalling codex leaves it intact with only copilot-cli remaining", async () => {
+    const codexResult = await runCli(["init", "codex", "--root", toolRoot]);
+    expect(codexResult.exitCode).toBe(0);
+    const copilotCliResult = await runCli(["init", "copilot-cli", "--root", toolRoot]);
+    expect(copilotCliResult.exitCode).toBe(0);
+
+    const agentsMdPath = join(toolRoot, "AGENTS.md");
+    const afterBothInit = readFileSync(agentsMdPath, "utf8");
+    expect(afterBothInit.split("## Memory").length - 1).toBe(1);
+    expect(afterBothInit).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli -->");
+    expect(afterBothInit).toContain("<!-- token-goat-mem:end -->");
+
+    const uninstallCodex = await runCli(["uninstall", "codex", "--root", toolRoot]);
+    expect(uninstallCodex.exitCode).toBe(0);
+
+    const afterUninstallCodex = readFileSync(agentsMdPath, "utf8");
+    expect(afterUninstallCodex.split("## Memory").length - 1).toBe(1);
+    expect(afterUninstallCodex).toContain("<!-- token-goat-mem:start tools=copilot-cli -->");
+    expect(afterUninstallCodex).not.toContain("tools=codex,copilot-cli");
+    expect(afterUninstallCodex).not.toContain("tools=codex ");
+    expect(afterUninstallCodex).toContain("mem recall --hint-format --root .");
+  });
+
   it("copilot-vscode init writes tasks.json, keybindings.json (under the isolated home), and AGENTS.md", async () => {
     const result = await runCli(["init", "copilot-vscode", "--root", toolRoot]);
     expect(result.exitCode).toBe(0);
