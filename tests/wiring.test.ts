@@ -155,28 +155,80 @@ describe("claudeCode wiring", () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────── codex / copilot-cli AGENTS.md coexistence ───────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────── codex / copilot-cli AGENTS.md shared block ───────────────────────────────────────────────────────────────────────────
 
-describe("codex and copilot-cli wiring", () => {
-  it("both write AGENTS.md instructions, using namespaced markers so installing one doesn't clobber the other", () => {
+describe("codex and copilot-cli wiring (shared, reference-counted AGENTS.md block)", () => {
+  it("codex install alone creates one shared block with tools=codex", () => {
+    codex.install({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex -->");
+    expect(agentsMd).toContain("<!-- token-goat-mem:end -->");
+    expect(agentsMd.split("## Memory").length - 1).toBe(1);
+  });
+
+  it("copilot-cli installing second joins the existing block: tools= gets both, sorted, and there is exactly one \"## Memory\" section", () => {
     codex.install({ root, homeDir: home });
     copilotCli.install({ root, homeDir: home });
 
     const agentsMd = read(join(root, "AGENTS.md"));
-    expect(agentsMd).toContain("<!-- token-goat-mem:codex:start -->");
-    expect(agentsMd).toContain("<!-- token-goat-mem:copilot-cli:start -->");
-    expect(agentsMd).toContain("mem remember \"<short fact>\" --kind decision --scope project --root .");
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli -->");
+    expect(agentsMd.split("## Memory").length - 1).toBe(1);
+    expect(agentsMd.split("<!-- token-goat-mem:start").length - 1).toBe(1);
+    expect(agentsMd).toContain("mem remember \"<short fact>\" --kind preference|decision|fact|correction");
     expect(agentsMd).toContain("At the start of a task, run");
   });
 
-  it("uninstalling codex leaves copilot-cli's block (and vice versa) untouched", () => {
+  it("installing in the opposite order (copilot-cli first, codex second) produces the same sorted tools= list", () => {
+    copilotCli.install({ root, homeDir: home });
+    codex.install({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex,copilot-cli -->");
+  });
+
+  it("the block body is untouched when a second tool joins: byte-identical body content before and after", () => {
+    codex.install({ root, homeDir: home });
+    const before = read(join(root, "AGENTS.md"));
+    const bodyBefore = before.split("\n").slice(1, -1).join("\n"); // strip the marker start line and trailing marker
+
+    copilotCli.install({ root, homeDir: home });
+    const after = read(join(root, "AGENTS.md"));
+    const bodyAfter = after.split("\n").slice(1, -1).join("\n");
+
+    expect(bodyAfter).toBe(bodyBefore);
+  });
+
+  it("re-running install for a tool already in the list is a no-op", () => {
+    codex.install({ root, homeDir: home });
+    copilotCli.install({ root, homeDir: home });
+    const first = read(join(root, "AGENTS.md"));
+
+    const second = codex.install({ root, homeDir: home });
+    expect(second.changes[0]?.action).toBe("noop");
+    expect(read(join(root, "AGENTS.md"))).toBe(first);
+  });
+
+  it("uninstalling codex leaves copilot-cli listed and the block (with its content) in place", () => {
     codex.install({ root, homeDir: home });
     copilotCli.install({ root, homeDir: home });
     codex.uninstall({ root, homeDir: home });
 
     const agentsMd = read(join(root, "AGENTS.md"));
-    expect(agentsMd).not.toContain("token-goat-mem:codex");
-    expect(agentsMd).toContain("token-goat-mem:copilot-cli");
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=copilot-cli -->");
+    expect(agentsMd).toContain("## Memory");
+    expect(agentsMd).toContain("mem recall --hint-format --root .");
+  });
+
+  it("uninstalling the last remaining tool removes the whole block", () => {
+    codex.install({ root, homeDir: home });
+    copilotCli.install({ root, homeDir: home });
+    codex.uninstall({ root, homeDir: home });
+    copilotCli.uninstall({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).not.toContain("token-goat-mem");
+    expect(agentsMd).not.toContain("## Memory");
   });
 
   it("codex install/uninstall round-trips a pre-existing AGENTS.md byte-for-byte", () => {
@@ -190,12 +242,36 @@ describe("codex and copilot-cli wiring", () => {
     expect(read(agentsMdPath)).toBe(original);
   });
 
-  it("re-running install upgrades the block in place instead of duplicating it", () => {
+  it("re-running install upgrades/joins the block in place instead of duplicating it", () => {
     codex.install({ root, homeDir: home });
     const first = read(join(root, "AGENTS.md"));
     const second = codex.install({ root, homeDir: home });
     expect(second.changes[0]?.action).toBe("noop");
     expect(read(join(root, "AGENTS.md"))).toBe(first);
+  });
+
+  describe("describe() (dry-run) wording for the shared block", () => {
+    it("installing codex when copilot-cli's block already exists describes it as joining, not creating", () => {
+      copilotCli.install({ root, homeDir: home });
+      const plan = codex.describe({ root, homeDir: home });
+      expect(plan.entries[0]?.installAction).toBe("update");
+      expect(plan.entries[0]?.detail).toContain("join existing shared block (adds codex to tools=)");
+    });
+
+    it("uninstalling one of several tools describes leaving the block in place and dropping just that tool", () => {
+      codex.install({ root, homeDir: home });
+      copilotCli.install({ root, homeDir: home });
+      const plan = codex.describe({ root, homeDir: home });
+      expect(plan.entries[0]?.uninstallAction).toBe("remove");
+      expect(plan.entries[0]?.detail).toContain("leave shared block in place, drop codex from tools=");
+    });
+
+    it("uninstalling the sole remaining tool describes removing the shared block entirely", () => {
+      codex.install({ root, homeDir: home });
+      const plan = codex.describe({ root, homeDir: home });
+      expect(plan.entries[0]?.uninstallAction).toBe("remove");
+      expect(plan.entries[0]?.detail).toContain("remove shared block entirely");
+    });
   });
 });
 
