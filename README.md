@@ -12,7 +12,14 @@ Mem stores them. Locally, in your own SQLite database. Each fact carries a trust
 
 Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). Optional one-way seam with **token-goat** for embedding memory hints into the token-reduction manifest.
 
-**Install from source (not yet published to npm):**
+**Install:**
+
+```
+npm install -g token-goat-mem
+mem --help
+```
+
+**Or from source:**
 
 ```
 git clone https://github.com/DFKHelper/token-goat-mem.git
