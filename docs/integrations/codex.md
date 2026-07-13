@@ -42,20 +42,21 @@ This machine has token-goat-mem installed (`mem` on PATH).
 
 ```bash
 #!/bin/bash
-# Load preferences before analysis
-PREFS=$(mem recall --kind preference --hint-format --root .)
+# Load preferences before analysis (--hint-format ignores --kind/--scope filters; it always
+# returns all in-scope kinds under its own per-kind caps -- filter the output yourself if needed)
+PREFS=$(mem recall --hint-format --root .)
 echo "Prefs in scope: $PREFS"
 
 # Run your analysis
 # ...
 
-# Capture the finding (anchor keeps it honest: contradicted if the file loses its pattern)
+# Capture the finding (anchor keeps it honest: contradicted if the file disappears)
 mem remember "Found N+1 query pattern; prefer DataLoader wrapper" \
   --kind correction \
   --subject query-patterns \
   --value dataloader \
   --scope project --root . \
-  --anchor 'file-contains src/queries.ts DataLoader'
+  --anchor 'file-exists src/queries.ts'
 ```
 
 ## Codex-specific patterns
@@ -88,12 +89,13 @@ Over time, `mem list --kind decision` accumulates a log of team design decisions
 `mem recall --hint-format` returns self-annotated display strings:
 
 ```
-TGMEM/1
-pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager — mem show 7ac43f22-..."
-pref  fresh=unverified  id=21a1330e-...  display="stored pref (unverified, 2026-07): switched to bun — verify; mem show 21a1330e-..."
+TGMEM/2
+pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager"
+pref  fresh=unverified  id=21a1330e-...  display="stored pref (unverified, 2026-07): switched to bun"
+footer  mem show <id> for detail; mem review to resolve contested/pending
 ```
 
-The caveat lives inside `display` — "verify", "unverified", "contradicted, excluded" — so Codex treats low-trust facts accordingly without parsing anything. Anchor-contradicted facts are excluded from ground truth and routed to `mem review`.
+The caveat lives inside `display` — "verify", "unverified", "contradicted, excluded" — so Codex treats low-trust facts accordingly without parsing anything. The shared `footer` line (present whenever at least one fact line was emitted) points to the same follow-up commands instead of repeating a CTA on every line. Anchor-contradicted facts are excluded from ground truth and routed to `mem review`.
 
 ## Fail-open guarantee
 

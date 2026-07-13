@@ -16,10 +16,11 @@ mem remember "auth service owns all database migrations" \
   --subject db-migrations \
   --value auth-service \
   --scope project --root . \
-  --anchor 'file-contains src/auth/migrations.ts migration'
+  --anchor 'file-exists src/auth/migrations.ts'
 
-# Recall facts before starting a session
-mem recall --hint-format --scope project --root .
+# Recall facts before starting a session (--hint-format ignores --kind/--scope filters;
+# it always returns every in-scope kind under its own per-kind caps)
+mem recall --hint-format --root .
 ```
 
 No special setup required.
@@ -36,7 +37,7 @@ Add Mem commands to `.vscode/tasks.json` for quick access (**Terminal > Run Task
       "label": "Mem: Recall project facts",
       "type": "shell",
       "command": "mem",
-      "args": ["recall", "--hint-format", "--scope", "project", "--root", "${workspaceFolder}"],
+      "args": ["recall", "--hint-format", "--root", "${workspaceFolder}"],
       "presentation": { "reveal": "always" }
     },
     {
@@ -91,9 +92,10 @@ Add to `keybindings.json` (Command Palette > "Preferences: Open Keyboard Shortcu
 Run `mem recall --hint-format` in the integrated terminal, then reference the output in Copilot Chat (select it, or use Copilot's terminal-context affordances):
 
 ```
-$ mem recall --hint-format --scope project --root .
-TGMEM/1
-pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager — mem show 7ac43f22-..."
+$ mem recall --hint-format --root .
+TGMEM/2
+pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager"
+footer  mem show <id> for detail; mem review to resolve contested/pending
 ```
 
 Then in chat:
