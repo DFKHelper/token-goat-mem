@@ -10,14 +10,18 @@ Mem stores them. Locally, in your own SQLite database. Each fact carries a trust
 
 Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). Optional one-way seam with **token-goat** for embedding memory hints into the token-reduction manifest.
 
-**Install in one command:**
+**Install from source (not yet published to npm):**
 
 ```
-npm install -g token-goat-mem
+git clone https://github.com/DFKHelper/token-goat-mem.git
+cd token-goat-mem
+npm install
+npm run build
+npm link
 mem --help
 ```
 
-[![npm](https://img.shields.io/npm/v/token-goat-mem.svg)](https://www.npmjs.com/package/token-goat-mem) [![PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)](LICENSE) ![requires Node.js](https://img.shields.io/badge/requires-Node.js%20%3E%3D18-339933?logo=node.js&logoColor=white)
+[![PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)](LICENSE) ![requires Node.js](https://img.shields.io/badge/requires-Node.js%20%3E%3D18-339933?logo=node.js&logoColor=white)
 
 > Built and maintained by [DFK Helper](https://dfkhelper.com). Free under PolyForm Noncommercial. If it saves your tokens, or your sanity, drop a star at the top of this page.
 
@@ -61,14 +65,7 @@ The defining engineering problem is not *retrieval* — it is **correctness and 
 
 **Requirements:** Node.js 18 or later
 
-```
-npm install -g token-goat-mem
-mem --help
-```
-
-That's it. No daemon, no tray icon, no setup wizard. Mem is a short-lived CLI process.
-
-### From source
+Not yet published to npm — install from source:
 
 ```
 git clone https://github.com/DFKHelper/token-goat-mem.git
@@ -77,6 +74,8 @@ npm install
 npm run build
 npm link
 ```
+
+No daemon, no tray icon, no setup wizard. Mem is a short-lived CLI process.
 
 ### Verify the install
 
@@ -105,6 +104,7 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | `mem edit <id>` | Change a fact's `--text`, `--subject`/`--value` (paired), `--anchor`, or `--scope`. Bumps epoch. |
 | `mem pin <id>` | Exempt a fact from time-decay (still subject to contradiction/anchor suppression). |
 | `mem epoch` | Print the current write epoch (monotonic, bumped on every write). `--gc` runs the retention pass first: persists contradiction resolutions, prunes superseded facts/sources/audit rows, applies preference decay. |
+| `mem doctor` | Read-only environment/DB health check: db path, WAL journal mode, foreign-key setting, schema tables, current epoch, fact counts by status, source/audit-log row counts. No options. |
 
 Every command supports `--help` for the authoritative flag list.
 
@@ -162,7 +162,8 @@ Anchors are pure, read-only filesystem/git predicates — no shell-out, no netwo
 | `file-newer-than <a> <b>` | `a` is the currently-active file relative to `b` (e.g. the newest lockfile is pnpm's) |
 | `file-contains <path> <substring>` | the file contains the substring (bounded read) |
 | `file-not-contains <path> <substring>` | the file does not contain the substring |
-| `glob-exists <pattern>` | some file matches the glob (`*`, `?` segments) |
+| `newest-of <expected> <candidate...>` | among `expected` plus every listed `candidate`, `expected` is the sole existing file with the greatest mtime (e.g. "the newest lockfile is pnpm-lock.yaml", not just "pnpm-lock.yaml exists") |
+| `glob-exists <pattern>` | some file matches the glob (`*`, `?`, and a recursive `**` segment) |
 | `git-branch-is <branch>` | the repo's current branch matches |
 | `git-tracked <path>` | the path is tracked in the git index |
 
