@@ -1,5 +1,7 @@
 # Token-Goat Mem
 
+![Token-Goat Mem](assets/cover.png)
+
 **Durable memory for daily AI coding** · **1-second recall** · **Trustworthy confidence levels** · **Anchor-based freshness** · **Optional token-goat seam**
 
 **Local-first, defense-in-depth memory that remembers what your AI coding agent keeps forgetting between sessions.**
