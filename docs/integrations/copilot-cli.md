@@ -60,7 +60,10 @@ This machine has token-goat-mem installed (`mem` on PATH).
 - At the start of a task, run `mem recall --hint-format --root .` and treat
   each returned line's `display` string as a prior fact, honoring its
   embedded trust caveat ("verify", "unverified", "contradicted, excluded").
-- When a durable preference, decision, or correction is reached, persist it:
+- Do not wait to be asked to run `mem remember` — when the user says things
+  like "remember that...", "always...", "from now on...", "never...",
+  "don't...", or otherwise reaches a durable preference, decision, or
+  correction, persist it yourself, right then:
   `mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .`. Use --subject/--value for anything that can be
   contradicted later.
