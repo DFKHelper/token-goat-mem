@@ -830,6 +830,54 @@ describe("default limits on mem list / mem recall (never hiding pending/conteste
     expect(recallResult.exitCode).toBe(1);
     expect(recallResult.stderr).toContain("--limit must be a positive integer");
   });
+
+  it("rejects non-numeric values for --age-days and --since-epoch instead of silently discarding NaN", async () => {
+    seedManyActiveFacts(5);
+
+    // Invalid --age-days
+    const ageDaysInvalid = await runCli(["recall", "--age-days", "abc"]);
+    expect(ageDaysInvalid.exitCode).toBe(1);
+    expect(ageDaysInvalid.stderr).toContain("--age-days must be a positive number");
+
+    // Invalid --since-epoch
+    const sinceEpochInvalid = await runCli(["recall", "--since-epoch", "abc"]);
+    expect(sinceEpochInvalid.exitCode).toBe(1);
+    expect(sinceEpochInvalid.stderr).toContain("--since-epoch must be a non-negative integer");
+
+    // Invalid --since-epoch in review
+    const reviewSinceEpochInvalid = await runCli(["review", "--since-epoch", "xyz"]);
+    expect(reviewSinceEpochInvalid.exitCode).toBe(1);
+    expect(reviewSinceEpochInvalid.stderr).toContain("--since-epoch must be a non-negative integer");
+
+    // Negative --age-days
+    const ageDaysNegative = await runCli(["recall", "--age-days", "-1"]);
+    expect(ageDaysNegative.exitCode).toBe(1);
+    expect(ageDaysNegative.stderr).toContain("--age-days must be a positive number");
+
+    // Negative --since-epoch
+    const sinceEpochNegative = await runCli(["recall", "--since-epoch", "-1"]);
+    expect(sinceEpochNegative.exitCode).toBe(1);
+    expect(sinceEpochNegative.stderr).toContain("--since-epoch must be a non-negative integer");
+
+    // Zero --age-days (not valid for "within N days")
+    const ageDaysZero = await runCli(["recall", "--age-days", "0"]);
+    expect(ageDaysZero.exitCode).toBe(1);
+    expect(ageDaysZero.stderr).toContain("--age-days must be a positive number");
+
+    // Zero --since-epoch is valid (can filter from epoch 0)
+    const sinceEpochZero = await runCli(["recall", "--since-epoch", "0"]);
+    expect(sinceEpochZero.exitCode).toBe(0);
+
+    // Positive values should work
+    const ageDaysValid = await runCli(["recall", "--age-days", "30"]);
+    expect(ageDaysValid.exitCode).toBe(0);
+
+    const sinceEpochValid = await runCli(["recall", "--since-epoch", "100"]);
+    expect(sinceEpochValid.exitCode).toBe(0);
+
+    const reviewSinceEpochValid = await runCli(["review", "--since-epoch", "50"]);
+    expect(reviewSinceEpochValid.exitCode).toBe(0);
+  });
 });
 // ─────────────────────────────────────────────────────────────────────────── import --from-md ───────────────────────────────────────────────────────────────────────────
 
@@ -912,6 +960,25 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
 
     const shown = await runCli(["show", id]);
     expect(shown.stdout).toContain("status: active");
+  });
+
+  it("exits with code 1 (user error) when the --from-md file does not exist", async () => {
+    const result = await runCli(["import", "--from-md", "/nonexistent/path/CLAUDE.md"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("mem: ");
+    expect(result.stderr).toContain("file not found");
+  });
+
+  it("exits with code 1 (user error) when the --from-md path is a directory", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-dir-"));
+    try {
+      const result = await runCli(["import", "--from-md", dir]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("mem: ");
+      expect(result.stderr).toContain("is a directory");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("requires exactly one of --from-md or --from-json", async () => {
@@ -1258,7 +1325,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
           id: "11111111-1111-1111-1111-111111111111",
           text: "deploy key",
           kind: "fact",
-          subject: null,
+          subject: "deploy-key",
           value: "AKIAABCDEFGHIJKLMNOP",
           scope: "global",
           scopeRoot: null,
@@ -1284,6 +1351,25 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
 
       const listed = await runCli(["list"]);
       expect(listed.stdout.trim()).toBe("no facts stored");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exits with code 1 (user error) when the --from-json file does not exist", async () => {
+    const result = await runCli(["import", "--from-json", "/nonexistent/path/export.json"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("mem: ");
+    expect(result.stderr).toContain("file not found");
+  });
+
+  it("exits with code 1 (user error) when the --from-json path is a directory", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-dir-"));
+    try {
+      const result = await runCli(["import", "--from-json", dir]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("mem: ");
+      expect(result.stderr).toContain("is a directory");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

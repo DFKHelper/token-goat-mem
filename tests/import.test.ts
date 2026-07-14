@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { openStorage } from "../src/storage.js";
-import { extractMarkdownBullets, importFromMarkdown, planImportFromMarkdown } from "../src/import.js";
+import { extractMarkdownBullets, importFromMarkdown, MarkdownImportError, planImportFromMarkdown } from "../src/import.js";
 
 // ─────────────────────────────────────────────────────────────────────────── extractMarkdownBullets (pure, no disk) ───────────────────────────────────────────────────────────────────────────
 
@@ -48,6 +48,38 @@ describe("extractMarkdownBullets", () => {
     const bullets = extractMarkdownBullets(["## File Structure", "- keep configs in the root directory"].join("\n"));
     expect(bullets.map((b) => b.text)).toEqual(["keep configs in the root directory"]);
   });
+
+  it("does not let a stray `~~~` line close a ``` fence (backtick and tilde fences don't cross-close)", () => {
+    const bullets = extractMarkdownBullets(
+      [
+        "- real bullet before",
+        "```",
+        "- fake bullet inside backtick fence",
+        "~~~",
+        "- still inside the backtick fence even after the stray tilde line",
+        "```",
+        "- real bullet after",
+      ].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["real bullet before", "real bullet after"]);
+  });
+
+  it("still tracks a genuine tilde-fenced block correctly alongside an unrelated backtick fence", () => {
+    const bullets = extractMarkdownBullets(
+      [
+        "- real bullet before",
+        "~~~",
+        "- fake bullet inside tilde fence",
+        "~~~",
+        "- real bullet between fences",
+        "```",
+        "- fake bullet inside backtick fence",
+        "```",
+        "- real bullet after",
+      ].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["real bullet before", "real bullet between fences", "real bullet after"]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── planImportFromMarkdown (dry-run, DB-free) ───────────────────────────────────────────────────────────────────────────
@@ -66,6 +98,32 @@ describe("planImportFromMarkdown", () => {
         "Prefer tabs over spaces.",
       ]);
       expect(result.candidates.every((c) => c.sourceRef.startsWith(resolve(path)))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws MarkdownImportError with clear message when the file does not exist", () => {
+    const path = "/nonexistent/path/that/does/not/exist/CLAUDE.md";
+    expect(() => planImportFromMarkdown({ path })).toThrow(MarkdownImportError);
+    try {
+      planImportFromMarkdown({ path });
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarkdownImportError);
+      expect((error as Error).message).toContain("file not found");
+      expect((error as Error).message).toContain("nonexistent");
+      expect((error as Error).message).toContain("CLAUDE.md");
+    }
+  });
+
+  it("throws MarkdownImportError with clear message when the path is a directory", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-plan-"));
+    try {
+      expect(() => planImportFromMarkdown({ path: dir })).toThrow(MarkdownImportError);
+      planImportFromMarkdown({ path: dir });
+    } catch (error) {
+      expect(error).toBeInstanceOf(MarkdownImportError);
+      expect((error as Error).message).toContain("is a directory");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
