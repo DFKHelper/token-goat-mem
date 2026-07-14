@@ -139,6 +139,50 @@ describe("mem CLI happy path", () => {
     expect(activeList.stdout).not.toContain(id);
   });
 
+  it("mem edit rejects a malformed anchor the same way mem remember does", async () => {
+    const created = await runCli(["remember", "uses pnpm not npm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--anchor", "run-shell rm"]);
+    expect(edited.exitCode).toBe(1);
+    expect(edited.stderr).toContain("unknown predicate");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("anchor: (none)");
+  });
+
+  it("mem edit rejects an over-length text the same way mem remember does", async () => {
+    const created = await runCli(["remember", "short fact", "--kind", "fact"]);
+    const id = extractRememberedId(created);
+
+    const tooLong = "x".repeat(501);
+    const edited = await runCli(["edit", id, "--text", tooLong]);
+    expect(edited.exitCode).toBe(1);
+    expect(edited.stderr).toContain("exceeds 500 characters");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("text: short fact");
+  });
+
+  it("a secret blocked by mem edit writes an edit_blocked_secret audit_log entry, same as capture", async () => {
+    const created = await runCli(["remember", "short fact", "--kind", "fact"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--text", "deploy key is AKIAABCDEFGHIJKLMNOP"]);
+    expect(edited.exitCode).toBe(1);
+    expect(edited.stderr).toContain("secret");
+
+    const db = openStorage(resolveDbPath());
+    const events = (
+      db.prepare("SELECT event FROM audit_log WHERE fact_id = ?").all(id) as { event: string }[]
+    ).map((row) => row.event);
+    db.close();
+    expect(events).toContain("edit_blocked_secret");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("text: short fact");
+  });
+
   it("reports the write epoch and bumps it on every write", async () => {
     const initial = await runCli(["epoch"]);
     expect(initial.exitCode).toBe(0);

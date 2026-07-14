@@ -305,6 +305,43 @@ function validateAnchorSyntax(anchor: string): void {
   }
 }
 
+/**
+ * Applies the same field-level guards `mem remember`/`captureExplicit` enforce (length limits,
+ * emptiness, anchor syntax) to a `mem edit` patch -- editing is a distinct write path from capture
+ * and was previously exempt from all of this, letting an edit store a fact capture would have
+ * rejected (an over-length text, an empty text, or a malformed anchor that permanently evaluates
+ * "unverified"). Only validates fields actually present in the patch; a `null` clears the field and
+ * is not validated (clearing is always safe).
+ */
+export function validateFactEditOrThrow(patch: {
+  readonly text?: string;
+  readonly subject?: string | null;
+  readonly value?: string | null;
+  readonly anchor?: string | null;
+}): void {
+  if (patch.text !== undefined) {
+    const text = patch.text.trim();
+    if (text.length === 0) {
+      throw new CaptureValidationError("fact text must not be empty");
+    }
+    if (text.length > MAX_TEXT_LENGTH) {
+      throw new CaptureValidationError(
+        `fact text exceeds ${MAX_TEXT_LENGTH} characters -- store a short extracted fact, not raw ` +
+          `content (design principle 7a: "only short extracted facts are stored, never raw dumps")`
+      );
+    }
+  }
+  if (typeof patch.subject === "string" && patch.subject.trim().length > MAX_SUBJECT_LENGTH) {
+    throw new CaptureValidationError(`subject exceeds ${MAX_SUBJECT_LENGTH} characters`);
+  }
+  if (typeof patch.value === "string" && patch.value.trim().length > MAX_VALUE_LENGTH) {
+    throw new CaptureValidationError(`value exceeds ${MAX_VALUE_LENGTH} characters`);
+  }
+  if (typeof patch.anchor === "string" && patch.anchor.trim().length > 0) {
+    validateAnchorSyntax(patch.anchor.trim());
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────── Capture pipeline ───────────────────────────────────────────────────────────────────────────
 
 function clamp(value: number, min: number, max: number): number {

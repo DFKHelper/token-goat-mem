@@ -46,6 +46,7 @@ import {
   loadAllowlist,
   screenForSecrets,
   SecretDetectedError,
+  validateFactEditOrThrow,
   type CaptureExplicitInput,
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
@@ -830,6 +831,7 @@ export function buildProgram(): Command {
         if (Object.keys(patch).length === 0) {
           throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");
         }
+        validateFactEditOrThrow(patch);
 
         const updated = await withDb((db) => {
           const existing = getFactById(db, id);
@@ -837,8 +839,16 @@ export function buildProgram(): Command {
             throw new UsageError(`no such fact: ${id}`);
           }
           const allowlist = loadAllowlist(root);
-          const matches = screenForSecrets({ text: patch.text, subject: patch.subject, value: patch.value, anchor: patch.anchor }, allowlist);
+          const matches = screenForSecrets(
+            { text: patch.text, subject: patch.subject, value: patch.value, anchor: patch.anchor },
+            allowlist
+          );
           if (matches.length > 0) {
+            insertAuditLog(db, {
+              event: "edit_blocked_secret",
+              factId: id,
+              detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
+            });
             throw new SecretDetectedError(matches);
           }
           const fact = updateFact(db, id, patch);
