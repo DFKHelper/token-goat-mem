@@ -441,6 +441,23 @@ describe("importFromJson", () => {
     expect(count).toBe(1);
   });
 
+  it("an imported fact with a Date.parse-lenient but non-ISO-8601 captured_at (e.g. '2026/07/14') is skipped with a per-item error", () => {
+    const lenientDate = { ...VALID_FACT, id: "12121212-1212-1212-1212-121212121212", captured_at: "2026/07/14" };
+    writeFileSync(jsonPath, envelope([VALID_FACT, lenientDate]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    if (result.outcomes[1]?.status === "skipped_error") {
+      expect(result.outcomes[1].reason).toContain("invalid ISO-8601");
+      expect(result.outcomes[1].reason).toContain("captured_at");
+    }
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
   it("an imported fact with a valid ISO-8601 captured_at still imports successfully", () => {
     const validIsoDates = [
       { ...VALID_FACT, id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", captured_at: "2026-01-15T12:34:56.789Z" },

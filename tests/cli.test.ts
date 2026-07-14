@@ -612,6 +612,20 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     expect(withStable.exitCode).toBe(0);
     expect(withStable.stdout).toMatch(/^TGMEM\/2\n/);
   });
+
+  it("--context-files without --hint-format throws an error", async () => {
+    // --context-files requires --hint-format to function
+    const withoutHintFormat = await runCli(["recall", "--context-files", "file.ts"]);
+    expect(withoutHintFormat.exitCode).toBe(1);
+    expect(withoutHintFormat.stderr).toContain("--context-files requires --hint-format");
+  });
+
+  it("--context-files with --hint-format and --root still works", async () => {
+    // This should not fail; we're testing that --context-files works correctly with --hint-format
+    const withContextFiles = await runCli(["recall", "--hint-format", "--root", home, "--context-files", "src/cli.ts"]);
+    expect(withContextFiles.exitCode).toBe(0);
+    expect(withContextFiles.stdout).toMatch(/^TGMEM\/2\n/);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── recall --stable ───────────────────────────────────────────────────────────────────────────

@@ -380,6 +380,56 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("file-contains linked-dir/config.json pnpm", root)).toBe("contradicted");
       expect(evaluateAnchor("file-exists linked-dir/config.json", root)).toBe("contradicted");
     });
+
+    it("file-newer-than contradicts (does not follow) when the first path is a symlink to a file outside root", () => {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "outside content");
+      symlinkSync(target, join(root, "link.txt"), "file");
+      writeFileSync(join(root, "b.txt"), "b");
+      expect(evaluateAnchor("file-newer-than link.txt b.txt", root)).toBe("contradicted");
+    });
+
+    it("file-newer-than contradicts (does not follow) when the second path is a symlink to a file outside root", () => {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "outside content");
+      symlinkSync(target, join(root, "link.txt"), "file");
+      writeFileSync(join(root, "a.txt"), "a");
+      expect(evaluateAnchor("file-newer-than a.txt link.txt", root)).toBe("contradicted");
+    });
+
+    it("file-newer-than refuses a symlinked intermediate directory in either path", () => {
+      const targetDir = join(outside, "nested");
+      mkdirSync(targetDir, { recursive: true });
+      writeFileSync(join(targetDir, "config.json"), "config");
+      symlinkSync(targetDir, join(root, "linked-dir"), "junction");
+      writeFileSync(join(root, "b.txt"), "b");
+      expect(evaluateAnchor("file-newer-than linked-dir/config.json b.txt", root)).toBe("contradicted");
+    });
+
+    it("newest-of contradicts (does not follow) when the expected candidate is a symlink to a file outside root", () => {
+      const target = join(outside, "pnpm-lock.yaml");
+      writeFileSync(target, "outside content");
+      symlinkSync(target, join(root, "pnpm-lock.yaml"), "file");
+      writeFileSync(join(root, "package-lock.json"), "inside content");
+      expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("contradicted");
+    });
+
+    it("newest-of contradicts (does not follow) when a non-expected candidate is a symlink to a file outside root", () => {
+      const target = join(outside, "package-lock.json");
+      writeFileSync(target, "outside content");
+      symlinkSync(target, join(root, "package-lock.json"), "file");
+      writeFileSync(join(root, "pnpm-lock.yaml"), "inside content");
+      expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("contradicted");
+    });
+
+    it("newest-of refuses a symlinked intermediate directory among candidates", () => {
+      const targetDir = join(outside, "nested");
+      mkdirSync(targetDir, { recursive: true });
+      writeFileSync(join(targetDir, "lock.yaml"), "outside content");
+      symlinkSync(targetDir, join(root, "linked-dir"), "junction");
+      writeFileSync(join(root, "package-lock.json"), "inside content");
+      expect(evaluateAnchor("newest-of linked-dir/lock.yaml package-lock.json", root)).toBe("contradicted");
+    });
   });
 
   describe("memoization", () => {

@@ -130,14 +130,15 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
     if (capturedAtStr.length === 0 || isNaN(Date.parse(capturedAtStr))) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}`);
     }
-    // Stricter validation: ensure the parsed date round-trips back to a valid ISO-8601 string.
-    // This catches JavaScript's lenient Date.parse behavior (e.g., "2023-13-45" parses but is not
-    // a real ISO-8601 date). The round-trip ensures captured_at remains lexicographically
-    // comparable for chronological ordering (design principle: contradiction-resolution, GC cutoff).
-    const parsed = new Date(capturedAtStr);
-    const roundTrip = parsed.toISOString();
-    if (!roundTrip) {
-      return fail(`facts[${index}] has an invalid ISO-8601 "captured_at": round-trip parse failed`);
+    // Stricter validation: ensure the string round-trips back to the exact canonical ISO-8601
+    // form produced by `new Date().toISOString()` (the only form this codebase ever writes for
+    // captured_at — see capture.ts/storage.ts). This catches JavaScript's lenient Date.parse
+    // behavior (e.g., "2026/07/14" or "July 14 2026" parse but are not ISO-8601) while still
+    // guaranteeing captured_at remains lexicographically comparable for chronological ordering
+    // (design principle: contradiction-resolution, GC cutoff).
+    const roundTrip = new Date(capturedAtStr).toISOString();
+    if (roundTrip !== capturedAtStr) {
+      return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}: expected canonical form ${JSON.stringify(roundTrip)}`);
     }
   }
 

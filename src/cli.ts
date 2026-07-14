@@ -853,6 +853,10 @@ export function buildProgram(): Command {
           throw new UsageError("--since-epoch must be a non-negative integer");
         }
 
+        if (options.contextFiles !== undefined && options.hintFormat !== true) {
+          throw new UsageError("--context-files requires --hint-format");
+        }
+
         if (options.hintFormat === true) {
           const incompatibleFlags = [];
           if (options.kind !== undefined) {
