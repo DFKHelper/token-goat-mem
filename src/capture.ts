@@ -262,11 +262,17 @@ export function loadAllowlist(root: string): string[] {
 
 // ─────────────────────────────────────────────────────────────────────────── Anchor syntax ───────────────────────────────────────────────────────────────────────────
 
-const ANCHOR_ARITY: Readonly<Record<string, number>> = {
+const ANCHOR_ARITY: Readonly<Record<string, number | { readonly min: number }>> = {
   "file-newer-than": 2,
   "file-exists": 1,
   "file-absent": 1,
+  "file-contains": 2,
+  "file-not-contains": 2,
+  "newest-of": { min: 2 },
+  "glob-exists": 1,
+  "git-branch-is": 1,
   "git-tracked": 1,
+  "package-version": 2,
 };
 
 const DISALLOWED_ANCHOR_ARG_LITERALS = ";&|`$<>";
@@ -295,8 +301,15 @@ function validateAnchorSyntax(anchor: string): void {
       `unknown predicate "${predicate}" (expected one of ${Object.keys(ANCHOR_ARITY).join(", ")})`
     );
   }
-  if (args.length !== arity) {
-    throw new InvalidAnchorError(anchor, `"${predicate}" expects ${arity} argument(s), got ${args.length}`);
+  // `file-contains`/`file-not-contains`'s substring argument may legitimately contain whitespace
+  // (anchors.ts's evaluator parses it via a raw-regex pre-pass, not plain whitespace-splitting) --
+  // this whitespace-split syntax check only accepts single-token substrings for those two
+  // predicates. A multi-word substring anchor must be written via `mem import --from-json`, which
+  // bypasses this syntax gate entirely.
+  const arityOk = typeof arity === "number" ? args.length === arity : args.length >= arity.min;
+  if (!arityOk) {
+    const expected = typeof arity === "number" ? `${arity}` : `at least ${arity.min}`;
+    throw new InvalidAnchorError(anchor, `"${predicate}" expects ${expected} argument(s), got ${args.length}`);
   }
   for (const arg of args) {
     if (hasDisallowedAnchorChar(arg)) {

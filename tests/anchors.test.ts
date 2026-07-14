@@ -220,6 +220,58 @@ describe("evaluateAnchor", () => {
     });
   });
 
+  describe("package-version (declared-manifest check only)", () => {
+    it("affirms on an exact declared-version match", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: "18.2.0" } }));
+      expect(evaluateAnchor("package-version package.json react@18.2.0", root)).toBe("affirmed");
+    });
+
+    it("affirms a major-version-prefix match against a caret range", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: "^18.2.0" } }));
+      expect(evaluateAnchor("package-version package.json react@18", root)).toBe("affirmed");
+    });
+
+    it("checks devDependencies when the name is not in dependencies", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ devDependencies: { typescript: "~5.4.0" } }));
+      expect(evaluateAnchor("package-version package.json typescript@5", root)).toBe("affirmed");
+    });
+
+    it("contradicts a confidently-resolvable mismatch", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: "^17.0.2" } }));
+      expect(evaluateAnchor("package-version package.json react@18", root)).toBe("contradicted");
+    });
+
+    it("is unverified when the dependency key is missing entirely", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { vue: "3.4.0" } }));
+      expect(evaluateAnchor("package-version package.json react@18", root)).toBe("unverified");
+    });
+
+    it("is unverified on malformed JSON", () => {
+      writeFileSync(join(root, "package.json"), "{ not valid json");
+      expect(evaluateAnchor("package-version package.json react@18", root)).toBe("unverified");
+    });
+
+    it("is unverified when the path is outside root", () => {
+      const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
+      try {
+        writeFileSync(join(outside, "package.json"), JSON.stringify({ dependencies: { react: "18.2.0" } }));
+        expect(evaluateAnchor(`package-version ${join(outside, "package.json")} react@18.2.0`, root)).toBe("unverified");
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("is unverified when the comparison can't confidently resolve (non-numeric expected, complex range)", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: ">=17 <19" } }));
+      expect(evaluateAnchor("package-version package.json react@18", root)).toBe("unverified");
+    });
+
+    it("is unverified for wrong arg count or a malformed name@version token", () => {
+      expect(evaluateAnchor("package-version package.json", root)).toBe("unverified");
+      expect(evaluateAnchor("package-version package.json react", root)).toBe("unverified");
+    });
+  });
+
   describe("path traversal is rejected as unverified, not followed", () => {
     it("rejects a relative path that escapes root", () => {
       expect(evaluateAnchor("file-exists ../outside.txt", root)).toBe("unverified");

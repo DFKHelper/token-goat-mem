@@ -110,6 +110,39 @@ describe("captureExplicit (happy path)", () => {
     ).toThrow(InvalidAnchorError);
   });
 
+  it("accepts every predicate anchors.ts documents, not just the four ANCHOR_ARITY originally listed", () => {
+    // Regression test: ANCHOR_ARITY (capture.ts's syntax gate for mem remember/mem edit --anchor) had
+    // drifted out of sync with anchors.ts's actual predicate set, silently rejecting six of the ten
+    // documented predicates -- including package-version, the predicate this session just added -- as
+    // "unknown predicate" even though anchors.ts fully evaluates them. Each of these must validate.
+    const wellFormedAnchors = [
+      "file-contains README.md hello",
+      "file-not-contains README.md nope",
+      "newest-of pnpm-lock.yaml package-lock.json yarn.lock",
+      "glob-exists src/**/*.ts",
+      "git-branch-is master",
+      "package-version package.json better-sqlite3@11",
+    ];
+    for (const anchor of wellFormedAnchors) {
+      const { fact } = captureExplicit(db, { text: `anchored: ${anchor}`, kind: "fact", anchor, root });
+      expect(fact.anchor).toBe(anchor);
+    }
+
+    // newest-of's variable arity: the minimum (expected + one candidate) must still validate.
+    const { fact: minimalNewestOf } = captureExplicit(db, {
+      text: "minimal newest-of",
+      kind: "fact",
+      anchor: "newest-of pnpm-lock.yaml package-lock.json",
+      root,
+    });
+    expect(minimalNewestOf.anchor).toBe("newest-of pnpm-lock.yaml package-lock.json");
+
+    // ...but still enforces its own arity floor (at least 2 args: expected + >=1 candidate).
+    expect(() =>
+      captureExplicit(db, { text: "bad newest-of arity", kind: "fact", anchor: "newest-of pnpm-lock.yaml", root })
+    ).toThrow(InvalidAnchorError);
+  });
+
   it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long nested-path anchor argument", () => {
     // A perfectly ordinary file-exists anchor over a deeply nested path has no secret in it, but its
     // path argument alone is a >=32-char mixed-case/slash/dash token whose entropy clears the generic

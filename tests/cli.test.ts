@@ -764,6 +764,130 @@ describe("mem export", () => {
     expect(byId.has(pendingId)).toBe(true);
     expect(byId.get(pendingId)?.status).toBe("pending");
   });
+
+  it("--status filters which facts are exported", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const activeId = extractRememberedId(remembered);
+
+    const suggested = await runCli(["suggest", "maybe prefers dark mode", "--kind", "preference"]);
+    const pendingId = /suggested \S+ fact (\S+) \(pending\)/u.exec(suggested.stdout)?.[1] as string;
+
+    const exported = await runCli(["export", "--status", "active"]);
+    expect(exported.exitCode).toBe(0);
+
+    const envelope = JSON.parse(exported.stdout) as ExportEnvelope;
+    const byId = new Map(envelope.facts.map((fact) => [fact.id, fact]));
+    expect(byId.has(activeId)).toBe(true);
+    expect(byId.has(pendingId)).toBe(false);
+  });
+});
+
+describe("mem list --json", () => {
+  it("emits a valid JSON envelope with the fact's fields and embedding dropped", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["list", "--json"]);
+    expect(result.exitCode).toBe(0);
+
+    const envelope = JSON.parse(result.stdout) as { schemaVersion: number; facts: Record<string, unknown>[] };
+    expect(envelope.schemaVersion).toBe(1);
+    const fact = envelope.facts.find((f) => f["id"] === id);
+    expect(fact).toBeDefined();
+    expect(fact?.["text"]).toBe("uses pnpm not npm");
+    expect(fact?.["subject"]).toBe("package-manager");
+    expect(fact).not.toHaveProperty("embedding");
+  });
+
+  it("still produces the existing human-readable text when --json is omitted", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["list"]);
+    expect(result.exitCode).toBe(0);
+    expect(() => JSON.parse(result.stdout)).toThrow();
+    expect(result.stdout).toContain(id);
+    expect(result.stdout).toContain("uses pnpm not npm");
+  });
+});
+
+describe("mem show --json", () => {
+  it("includes fact, freshness, and sources", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["show", id, "--json"]);
+    expect(result.exitCode).toBe(0);
+
+    const envelope = JSON.parse(result.stdout) as {
+      schemaVersion: number;
+      fact: Record<string, unknown>;
+      freshness: string;
+      sources: unknown[];
+    };
+    expect(envelope.schemaVersion).toBe(1);
+    expect(envelope.fact["id"]).toBe(id);
+    expect(envelope.fact["text"]).toBe("uses pnpm not npm");
+    expect(envelope.fact).not.toHaveProperty("embedding");
+    expect(envelope.freshness).toBe("unverified");
+    expect(Array.isArray(envelope.sources)).toBe(true);
+  });
+
+  it("still produces the existing formatFactDetail text output when --json is omitted", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["show", id]);
+    expect(result.exitCode).toBe(0);
+    expect(() => JSON.parse(result.stdout)).toThrow();
+    expect(result.stdout).toContain(`id: ${id}`);
+    expect(result.stdout).toContain("freshness=");
+  });
 });
 
 describe("mem import --from-json (full-fidelity round-trip)", () => {

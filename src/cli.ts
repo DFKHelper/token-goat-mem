@@ -253,6 +253,50 @@ function formatFactDetail(fact: Fact, freshness: AnchorVerdict, sources: readonl
   return lines.join("\n");
 }
 
+/** Plain-JSON projection of a `Fact`, shared by `mem export`, `mem list --json`, and `mem show --json`. */
+interface ExportedFactJson {
+  readonly id: string;
+  readonly text: string;
+  readonly kind: FactKind;
+  readonly subject: string | null;
+  readonly value: string | null;
+  readonly scope: FactScope;
+  readonly scopeRoot: string | null;
+  readonly source_type: Fact["source_type"];
+  readonly source_ref: string | null;
+  readonly captured_at: string;
+  readonly anchor: string | null;
+  readonly status: FactStatus;
+  readonly confidence: number;
+  readonly embedding?: number[] | null;
+}
+
+/**
+ * Projects a `Fact` to its plain-JSON shape. `includeEmbedding` defaults to `true` (matching `mem
+ * export`'s existing full-fidelity behavior, unchanged by this extraction); `mem list --json` / `mem
+ * show --json` pass `false` to drop the field entirely (large, usually null, an internal
+ * retrieval-only detail -- see the design plan's council/GLM synthesis).
+ */
+function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boolean } = {}): ExportedFactJson {
+  const includeEmbedding = options.includeEmbedding ?? true;
+  return {
+    id: fact.id,
+    text: fact.text,
+    kind: fact.kind,
+    subject: fact.subject,
+    value: fact.value,
+    scope: fact.scope,
+    scopeRoot: fact.scopeRoot ?? null,
+    source_type: fact.source_type,
+    source_ref: fact.source_ref,
+    captured_at: fact.captured_at,
+    anchor: fact.anchor,
+    status: fact.status,
+    confidence: fact.confidence,
+    ...(includeEmbedding ? { embedding: fact.embedding === null ? null : Array.from(fact.embedding) } : {}),
+  };
+}
+
 function formatSection(title: string, facts: readonly Fact[]): string {
   if (facts.length === 0) {
     return "";
@@ -533,16 +577,25 @@ interface RecallCliOptions {
   readonly hintStyle?: string;
 }
 
+interface ExportCliOptions {
+  readonly kind?: string;
+  readonly status?: string;
+  readonly subject?: string;
+  readonly scope?: string;
+}
+
 interface ListCliOptions {
   readonly kind?: string;
   readonly status?: string;
   readonly subject?: string;
   readonly scope?: string;
   readonly limit?: number;
+  readonly json?: boolean;
 }
 
 interface ShowCliOptions {
   readonly root?: string;
+  readonly json?: boolean;
 }
 
 interface EditCliOptions {
@@ -660,29 +713,24 @@ export function buildProgram(): Command {
 
   program
     .command("export")
-    .description("Export every stored fact (all statuses) as a full-fidelity JSON envelope, for `mem import --from-json`")
+    .description("Export stored facts as a full-fidelity JSON envelope, for `mem import --from-json`")
+    .option("--kind <kind>", "Filter by kind")
+    .option("--status <status>", "Filter by status (comma-separated for multiple)")
+    .option("--subject <key>", "Filter by subject")
+    .option("--scope <scope>", "Filter by scope")
     .action(
-      guard(async () => {
-        const facts = await withDb((db) => listFacts(db, {}));
+      guard(async (options: ExportCliOptions) => {
+        const filter: FactFilter = {
+          ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
+          ...(options.status !== undefined ? { status: parseFactStatusList(options.status) } : {}),
+          ...(options.subject !== undefined ? { subject: options.subject } : {}),
+          ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
+        };
+        const facts = await withDb((db) => listFacts(db, filter));
         const envelope = {
           schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
           exportedAt: new Date().toISOString(),
-          facts: facts.map((fact) => ({
-            id: fact.id,
-            text: fact.text,
-            kind: fact.kind,
-            subject: fact.subject,
-            value: fact.value,
-            scope: fact.scope,
-            scopeRoot: fact.scopeRoot ?? null,
-            source_type: fact.source_type,
-            source_ref: fact.source_ref,
-            captured_at: fact.captured_at,
-            anchor: fact.anchor,
-            status: fact.status,
-            confidence: fact.confidence,
-            embedding: fact.embedding === null ? null : Array.from(fact.embedding),
-          })),
+          facts: facts.map((fact) => factToExportJson(fact)),
         };
         process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
       })
@@ -812,6 +860,10 @@ export function buildProgram(): Command {
     .option("--subject <key>", "Filter by subject")
     .option("--scope <scope>", "Filter by scope")
     .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
+    .option(
+      "--json",
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface)"
+    )
     .action(
       guard(async (options: ListCliOptions) => {
         const filter: FactFilter = {
@@ -822,6 +874,14 @@ export function buildProgram(): Command {
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
         };
         const facts = await withDb((db) => listFacts(db, filter));
+        if (options.json === true) {
+          const envelope = {
+            schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
+            facts: facts.map((fact) => factToExportJson(fact, { includeEmbedding: false })),
+          };
+          process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+          return;
+        }
         if (facts.length === 0) {
           process.stdout.write("no facts stored\n");
           return;
@@ -836,6 +896,10 @@ export function buildProgram(): Command {
     .command("show <id>")
     .description("Show one fact in full, including provenance and anchor freshness")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: fact's scope root, then current directory)")
+    .option(
+      "--json",
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Includes freshness and sources, unlike mem export/mem list --json."
+    )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
         const output = await withDb((db) => {
@@ -846,6 +910,15 @@ export function buildProgram(): Command {
           const root = resolveRoot(options.root ?? fact.scopeRoot ?? undefined);
           const freshness = evaluateAnchor(fact.anchor, root);
           const sources = listSourcesForFact(db, id);
+          if (options.json === true) {
+            const envelope = {
+              schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
+              fact: factToExportJson(fact, { includeEmbedding: false }),
+              freshness,
+              sources,
+            };
+            return JSON.stringify(envelope, null, 2);
+          }
           return formatFactDetail(fact, freshness, sources);
         });
         process.stdout.write(`${output}\n`);

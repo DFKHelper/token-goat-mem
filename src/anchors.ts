@@ -25,7 +25,9 @@
  * `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`,
  * `newest-of <expected> <candidate...>` (the direct implementation of the plan's P3 headline example,
  * "the newest lockfile is pnpm-lock.yaml"), `glob-exists <pattern>` (Section 3's "glob match"),
- * `git-branch-is <branch>`, `git-tracked <path>`.
+ * `git-branch-is <branch>`, `git-tracked <path>`, `package-version <path> <name>@<expected>`
+ * (declared-manifest check only — see that predicate's own doc comment for the deliberate fence
+ * against real semver-range-satisfaction or lockfile parsing).
  *
  * mem is a short-lived, single-shot CLI process (Section 3) — there is no cross-process cache to
  * invalidate. The in-memory memoization here exists only to avoid re-stat'ing / re-reading / re-parsing
@@ -154,6 +156,76 @@ function evaluateFileContains(path: string, substring: string, negate: boolean):
     return found ? "contradicted" : "affirmed";
   }
   return found ? "affirmed" : "contradicted";
+}
+
+/**
+ * `package-version <path> <name>@<expected>` — declared-manifest check only, never an
+ * installed/lockfile-resolved version check (S1: a predicate that can falsely affirm a version fact
+ * is worse than no predicate at all — see the module header comment). Reads `path` (expected to be a
+ * `package.json`), looks up `name` in `dependencies` then `devDependencies`, and compares the declared
+ * range string against `expected` using only two confidently-resolvable comparisons: an exact string
+ * match, or a leftmost-numeric-major-version-prefix match (e.g. declared `^18.2.0` affirms expected
+ * `18`). This is deliberately **not** a semver-range-satisfaction check and does **not** consult any
+ * lockfile — anything the comparison cannot confidently resolve (a range operator other than a bare
+ * leading `^`/`~`/exact, a non-numeric expected value, ...) returns `unverified` rather than guess.
+ * unverified: path unreadable/oversized, JSON malformed, or the dependency key is missing entirely.
+ */
+function comparePackageVersion(declared: string, expected: string): AnchorVerdict {
+  if (declared === expected) {
+    return "affirmed";
+  }
+  const declaredMajorMatch = /^[\^~]?(\d+)(?:\.|$)/u.exec(declared.trim());
+  const expectedMajorMatch = /^(\d+)$/u.exec(expected.trim());
+  if (declaredMajorMatch?.[1] !== undefined && expectedMajorMatch?.[1] !== undefined) {
+    return declaredMajorMatch[1] === expectedMajorMatch[1] ? "affirmed" : "contradicted";
+  }
+  return "unverified";
+}
+
+function evaluatePackageVersion(path: string, expected: string): AnchorVerdict {
+  const atIdx = expected.lastIndexOf("@");
+  if (atIdx <= 0) {
+    return "unverified";
+  }
+  const name = expected.slice(0, atIdx);
+  const version = expected.slice(atIdx + 1);
+  if (name.length === 0 || version.length === 0) {
+    return "unverified";
+  }
+
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch {
+    return "unverified";
+  }
+  if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
+    return "unverified";
+  }
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    return "unverified";
+  }
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(content);
+  } catch {
+    return "unverified";
+  }
+  if (typeof manifest !== "object" || manifest === null) {
+    return "unverified";
+  }
+  const deps = (manifest as Record<string, unknown>)["dependencies"];
+  const devDeps = (manifest as Record<string, unknown>)["devDependencies"];
+  const declared =
+    (typeof deps === "object" && deps !== null ? (deps as Record<string, unknown>)[name] : undefined) ??
+    (typeof devDeps === "object" && devDeps !== null ? (devDeps as Record<string, unknown>)[name] : undefined);
+  if (typeof declared !== "string") {
+    return "unverified";
+  }
+  return comparePackageVersion(declared, version);
 }
 
 /**
@@ -542,6 +614,20 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
         return "unverified";
       }
       return evaluateGitBranchIs(resolvedRoot, branch);
+    }
+    case "package-version": {
+      const [rawPath, expected] = args;
+      if (args.length !== 2 || rawPath === undefined || expected === undefined) {
+        return "unverified";
+      }
+      const resolved = resolveWithinRoot(resolvedRoot, rawPath);
+      if (resolved === null) {
+        return "unverified";
+      }
+      if (budgetExceeded(deadlineMs)) {
+        return "unverified";
+      }
+      return evaluatePackageVersion(resolved, expected);
     }
     case "git-tracked": {
       const [rawA] = args;
