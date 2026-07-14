@@ -151,6 +151,23 @@ describe("mem CLI happy path", () => {
     expect(shown.stdout).toContain("anchor: (none)");
   });
 
+  it("mem edit still rejects a file-contains anchor with a multi-word substring (CLI arity check is unchanged)", async () => {
+    // The CLI-facing anchor-syntax arity check (capture.ts's validateAnchorSyntax) whitespace-splits
+    // the anchor string, so a multi-word file-contains/file-not-contains substring is genuinely
+    // ambiguous to parse from flat CLI input and must still be rejected here -- json-import's
+    // exemption from this check (see exportImport.test.ts) does not extend to mem edit/mem remember,
+    // which take the same kind of CLI-string input.
+    const created = await runCli(["remember", "uses pnpm not npm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--anchor", "file-contains path/to/file.txt multi word value"]);
+    expect(edited.exitCode).toBe(1);
+    expect(edited.stderr).toContain("expects");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("anchor: (none)");
+  });
+
   it("mem edit rejects an over-length text the same way mem remember does", async () => {
     const created = await runCli(["remember", "short fact", "--kind", "fact"]);
     const id = extractRememberedId(created);
@@ -181,6 +198,30 @@ describe("mem CLI happy path", () => {
 
     const shown = await runCli(["show", id]);
     expect(shown.stdout).toContain("text: short fact");
+  });
+
+  it("edit/pin/forget each write their audit_log row atomically with the fact write on the normal path (mirrors 008f60b's json_import atomicity fix)", async () => {
+    const created = await runCli(["remember", "audit row check", "--kind", "fact"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--text", "audit row check v2"]);
+    expect(edited.exitCode).toBe(0);
+
+    const pinned = await runCli(["pin", id]);
+    expect(pinned.exitCode).toBe(0);
+
+    const forgotten = await runCli(["forget", id]);
+    expect(forgotten.exitCode).toBe(0);
+
+    const db = openStorage(resolveDbPath());
+    const events = (
+      db.prepare("SELECT event FROM audit_log WHERE fact_id = ? ORDER BY rowid").all(id) as { event: string }[]
+    ).map((row) => row.event);
+    db.close();
+
+    expect(events).toContain("edit");
+    expect(events).toContain("pin");
+    expect(events).toContain("forget");
   });
 
   it("mem edit rejects empty-string value (after trim)", async () => {
@@ -378,6 +419,31 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
     const result = await runCli(["review", "--promote", id]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain(`fact ${id} is not pending (status=active)`);
+  });
+
+  it("review --promote and --reject each write their audit_log row atomically with the status write on the normal path", async () => {
+    const db = openStorage(resolveDbPath());
+    const promoteCandidate = captureSuggested(db, { text: "promote-audit candidate", kind: "fact", root: home }).fact;
+    const rejectCandidate = captureSuggested(db, { text: "reject-audit candidate", kind: "fact", root: home }).fact;
+    db.close();
+
+    const promoted = await runCli(["review", "--promote", promoteCandidate.id]);
+    expect(promoted.exitCode).toBe(0);
+
+    const rejected = await runCli(["review", "--reject", rejectCandidate.id]);
+    expect(rejected.exitCode).toBe(0);
+
+    const dbAfter = openStorage(resolveDbPath());
+    const promoteEvents = (
+      dbAfter.prepare("SELECT event FROM audit_log WHERE fact_id = ?").all(promoteCandidate.id) as { event: string }[]
+    ).map((row) => row.event);
+    const rejectEvents = (
+      dbAfter.prepare("SELECT event FROM audit_log WHERE fact_id = ?").all(rejectCandidate.id) as { event: string }[]
+    ).map((row) => row.event);
+    dbAfter.close();
+
+    expect(promoteEvents).toContain("review_promote");
+    expect(rejectEvents).toContain("review_reject");
   });
 });
 

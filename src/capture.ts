@@ -318,18 +318,23 @@ function validateAnchorSyntax(anchor: string): void {
 }
 
 /**
- * Applies the same field-level guards `mem remember`/`captureExplicit` enforce (length limits,
- * emptiness, anchor syntax) to a `mem edit` patch -- editing is a distinct write path from capture
- * and was previously exempt from all of this, letting an edit store a fact capture would have
- * rejected (an over-length text, an empty text, or a malformed anchor that permanently evaluates
- * "unverified"). Only validates fields actually present in the patch; a `null` clears the field and
- * is not validated (clearing is always safe).
+ * Applies the field-level guards `mem remember`/`captureExplicit` enforce (length limits,
+ * emptiness, subject/value pairing) to a patch of fact fields, WITHOUT the CLI-facing
+ * anchor-syntax arity check (see `validateAnchorSyntax`). Only validates fields actually present in
+ * the patch; a `null` clears the field and is not validated (clearing is always safe).
+ *
+ * Deliberately anchor-syntax-agnostic: this is the shared base used both by `validateFactEditOrThrow`
+ * (which adds the arity check back on top, since `mem edit` takes CLI-string input just like `mem
+ * remember`) and by JSON import (which must NOT apply the arity check -- a JSON `anchor` field is
+ * structured data, not a CLI-parsed string, so there is no parsing ambiguity for a multi-word
+ * `file-contains`/`file-not-contains` substring to create). Anchor *correctness* for callers that
+ * skip the arity check is still guaranteed: `anchors.ts`'s `evaluateAnchor` never throws on a
+ * malformed or unrecognized anchor string regardless of arity -- it just returns `"unverified"`.
  */
-export function validateFactEditOrThrow(patch: {
+export function validateFactFieldsOrThrow(patch: {
   readonly text?: string;
   readonly subject?: string | null;
   readonly value?: string | null;
-  readonly anchor?: string | null;
 }): void {
   if (patch.text !== undefined) {
     const text = patch.text.trim();
@@ -373,6 +378,26 @@ export function validateFactEditOrThrow(patch: {
         "detection keys on subject+value pairs -- a lone key is unusable)"
     );
   }
+}
+
+/**
+ * Applies the same field-level guards `mem remember`/`captureExplicit` enforce (length limits,
+ * emptiness, anchor syntax) to a `mem edit` patch -- editing is a distinct write path from capture
+ * and was previously exempt from all of this, letting an edit store a fact capture would have
+ * rejected (an over-length text, an empty text, or a malformed anchor that permanently evaluates
+ * "unverified"). Only validates fields actually present in the patch; a `null` clears the field and
+ * is not validated (clearing is always safe).
+ *
+ * `mem edit`, like `mem remember`, takes CLI-string input, so it keeps the anchor-syntax arity
+ * check (`validateAnchorSyntax`) that JSON import is exempt from -- see `validateFactFieldsOrThrow`.
+ */
+export function validateFactEditOrThrow(patch: {
+  readonly text?: string;
+  readonly subject?: string | null;
+  readonly value?: string | null;
+  readonly anchor?: string | null;
+}): void {
+  validateFactFieldsOrThrow(patch);
   if (typeof patch.anchor === "string" && patch.anchor.trim().length > 0) {
     validateAnchorSyntax(patch.anchor.trim());
   }
@@ -525,15 +550,24 @@ function applyOptionalFields(
   }
 }
 
+/**
+ * Inserts a fact and writes its capture audit row atomically -- both run inside a single
+ * `db.transaction()` (nesting `storageInsertFact`'s own transaction via savepoint, the same pattern
+ * exportImport.ts's `importFromJson` uses) so a crash between the two can never leave a fact with no
+ * corresponding audit entry, mirroring 008f60b's json_import fix.
+ */
 function writeFact(
   db: Database.Database,
   newFact: NewFact,
   auditEvent: string,
   detail: (fact: Fact) => string
 ): Fact {
-  const fact = storageInsertFact(db, newFact);
-  insertAuditLog(db, { event: auditEvent, factId: fact.id, detail: detail(fact) });
-  return fact;
+  const tx = db.transaction((): Fact => {
+    const fact = storageInsertFact(db, newFact);
+    insertAuditLog(db, { event: auditEvent, factId: fact.id, detail: detail(fact) });
+    return fact;
+  });
+  return tx();
 }
 
 /**

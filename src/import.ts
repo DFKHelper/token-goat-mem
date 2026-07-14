@@ -19,11 +19,11 @@
  * `mem review --promote`), not from pre-filtering cleverness.
  */
 
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { CaptureValidationError, SecretDetectedError, captureSuggested, type CaptureSuggestedInput } from "./capture.js";
+import { readFileWithErrorMapping } from "./fileUtils.js";
 import { listFacts } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
 
@@ -188,23 +188,7 @@ export function planImportFromMarkdown(options: Pick<ImportFromMarkdownOptions, 
   // Wrap file read to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
   // rather than internal errors: a missing or unreadable file is a user error (bad input path),
   // not a bug.
-  let markdown: string;
-  try {
-    markdown = readFileSync(filePath, "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new MarkdownImportError(`file not found: ${filePath}`);
-    }
-    if (code === "EACCES") {
-      throw new MarkdownImportError(`permission denied reading file: ${filePath}`);
-    }
-    if (code === "EISDIR") {
-      throw new MarkdownImportError(`is a directory, not a file: ${filePath}`);
-    }
-    // For any other error, preserve the original message but wrap in MarkdownImportError
-    throw new MarkdownImportError(`cannot read file: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
-  }
+  const markdown = readFileWithErrorMapping(filePath, MarkdownImportError);
 
   const candidates: ImportCandidate[] = extractMarkdownBullets(markdown).map((bullet) => ({
     text: bullet.text,

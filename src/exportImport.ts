@@ -20,13 +20,13 @@
  * `{ filePath, outcomes }`, so both import modes render through the same summary/line formatting.
  */
 
-import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactEditOrThrow } from "./capture.js";
+import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactFieldsOrThrow } from "./capture.js";
 import { insertAuditLog } from "./db.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
+import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { getFactById, insertFact } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
@@ -182,28 +182,36 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   }
 
   // Apply the same structural guards every other write path enforces (capture.ts's
-  // `validateFactEditOrThrow` -- text/subject length limits, subject/value pairing, anchor syntax).
-  // This is reused, not redefined, so the limits/rules can never drift out of sync with
+  // `validateFactFieldsOrThrow` -- text/subject length limits, subject/value pairing). This is
+  // reused, not redefined, so the limits/rules can never drift out of sync with
   // captureExplicit/captureSuggested/mem edit. Deliberately does NOT touch status/confidence: this
   // module's full-fidelity round-trip contract (see header comment) is unaffected -- only
   // structural shape is gated here, not trust level.
+  //
+  // Deliberately does NOT call `validateFactEditOrThrow` (which additionally enforces
+  // `validateAnchorSyntax`'s CLI-facing arity check): that check exists only because `mem remember`/
+  // `mem edit` parse the anchor out of a flat CLI string with a fixed delimiter scheme, where a
+  // multi-word `file-contains`/`file-not-contains` substring would be ambiguous to parse. A JSON
+  // `anchor` field is already a structured, unambiguous string -- there's no parsing step for a
+  // multi-word substring to be ambiguous in -- so the arity check does not apply here, and skipping
+  // it restores json-import's original documented exemption (a previously-exported fact with a
+  // multi-word substring anchor must round-trip back in). `anchors.ts`'s `evaluateAnchor` never
+  // throws on a malformed or unrecognized anchor regardless of arity -- it safely returns
+  // `"unverified"` -- so this exemption carries no crash risk at evaluation time.
   try {
     // Plain conditional assignment (not spreading possibly-`undefined` values into the literal),
     // same discipline as this file's own newFact construction above: tsconfig's
     // exactOptionalPropertyTypes rejects writing `undefined` into an optional `string | null` field.
-    const editPatch: { text?: string; subject?: string | null; value?: string | null; anchor?: string | null } = {
+    const fieldsPatch: { text?: string; subject?: string | null; value?: string | null } = {
       text: newFact.text,
     };
     if (newFact.subject !== undefined) {
-      editPatch.subject = newFact.subject;
+      fieldsPatch.subject = newFact.subject;
     }
     if (newFact.value !== undefined) {
-      editPatch.value = newFact.value;
+      fieldsPatch.value = newFact.value;
     }
-    if (newFact.anchor !== undefined) {
-      editPatch.anchor = newFact.anchor;
-    }
-    validateFactEditOrThrow(editPatch);
+    validateFactFieldsOrThrow(fieldsPatch);
   } catch (error) {
     if (error instanceof CaptureValidationError || error instanceof InvalidAnchorError) {
       return fail(`facts[${index}] failed structural validation: ${error.message}`);
@@ -227,23 +235,7 @@ function parseJsonFacts(path: string): { readonly filePath: string; readonly ent
   // Wrap file operations to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
   // rather than internal errors: a missing or unreadable file is a user error (bad input path),
   // not a bug.
-  let stat: ReturnType<typeof statSync>;
-  try {
-    stat = statSync(filePath);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new JsonImportError(`file not found: ${filePath}`);
-    }
-    if (code === "EACCES") {
-      throw new JsonImportError(`permission denied reading file: ${filePath}`);
-    }
-    if (code === "EISDIR") {
-      throw new JsonImportError(`is a directory, not a file: ${filePath}`);
-    }
-    // For any other error, preserve the original message but wrap in JsonImportError
-    throw new JsonImportError(`cannot read file: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
-  }
+  const stat = statFileWithErrorMapping(filePath, JsonImportError);
 
   if (stat.size > MAX_IMPORT_FILE_SIZE_BYTES) {
     throw new JsonImportError(
@@ -251,22 +243,7 @@ function parseJsonFacts(path: string): { readonly filePath: string; readonly ent
     );
   }
 
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf8");
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") {
-      throw new JsonImportError(`file not found: ${filePath}`);
-    }
-    if (code === "EACCES") {
-      throw new JsonImportError(`permission denied reading file: ${filePath}`);
-    }
-    if (code === "EISDIR") {
-      throw new JsonImportError(`is a directory, not a file: ${filePath}`);
-    }
-    throw new JsonImportError(`cannot read file: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
-  }
+  const raw = readFileWithErrorMapping(filePath, JsonImportError);
 
   let parsed: unknown;
   try {
@@ -361,12 +338,22 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
   const outcomes: (ImportOutcome | undefined)[] = new Array(entries.length).fill(undefined);
   const toInsert: { readonly index: number; readonly newFact: NewFact & { id: string } }[] = [];
   const skips: PlannedSkip[] = [];
+  const seenIds = new Set<string>();
 
   entries.forEach((entry, index) => {
     if (entry.newFact === null) {
       outcomes[index] = { status: "skipped_error", candidate: entry.candidate, reason: entry.reason ?? "invalid fact" };
       return;
     }
+    if (seenIds.has(entry.newFact.id)) {
+      outcomes[index] = {
+        status: "skipped_error",
+        candidate: entry.candidate,
+        reason: `duplicate id within import file: ${entry.newFact.id}`,
+      };
+      return;
+    }
+    seenIds.add(entry.newFact.id);
     const existing = getFactById(db, entry.newFact.id);
     if (existing !== undefined) {
       skips.push({

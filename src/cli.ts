@@ -411,8 +411,11 @@ function promotePending(db: Database.Database, id: string): string {
   if (fact.status !== "pending") {
     throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
   }
-  setFactStatus(db, fact.id, "active");
-  insertAuditLog(db, { event: "review_promote", factId: fact.id, detail: "promoted pending fact to active via explicit review" });
+  const tx = db.transaction((): void => {
+    setFactStatus(db, fact.id, "active");
+    insertAuditLog(db, { event: "review_promote", factId: fact.id, detail: "promoted pending fact to active via explicit review" });
+  });
+  tx();
   return fact.id;
 }
 
@@ -421,8 +424,11 @@ function rejectPending(db: Database.Database, id: string): string {
   if (fact.status !== "pending") {
     throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
   }
-  setFactStatus(db, fact.id, "superseded");
-  insertAuditLog(db, { event: "review_reject", factId: fact.id, detail: "rejected pending fact (superseded) via explicit review" });
+  const tx = db.transaction((): void => {
+    setFactStatus(db, fact.id, "superseded");
+    insertAuditLog(db, { event: "review_reject", factId: fact.id, detail: "rejected pending fact (superseded) via explicit review" });
+  });
+  tx();
   return fact.id;
 }
 
@@ -983,8 +989,11 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
-          setFactStatus(db, existing.id, "superseded");
-          insertAuditLog(db, { event: "forget", factId: existing.id, detail: `forgot fact (was ${existing.status})` });
+          const tx = db.transaction((): void => {
+            setFactStatus(db, existing.id, "superseded");
+            insertAuditLog(db, { event: "forget", factId: existing.id, detail: `forgot fact (was ${existing.status})` });
+          });
+          tx();
           return existing.id;
         });
         process.stdout.write(`forgot ${resolved}\n`);
@@ -998,8 +1007,11 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
-          setFactStatus(db, existing.id, "pinned");
-          insertAuditLog(db, { event: "pin", factId: existing.id, detail: `pinned fact (was ${existing.status})` });
+          const tx = db.transaction((): void => {
+            setFactStatus(db, existing.id, "pinned");
+            insertAuditLog(db, { event: "pin", factId: existing.id, detail: `pinned fact (was ${existing.status})` });
+          });
+          tx();
           return existing.id;
         });
         process.stdout.write(`pinned ${resolved}\n`);
@@ -1053,12 +1065,15 @@ export function buildProgram(): Command {
             "edit",
             existing.id
           );
-          const fact = updateFact(db, existing.id, patch);
-          if (fact === undefined) {
-            throw new UsageError(`no such fact: ${existing.id}`);
-          }
-          insertAuditLog(db, { event: "edit", factId: existing.id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
-          return fact;
+          const tx = db.transaction((): Fact => {
+            const fact = updateFact(db, existing.id, patch);
+            if (fact === undefined) {
+              throw new UsageError(`no such fact: ${existing.id}`);
+            }
+            insertAuditLog(db, { event: "edit", factId: existing.id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
+            return fact;
+          });
+          return tx();
         });
         process.stdout.write(`edited ${updated.id}\n`);
       })
