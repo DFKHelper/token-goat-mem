@@ -104,7 +104,10 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | Command | What it does |
 |---------|-------------|
 | `mem remember <text>` | Store a new fact. `--kind preference\|decision\|fact\|correction` (required), `--subject <key>` + `--value <value>` (paired, for contradiction detection), `--anchor <predicate>` (optional), `--scope global\|project\|path` (default global), `--source-ref <ref>`, `--root <path>`. |
+| `mem suggest <text>` | Same flags as `mem remember`, but always stores the fact `pending` (`captureSuggested`, not `captureExplicit`) — never auto-promoted, confirm via `mem review --promote <id>`. |
+| `mem export` | Writes every stored fact (any status) to stdout as a JSON envelope: `{ schemaVersion, exportedAt, facts }`. Pair with `mem import --from-json` for backup/restore or full-fidelity migration between stores. No options. |
 | `mem import --from-md <path>` | **Advisory only.** Parses a markdown file (CLAUDE.md-style) for `-`/`*` bullet lines that look like preference/decision statements and imports each as a `pending`, `source_type: "derived"` fact — the same trust path as any other suggested candidate; never auto-promoted, no bulk-promote shortcut. Confirm each import via `mem review --promote <id>`. `--dry-run` (report candidates without writing), `--root <path>`, `--scope global\|project\|path` (default `project`), `--kind` (default `preference`). Re-importing the same file skips bullets already imported at the same file:line + text. |
+| `mem import --from-json <path>` | **Full-fidelity.** Imports a `mem export` file, preserving each fact's original `id`, `status`, `confidence`, and `captured_at` exactly — unlike `--from-md`, an imported fact keeps whatever status it was exported with (including already-`active`), not forced to `pending`. Still runs the same secret screening before writing. Idempotent: a fact whose `id` already exists in the target store is skipped as a duplicate, safe to re-run. `--dry-run` (report candidates without writing), `--root <path>` (used only for `.mem/allowlist` resolution). Exactly one of `--from-md`/`--from-json` is required. |
 | `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/2 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>`, `--root <path>`, `--stable` (deterministic id-sorted output instead of relevance/recency order), `--hint-style <full\|terse>` (default `full`; `terse` drops the CTA and shortens kind labels to `pref`/`dec`/`fact`/`corr`). |
 | `mem list` | Fact IDs and one-line summaries. `--kind`, `--status` (comma-separated), `--subject`, `--scope`, `--limit`. |
 | `mem show <id>` | One fact in full: text, provenance, anchor and its current freshness verdict. `--root <path>`. |
@@ -118,6 +121,8 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | `mem uninstall <tool\|--all>` | Removes exactly what `mem init` wrote for `tool` -- or every tool with `--all` -- leaving everything else untouched. A no-op (not an error) if there's nothing mem-authored to remove. `--root <path>`, `--user`, `--dry-run`. |
 
 Every command supports `--help` for the authoritative flag list.
+
+> **`mem import --from-json` and `scope_root`:** a `scope="project"`/`scope="path"` fact's `scopeRoot` is an absolute filesystem path from the machine it was exported on. `mem import --from-json` imports it verbatim (full fidelity), so re-importing an export from a different machine — or a different path on the same machine — leaves `scopeRoot` pointing at a path that may not exist there. This is a known v1 limitation, not something the import command tries to fix up.
 
 ## Walkthrough
 
