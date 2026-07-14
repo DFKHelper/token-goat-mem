@@ -100,6 +100,33 @@ describe("evaluateAnchor", () => {
         rmSync(outside, { recursive: true, force: true });
       }
     });
+
+    it("file-newer-than contradicts, does not follow, for a symlink to a file outside root", () => {
+      const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
+      try {
+        const target = join(outside, "secret.txt");
+        writeFileSync(target, "outside content");
+        symlinkSync(target, join(root, "link.txt"), "file");
+        writeFileSync(join(root, "b.txt"), "b");
+        expect(evaluateAnchor("file-newer-than link.txt b.txt", root)).toBe("contradicted");
+        expect(evaluateAnchor("file-newer-than b.txt link.txt", root)).toBe("contradicted");
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+
+    it("newest-of contradicts, does not follow, for a symlinked candidate outside root", () => {
+      const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
+      try {
+        const target = join(outside, "pnpm-lock.yaml");
+        writeFileSync(target, "outside content");
+        symlinkSync(target, join(root, "pnpm-lock.yaml"), "file");
+        writeFileSync(join(root, "package-lock.json"), "inside content");
+        expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("contradicted");
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("git-tracked", () => {

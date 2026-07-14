@@ -20,10 +20,10 @@
  * must stay within `root` (no traversal, no symlink escapes) — root-containment alone does not stop a
  * symlink *inside* `root` from pointing *outside* it, so every path-based predicate additionally
  * refuses to follow a symlink at the target path or at any directory component between `root` and the
- * target (`glob-exists` does this by skipping symlinked entries during its directory walk; the
- * single-path predicates — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`,
- * `package-version` — do it via an explicit `lstatSync`-based check before any `statSync`/
- * `readFileSync` of the resolved path) — an anchor string can originate from a `derived`
+ * target (`glob-exists` does this by skipping symlinked entries during its directory walk; every
+ * other path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`,
+ * `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check
+ * before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived`
  * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified (or, for a
  * detected symlink escape, contradicted) rather than followed.
  *
@@ -172,7 +172,9 @@ interface BudgetState {
 /**
  * `file-newer-than <a> <b>` — tests whether `a` is the currently-active file relative to `b`.
  * affirmed: `a` exists and is newer than `b` (or `b` does not exist).
- * contradicted: `b` exists and is newer than `a` (or `a` does not exist while `b` does).
+ * contradicted: `b` exists and is newer than `a` (or `a` does not exist while `b` does), or `a`/`b`
+ * (or a directory component between `root` and either) is a symlink ({@link containsSymlink}) —
+ * refused rather than followed, for the same reason as `file-contains`.
  * unverified: neither file exists, or both exist with identical mtimes (ambiguous).
  */
 function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): AnchorVerdict {
@@ -305,11 +307,15 @@ function evaluatePackageVersion(root: string, path: string, expected: string): A
 /**
  * `newest-of <expected> <candidate...>` — among the full candidate set (`expected` plus every other
  * candidate), affirmed if `expected` is the sole existing candidate with the greatest mtime;
- * contradicted if a different existing candidate is the sole newest; unverified if none of the
- * candidates exist, or two or more candidates tie for newest (ambiguous — P3: never guess). This is
- * the direct implementation of the design plan's headline example (P3): "the newest lockfile is
- * pnpm-lock.yaml" — unlike a proxy check ("does pnpm-lock.yaml exist"), a stale lockfile left behind
- * after a package-manager switch cannot make this affirm, because it will not be the newest.
+ * contradicted if a different existing candidate is the sole newest, or if `expected` or any
+ * candidate (or a directory component between `root` and any of them) is a symlink
+ * ({@link containsSymlink}) — refused rather than followed, since trusting a symlinked candidate's
+ * mtime (or silently dropping it) could make this predicate affirm based on a file outside `root`;
+ * unverified if none of the candidates exist, or two or more candidates tie for newest (ambiguous —
+ * P3: never guess). This is the direct implementation of the design plan's headline example (P3):
+ * "the newest lockfile is pnpm-lock.yaml" — unlike a proxy check ("does pnpm-lock.yaml exist"), a
+ * stale lockfile left behind after a package-manager switch cannot make this affirm, because it will
+ * not be the newest.
  */
 function evaluateNewestOf(mtimes: ReadonlyMap<string, number>, expected: string): AnchorVerdict {
   if (mtimes.size === 0) {
@@ -642,6 +648,9 @@ function evaluateTokens(
       if (a === null || b === null) {
         return "unverified";
       }
+      if (containsSymlink(resolvedRoot, a) || containsSymlink(resolvedRoot, b)) {
+        return "contradicted";
+      }
       return evaluateFileNewerThan(mtimeOrNull(a), mtimeOrNull(b));
     }
     case "file-exists": {
@@ -678,6 +687,9 @@ function evaluateTokens(
       if (expectedResolved === null) {
         return "unverified";
       }
+      if (containsSymlink(resolvedRoot, expectedResolved)) {
+        return "contradicted";
+      }
       const mtimes = new Map<string, number>();
       const expMtime = mtimeOrNull(expectedResolved);
       if (expMtime !== null) {
@@ -687,6 +699,9 @@ function evaluateTokens(
         const resolved = resolveWithinRoot(resolvedRoot, rawCandidate);
         if (resolved === null) {
           return "unverified";
+        }
+        if (containsSymlink(resolvedRoot, resolved)) {
+          return "contradicted";
         }
         const mtime = mtimeOrNull(resolved);
         if (mtime !== null) {

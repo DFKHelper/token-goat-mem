@@ -69,7 +69,8 @@ export class CaptureValidationError extends Error {
  * safety — not existence or semantics; that is evaluated later by
  * src/anchors.ts against real fs/git state at recall time). Must stay in
  * sync with the predicate set src/anchors.ts actually evaluates
- * (file-newer-than, file-exists, file-absent, git-tracked) — accepting a
+ * (file-newer-than, file-exists, file-absent, file-contains, file-not-contains,
+ * newest-of, glob-exists, git-branch-is, git-tracked, package-version) — accepting a
  * predicate here that anchors.ts does not recognize would silently downgrade
  * it to permanently "unverified" with no capture-time warning, and no
  * arbitrary-shell anchors are permitted at all (Section 3 / review S4).
@@ -78,7 +79,8 @@ export class InvalidAnchorError extends Error {
   constructor(anchor: string, reason: string) {
     super(
       `invalid anchor "${anchor}": ${reason}. Anchors must be a read-only fs/git predicate ` +
-        `(file-newer-than <a> <b>, file-exists <a>, file-absent <a>, git-tracked <a>) — ` +
+        `(file-newer-than, file-exists, file-absent, file-contains, file-not-contains, ` +
+        `newest-of, glob-exists, git-branch-is, git-tracked, package-version) — ` +
         `Section 3: no arbitrary-shell anchors.`
     );
     this.name = "InvalidAnchorError";
