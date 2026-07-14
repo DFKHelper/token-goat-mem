@@ -186,4 +186,84 @@ describe("importFromJson", () => {
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
   });
+
+  it("an imported fact with out-of-range confidence is skipped with a per-item error", () => {
+    const badConfidence = { ...VALID_FACT, id: "55555555-5555-5555-5555-555555555555", confidence: 999 };
+    writeFileSync(jsonPath, envelope([VALID_FACT, badConfidence]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    expect(result.outcomes[1]?.reason).toContain("out-of-range");
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an imported fact with negative confidence is skipped with a per-item error", () => {
+    const badConfidence = { ...VALID_FACT, id: "66666666-6666-6666-6666-666666666666", confidence: -0.5 };
+    writeFileSync(jsonPath, envelope([VALID_FACT, badConfidence]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    expect(result.outcomes[1]?.reason).toContain("out-of-range");
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an oversized import file throws JsonImportError before attempting to parse", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-size-"));
+    const path = join(dir, "huge.json");
+    // Create a file just over the 50MB limit
+    const hugeContent = "x".repeat(50_000_001);
+    writeFileSync(path, hugeContent, "utf8");
+    try {
+      expect(() => importFromJson(db, { path, root })).toThrow(JsonImportError);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("planImportFromJson consistency with importFromJson --dry-run", () => {
+  it("planImportFromJson and importFromJson with dryRun produce identical results", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-consistency-"));
+    const path = join(dir, "export.json");
+    const testFacts = [
+      VALID_FACT,
+      { ...VALID_FACT, id: "77777777-7777-7777-7777-777777777777", confidence: 0.5 },
+      { ...VALID_FACT, id: "88888888-8888-8888-8888-888888888888", kind: "invalid-kind" },
+    ];
+    writeFileSync(path, envelope(testFacts), "utf8");
+    try {
+      const fromPlan = planImportFromJson({ path });
+      const root = mkdtempSync(join(tmpdir(), "mem-exportimport-dryrun-"));
+      const db = openStorage(join(root, "mem.db"));
+      try {
+        const fromDryRun = importFromJson(db, { path, root, dryRun: true });
+        db.close();
+
+        // Compare structure: same filePath
+        expect(fromDryRun.filePath).toBe(fromPlan.filePath);
+
+        // Compare outcomes count
+        expect(fromDryRun.outcomes).toHaveLength(fromPlan.outcomes.length);
+
+        // Compare each outcome (status and candidate text)
+        fromDryRun.outcomes.forEach((outcome, i) => {
+          const expectedOutcome = fromPlan.outcomes[i];
+          expect(outcome.status).toBe(expectedOutcome?.status);
+          expect(outcome.candidate.text).toBe(expectedOutcome?.candidate.text);
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

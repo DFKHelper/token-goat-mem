@@ -175,6 +175,43 @@ describe("evaluateAnchor", () => {
     it("rejects an absolute pattern as unverified", () => {
       expect(evaluateAnchor("glob-exists /etc/passwd", root)).toBe("unverified");
     });
+
+    it("affirms a trailing ** pattern when a file exists directly under the directory", () => {
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "index.ts"), "x");
+
+      expect(evaluateAnchor("glob-exists src/**", root)).toBe("affirmed");
+    });
+
+    it("affirms a trailing ** pattern when a match only exists nested deeper", () => {
+      mkdirSync(join(root, "src", "nested", "deeper"), { recursive: true });
+      writeFileSync(join(root, "src", "nested", "deeper", "widget.ts"), "x");
+
+      expect(evaluateAnchor("glob-exists src/**", root)).toBe("affirmed");
+    });
+
+    it("contradicts a trailing ** pattern when the directory is empty or absent", () => {
+      mkdirSync(join(root, "empty-dir"), { recursive: true });
+      expect(evaluateAnchor("glob-exists empty-dir/**", root)).toBe("contradicted");
+      expect(evaluateAnchor("glob-exists missing-dir/**", root)).toBe("contradicted");
+    });
+
+    it("does not let .git/node_modules alone satisfy a trailing ** pattern", () => {
+      mkdirSync(join(root, "src", "node_modules", "pkg"), { recursive: true });
+      writeFileSync(join(root, "src", "node_modules", "pkg", "index.js"), "x");
+      mkdirSync(join(root, "src", ".git"), { recursive: true });
+      writeFileSync(join(root, "src", ".git", "HEAD"), "x");
+
+      expect(evaluateAnchor("glob-exists src/**", root)).toBe("contradicted");
+    });
+
+    it("still affirms a middle-position ** pattern (regression guard)", () => {
+      mkdirSync(join(root, "src", "nested"), { recursive: true });
+      writeFileSync(join(root, "src", "nested", "widget.test.ts"), "x");
+
+      expect(evaluateAnchor("glob-exists src/**/*.test.ts", root)).toBe("affirmed");
+      expect(evaluateAnchor("glob-exists src/**/*.spec.ts", root)).toBe("contradicted");
+    });
   });
 
   describe("git-branch-is (happy path)", () => {

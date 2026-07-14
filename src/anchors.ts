@@ -311,7 +311,8 @@ function evaluateGlobExists(root: string, pattern: string, deadlineMs: number | 
 
     if (segment === "**") {
       const restIdx = top.segIdx + 1;
-      if (restIdx < segments.length) {
+      const trailing = restIdx >= segments.length;
+      if (!trailing) {
         stack.push({ dir: top.dir, segIdx: restIdx });
       }
       for (const entry of entries) {
@@ -320,13 +321,21 @@ function evaluateGlobExists(root: string, pattern: string, deadlineMs: number | 
           budgetHit = true;
           break walk;
         }
-        if (entry.isSymbolicLink() || !entry.isDirectory()) {
+        if (entry.isSymbolicLink()) {
           continue;
         }
         if (entry.name === ".git" || entry.name === "node_modules") {
           continue;
         }
-        stack.push({ dir: join(top.dir, entry.name), segIdx: top.segIdx });
+        if (trailing) {
+          // A trailing `**` matches everything under this directory, including this entry
+          // itself (file or directory) — standard glob semantics for a trailing `/**` — so
+          // any surviving entry here is an immediate affirm; no need to look deeper.
+          return "affirmed";
+        }
+        if (entry.isDirectory()) {
+          stack.push({ dir: join(top.dir, entry.name), segIdx: top.segIdx });
+        }
       }
       continue;
     }

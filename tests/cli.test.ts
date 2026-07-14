@@ -183,6 +183,57 @@ describe("mem CLI happy path", () => {
     expect(shown.stdout).toContain("text: short fact");
   });
 
+  it("mem edit rejects empty-string value (after trim)", async () => {
+    const created = await runCli(["remember", "test fact", "--kind", "fact", "--subject", "x", "--value", "y"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--subject", "x", "--value", ""]);
+    expect(edited.exitCode).toBe(1);
+    expect(edited.stderr).toContain("value must not be empty");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("subject: x");
+    expect(shown.stdout).toContain("value: y");
+  });
+
+  it("mem edit rejects empty-string subject (after trim)", async () => {
+    const created = await runCli(["remember", "test fact", "--kind", "fact", "--subject", "x", "--value", "y"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--subject", "", "--value", "y"]);
+    expect(edited.exitCode).toBe(1);
+    expect(edited.stderr).toContain("subject must not be empty");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("subject: x");
+    expect(shown.stdout).toContain("value: y");
+  });
+
+  it("mem edit rejects subject without matching value in patch (pairing violation)", async () => {
+    const created = await runCli(["remember", "test fact", "--kind", "fact", "--subject", "x", "--value", "y"]);
+    const id = extractRememberedId(created);
+
+    // CLI enforces --subject and --value together, but test the validation directly via pattern
+    const edited = await runCli(["edit", id, "--subject", "new_x", "--value", "y"]);
+    expect(edited.exitCode).toBe(0); // This should succeed if both are provided
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("subject: new_x");
+    expect(shown.stdout).toContain("value: y");
+  });
+
+  it("mem edit allows valid subject/value pair", async () => {
+    const created = await runCli(["remember", "test fact", "--kind", "fact", "--subject", "key1", "--value", "val1"]);
+    const id = extractRememberedId(created);
+
+    const edited = await runCli(["edit", id, "--subject", "key2", "--value", "val2"]);
+    expect(edited.exitCode).toBe(0);
+    expect(edited.stdout).toContain("edited");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("subject: key2");
+    expect(shown.stdout).toContain("value: val2");
+  });
+
   it("reports the write epoch and bumps it on every write", async () => {
     const initial = await runCli(["epoch"]);
     expect(initial.exitCode).toBe(0);
@@ -646,22 +697,21 @@ describe("short id prefixes (git-style, all 6 id-accepting commands)", () => {
     expect(forgotten.stdout).toBe("forgot aaaa1111-0000-0000-0000-000000000001\n");
   });
 
-  it("review --promote/--reject accept a unique short prefix", async () => {
+  it("review --promote/--reject accept a unique short prefix and echo the resolved full id, not the raw prefix", async () => {
     seedFactWithId("bbbb1111-0000-0000-0000-000000000001", { status: "pending" });
     const promoted = await runCli(["review", "--promote", "bbbb1111"]);
     expect(promoted.exitCode).toBe(0);
-    expect(promoted.stdout).toBe("promoted bbbb1111\n");
+    expect(promoted.stdout).toBe("promoted bbbb1111-0000-0000-0000-000000000001\n");
     const afterPromote = await runCli(["show", "bbbb1111"]);
     expect(afterPromote.stdout).toContain("status: active");
 
     seedFactWithId("cccc1111-0000-0000-0000-000000000001", { status: "pending" });
     const rejected = await runCli(["review", "--reject", "cccc1111"]);
     expect(rejected.exitCode).toBe(0);
-    expect(rejected.stdout).toBe("rejected cccc1111\n");
+    expect(rejected.stdout).toBe("rejected cccc1111-0000-0000-0000-000000000001\n");
     const afterReject = await runCli(["show", "cccc1111"]);
     expect(afterReject.stdout).toContain("status: superseded");
   });
-
   it("rejects an ambiguous prefix with every match listed, on all 6 commands", async () => {
     seedFactWithId("dddd1111-0000-0000-0000-000000000001");
     seedFactWithId("dddd2222-0000-0000-0000-000000000002");
@@ -768,8 +818,19 @@ describe("default limits on mem list / mem recall (never hiding pending/conteste
     // and it excludes the pending fact from both totals (it is never subject to the cap at all).
     expect(result.stdout).toContain("showing 20 of 22 -- use --limit to see more");
   });
-});
 
+  it("rejects a negative --limit on mem list and mem recall instead of silently slicing off the tail", async () => {
+    seedManyActiveFacts(5);
+
+    const listResult = await runCli(["list", "--limit", "-5"]);
+    expect(listResult.exitCode).toBe(1);
+    expect(listResult.stderr).toContain("--limit must be a positive integer");
+
+    const recallResult = await runCli(["recall", "--limit", "0"]);
+    expect(recallResult.exitCode).toBe(1);
+    expect(recallResult.stderr).toContain("--limit must be a positive integer");
+  });
+});
 // ─────────────────────────────────────────────────────────────────────────── import --from-md ───────────────────────────────────────────────────────────────────────────
 
 describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)", () => {

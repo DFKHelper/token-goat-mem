@@ -20,7 +20,7 @@
  * `{ filePath, outcomes }`, so both import modes render through the same summary/line formatting.
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 
@@ -28,15 +28,16 @@ import { loadAllowlist, screenForSecrets } from "./capture.js";
 import { insertAuditLog } from "./db.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { getFactById, insertFact } from "./storage.js";
+import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
 
 /** The only envelope shape this module reads. Bumping this is a breaking change to the export format -- there is deliberately no migration path for older/newer envelopes today. */
 export const JSON_EXPORT_SCHEMA_VERSION = 1;
 
-const FACT_KINDS: readonly FactKind[] = ["preference", "decision", "fact", "correction"];
-const FACT_SCOPES: readonly FactScope[] = ["global", "project", "path"];
+/** Maximum JSON export file size (50 MB). Files larger than this are rejected as DoS protection. */
+const MAX_IMPORT_FILE_SIZE_BYTES = 50_000_000;
+
 const FACT_SOURCE_TYPES: readonly FactSourceType[] = ["user", "derived"];
-const FACT_STATUSES: readonly FactStatus[] = ["active", "pending", "superseded", "contested", "pinned"];
 
 /**
  * Thrown for a whole-file problem (malformed JSON, missing/mismatched `schemaVersion`, missing
@@ -115,6 +116,12 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   if (obj["confidence"] !== undefined && typeof obj["confidence"] !== "number") {
     return fail(`facts[${index}] has a non-numeric "confidence"`);
   }
+  if (obj["confidence"] !== undefined && !Number.isFinite(obj["confidence"])) {
+    return fail(`facts[${index}] has a non-finite "confidence" (NaN or Infinity)`);
+  }
+  if (obj["confidence"] !== undefined && (obj["confidence"] < 0 || obj["confidence"] > 1)) {
+    return fail(`facts[${index}] has out-of-range "confidence" ${obj["confidence"]} (expected 0-1)`);
+  }
   if (obj["captured_at"] !== undefined && typeof obj["captured_at"] !== "string") {
     return fail(`facts[${index}] has a non-string "captured_at"`);
   }
@@ -186,6 +193,12 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
  */
 function parseJsonFacts(path: string): { readonly filePath: string; readonly entries: readonly ParsedEntry[] } {
   const filePath = resolve(path);
+  const stat = statSync(filePath);
+  if (stat.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+    throw new JsonImportError(
+      `${filePath} is too large (${stat.size} bytes, max ${MAX_IMPORT_FILE_SIZE_BYTES} bytes)`
+    );
+  }
   const raw = readFileSync(filePath, "utf8");
 
   let parsed: unknown;
@@ -253,16 +266,10 @@ export interface ImportFromJsonOptions {
  * duplicate skips are recorded as outcomes, not exceptions, and do not trigger that rollback.
  */
 export function importFromJson(db: Database.Database, options: ImportFromJsonOptions): ImportResult {
-  const { filePath, entries } = parseJsonFacts(options.path);
   if (options.dryRun === true) {
-    const candidates = entries.map((entry) => entry.candidate);
-    const outcomes: ImportOutcome[] = entries.map((entry) =>
-      entry.newFact === null
-        ? { status: "skipped_error", candidate: entry.candidate, reason: entry.reason ?? "invalid fact" }
-        : { status: "dry_run", candidate: entry.candidate }
-    );
-    return { filePath, candidates, outcomes };
+    return planImportFromJson(options);
   }
+  const { filePath, entries } = parseJsonFacts(options.path);
 
   const root = resolve(options.root ?? process.cwd());
   const allowlist = loadAllowlist(root);

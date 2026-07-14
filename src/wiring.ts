@@ -225,6 +225,24 @@ function markerEnd(tool: string): string {
   return `<!-- token-goat-mem:${tool}:end -->`;
 }
 
+/** Appends `block` to `content`, separated from any existing content by exactly one blank line. If `content` is blank (absent or whitespace-only), writes just the block (no leading separator). Shared by both the per-tool and reference-counted shared marker implementations. */
+function appendBlock(content: string, block: string): string {
+  if (content.trim().length === 0) {
+    return `${block}\n`;
+  }
+  const base = content.endsWith("\n") ? content : `${content}\n`;
+  return `${base}\n${block}\n`;
+}
+
+/** Removes the `[startIdx, blockEnd)` slice of `content` plus the one blank-line separator `appendBlock` adds, leaving the rest of the file untouched. Shared by both the per-tool and reference-counted shared marker implementations. */
+function stripBlockSeparators(content: string, startIdx: number, blockEnd: number): string {
+  const before = content.slice(0, startIdx);
+  const after = content.slice(blockEnd);
+  const beforeStripped = before.endsWith("\n\n") ? before.slice(0, -1) : before;
+  const afterStripped = after.startsWith("\n") ? after.slice(1) : after;
+  return `${beforeStripped}${afterStripped}`;
+}
+
 /** Inserts/replaces a tool-namespaced marked block. Replaces everything between an existing marker pair in place (upgrade); otherwise appends a new marked block at end of file, separated from any existing content by exactly one blank line. */
 function upsertMarkedBlock(content: string, tool: string, body: string): string {
   const start = markerStart(tool);
@@ -237,11 +255,7 @@ function upsertMarkedBlock(content: string, tool: string, body: string): string 
     return content.slice(0, startIdx) + block + content.slice(endIdx + end.length);
   }
 
-  if (content.trim().length === 0) {
-    return `${block}\n`;
-  }
-  const base = content.endsWith("\n") ? content : `${content}\n`;
-  return `${base}\n${block}\n`;
+  return appendBlock(content, block);
 }
 
 /** Strips a tool-namespaced marked block plus the one blank-line separator `upsertMarkedBlock` adds, leaving the rest of the file untouched. No-op (returns `content` unchanged) if the marker pair isn't present. */
@@ -254,11 +268,7 @@ function stripMarkedBlock(content: string, tool: string): string {
     return content;
   }
   const blockEnd = endIdx + end.length;
-  const before = content.slice(0, startIdx);
-  const after = content.slice(blockEnd);
-  const beforeStripped = before.endsWith("\n\n") ? before.slice(0, -1) : before;
-  const afterStripped = after.startsWith("\n") ? after.slice(1) : after;
-  return `${beforeStripped}${afterStripped}`;
+  return stripBlockSeparators(content, startIdx, blockEnd);
 }
 
 function markdownFile(path: string, tool: string, body: string): ManagedFile {
@@ -353,11 +363,7 @@ function upsertSharedMarkedBlock(content: string, tool: string, body: string): s
   }
 
   const block = `${sharedMarkerStart([tool])}\n${body.trim()}\n${SHARED_BLOCK_END}`;
-  if (content.trim().length === 0) {
-    return `${block}\n`;
-  }
-  const base = content.endsWith("\n") ? content : `${content}\n`;
-  return `${base}\n${block}\n`;
+  return appendBlock(content, block);
 }
 
 /**
@@ -379,11 +385,7 @@ function stripSharedMarkedBlock(content: string, tool: string): string {
   }
 
   const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
-  const before = content.slice(0, found.startIdx);
-  const after = content.slice(blockEnd);
-  const beforeStripped = before.endsWith("\n\n") ? before.slice(0, -1) : before;
-  const afterStripped = after.startsWith("\n") ? after.slice(1) : after;
-  return `${beforeStripped}${afterStripped}`;
+  return stripBlockSeparators(content, found.startIdx, blockEnd);
 }
 
 /** describe() detail override for the shared block: distinguishes "join existing shared block" from a plain create/update, and "leave shared block in place, drop <tool>" from "remove shared block entirely". Falls back to the generic wording (`undefined`) whenever no shared block is present yet. */
