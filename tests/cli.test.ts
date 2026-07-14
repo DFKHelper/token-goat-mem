@@ -575,6 +575,10 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(result.stdout).toContain("would import 1 candidate fact(s)");
     expect(result.stdout).toContain("nothing written");
 
+    // Regression: --dry-run previously routed through openDb (mkdir + schema init) even though it
+    // never wrote a fact, so it silently created mem.db despite claiming not to write anything.
+    expect(existsSync(join(home, "mem.db"))).toBe(false);
+
     const listed = await runCli(["list"]);
     expect(listed.stdout.trim()).toBe("no facts stored");
   });

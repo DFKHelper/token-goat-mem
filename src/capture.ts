@@ -158,15 +158,15 @@ function shannonEntropy(value: string): number {
 
 /**
  * Fields whose value is a structurally-constrained fs/git predicate string (an anchor), never
- * free-text/user-authored content, so they are excluded from the *generic* high-entropy-token
- * heuristic below -- same false-positive mechanism, and same fix, already applied to `sourceRef`
- * (see the comment in `screenInputOrThrow`): `GENERIC_TOKEN`'s alphabet includes "/", so any
- * plausible, entirely benign `file-exists <long/nested/path.tsx>` or `glob-exists <pattern>`
- * argument over ~32 chars can exceed the entropy threshold purely from directory-name variety, with
- * no secret present at all. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) still run against
- * these fields -- those are specific enough that a real credential embedded in an anchor argument
- * (e.g. a malicious `derived` fact's anchor smuggling a literal key) is still caught; only the noisy
- * generic-entropy catch-all is skipped.
+ * free-text/user-authored content, so a slash-containing token is excluded from the *generic*
+ * high-entropy-token heuristic below -- same false-positive mechanism, and same fix, already
+ * applied to `sourceRef` (see the comment in `screenInputOrThrow`): `GENERIC_TOKEN`'s alphabet
+ * includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` argument
+ * over ~32 chars can exceed the entropy threshold purely from directory-name variety, with no
+ * secret present at all. The exemption only applies to a matched token that contains "/" -- a
+ * prefix-less high-entropy secret with no path separator (an unlabeled credential with no
+ * recognized `SECRET_PATTERNS` prefix) is still caught by the entropy fallback. Named
+ * `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields regardless.
  */
 const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor"]);
 
@@ -185,16 +185,20 @@ function scanField(field: string, value: string): SecretMatch[] {
     }
   }
 
-  if (!GENERIC_ENTROPY_EXEMPT_FIELDS.has(field)) {
-    GENERIC_TOKEN.lastIndex = 0;
-    let g = GENERIC_TOKEN.exec(value);
-    while (g !== null) {
-      const token = g[0];
-      if (!HEX_ONLY.test(token) && !DIGITS_ONLY.test(token) && shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD) {
-        matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
-      }
-      g = GENERIC_TOKEN.exec(value);
+  const exemptField = GENERIC_ENTROPY_EXEMPT_FIELDS.has(field);
+  GENERIC_TOKEN.lastIndex = 0;
+  let g = GENERIC_TOKEN.exec(value);
+  while (g !== null) {
+    const token = g[0];
+    if (
+      !(exemptField && token.includes("/")) &&
+      !HEX_ONLY.test(token) &&
+      !DIGITS_ONLY.test(token) &&
+      shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD
+    ) {
+      matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
     }
+    g = GENERIC_TOKEN.exec(value);
   }
 
   return matches;

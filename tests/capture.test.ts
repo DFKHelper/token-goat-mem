@@ -135,6 +135,20 @@ describe("captureExplicit (happy path)", () => {
     ).toThrow(SecretDetectedError);
   });
 
+  it("still catches a prefix-less high-entropy secret (no named pattern, no slash) embedded in an anchor argument", () => {
+    // The slash-scoped entropy exemption above must not become a blanket exemption for the whole
+    // `anchor` field: a token with no path separator and no recognized SECRET_PATTERNS prefix is
+    // exactly the case the generic heuristic exists to catch, and must still be caught here.
+    expect(() =>
+      captureExplicit(db, {
+        text: "suspicious anchor",
+        kind: "fact",
+        anchor: "file-exists aB3xK9m2ZpQwErTyUiOpAsDfGhJkLzXcVbNm1234",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
   it("blocks a fact containing a known secret pattern, persists nothing, and audits the block", () => {
     const before = (db.prepare("SELECT COUNT(*) AS n FROM facts").get() as { n: number }).n;
 
