@@ -99,8 +99,11 @@ export type FreshnessVerdict = "affirmed" | "unverified" | "contradicted";
 
 /**
  * Fields required/allowed to insert a new fact via storage.insertFact
- * (src/storage.ts). `id` is assigned by storage (a fresh `crypto.randomUUID()`,
- * matching the `facts.id TEXT PRIMARY KEY` column owned by src/db.ts).
+ * (src/storage.ts). `id` is assigned by storage: a fresh `crypto.randomUUID()`
+ * (matching the `facts.id TEXT PRIMARY KEY` column owned by src/db.ts) ONLY
+ * when the caller omits `id`; when the caller supplies `id`, storage uses it
+ * as-is. That is what lets a full-fidelity JSON re-import (src/exportImport.ts)
+ * preserve a fact's original id across an export/import round trip.
  * `captured_at` defaults to `new Date().toISOString()`, `status` defaults to
  * `'active'`, and `confidence` defaults to `1.0` when omitted. Field names and
  * casing mirror `Fact` exactly (including the snake_case of `source_type`,
@@ -112,6 +115,8 @@ export interface NewFact {
   kind: FactKind;
   scope: FactScope;
   source_type: FactSourceType;
+  /** Assigned by storage.insertFact when omitted (see above). Supply it only to preserve a specific id, e.g. a full-fidelity JSON re-import. */
+  id?: string;
   subject?: string | null;
   value?: string | null;
   scopeRoot?: string | null;

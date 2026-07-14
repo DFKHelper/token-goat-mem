@@ -657,13 +657,255 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(shown.stdout).toContain("status: active");
   });
 
-  it("requires --from-md", async () => {
-    // Commander's own required-option enforcement fires here (before this command's `guard()`
-    // action ever runs), same pre-existing exitOverride/subcommand interaction every other
-    // `requiredOption` command (e.g. `remember --kind`) has -- not specific to `import`, so this
-    // only asserts non-success rather than a precise exit code.
-    const result = await runCli(["import"]);
-    expect(result.exitCode).not.toBe(0);
+  it("requires exactly one of --from-md or --from-json", async () => {
+    // Neither flag given.
+    const neither = await runCli(["import"]);
+    expect(neither.exitCode).toBe(1);
+    expect(neither.stderr).toContain("requires exactly one of --from-md or --from-json");
+
+    // Both flags given.
+    const path = writeFixture(["- Always use pnpm, never npm."].join("\n"));
+    const both = await runCli(["import", "--from-md", path, "--from-json", path, "--root", home]);
+    expect(both.exitCode).toBe(1);
+    expect(both.stderr).toContain("requires exactly one of --from-md or --from-json");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── mem suggest ───────────────────────────────────────────────────────────────────────────
+
+describe("mem suggest (suggested/candidate capture, S9 trust path)", () => {
+  it("stores a pending fact, confirmable only via `mem review --promote`", async () => {
+    const result = await runCli(["suggest", "consider using vitest workspaces", "--kind", "preference"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/^suggested preference fact \S+ \(pending\)\n$/u);
+
+    const match = /suggested \S+ fact (\S+) \(pending\)/u.exec(result.stdout);
+    const id = match?.[1];
+    expect(id).toBeDefined();
+
+    const pendingList = await runCli(["list", "--status", "pending"]);
+    expect(pendingList.exitCode).toBe(0);
+    expect(pendingList.stdout).toContain(id as string);
+    expect(pendingList.stdout).toContain("[preference/pending]");
+
+    const activeList = await runCli(["list", "--status", "active"]);
+    expect(activeList.stdout).not.toContain(id as string);
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+  });
+
+  it("rejects a malformed anchor the same way mem remember does", async () => {
+    const result = await runCli(["suggest", "bogus", "--kind", "fact", "--anchor", "run-shell rm"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("unknown predicate");
+
+    const listed = await runCli(["list"]);
+    expect(listed.stdout.trim()).toBe("no facts stored");
+  });
+
+  it("rejects an over-length text the same way mem remember does", async () => {
+    const tooLong = "x".repeat(501);
+    const result = await runCli(["suggest", tooLong, "--kind", "fact"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("exceeds 500 characters");
+
+    const listed = await runCli(["list"]);
+    expect(listed.stdout.trim()).toBe("no facts stored");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── mem export / mem import --from-json ───────────────────────────────────────────────────────────────────────────
+
+interface ExportedFact {
+  readonly id: string;
+  readonly text: string;
+  readonly kind: string;
+  readonly status: string;
+  readonly confidence: number;
+  readonly captured_at: string;
+}
+
+interface ExportEnvelope {
+  readonly schemaVersion: number;
+  readonly exportedAt: string;
+  readonly facts: readonly ExportedFact[];
+}
+
+describe("mem export", () => {
+  it("exports schemaVersion 1, a valid exportedAt, and every seeded fact across statuses", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const activeId = extractRememberedId(remembered);
+
+    const suggested = await runCli(["suggest", "maybe prefers dark mode", "--kind", "preference"]);
+    const pendingId = /suggested \S+ fact (\S+) \(pending\)/u.exec(suggested.stdout)?.[1] as string;
+
+    const exported = await runCli(["export"]);
+    expect(exported.exitCode).toBe(0);
+
+    const envelope = JSON.parse(exported.stdout) as ExportEnvelope;
+    expect(envelope.schemaVersion).toBe(1);
+    expect(new Date(envelope.exportedAt).toISOString()).toBe(envelope.exportedAt);
+
+    const byId = new Map(envelope.facts.map((fact) => [fact.id, fact]));
+    expect(byId.has(activeId)).toBe(true);
+    expect(byId.get(activeId)?.status).toBe("active");
+    expect(byId.get(activeId)?.text).toBe("uses pnpm not npm");
+
+    expect(byId.has(pendingId)).toBe(true);
+    expect(byId.get(pendingId)?.status).toBe("pending");
+  });
+});
+
+describe("mem import --from-json (full-fidelity round-trip)", () => {
+  it("round-trips a fact -- including id, status, confidence, and captured_at -- into a fresh store", async () => {
+    const remembered = await runCli([
+      "remember",
+      "uses pnpm not npm",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const id = extractRememberedId(remembered);
+
+    const exported = await runCli(["export"]);
+    expect(exported.exitCode).toBe(0);
+    const envelope = JSON.parse(exported.stdout) as ExportEnvelope;
+    const originalFact = envelope.facts.find((fact) => fact.id === id);
+    expect(originalFact).toBeDefined();
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-json", jsonPath]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+      const shown = await runCli(["show", id]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toContain(`id: ${id}`);
+      expect(shown.stdout).toContain("status: active");
+      expect(shown.stdout).toContain("text: uses pnpm not npm");
+      expect(shown.stdout).toContain("subject: package-manager");
+      expect(shown.stdout).toContain("value: pnpm");
+      expect(shown.stdout).toContain(`confidence: ${originalFact?.confidence}`);
+      expect(shown.stdout).toContain(`captured_at: ${originalFact?.captured_at}`);
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-importing the same export file against the same target is idempotent -- second run reports duplicates, fact count unchanged", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+    const exported = await runCli(["export"]);
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const first = await runCli(["import", "--from-json", jsonPath]);
+      expect(first.exitCode).toBe(0);
+      expect(first.stdout).toContain("imported 1 of 1 candidate fact(s)");
+      const countAfterFirst = await runCli(["list"]);
+      const countLinesFirst = countAfterFirst.stdout.trim().split("\n").length;
+
+      const second = await runCli(["import", "--from-json", jsonPath]);
+      expect(second.exitCode).toBe(0);
+      expect(second.stdout).toContain("imported 0 of 1 candidate fact(s)");
+      expect(second.stdout).toContain("skipped (duplicate)");
+
+      const countAfterSecond = await runCli(["list"]);
+      const countLinesSecond = countAfterSecond.stdout.trim().split("\n").length;
+      expect(countLinesSecond).toBe(countLinesFirst);
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("--dry-run reports candidates without writing any facts, and never creates mem.db", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+    const exported = await runCli(["export"]);
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const result = await runCli(["import", "--from-json", jsonPath, "--dry-run"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("would import 1 candidate fact(s)");
+      expect(result.stdout).toContain("nothing written");
+      expect(existsSync(join(targetHome, "mem.db"))).toBe(false);
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips a fact with a high-entropy secret value the same way mem remember rejects it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-export-tampered-"));
+    const jsonPath = join(dir, "export.json");
+    const envelope = {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      facts: [
+        {
+          id: "11111111-1111-1111-1111-111111111111",
+          text: "deploy key",
+          kind: "fact",
+          subject: null,
+          value: "AKIAABCDEFGHIJKLMNOP",
+          scope: "global",
+          scopeRoot: null,
+          source_type: "user",
+          source_ref: null,
+          captured_at: new Date().toISOString(),
+          anchor: null,
+          status: "active",
+          confidence: 1,
+          embedding: null,
+        },
+      ],
+    };
+    writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
+
+    try {
+      const result = await runCli(["import", "--from-json", jsonPath]);
+      // Per-fact skip, not a hard command failure: the command still reports success overall
+      // (imported 0 of 1), same as a duplicate or a structurally invalid fact.
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("imported 0 of 1 candidate fact(s)");
+      expect(result.stdout).toContain("secret");
+
+      const listed = await runCli(["list"]);
+      expect(listed.stdout.trim()).toBe("no facts stored");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

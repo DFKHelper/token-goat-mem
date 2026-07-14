@@ -41,6 +41,7 @@ import type Database from "better-sqlite3";
 import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
 import {
   captureExplicit,
+  captureSuggested,
   CaptureValidationError,
   InvalidAnchorError,
   loadAllowlist,
@@ -48,9 +49,11 @@ import {
   SecretDetectedError,
   validateFactEditOrThrow,
   type CaptureExplicitInput,
+  type CaptureSuggestedInput,
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
+import { importFromJson, JsonImportError, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
 import { importFromMarkdown, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
   getToolWiring,
@@ -109,7 +112,8 @@ function exitCodeForError(error: unknown): number {
     error instanceof CaptureValidationError ||
     error instanceof InvalidAnchorError ||
     error instanceof SecretDetectedError ||
-    error instanceof WiringConflictError
+    error instanceof WiringConflictError ||
+    error instanceof JsonImportError
     ? EXIT_USER_ERROR
     : EXIT_INTERNAL_ERROR;
 }
@@ -508,7 +512,8 @@ interface RememberCliOptions {
 }
 
 interface ImportCliOptions {
-  readonly fromMd: string;
+  readonly fromMd?: string;
+  readonly fromJson?: string;
   readonly root?: string;
   readonly scope?: string;
   readonly kind?: string;
@@ -621,32 +626,111 @@ export function buildProgram(): Command {
     );
 
   program
+    .command("suggest <text>")
+    .description(
+      "Suggested capture: propose a candidate fact into pending storage -- never auto-promoted, same trust " +
+        "path as any other suggested/derived fact (confirm via `mem review --promote <id>`)"
+    )
+    .requiredOption("--kind <kind>", `preference, decision, fact, or correction`)
+    .option("--subject <key>", "Normalized key for contradiction detection (requires --value)")
+    .option("--value <value>", "Value for the subject (requires --subject)")
+    .option("--anchor <predicate>", "Read-only anchor predicate (filesystem/git)")
+    .option("--scope <scope>", "global, project, or path", "global")
+    .option("--source-ref <ref>", "Reference to the originating conversation/message")
+    .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
+    .action(
+      guard(async (text: string, options: RememberCliOptions) => {
+        const kind = parseFactKind(options.kind);
+        const scope = parseFactScope(options.scope);
+        const root = resolveRoot(options.root);
+        const input: CaptureSuggestedInput = {
+          text,
+          kind,
+          scope,
+          root,
+          ...(options.subject !== undefined ? { subject: options.subject } : {}),
+          ...(options.value !== undefined ? { value: options.value } : {}),
+          ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
+          ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+        };
+        const { fact } = await withDb((db) => captureSuggested(db, input));
+        process.stdout.write(`suggested ${fact.kind} fact ${fact.id} (pending)\n`);
+      })
+    );
+
+  program
+    .command("export")
+    .description("Export every stored fact (all statuses) as a full-fidelity JSON envelope, for `mem import --from-json`")
+    .action(
+      guard(async () => {
+        const facts = await withDb((db) => listFacts(db, {}));
+        const envelope = {
+          schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
+          exportedAt: new Date().toISOString(),
+          facts: facts.map((fact) => ({
+            id: fact.id,
+            text: fact.text,
+            kind: fact.kind,
+            subject: fact.subject,
+            value: fact.value,
+            scope: fact.scope,
+            scopeRoot: fact.scopeRoot ?? null,
+            source_type: fact.source_type,
+            source_ref: fact.source_ref,
+            captured_at: fact.captured_at,
+            anchor: fact.anchor,
+            status: fact.status,
+            confidence: fact.confidence,
+            embedding: fact.embedding === null ? null : Array.from(fact.embedding),
+          })),
+        };
+        process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+      })
+    );
+
+  program
     .command("import")
     .description(
-      "Advisory import: parse a markdown file (CLAUDE.md-style) for preference/decision-shaped bullets and " +
-        "store each as a pending fact -- never auto-promoted, same trust path as any other suggested/derived fact " +
-        "(confirm via `mem review --promote <id>`)"
+      "Import facts from either a markdown file (--from-md, advisory: bullets always land pending, never " +
+        "auto-promoted) or a JSON export (--from-json, full-fidelity: preserves original id/status/confidence/" +
+        "captured_at, safe to re-run idempotently) -- exactly one of the two is required"
     )
-    .requiredOption("--from-md <path>", "Markdown file to import bullet-list candidates from")
+    .option("--from-md <path>", "Markdown file (CLAUDE.md-style) to import preference/decision-shaped bullets from, always as pending facts")
+    .option("--from-json <path>", "JSON file produced by `mem export` to import full-fidelity (id, status, confidence, captured_at preserved)")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
-    .option("--scope <scope>", "global, project, or path", "project")
-    .option("--kind <kind>", "preference, decision, fact, or correction", "preference")
+    .option("--scope <scope>", "--from-md only: global, project, or path", "project")
+    .option("--kind <kind>", "--from-md only: preference, decision, fact, or correction", "preference")
     .option("--dry-run", "Report what would be imported without writing anything")
     .action(
       guard(async (options: ImportCliOptions) => {
+        const hasFromMd = options.fromMd !== undefined;
+        const hasFromJson = options.fromJson !== undefined;
+        if (hasFromMd === hasFromJson) {
+          throw new UsageError("import requires exactly one of --from-md or --from-json");
+        }
+        const dryRun = options.dryRun === true;
+
+        // --dry-run opens no database on purpose in either mode: openDb() would mkdirSync + create
+        // the db file, WAL sidecars, and schema on disk, which contradicts --dry-run's "nothing
+        // written". Both plan* functions need only the source file, no db.
+        if (hasFromJson) {
+          const fromJson = options.fromJson as string;
+          const result = dryRun
+            ? planImportFromJson({ path: fromJson })
+            : await withDb((db) => importFromJson(db, { path: fromJson, root: resolveRoot(options.root) }));
+          process.stdout.write(`${formatImportResult(result, dryRun)}\n`);
+          return;
+        }
+
+        const fromMd = options.fromMd as string;
         const root = resolveRoot(options.root);
         const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
         const kind = options.kind !== undefined ? parseFactKind(options.kind) : undefined;
-        const dryRun = options.dryRun === true;
-
-        // --dry-run opens no database on purpose: openDb() would mkdirSync + create the db file,
-        // WAL sidecars, and schema on disk, which contradicts --dry-run's "nothing written". The
-        // dry-run computation (planImportFromMarkdown) needs only the markdown file, no db.
         const result = dryRun
-          ? planImportFromMarkdown({ path: options.fromMd })
+          ? planImportFromMarkdown({ path: fromMd })
           : await withDb((db) =>
               importFromMarkdown(db, {
-                path: options.fromMd,
+                path: fromMd,
                 root,
                 ...(scope !== undefined ? { scope } : {}),
                 ...(kind !== undefined ? { kind } : {}),

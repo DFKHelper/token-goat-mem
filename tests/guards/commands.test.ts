@@ -13,6 +13,7 @@ const EXPECTED_COMMANDS = [
   "doctor",
   "edit",
   "epoch",
+  "export",
   "forget",
   "import",
   "init",
@@ -22,6 +23,7 @@ const EXPECTED_COMMANDS = [
   "remember",
   "review",
   "show",
+  "suggest",
   "uninstall",
 ] as const;
 

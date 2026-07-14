@@ -4,6 +4,12 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+### Added
+
+- **`mem suggest <text>`** — the suggested-capture counterpart to `mem remember`: same flags (`--kind`, `--subject`/`--value`, `--anchor`, `--scope`, `--source-ref`, `--root`), but goes through `captureSuggested` instead of `captureExplicit`, so the fact always lands `pending` and is never auto-promoted (same S9 trust path `mem import --from-md` already uses). Confirm with `mem review --promote <id>`.
+- **`mem export`** — writes every stored fact (any status) to stdout as a JSON envelope (`{ schemaVersion, exportedAt, facts }`), for backup or full-fidelity re-import via `mem import --from-json`.
+- **`mem import --from-json <path>`** — full-fidelity import of a `mem export` file: preserves each fact's original `id`, `status`, `confidence`, and `captured_at` exactly (unlike `--from-md`, which always imports as advisory `pending` candidates). Bypasses the capture pipeline's status/confidence defaulting (it calls `storage.insertFact` directly) but still runs the same secret screening before writing. Re-running the same import against the same store is idempotent: a fact whose `id` already exists is skipped as a duplicate, not re-inserted. `--from-md` and `--from-json` are mutually exclusive; exactly one is required.
+
 ### Fixed
 
 - **`mem init` crashed with a raw error (not the `WiringConflictError` contract) on some hand-edited configs.** Two more spots that assumed well-formed input reached uncaught type errors instead of the documented "refusing to modify a hand-edited config" abort: (1) a `hooks.SessionStart` array element that is `null`, a primitive, or an object whose `hooks` isn't an array (`installClaudeSettings` threw `TypeError: Cannot read properties of null`; `uninstallClaudeSettings` likewise crashed instead of leaving the file untouched); (2) a `tasks.json` whose `tasks` or `inputs` key is present but not an array (`installTasksJson` reached jsonc-parser's raw `Can not add property to parent of type string`). Both now abort with `WiringConflictError` on install and are left untouched on uninstall, matching how the root/`hooks`/`SessionStart`-array checks already behaved.

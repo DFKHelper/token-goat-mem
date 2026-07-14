@@ -190,7 +190,7 @@ function getFactRow(db: Db, id: string): FactRow | undefined {
  * so a crash between the insert and the bump can never happen.
  */
 export function insertFact(db: Db, fact: NewFact): Fact {
-  const id = randomUUID();
+  const id = fact.id ?? randomUUID();
   const capturedAt = fact.captured_at ?? new Date().toISOString();
   const status = fact.status ?? "active";
   const confidence = fact.confidence ?? 1.0;
