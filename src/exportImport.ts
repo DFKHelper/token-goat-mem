@@ -24,7 +24,7 @@ import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { loadAllowlist, screenForSecrets } from "./capture.js";
+import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactEditOrThrow } from "./capture.js";
 import { insertAuditLog } from "./db.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { getFactById, insertFact } from "./storage.js";
@@ -181,6 +181,36 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
     newFact.confidence = obj["confidence"];
   }
 
+  // Apply the same structural guards every other write path enforces (capture.ts's
+  // `validateFactEditOrThrow` -- text/subject length limits, subject/value pairing, anchor syntax).
+  // This is reused, not redefined, so the limits/rules can never drift out of sync with
+  // captureExplicit/captureSuggested/mem edit. Deliberately does NOT touch status/confidence: this
+  // module's full-fidelity round-trip contract (see header comment) is unaffected -- only
+  // structural shape is gated here, not trust level.
+  try {
+    // Plain conditional assignment (not spreading possibly-`undefined` values into the literal),
+    // same discipline as this file's own newFact construction above: tsconfig's
+    // exactOptionalPropertyTypes rejects writing `undefined` into an optional `string | null` field.
+    const editPatch: { text?: string; subject?: string | null; value?: string | null; anchor?: string | null } = {
+      text: newFact.text,
+    };
+    if (newFact.subject !== undefined) {
+      editPatch.subject = newFact.subject;
+    }
+    if (newFact.value !== undefined) {
+      editPatch.value = newFact.value;
+    }
+    if (newFact.anchor !== undefined) {
+      editPatch.anchor = newFact.anchor;
+    }
+    validateFactEditOrThrow(editPatch);
+  } catch (error) {
+    if (error instanceof CaptureValidationError || error instanceof InvalidAnchorError) {
+      return fail(`facts[${index}] failed structural validation: ${error.message}`);
+    }
+    throw error;
+  }
+
   const candidate: ImportCandidate = { text: candidateText, line: index + 1, sourceRef: `${newFact.id}` };
   return { candidate, newFact, reason: null };
 }
@@ -193,13 +223,50 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
  */
 function parseJsonFacts(path: string): { readonly filePath: string; readonly entries: readonly ParsedEntry[] } {
   const filePath = resolve(path);
-  const stat = statSync(filePath);
+
+  // Wrap file operations to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
+  // rather than internal errors: a missing or unreadable file is a user error (bad input path),
+  // not a bug.
+  let stat: ReturnType<typeof statSync>;
+  try {
+    stat = statSync(filePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new JsonImportError(`file not found: ${filePath}`);
+    }
+    if (code === "EACCES") {
+      throw new JsonImportError(`permission denied reading file: ${filePath}`);
+    }
+    if (code === "EISDIR") {
+      throw new JsonImportError(`is a directory, not a file: ${filePath}`);
+    }
+    // For any other error, preserve the original message but wrap in JsonImportError
+    throw new JsonImportError(`cannot read file: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
+  }
+
   if (stat.size > MAX_IMPORT_FILE_SIZE_BYTES) {
     throw new JsonImportError(
       `${filePath} is too large (${stat.size} bytes, max ${MAX_IMPORT_FILE_SIZE_BYTES} bytes)`
     );
   }
-  const raw = readFileSync(filePath, "utf8");
+
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      throw new JsonImportError(`file not found: ${filePath}`);
+    }
+    if (code === "EACCES") {
+      throw new JsonImportError(`permission denied reading file: ${filePath}`);
+    }
+    if (code === "EISDIR") {
+      throw new JsonImportError(`is a directory, not a file: ${filePath}`);
+    }
+    throw new JsonImportError(`cannot read file: ${filePath} (${error instanceof Error ? error.message : String(error)})`);
+  }
 
   let parsed: unknown;
   try {
@@ -255,15 +322,31 @@ export interface ImportFromJsonOptions {
   readonly dryRun?: boolean;
 }
 
+/** A pre-decided skip outcome (duplicate or secret) whose audit row is deferred into the import transaction so it can never outlive a rollback of that same transaction. */
+interface PlannedSkip {
+  readonly index: number;
+  readonly event: string;
+  readonly factId: string | null;
+  readonly detail: string;
+  readonly outcome: ImportOutcome;
+}
+
 /**
  * Imports every valid, non-duplicate fact from `options.path` via `insertFact` directly (not
  * `capture.ts`), preserving each fact's original `id`/`status`/`confidence`/`captured_at`/
  * `source_type` exactly as exported. A fact whose `id` already exists in the target store is
  * `skipped_duplicate` -- this is what makes re-running an import against the same store idempotent.
  * A fact that fails shape validation or secret screening is `skipped_error`, not fatal to the rest
- * of the import. Every real `insertFact` call runs inside one `db.transaction()` so an unexpected
- * exception during the insert loop aborts the whole import atomically; per-fact validation/secret/
- * duplicate skips are recorded as outcomes, not exceptions, and do not trigger that rollback.
+ * of the import.
+ *
+ * Every DB write for this import -- both the skip-audit rows for duplicates/secrets and each
+ * successful `insertFact` paired with its own `json_import` audit row -- runs inside a single
+ * `db.transaction()`. This guarantees an unexpected exception anywhere in the batch rolls back
+ * every write together: a crash mid-import can never leave a fact without its audit row, nor an
+ * audit row (skip or import) that outlives a rollback of the work it describes. Per-fact
+ * validation/secret/duplicate detection happens beforehand (pure reads and checks, no writes), so
+ * it does not itself trigger or need that rollback -- only the writes it decides on are deferred
+ * into the transaction.
  */
 export function importFromJson(db: Database.Database, options: ImportFromJsonOptions): ImportResult {
   if (options.dryRun === true) {
@@ -277,6 +360,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
   const candidates = entries.map((entry) => entry.candidate);
   const outcomes: (ImportOutcome | undefined)[] = new Array(entries.length).fill(undefined);
   const toInsert: { readonly index: number; readonly newFact: NewFact & { id: string } }[] = [];
+  const skips: PlannedSkip[] = [];
 
   entries.forEach((entry, index) => {
     if (entry.newFact === null) {
@@ -285,12 +369,13 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
     }
     const existing = getFactById(db, entry.newFact.id);
     if (existing !== undefined) {
-      insertAuditLog(db, {
+      skips.push({
+        index,
         event: "json_import_skipped_duplicate",
         factId: entry.newFact.id,
         detail: `skipped: fact ${entry.newFact.id} already exists`,
+        outcome: { status: "skipped_duplicate", candidate: entry.candidate },
       });
-      outcomes[index] = { status: "skipped_duplicate", candidate: entry.candidate };
       return;
     }
     const matches = screenForSecrets(
@@ -304,16 +389,17 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
       allowlist
     );
     if (matches.length > 0) {
-      insertAuditLog(db, {
+      skips.push({
+        index,
         event: "json_import_skipped_secret",
         factId: null,
         detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
+        outcome: {
+          status: "skipped_error",
+          candidate: entry.candidate,
+          reason: `refusing to import fact: possible secret detected -- ${matches.map((match) => `${match.field}: ${match.patternName}`).join("; ")}`,
+        },
       });
-      outcomes[index] = {
-        status: "skipped_error",
-        candidate: entry.candidate,
-        reason: `refusing to import fact: possible secret detected -- ${matches.map((match) => `${match.field}: ${match.patternName}`).join("; ")}`,
-      };
       return;
     }
     toInsert.push({ index, newFact: entry.newFact });
@@ -321,22 +407,29 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
 
   const insertedFacts = new Map<number, Fact>();
   const tx = db.transaction((): void => {
+    for (const skip of skips) {
+      insertAuditLog(db, { event: skip.event, factId: skip.factId, detail: skip.detail });
+    }
     for (const { index, newFact } of toInsert) {
-      insertedFacts.set(index, insertFact(db, newFact));
+      const fact = insertFact(db, newFact);
+      insertedFacts.set(index, fact);
+      insertAuditLog(db, {
+        event: "json_import",
+        factId: fact.id,
+        detail: `imported ${fact.status} ${fact.kind} fact from JSON export (id preserved)`,
+      });
     }
   });
   tx();
 
+  for (const skip of skips) {
+    outcomes[skip.index] = skip.outcome;
+  }
   for (const { index } of toInsert) {
     const fact = insertedFacts.get(index);
     if (fact === undefined) {
       throw new Error(`exportImport: importFromJson failed to read back an inserted fact at index ${index}`);
     }
-    insertAuditLog(db, {
-      event: "json_import",
-      factId: fact.id,
-      detail: `imported ${fact.status} ${fact.kind} fact from JSON export (id preserved)`,
-    });
     outcomes[index] = { status: "imported", candidate: candidates[index] as ImportCandidate, fact };
   }
 

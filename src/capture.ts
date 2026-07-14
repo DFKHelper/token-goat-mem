@@ -459,11 +459,12 @@ function validateCommonInput(input: CaptureExplicitInput): { text: string; root:
   return { text, root };
 }
 
-function screenInputOrThrow(
+export function screenInputOrThrow(
   db: Database.Database,
   input: CaptureExplicitInput,
   root: string,
-  auditEvent: string
+  auditEvent: string,
+  factId: string | null = null
 ): void {
   const allowlist = loadAllowlist(root);
   // sourceRef is scanned like any other field: for the `mem import --from-md` path it's a
@@ -486,7 +487,7 @@ function screenInputOrThrow(
   if (matches.length > 0) {
     insertAuditLog(db, {
       event: `${auditEvent}_blocked_secret`,
-      factId: null,
+      factId,
       detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
     });
     throw new SecretDetectedError(matches);

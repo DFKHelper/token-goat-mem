@@ -44,8 +44,7 @@ import {
   captureSuggested,
   CaptureValidationError,
   InvalidAnchorError,
-  loadAllowlist,
-  screenForSecrets,
+  screenInputOrThrow,
   SecretDetectedError,
   validateFactEditOrThrow,
   type CaptureExplicitInput,
@@ -54,7 +53,7 @@ import {
 import { detectContradictions } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
 import { importFromJson, JsonImportError, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
-import { importFromMarkdown, planImportFromMarkdown, type ImportOutcome } from "./import.js";
+import { importFromMarkdown, MarkdownImportError, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
   getToolWiring,
   TOOL_NAMES,
@@ -117,7 +116,8 @@ function exitCodeForError(error: unknown): number {
     error instanceof InvalidAnchorError ||
     error instanceof SecretDetectedError ||
     error instanceof WiringConflictError ||
-    error instanceof JsonImportError
+    error instanceof JsonImportError ||
+    error instanceof MarkdownImportError
     ? EXIT_USER_ERROR
     : EXIT_INTERNAL_ERROR;
 }
@@ -828,6 +828,14 @@ export function buildProgram(): Command {
           throw new UsageError("--limit must be a positive integer");
         }
 
+        if (options.ageDays !== undefined && (!Number.isFinite(options.ageDays) || options.ageDays <= 0)) {
+          throw new UsageError("--age-days must be a positive number");
+        }
+
+        if (options.sinceEpoch !== undefined && (!Number.isFinite(options.sinceEpoch) || options.sinceEpoch < 0)) {
+          throw new UsageError("--since-epoch must be a non-negative integer");
+        }
+
         if (options.hintFormat === true) {
           if (typeof options.root !== "string" || options.root.trim().length === 0) {
             throw new UsageError("recall --hint-format requires --root <path>");
@@ -1031,19 +1039,20 @@ export function buildProgram(): Command {
 
         const updated = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
-          const allowlist = loadAllowlist(root);
-          const matches = screenForSecrets(
-            { text: patch.text, subject: patch.subject, value: patch.value, anchor: patch.anchor },
-            allowlist
+          screenInputOrThrow(
+            db,
+            {
+              text: patch.text ?? "",
+              kind: "fact",
+              subject: patch.subject,
+              value: patch.value,
+              anchor: patch.anchor,
+              root,
+            } as CaptureExplicitInput,
+            root,
+            "edit",
+            existing.id
           );
-          if (matches.length > 0) {
-            insertAuditLog(db, {
-              event: "edit_blocked_secret",
-              factId: existing.id,
-              detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
-            });
-            throw new SecretDetectedError(matches);
-          }
           const fact = updateFact(db, existing.id, patch);
           if (fact === undefined) {
             throw new UsageError(`no such fact: ${existing.id}`);
@@ -1069,6 +1078,11 @@ export function buildProgram(): Command {
         if (options.promote !== undefined && options.reject !== undefined) {
           throw new UsageError("--promote and --reject cannot be used together");
         }
+
+        if (options.sinceEpoch !== undefined && (!Number.isFinite(options.sinceEpoch) || options.sinceEpoch < 0)) {
+          throw new UsageError("--since-epoch must be a non-negative integer");
+        }
+
         if (options.promote !== undefined) {
           const id = options.promote;
           const resolved = await withDb((db) => promotePending(db, id));
