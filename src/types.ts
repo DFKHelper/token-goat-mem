@@ -8,10 +8,12 @@
  */
 
 /** The four fact categories the design distinguishes for recall bias (P6) and decay (Section 6). */
-export type FactKind = "preference" | "decision" | "fact" | "correction";
+export const FACT_KINDS = ["preference", "decision", "fact", "correction"] as const;
+export type FactKind = (typeof FACT_KINDS)[number];
 
 /** Coarse applicability of a fact. Not a literal path — an enum bucket. */
-export type FactScope = "global" | "project" | "path";
+export const FACT_SCOPES = ["global", "project", "path"] as const;
+export type FactScope = (typeof FACT_SCOPES)[number];
 
 /**
  * Provenance of how a fact entered the store. `derived` facts (extracted from
@@ -38,7 +40,8 @@ export type FactSourceType = "user" | "derived";
  *   its proposition — fact-vs-world re-verification (P3, src/anchors.ts).
  * A fact can be either, both, or neither; both independently exclude it from ground truth.
  */
-export type FactStatus = "active" | "pending" | "superseded" | "contested" | "pinned";
+export const FACT_STATUSES = ["active", "pending", "superseded", "contested", "pinned"] as const;
+export type FactStatus = (typeof FACT_STATUSES)[number];
 
 /** A single durable memory record. Column order matches the design plan's `facts` table listing. */
 export interface Fact {

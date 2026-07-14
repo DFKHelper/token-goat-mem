@@ -41,10 +41,9 @@ import type Database from "better-sqlite3";
 
 import { insertAuditLog } from "./db.js";
 import { insertFact as storageInsertFact } from "./storage.js";
+import { FACT_KINDS, FACT_SCOPES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
-const FACT_KINDS: readonly FactKind[] = ["preference", "decision", "fact", "correction"];
-const FACT_SCOPES: readonly FactScope[] = ["global", "project", "path"];
 const SOURCE_TYPES: readonly FactSourceType[] = ["user", "derived"];
 
 const MAX_TEXT_LENGTH = 500;
@@ -344,11 +343,35 @@ export function validateFactEditOrThrow(patch: {
       );
     }
   }
-  if (typeof patch.subject === "string" && patch.subject.trim().length > MAX_SUBJECT_LENGTH) {
-    throw new CaptureValidationError(`subject exceeds ${MAX_SUBJECT_LENGTH} characters`);
+  if (typeof patch.subject === "string") {
+    const subject = patch.subject.trim();
+    if (subject.length === 0) {
+      throw new CaptureValidationError("subject must not be empty");
+    }
+    if (subject.length > MAX_SUBJECT_LENGTH) {
+      throw new CaptureValidationError(`subject exceeds ${MAX_SUBJECT_LENGTH} characters`);
+    }
   }
-  if (typeof patch.value === "string" && patch.value.trim().length > MAX_VALUE_LENGTH) {
-    throw new CaptureValidationError(`value exceeds ${MAX_VALUE_LENGTH} characters`);
+  if (typeof patch.value === "string") {
+    const value = patch.value.trim();
+    if (value.length === 0) {
+      throw new CaptureValidationError("value must not be empty");
+    }
+    if (value.length > MAX_VALUE_LENGTH) {
+      throw new CaptureValidationError(`value exceeds ${MAX_VALUE_LENGTH} characters`);
+    }
+  }
+  // Enforce subject/value pairing: if both are present in the patch and are strings (not null),
+  // they must both be non-empty. This mirrors captureExplicit's rule: "subject and value must
+  // be provided together or not at all (design P4: contradiction detection keys on subject+value
+  // pairs -- a lone key is unusable)".
+  const hasSubjectInPatch = typeof patch.subject === "string" && patch.subject.trim().length > 0;
+  const hasValueInPatch = typeof patch.value === "string" && patch.value.trim().length > 0;
+  if (hasSubjectInPatch !== hasValueInPatch) {
+    throw new CaptureValidationError(
+      "subject and value must be provided together or not at all (design P4: contradiction " +
+        "detection keys on subject+value pairs -- a lone key is unusable)"
+    );
   }
   if (typeof patch.anchor === "string" && patch.anchor.trim().length > 0) {
     validateAnchorSyntax(patch.anchor.trim());

@@ -83,6 +83,7 @@ import {
   setFactStatus,
   updateFact,
 } from "./storage.js";
+import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
 
 const MS_PER_DAY = 86_400_000;
@@ -123,9 +124,6 @@ function exitCodeForError(error: unknown): number {
 
 // ─────────────────────────────────────────────────────────────────────────── CLI-boundary validation ───────────────────────────────────────────────────────────────────────────
 
-const FACT_KINDS: readonly FactKind[] = ["preference", "decision", "fact", "correction"];
-const FACT_SCOPES: readonly FactScope[] = ["global", "project", "path"];
-const FACT_STATUSES: readonly FactStatus[] = ["active", "pending", "superseded", "contested", "pinned"];
 
 function parseFactKind(raw: string): FactKind {
   if (!FACT_KINDS.includes(raw as FactKind)) {
@@ -408,22 +406,24 @@ interface ReviewOptions {
   readonly sinceEpoch?: number;
 }
 
-function promotePending(db: Database.Database, id: string): void {
+function promotePending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   if (fact.status !== "pending") {
     throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
   }
   setFactStatus(db, fact.id, "active");
   insertAuditLog(db, { event: "review_promote", factId: fact.id, detail: "promoted pending fact to active via explicit review" });
+  return fact.id;
 }
 
-function rejectPending(db: Database.Database, id: string): void {
+function rejectPending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   if (fact.status !== "pending") {
     throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
   }
   setFactStatus(db, fact.id, "superseded");
   insertAuditLog(db, { event: "review_reject", factId: fact.id, detail: "rejected pending fact (superseded) via explicit review" });
+  return fact.id;
 }
 
 /** `formatReview`'s long, human-facing section titles, keyed by the short bucket names `--section`/`--summary` validate against. */
@@ -824,6 +824,10 @@ export function buildProgram(): Command {
       guard(async (query: string | undefined, options: RecallCliOptions) => {
         const hintStyle = options.hintStyle !== undefined ? parseHintStyle(options.hintStyle) : "full";
 
+        if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) {
+          throw new UsageError("--limit must be a positive integer");
+        }
+
         if (options.hintFormat === true) {
           if (typeof options.root !== "string" || options.root.trim().length === 0) {
             throw new UsageError("recall --hint-format requires --root <path>");
@@ -897,6 +901,9 @@ export function buildProgram(): Command {
     )
     .action(
       guard(async (options: ListCliOptions) => {
+        if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) {
+          throw new UsageError("--limit must be a positive integer");
+        }
         const filter: FactFilter = {
           ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
           ...(options.status !== undefined ? { status: parseFactStatusList(options.status) } : {}),
@@ -1064,14 +1071,14 @@ export function buildProgram(): Command {
         }
         if (options.promote !== undefined) {
           const id = options.promote;
-          await withDb((db) => promotePending(db, id));
-          process.stdout.write(`promoted ${id}\n`);
+          const resolved = await withDb((db) => promotePending(db, id));
+          process.stdout.write(`promoted ${resolved}\n`);
           return;
         }
         if (options.reject !== undefined) {
           const id = options.reject;
-          await withDb((db) => rejectPending(db, id));
-          process.stdout.write(`rejected ${id}\n`);
+          const resolved = await withDb((db) => rejectPending(db, id));
+          process.stdout.write(`rejected ${resolved}\n`);
           return;
         }
 
