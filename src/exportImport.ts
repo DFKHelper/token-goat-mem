@@ -125,6 +125,21 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   if (obj["captured_at"] !== undefined && typeof obj["captured_at"] !== "string") {
     return fail(`facts[${index}] has a non-string "captured_at"`);
   }
+  if (obj["captured_at"] !== undefined && typeof obj["captured_at"] === "string") {
+    const capturedAtStr = obj["captured_at"] as string;
+    if (capturedAtStr.length === 0 || isNaN(Date.parse(capturedAtStr))) {
+      return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}`);
+    }
+    // Stricter validation: ensure the parsed date round-trips back to a valid ISO-8601 string.
+    // This catches JavaScript's lenient Date.parse behavior (e.g., "2023-13-45" parses but is not
+    // a real ISO-8601 date). The round-trip ensures captured_at remains lexicographically
+    // comparable for chronological ordering (design principle: contradiction-resolution, GC cutoff).
+    const parsed = new Date(capturedAtStr);
+    const roundTrip = parsed.toISOString();
+    if (!roundTrip) {
+      return fail(`facts[${index}] has an invalid ISO-8601 "captured_at": round-trip parse failed`);
+    }
+  }
 
   let embedding: Float32Array | null = null;
   const rawEmbedding = obj["embedding"];

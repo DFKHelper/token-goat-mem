@@ -406,16 +406,32 @@ interface ReviewOptions {
   readonly sinceEpoch?: number;
 }
 
+/**
+ * Flips a fact's status and writes its audit-log row inside a single transaction, so a crash
+ * between the two never leaves a persisted status change with no audit trail (the crash-window
+ * class commit bb38b1e closed for remember/suggest/edit/forget/pin/promote/reject). All status-
+ * changing commands (and the retention pass's per-contradiction resolution) funnel through here.
+ */
+function setStatusWithAudit(
+  db: Database.Database,
+  factId: string,
+  nextStatus: FactStatus,
+  event: string,
+  detail: string
+): void {
+  const tx = db.transaction((): void => {
+    setFactStatus(db, factId, nextStatus);
+    insertAuditLog(db, { event, factId, detail });
+  });
+  tx();
+}
+
 function promotePending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   if (fact.status !== "pending") {
     throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
   }
-  const tx = db.transaction((): void => {
-    setFactStatus(db, fact.id, "active");
-    insertAuditLog(db, { event: "review_promote", factId: fact.id, detail: "promoted pending fact to active via explicit review" });
-  });
-  tx();
+  setStatusWithAudit(db, fact.id, "active", "review_promote", "promoted pending fact to active via explicit review");
   return fact.id;
 }
 
@@ -424,11 +440,7 @@ function rejectPending(db: Database.Database, id: string): string {
   if (fact.status !== "pending") {
     throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
   }
-  const tx = db.transaction((): void => {
-    setFactStatus(db, fact.id, "superseded");
-    insertAuditLog(db, { event: "review_reject", factId: fact.id, detail: "rejected pending fact (superseded) via explicit review" });
-  });
-  tx();
+  setStatusWithAudit(db, fact.id, "superseded", "review_reject", "rejected pending fact (superseded) via explicit review");
   return fact.id;
 }
 
@@ -535,8 +547,7 @@ function runRetentionPass(db: Database.Database): string {
   const groundTruth = listFacts(db, { status: ["active", "pinned"] });
   const { updates } = detectContradictions(groundTruth);
   for (const update of updates) {
-    setFactStatus(db, update.factId, update.nextStatus);
-    insertAuditLog(db, { event: "epoch_contradiction", factId: update.factId, detail: update.reason });
+    setStatusWithAudit(db, update.factId, update.nextStatus, "epoch_contradiction", update.reason);
   }
 
   const preferences = listFacts(db, { kind: "preference", status: "active" });
@@ -843,6 +854,32 @@ export function buildProgram(): Command {
         }
 
         if (options.hintFormat === true) {
+          const incompatibleFlags = [];
+          if (options.kind !== undefined) {
+            incompatibleFlags.push("--kind");
+          }
+          if (options.subject !== undefined) {
+            incompatibleFlags.push("--subject");
+          }
+          if (options.scope !== undefined) {
+            incompatibleFlags.push("--scope");
+          }
+          if (options.ageDays !== undefined) {
+            incompatibleFlags.push("--age-days");
+          }
+          if (options.limit !== undefined) {
+            incompatibleFlags.push("--limit");
+          }
+          if (options.sinceEpoch !== undefined) {
+            incompatibleFlags.push("--since-epoch");
+          }
+
+          if (incompatibleFlags.length > 0) {
+            throw new UsageError(
+              `--hint-format cannot be combined with ${incompatibleFlags.join("/")}; pass only --hint-format, --root, --context-files, --stable, and --hint-style`
+            );
+          }
+
           if (typeof options.root !== "string" || options.root.trim().length === 0) {
             throw new UsageError("recall --hint-format requires --root <path>");
           }
@@ -989,11 +1026,7 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
-          const tx = db.transaction((): void => {
-            setFactStatus(db, existing.id, "superseded");
-            insertAuditLog(db, { event: "forget", factId: existing.id, detail: `forgot fact (was ${existing.status})` });
-          });
-          tx();
+          setStatusWithAudit(db, existing.id, "superseded", "forget", `forgot fact (was ${existing.status})`);
           return existing.id;
         });
         process.stdout.write(`forgot ${resolved}\n`);
@@ -1007,11 +1040,7 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
-          const tx = db.transaction((): void => {
-            setFactStatus(db, existing.id, "pinned");
-            insertAuditLog(db, { event: "pin", factId: existing.id, detail: `pinned fact (was ${existing.status})` });
-          });
-          tx();
+          setStatusWithAudit(db, existing.id, "pinned", "pin", `pinned fact (was ${existing.status})`);
           return existing.id;
         });
         process.stdout.write(`pinned ${resolved}\n`);

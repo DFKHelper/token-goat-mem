@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -326,6 +326,62 @@ describe("evaluateAnchor", () => {
     });
   });
 
+  describe("a symlink inside root pointing outside root is refused, not followed", () => {
+    // Root-containment (resolveWithinRoot) only guarantees the *resolved* path stays inside root --
+    // it says nothing about a symlink *inside* root whose target lives outside it. Without an
+    // additional check, following that symlink would turn these predicates into an existence/content
+    // oracle for arbitrary filesystem locations (e.g. via an attacker-influenceable anchor string
+    // from `mem import --from-json` or a derived/suggested fact).
+    let outside: string;
+
+    beforeEach(() => {
+      outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
+    });
+
+    afterEach(() => {
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it("file-exists contradicts (does not follow) a symlink to a file outside root", () => {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "outside content");
+      symlinkSync(target, join(root, "link.txt"), "file");
+      expect(evaluateAnchor("file-exists link.txt", root)).toBe("contradicted");
+    });
+
+    it("file-absent affirms (does not follow) a symlink to a file outside root", () => {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "outside content");
+      symlinkSync(target, join(root, "link.txt"), "file");
+      // The symlink itself exists, but its target is refused rather than followed, so the predicate
+      // must not report the (unreachable, unconfirmed) target's existence as "file-absent contradicted".
+      expect(evaluateAnchor("file-absent link.txt", root)).toBe("affirmed");
+    });
+
+    it("file-contains contradicts (does not read through) a symlink to a file outside root", () => {
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "super-secret-value");
+      symlinkSync(target, join(root, "link.txt"), "file");
+      expect(evaluateAnchor("file-contains link.txt super-secret-value", root)).toBe("contradicted");
+    });
+
+    it("package-version contradicts (does not read through) a symlink to a package.json outside root", () => {
+      const target = join(outside, "package.json");
+      writeFileSync(target, JSON.stringify({ dependencies: { react: "18.2.0" } }));
+      symlinkSync(target, join(root, "package.json"), "file");
+      expect(evaluateAnchor("package-version package.json react@18.2.0", root)).toBe("contradicted");
+    });
+
+    it("refuses a symlinked intermediate directory, not just a symlinked final path component", () => {
+      const targetDir = join(outside, "nested");
+      mkdirSync(targetDir, { recursive: true });
+      writeFileSync(join(targetDir, "config.json"), '{"packageManager": "pnpm"}');
+      symlinkSync(targetDir, join(root, "linked-dir"), "junction");
+      expect(evaluateAnchor("file-contains linked-dir/config.json pnpm", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-exists linked-dir/config.json", root)).toBe("contradicted");
+    });
+  });
+
   describe("memoization", () => {
     it("returns a consistent verdict for repeated evaluation of the same anchor+root", () => {
       writeFileSync(join(root, "a.txt"), "a");
@@ -343,6 +399,29 @@ describe("evaluateAnchor", () => {
       } finally {
         rmSync(otherRoot, { recursive: true, force: true });
       }
+    });
+
+    it("does not memoize a budget-limited unverified verdict, so a later unbudgeted call re-evaluates for real", () => {
+      writeFileSync(join(root, "a.txt"), "a");
+      // An already-expired deadline forces the "ran out of time" bailout path, never reaching the
+      // real file-exists check — this "unverified" is a budget artifact, not a genuine predicate
+      // outcome for this anchor+root.
+      const expiredDeadline = Date.now() - 1;
+      expect(evaluateAnchor("file-exists a.txt", root, expiredDeadline)).toBe("unverified");
+      // Same anchor + same root, no deadline this time: if the budget-limited verdict had been
+      // memoized under the `root + anchor` key, this would incorrectly return the stale
+      // "unverified" instead of actually evaluating the predicate.
+      expect(evaluateAnchor("file-exists a.txt", root)).toBe("affirmed");
+    });
+
+    it("still memoizes a genuine (non-budget) unverified verdict", () => {
+      // Malformed anchor: unverified for a real reason (wrong arity), independent of any budget.
+      expect(evaluateAnchor("file-exists", root)).toBe("unverified");
+      // A second call with a generous (unexpired) deadline still passes through the top-of-function
+      // budget check and reaches the memo lookup — if the fix had disabled memoization wholesale
+      // instead of narrowly targeting budget-exhaustion bailouts, this would still pass, but it
+      // confirms genuine unverified verdicts are cached and returned the same way as before.
+      expect(evaluateAnchor("file-exists", root, Date.now() + 100_000)).toBe("unverified");
     });
   });
 });
