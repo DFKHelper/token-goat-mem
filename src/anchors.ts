@@ -17,9 +17,15 @@
  * dependency on an external binary being installed, on PATH, or behaving a particular way across
  * versions — it is pure, synchronous, and bounded by nothing but disk I/O. Every predicate evaluates
  * against an explicit `root` (never ambient `process.cwd()`), and every path argument is resolved and
- * must stay within `root` (no traversal, no symlink escapes for `glob-exists`) — an anchor string can
- * originate from a `derived` (lower-trust) fact, so a malformed or adversarial anchor is rejected as
- * unverified rather than followed.
+ * must stay within `root` (no traversal, no symlink escapes) — root-containment alone does not stop a
+ * symlink *inside* `root` from pointing *outside* it, so every path-based predicate additionally
+ * refuses to follow a symlink at the target path or at any directory component between `root` and the
+ * target (`glob-exists` does this by skipping symlinked entries during its directory walk; the
+ * single-path predicates — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`,
+ * `package-version` — do it via an explicit `lstatSync`-based check before any `statSync`/
+ * `readFileSync` of the resolved path) — an anchor string can originate from a `derived`
+ * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified (or, for a
+ * detected symlink escape, contradicted) rather than followed.
  *
  * Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`,
  * `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`,
@@ -37,7 +43,7 @@
  * under it.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FreshnessVerdict } from "./types.js";
@@ -94,7 +100,51 @@ function mtimeOrNull(path: string): number | null {
   }
 }
 
-function existsFile(path: string): boolean {
+/**
+ * Returns `true` if `target` itself, or any directory component between `root` and `target`, is a
+ * symlink. Root-containment (`resolveWithinRoot`) only guarantees the *resolved* path stays inside
+ * `root` — it says nothing about whether a symlink somewhere along that path hops outside `root`
+ * before the filesystem gets there, so this is a separate, additional check. Mirrors `glob-exists`'s
+ * own symlink refusal (it skips any `entry.isSymbolicLink()` encountered while walking, at every
+ * directory level and for the final matched entry) for callers that stat/read a single resolved path
+ * directly instead of walking a directory tree: every path component from `root` down to `target` is
+ * `lstatSync`'d in turn, so a symlink anywhere in the chain — not just at the final component — is
+ * caught. A missing component (nothing to detect, nothing to leak) is treated as "no symlink found"
+ * and left for the caller's own `statSync`/`readFileSync` to report as missing.
+ */
+function containsSymlink(root: string, target: string): boolean {
+  const rel = relative(root, target);
+  if (rel === "" || rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
+    return false;
+  }
+  const segments = rel.split(sep).filter((segment) => segment.length > 0);
+  let current = root;
+  for (const segment of segments) {
+    current = join(current, segment);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (stat.isSymbolicLink()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `file-exists <path>` / `file-absent <path>` — affirmed/contradicted based on whether `path` exists
+ * as a plain, non-symlinked entity reachable through `root` alone. Refuses to follow a symlink at
+ * `path` or at any directory component between `root` and `path` ({@link containsSymlink}): such a
+ * path is treated as not existing, so `file-exists` contradicts and `file-absent` affirms, rather than
+ * following the symlink to probe whatever it actually points at.
+ */
+function existsFile(root: string, path: string): boolean {
+  if (containsSymlink(root, path)) {
+    return false;
+  }
   try {
     statSync(path);
     return true;
@@ -105,6 +155,18 @@ function existsFile(path: string): boolean {
 
 function budgetExceeded(deadlineMs: number | undefined): boolean {
   return deadlineMs !== undefined && Date.now() >= deadlineMs;
+}
+
+/**
+ * Mutable out-of-band signal threaded through a single {@link evaluateAnchor} call: set to `true`
+ * only when a `deadlineMs` time-budget check (never the unrelated `MAX_GLOB_ENTRIES_SCANNED` scan
+ * cap) is the reason evaluation bailed out to `"unverified"`. `evaluateAnchor` uses this to decide
+ * whether the resulting `"unverified"` is a genuine predicate outcome (safe to memoize) or merely
+ * "ran out of time this call" (must not be memoized, since a later call with a different/absent
+ * deadline could reach a different, real verdict for the same anchor+root).
+ */
+interface BudgetState {
+  hit: boolean;
 }
 
 /**
@@ -134,8 +196,15 @@ function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): An
  * exists, is a plain file within the read budget, and does (or does not, for the negated form)
  * contain `substring`. unverified if the file is missing (S1: a moved/renamed file is the exact
  * proxy-anchor trap, don't guess), is not a plain file, exceeds the read budget, or can't be read.
+ * contradicted if `path` (or a directory component between `root` and `path`) is a symlink
+ * ({@link containsSymlink}) — refused rather than followed, since a symlink inside `root` could point
+ * outside it, and following it here would turn this predicate into a content-read oracle for
+ * arbitrary filesystem locations.
  */
-function evaluateFileContains(path: string, substring: string, negate: boolean): AnchorVerdict {
+function evaluateFileContains(root: string, path: string, substring: string, negate: boolean): AnchorVerdict {
+  if (containsSymlink(root, path)) {
+    return "contradicted";
+  }
   let stat;
   try {
     stat = statSync(path);
@@ -169,6 +238,8 @@ function evaluateFileContains(path: string, substring: string, negate: boolean):
  * lockfile — anything the comparison cannot confidently resolve (a range operator other than a bare
  * leading `^`/`~`/exact, a non-numeric expected value, ...) returns `unverified` rather than guess.
  * unverified: path unreadable/oversized, JSON malformed, or the dependency key is missing entirely.
+ * contradicted: `path` (or a directory component between `root` and `path`) is a symlink
+ * ({@link containsSymlink}) — refused rather than followed, for the same reason as `file-contains`.
  */
 function comparePackageVersion(declared: string, expected: string): AnchorVerdict {
   if (declared === expected) {
@@ -182,7 +253,7 @@ function comparePackageVersion(declared: string, expected: string): AnchorVerdic
   return "unverified";
 }
 
-function evaluatePackageVersion(path: string, expected: string): AnchorVerdict {
+function evaluatePackageVersion(root: string, path: string, expected: string): AnchorVerdict {
   const atIdx = expected.lastIndexOf("@");
   if (atIdx <= 0) {
     return "unverified";
@@ -191,6 +262,9 @@ function evaluatePackageVersion(path: string, expected: string): AnchorVerdict {
   const version = expected.slice(atIdx + 1);
   if (name.length === 0 || version.length === 0) {
     return "unverified";
+  }
+  if (containsSymlink(root, path)) {
+    return "contradicted";
   }
 
   let stat;
@@ -278,7 +352,12 @@ function segmentToRegExp(segment: string): RegExp {
  * — a symlink could otherwise point outside `root`) and `.git`/`node_modules` are always skipped
  * (S4: anchors must stay cheap; those trees are large and never what a fact's proposition means).
  */
-function evaluateGlobExists(root: string, pattern: string, deadlineMs: number | undefined): AnchorVerdict {
+function evaluateGlobExists(
+  root: string,
+  pattern: string,
+  deadlineMs: number | undefined,
+  budgetState: BudgetState,
+): AnchorVerdict {
   const segments = pattern.split("/").filter((segment) => segment.length > 0);
   if (segments.length === 0 || segments.includes("..")) {
     return "unverified";
@@ -291,6 +370,7 @@ function evaluateGlobExists(root: string, pattern: string, deadlineMs: number | 
   walk: while (stack.length > 0) {
     if (budgetExceeded(deadlineMs)) {
       budgetHit = true;
+      budgetState.hit = true;
       break;
     }
     const top = stack.pop();
@@ -539,7 +619,12 @@ function tokenize(anchor: string): string[] {
   return anchor.trim().split(/\s+/u).filter((token) => token.length > 0);
 }
 
-function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: number | undefined): AnchorVerdict {
+function evaluateTokens(
+  tokens: readonly string[],
+  root: string,
+  deadlineMs: number | undefined,
+  budgetState: BudgetState,
+): AnchorVerdict {
   const [predicate, ...args] = tokens;
   const resolvedRoot = resolve(root);
 
@@ -568,7 +653,7 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
       if (a === null) {
         return "unverified";
       }
-      return existsFile(a) ? "affirmed" : "contradicted";
+      return existsFile(resolvedRoot, a) ? "affirmed" : "contradicted";
     }
     case "file-absent": {
       const [rawA] = args;
@@ -579,7 +664,7 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
       if (a === null) {
         return "unverified";
       }
-      return existsFile(a) ? "contradicted" : "affirmed";
+      return existsFile(resolvedRoot, a) ? "contradicted" : "affirmed";
     }
     case "newest-of": {
       if (args.length < 2) {
@@ -615,7 +700,7 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
       if (args.length !== 1 || pattern === undefined || isAbsolute(pattern)) {
         return "unverified";
       }
-      return evaluateGlobExists(resolvedRoot, pattern, deadlineMs);
+      return evaluateGlobExists(resolvedRoot, pattern, deadlineMs, budgetState);
     }
     case "git-branch-is": {
       const [branch] = args;
@@ -634,9 +719,10 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
         return "unverified";
       }
       if (budgetExceeded(deadlineMs)) {
+        budgetState.hit = true;
         return "unverified";
       }
-      return evaluatePackageVersion(resolved, expected);
+      return evaluatePackageVersion(resolvedRoot, resolved, expected);
     }
     case "git-tracked": {
       const [rawA] = args;
@@ -648,6 +734,7 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
         return "unverified";
       }
       if (budgetExceeded(deadlineMs)) {
+        budgetState.hit = true;
         return "unverified";
       }
       return evaluateGitTracked(resolvedRoot, a);
@@ -663,7 +750,12 @@ function evaluateTokens(tokens: readonly string[], root: string, deadlineMs: num
  * (predicate name, then one path token, then everything else verbatim) rather than through the
  * generic whitespace tokenizer.
  */
-function evaluateFileContainsRaw(trimmed: string, resolvedRoot: string, deadlineMs: number | undefined): AnchorVerdict | undefined {
+function evaluateFileContainsRaw(
+  trimmed: string,
+  resolvedRoot: string,
+  deadlineMs: number | undefined,
+  budgetState: BudgetState,
+): AnchorVerdict | undefined {
   const match = /^(file-contains|file-not-contains)\s+(\S+)\s+([\s\S]+)$/u.exec(trimmed);
   if (match === null) {
     return undefined;
@@ -679,9 +771,10 @@ function evaluateFileContainsRaw(trimmed: string, resolvedRoot: string, deadline
     return "unverified";
   }
   if (budgetExceeded(deadlineMs)) {
+    budgetState.hit = true;
     return "unverified";
   }
-  return evaluateFileContains(resolvedPath, substring, predicate === "file-not-contains");
+  return evaluateFileContains(resolvedRoot, resolvedPath, substring, predicate === "file-not-contains");
 }
 
 /**
@@ -698,6 +791,8 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
     return "unverified";
   }
   if (budgetExceeded(deadlineMs)) {
+    // Already-expired deadline on entry: never a genuine predicate outcome, so never memoized —
+    // there is nothing to cache under `key` since we return before ever reading/writing `memo`.
     return "unverified";
   }
 
@@ -709,9 +804,17 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
     return cached;
   }
 
-  const containsResult = evaluateFileContainsRaw(trimmed, resolvedRoot, deadlineMs);
-  const verdict = containsResult ?? evaluateTokens(tokenize(trimmed), resolvedRoot, deadlineMs);
-  memo.set(key, verdict);
+  const budgetState: BudgetState = { hit: false };
+  const containsResult = evaluateFileContainsRaw(trimmed, resolvedRoot, deadlineMs, budgetState);
+  const verdict = containsResult ?? evaluateTokens(tokenize(trimmed), resolvedRoot, deadlineMs, budgetState);
+  // A budget-limited "unverified" is a "ran out of time this call" bailout, not a genuine
+  // predicate outcome — memoizing it under a key that doesn't encode the deadline would let a
+  // later, differently-budgeted (or unbudgeted) call for the same anchor+root incorrectly reuse
+  // it instead of actually re-evaluating. Genuine verdicts (affirmed/contradicted, and unverified
+  // that stems from the predicate itself rather than the time budget) are cached as before.
+  if (!budgetState.hit) {
+    memo.set(key, verdict);
+  }
   return verdict;
 }
 

@@ -389,6 +389,74 @@ describe("importFromJson", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("an imported fact with captured_at 'not-a-date' is skipped with a per-item error", () => {
+    const badDate = { ...VALID_FACT, id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", captured_at: "not-a-date" };
+    writeFileSync(jsonPath, envelope([VALID_FACT, badDate]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    if (result.outcomes[1]?.status === "skipped_error") {
+      expect(result.outcomes[1].reason).toContain("invalid ISO-8601");
+      expect(result.outcomes[1].reason).toContain("captured_at");
+    }
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an imported fact with captured_at as an empty string is skipped with a per-item error", () => {
+    const emptyDate = { ...VALID_FACT, id: "cccccccc-cccc-cccc-cccc-cccccccccccc", captured_at: "" };
+    writeFileSync(jsonPath, envelope([VALID_FACT, emptyDate]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    if (result.outcomes[1]?.status === "skipped_error") {
+      expect(result.outcomes[1].reason).toContain("invalid ISO-8601");
+      expect(result.outcomes[1].reason).toContain("captured_at");
+    }
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an imported fact with a malformed date (invalid month/day) is skipped with a per-item error", () => {
+    const malformedDate = { ...VALID_FACT, id: "dddddddd-dddd-dddd-dddd-dddddddddddd", captured_at: "2023-13-45T00:00:00.000Z" };
+    writeFileSync(jsonPath, envelope([VALID_FACT, malformedDate]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    if (result.outcomes[1]?.status === "skipped_error") {
+      expect(result.outcomes[1].reason).toContain("invalid ISO-8601");
+      expect(result.outcomes[1].reason).toContain("captured_at");
+    }
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an imported fact with a valid ISO-8601 captured_at still imports successfully", () => {
+    const validIsoDates = [
+      { ...VALID_FACT, id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", captured_at: "2026-01-15T12:34:56.789Z" },
+      { ...VALID_FACT, id: "ffffffff-ffff-ffff-ffff-ffffffffffff", captured_at: "2025-12-31T23:59:59.999Z" },
+    ];
+    writeFileSync(jsonPath, envelope([VALID_FACT, ...validIsoDates]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(3);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("imported");
+    expect(result.outcomes[2]?.status).toBe("imported");
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(3);
+  });
 });
 
 describe("planImportFromJson consistency with importFromJson --dry-run", () => {

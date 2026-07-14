@@ -412,11 +412,10 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
   const sql = `UPDATE facts SET ${sets.join(", ")} WHERE id = ?`;
 
   const tx = db.transaction((): void => {
-    const current = getEpoch(db);
-    const next = current + 1;
+    const next = getEpoch(db) + 1;
     const result = db.prepare(sql).run(...params, next, id);
     if (result.changes > 0) {
-      db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+      performEpochUpsert(db, next);
     }
   });
   tx();
@@ -436,11 +435,10 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
  */
 export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | undefined {
   const tx = db.transaction((): void => {
-    const current = getEpoch(db);
-    const next = current + 1;
+    const next = getEpoch(db) + 1;
     const result = db.prepare("UPDATE facts SET status = ?, epoch = ? WHERE id = ?").run(status, next, id);
     if (result.changes > 0) {
-      db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+      performEpochUpsert(db, next);
     }
   });
   tx();
@@ -515,6 +513,14 @@ export function getEpoch(db: Db): number {
 }
 
 /**
+ * Performs the actual epoch upsert into the meta table. Extracted to eliminate duplication
+ * across `bumpEpoch` and the conditional bumps in `updateFact`/`setFactStatus`.
+ */
+function performEpochUpsert(db: Db, next: number): void {
+  db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+}
+
+/**
  * Increments the write epoch by 1 and returns the new value. Callers must run this inside the same
  * transaction as the fact write it accompanies (every exported fact-write function in this module
  * already does), and use the returned value to stamp that write's `facts.epoch` column so a fact's
@@ -525,6 +531,6 @@ export function getEpoch(db: Db): number {
 function bumpEpoch(db: Db): number {
   const current = getEpoch(db);
   const next = current + 1;
-  db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+  performEpochUpsert(db, next);
   return next;
 }

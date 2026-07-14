@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -87,6 +87,21 @@ describe("evaluateAnchor", () => {
     });
   });
 
+  describe("a symlink inside root pointing outside root is refused, not followed", () => {
+    it("file-exists contradicts, file-absent affirms, for a symlink to a file outside root", () => {
+      const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
+      try {
+        const target = join(outside, "secret.txt");
+        writeFileSync(target, "outside content");
+        symlinkSync(target, join(root, "link.txt"), "file");
+        expect(evaluateAnchor("file-exists link.txt", root)).toBe("contradicted");
+        expect(evaluateAnchor("file-absent link.txt", root)).toBe("affirmed");
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("git-tracked", () => {
     it("is unverified outside a git repository", () => {
       writeFileSync(join(root, "f.txt"), "x");
@@ -121,6 +136,16 @@ describe("evaluateAnchor", () => {
       const second = evaluateAnchor("file-exists a.txt", root);
       expect(first).toBe("affirmed");
       expect(second).toBe("affirmed");
+    });
+
+    it("does not memoize a budget-limited unverified verdict, so a later unbudgeted call re-evaluates for real", () => {
+      writeFileSync(join(root, "a.txt"), "a");
+      // Already-expired deadline forces the budget bailout before the real file-exists check runs.
+      const expiredDeadline = Date.now() - 1;
+      expect(evaluateAnchor("file-exists a.txt", root, expiredDeadline)).toBe("unverified");
+      // Same anchor + root, no deadline: must re-evaluate for real rather than reuse the stale
+      // budget-limited "unverified" from the call above.
+      expect(evaluateAnchor("file-exists a.txt", root)).toBe("affirmed");
     });
   });
 });

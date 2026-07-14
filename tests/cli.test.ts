@@ -569,6 +569,49 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     expect(blankRoot.exitCode).toBe(1);
     expect(blankRoot.stderr).toContain("recall --hint-format requires --root <path>");
   });
+
+  it("--hint-format rejects incompatible filter options (--kind, --subject, --scope, --age-days, --limit, --since-epoch)", async () => {
+    // --hint-format with --kind should fail
+    const withKind = await runCli(["recall", "--hint-format", "--root", home, "--kind", "decision"]);
+    expect(withKind.exitCode).toBe(1);
+    expect(withKind.stderr).toContain("--hint-format cannot be combined with --kind");
+
+    // --hint-format with --subject should fail
+    const withSubject = await runCli(["recall", "--hint-format", "--root", home, "--subject", "foo"]);
+    expect(withSubject.exitCode).toBe(1);
+    expect(withSubject.stderr).toContain("--hint-format cannot be combined with --subject");
+
+    // --hint-format with --scope should fail
+    const withScope = await runCli(["recall", "--hint-format", "--root", home, "--scope", "file"]);
+    expect(withScope.exitCode).toBe(1);
+    expect(withScope.stderr).toContain("--hint-format cannot be combined with --scope");
+
+    // --hint-format with --limit should fail
+    const withLimit = await runCli(["recall", "--hint-format", "--root", home, "--limit", "10"]);
+    expect(withLimit.exitCode).toBe(1);
+    expect(withLimit.stderr).toContain("--hint-format cannot be combined with --limit");
+
+    // --hint-format with --age-days should fail
+    const withAgeDays = await runCli(["recall", "--hint-format", "--root", home, "--age-days", "7"]);
+    expect(withAgeDays.exitCode).toBe(1);
+    expect(withAgeDays.stderr).toContain("--hint-format cannot be combined with --age-days");
+
+    // --hint-format with --since-epoch should fail
+    const withSinceEpoch = await runCli(["recall", "--hint-format", "--root", home, "--since-epoch", "123"]);
+    expect(withSinceEpoch.exitCode).toBe(1);
+    expect(withSinceEpoch.stderr).toContain("--hint-format cannot be combined with --since-epoch");
+
+    // --hint-format alone (or with allowed options like --context-files, --stable, --hint-style) should still work
+    // We already test the basic case above, and the next test should cover this working case.
+  });
+
+  it("--hint-format with allowed options (--context-files, --stable, --hint-style) still works", async () => {
+    // This should not fail; we're testing that the allowed options don't trigger the incompatibility error
+    // In this test home is already set from the outer describe block, and the DB is populated from prior tests
+    const withStable = await runCli(["recall", "--hint-format", "--root", home, "--stable"]);
+    expect(withStable.exitCode).toBe(0);
+    expect(withStable.stdout).toMatch(/^TGMEM\/2\n/);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── recall --stable ───────────────────────────────────────────────────────────────────────────
