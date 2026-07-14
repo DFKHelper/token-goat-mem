@@ -157,18 +157,20 @@ function shannonEntropy(value: string): number {
 }
 
 /**
- * Fields whose value is a structurally-constrained fs/git predicate string (an anchor), never
- * free-text/user-authored content, so a slash-containing token is excluded from the *generic*
- * high-entropy-token heuristic below -- same false-positive mechanism, and same fix, already
- * applied to `sourceRef` (see the comment in `screenInputOrThrow`): `GENERIC_TOKEN`'s alphabet
- * includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` argument
- * over ~32 chars can exceed the entropy threshold purely from directory-name variety, with no
- * secret present at all. The exemption only applies to a matched token that contains "/" -- a
- * prefix-less high-entropy secret with no path separator (an unlabeled credential with no
- * recognized `SECRET_PATTERNS` prefix) is still caught by the entropy fallback. Named
- * `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields regardless.
+ * Fields that legitimately contain long, forward-slash-delimited path-shaped values -- an anchor's
+ * fs/git predicate argument, or a `sourceRef` provenance pointer (`<path>:<line>`, but for
+ * `mem remember --source-ref` a free-form, user/agent-supplied string, so it is NOT exempt from
+ * `SECRET_PATTERNS` or from a slash-free high-entropy token) -- so a slash-containing token is
+ * excluded from the *generic* high-entropy-token heuristic below: `GENERIC_TOKEN`'s alphabet
+ * includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` or
+ * `src/very/long/path.ts:123` argument over ~32 chars can exceed the entropy threshold purely from
+ * directory-name variety, with no secret present at all. The exemption only applies to a matched
+ * token that contains "/" -- a prefix-less high-entropy secret with no path separator (an
+ * unlabeled credential with no recognized `SECRET_PATTERNS` prefix) is still caught by the entropy
+ * fallback. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields
+ * regardless.
  */
-const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor"]);
+const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor", "sourceRef"]);
 
 function scanField(field: string, value: string): SecretMatch[] {
   const matches: SecretMatch[] = [];
@@ -391,18 +393,20 @@ function screenInputOrThrow(
   auditEvent: string
 ): void {
   const allowlist = loadAllowlist(root);
-  // sourceRef is never free-form/user-authored content -- it's always a programmatically
-  // constructed "<resolved path>:<line>" provenance pointer (see import.ts) -- so it's excluded
-  // from screening. Scanning it was also actively broken: GENERIC_TOKEN's alphabet includes "/"
-  // (needed to catch real base64 secrets, which legitimately contain "/"), so any long
-  // forward-slash-delimited path (any Linux/macOS path over ~32 chars) could false-positive as a
-  // "high-entropy secret" purely from directory-name entropy, with no secret present at all.
+  // sourceRef is scanned like any other field: for the `mem import --from-md` path it's a
+  // programmatically constructed "<resolved path>:<line>" provenance pointer, but `mem remember
+  // --source-ref <ref>` accepts an arbitrary user/agent-supplied string, so it must not be
+  // excluded outright. It's in GENERIC_ENTROPY_EXEMPT_FIELDS instead (see that comment): named
+  // SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy
+  // fallback, so the legitimate "<path>:<line>" false-positive is still avoided without leaving a
+  // prefix-less secret unscreened.
   const matches = screenForSecrets(
     {
       text: input.text,
       subject: input.subject,
       value: input.value,
       anchor: input.anchor,
+      sourceRef: input.sourceRef,
     },
     allowlist
   );

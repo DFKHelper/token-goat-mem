@@ -113,8 +113,8 @@ describe("captureExplicit (happy path)", () => {
   it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long nested-path anchor argument", () => {
     // A perfectly ordinary file-exists anchor over a deeply nested path has no secret in it, but its
     // path argument alone is a >=32-char mixed-case/slash/dash token whose entropy clears the generic
-    // heuristic's threshold -- this must not block the capture (regression: this exact mechanism was
-    // already found and fixed for sourceRef; anchor needed the same fix).
+    // heuristic's threshold -- this must not block the capture (same false-positive mechanism, and
+    // same slash-scoped fix, as the sourceRef tests below).
     const { fact } = captureExplicit(db, {
       text: "uses this component",
       kind: "fact",
@@ -122,6 +122,44 @@ describe("captureExplicit (happy path)", () => {
       root,
     });
     expect(fact.anchor).toBe("file-exists src/components/very-long-nested-directory-name/AnotherComponent.tsx");
+  });
+
+  it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long path:line sourceRef", () => {
+    // A programmatically-constructed "<path>:<line>" provenance pointer has no secret in it, but a
+    // deeply nested path argument alone is a >=32-char mixed-case/slash/dash token whose entropy
+    // clears the generic heuristic's threshold -- this must not block the capture.
+    const { fact } = captureExplicit(db, {
+      text: "uses this component",
+      kind: "fact",
+      sourceRef: "src/components/very-long-nested-directory-name/AnotherComponent.tsx:42",
+      root,
+    });
+    expect(fact.source_ref).toBe("src/components/very-long-nested-directory-name/AnotherComponent.tsx:42");
+  });
+
+  it("still catches a named secret pattern embedded in a sourceRef", () => {
+    expect(() =>
+      captureExplicit(db, {
+        text: "suspicious source ref",
+        kind: "fact",
+        sourceRef: "AKIAIOSFODNN7EXAMPLE",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
+  it("still catches a prefix-less high-entropy secret (no named pattern, no slash) embedded in a sourceRef", () => {
+    // sourceRef must not be a blanket exemption from screening: `mem remember --source-ref <ref>`
+    // accepts an arbitrary user/agent-supplied string, not just the programmatic "<path>:<line>"
+    // pointer the import path produces, so a real unlabeled secret placed there must still be caught.
+    expect(() =>
+      captureExplicit(db, {
+        text: "suspicious source ref",
+        kind: "fact",
+        sourceRef: "aB3xK9m2ZpQwErTyUiOpAsDfGhJkLzXcVbNm1234",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
   });
 
   it("still catches a named secret pattern (not just the generic heuristic) embedded in an anchor argument", () => {
