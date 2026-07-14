@@ -21,6 +21,7 @@ import {
   deleteSourcesForFact,
   deleteSourcesOlderThan,
   getEpoch,
+  resolveFactIdOrPrefix,
 } from "../src/storage.js";
 import { openDb } from "../src/db.js";
 import type { NewFact } from "../src/types.js";
@@ -380,5 +381,49 @@ describe("getEpoch", () => {
     expect(getEpoch(db)).toBe(3);
     deleteFact(db, fact.id);
     expect(getEpoch(db)).toBe(4);
+  });
+});
+
+describe("resolveFactIdOrPrefix", () => {
+  it("resolves an exact full id via the fast path, without a prefix scan", () => {
+    const fact = insertFact(db, baseFact());
+    const resolution = resolveFactIdOrPrefix(db, fact.id);
+    expect(resolution.kind).toBe("found");
+    expect(resolution.kind === "found" && resolution.fact.id).toBe(fact.id);
+  });
+
+  it("resolves a unique short prefix (at least MIN_ID_PREFIX_LEN characters)", () => {
+    const fact = insertFact(db, { ...baseFact(), id: "abcd1234-0000-0000-0000-000000000001" });
+    const resolution = resolveFactIdOrPrefix(db, "abcd1234");
+    expect(resolution.kind).toBe("found");
+    expect(resolution.kind === "found" && resolution.fact.id).toBe(fact.id);
+  });
+
+  it("treats a prefix shorter than MIN_ID_PREFIX_LEN as not-found, without scanning", () => {
+    insertFact(db, { ...baseFact(), id: "abcd1234-0000-0000-0000-000000000001" });
+    const resolution = resolveFactIdOrPrefix(db, "abc");
+    expect(resolution.kind).toBe("not-found");
+  });
+
+  it("reports ambiguous when a prefix matches 2+ facts, listing every match", () => {
+    const a = insertFact(db, { ...baseFact(), id: "abcd1111-0000-0000-0000-000000000001" });
+    const b = insertFact(db, { ...baseFact(), id: "abcd2222-0000-0000-0000-000000000002" });
+    const resolution = resolveFactIdOrPrefix(db, "abcd");
+    expect(resolution.kind).toBe("ambiguous");
+    if (resolution.kind === "ambiguous") {
+      expect(resolution.matches.map((fact) => fact.id).sort()).toEqual([a.id, b.id].sort());
+    }
+  });
+
+  it("treats a prefix containing non-hex/dash characters as not-found, without scanning", () => {
+    insertFact(db, baseFact());
+    const resolution = resolveFactIdOrPrefix(db, "not an id!");
+    expect(resolution.kind).toBe("not-found");
+  });
+
+  it("does not let a prefix's SQL wildcard characters match unintended rows", () => {
+    insertFact(db, { ...baseFact(), id: "abcd1234-0000-0000-0000-000000000001" });
+    const resolution = resolveFactIdOrPrefix(db, "abcd%");
+    expect(resolution.kind).toBe("not-found");
   });
 });

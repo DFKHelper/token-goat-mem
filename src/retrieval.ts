@@ -126,6 +126,15 @@ export const PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS = 180;
 /** Below this decayed confidence, an otherwise-affirmed preference downgrades from ground-truth to hint (Section 6). */
 export const GROUND_TRUTH_CONFIDENCE_FLOOR = 0.5;
 
+/**
+ * Default cap on non-withheld results returned by `retrieve()` when the caller does not pass an
+ * explicit `options.limit`. Withheld results (`trust === "withheld"` -- pending/contested/superseded/
+ * contradicted) are never subject to this cap: a fact needing human attention must never be pushed
+ * off the end of the default result set just because 20 clean facts outrank it. Lives here rather
+ * than in cli.ts because the withheld-exempt slicing it bounds happens inside `retrieve()` itself.
+ */
+export const DEFAULT_RECALL_LIMIT = 20;
+
 /** Preferences/corrections are recalled aggressively (P6) — a small ranking boost relative to precision-biased decisions/facts. */
 export const AGGRESSIVE_RECALL_BOOST = 1.15;
 
@@ -425,13 +434,26 @@ function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boole
   return true;
 }
 
+export interface RetrieveOutcome {
+  /**
+   * Final, trust-annotated, self-caveating results in surfacing order. Every withheld result
+   * (`trust === "withheld"`) is always included, regardless of `totalNonWithheld`/`shownNonWithheld`
+   * or the effective limit -- only non-withheld results are ever capped.
+   */
+  readonly results: readonly RetrievedFact[];
+  /** Count of non-withheld results that matched, before the default/explicit limit was applied. */
+  readonly totalNonWithheld: number;
+  /** Count of non-withheld results actually included in `results` (i.e. `min(totalNonWithheld, effectiveLimit)`). */
+  readonly shownNonWithheld: number;
+}
+
 /**
  * Runs the full hybrid-retrieval + correctness-gate pipeline over `facts` and returns ranked,
  * trust-annotated, self-caveating results. `facts` may be the full store contents — this function
  * does its own status filtering (never surfacing `superseded` facts, recomputing contradictions
  * fresh) so callers do not need to pre-filter by status.
  */
-export async function retrieve(facts: readonly Fact[], options: RetrievalOptions): Promise<RetrievedFact[]> {
+export async function retrieve(facts: readonly Fact[], options: RetrievalOptions): Promise<RetrieveOutcome> {
   const now = options.now ?? new Date();
   const anchorDeadline = Date.now() + (options.anchorTimeBudgetMs ?? DEFAULT_ANCHOR_TIME_BUDGET_MS);
 
@@ -443,7 +465,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
 
   const filtered = pool.filter((fact) => matchesFilters(fact, options, now));
   if (filtered.length === 0) {
-    return [];
+    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0 };
   }
 
   const bm25Scores = computeBm25Scores(filtered, options.query);
@@ -499,5 +521,14 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at);
   });
 
-  return options.limit !== undefined ? visible.slice(0, options.limit) : visible;
+  // Non-withheld results are capped at the effective limit; withheld results (pending/contested/
+  // superseded/contradicted) are never subject to it -- a fact needing human attention must never be
+  // silently pushed off the end of the default result set by 20 unrelated clean facts outranking it.
+  const effectiveLimit = options.limit ?? DEFAULT_RECALL_LIMIT;
+  const nonWithheld = visible.filter((result) => result.trust !== "withheld");
+  const shownNonWithheldResults = nonWithheld.slice(0, effectiveLimit);
+  const shownIds = new Set(shownNonWithheldResults.map((result) => result.fact.id));
+  const final = visible.filter((result) => result.trust === "withheld" || shownIds.has(result.fact.id));
+
+  return { results: final, totalNonWithheld: nonWithheld.length, shownNonWithheld: shownNonWithheldResults.length };
 }

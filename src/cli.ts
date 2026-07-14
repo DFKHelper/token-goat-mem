@@ -76,16 +76,19 @@ import {
   deleteFact,
   deleteSourcesOlderThan,
   getEpoch,
-  getFactById,
   listFacts,
   listSourcesForFact,
   openStorage,
+  resolveFactIdOrPrefix,
   setFactStatus,
   updateFact,
 } from "./storage.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
 
 const MS_PER_DAY = 86_400_000;
+
+/** Default cap on `mem list` output when `--limit` is not given -- see the module doc comment on `retrieve()`'s own `DEFAULT_RECALL_LIMIT` in retrieval.ts for the recall-side analog. */
+const DEFAULT_LIST_LIMIT = 20;
 
 // ─────────────────────────────────────────────────────────────────────────── Exit-code contract ───────────────────────────────────────────────────────────────────────────
 
@@ -199,6 +202,26 @@ async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): Promise
 
 function err(message: string): void {
   process.stderr.write(`${message}\n`);
+}
+
+/**
+ * Resolves a fact id argument (full id or git-style short prefix, `resolveFactIdOrPrefix` in
+ * storage.ts) to the fact it names, or throws the same `UsageError` shape every id-accepting command
+ * already used before short prefixes existed (`no such fact: <id>`), plus a new ambiguity error
+ * listing every matching id. Every id-accepting command (`show`, `forget`, `pin`, `edit`, `review
+ * --promote`, `review --reject`) should use the resolved fact's own `.id` for any subsequent
+ * write/lookup, never the raw user-typed argument.
+ */
+function resolveIdArgOrThrow(db: Database.Database, id: string): Fact {
+  const resolution = resolveFactIdOrPrefix(db, id);
+  if (resolution.kind === "not-found") {
+    throw new UsageError(`no such fact: ${id}`);
+  }
+  if (resolution.kind === "ambiguous") {
+    const ids = resolution.matches.map((fact) => fact.id).join(", ");
+    throw new UsageError(`ambiguous id prefix "${id}" matches ${resolution.matches.length} facts: ${ids} -- use more characters`);
+  }
+  return resolution.fact;
 }
 
 function extractErrorMessage(error: unknown): string {
@@ -386,27 +409,21 @@ interface ReviewOptions {
 }
 
 function promotePending(db: Database.Database, id: string): void {
-  const fact = getFactById(db, id);
-  if (fact === undefined) {
-    throw new UsageError(`no such fact: ${id}`);
-  }
+  const fact = resolveIdArgOrThrow(db, id);
   if (fact.status !== "pending") {
-    throw new UsageError(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
+    throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
   }
-  setFactStatus(db, id, "active");
-  insertAuditLog(db, { event: "review_promote", factId: id, detail: "promoted pending fact to active via explicit review" });
+  setFactStatus(db, fact.id, "active");
+  insertAuditLog(db, { event: "review_promote", factId: fact.id, detail: "promoted pending fact to active via explicit review" });
 }
 
 function rejectPending(db: Database.Database, id: string): void {
-  const fact = getFactById(db, id);
-  if (fact === undefined) {
-    throw new UsageError(`no such fact: ${id}`);
-  }
+  const fact = resolveIdArgOrThrow(db, id);
   if (fact.status !== "pending") {
-    throw new UsageError(`fact ${id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
+    throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
   }
-  setFactStatus(db, id, "superseded");
-  insertAuditLog(db, { event: "review_reject", factId: id, detail: "rejected pending fact (superseded) via explicit review" });
+  setFactStatus(db, fact.id, "superseded");
+  insertAuditLog(db, { event: "review_reject", factId: fact.id, detail: "rejected pending fact (superseded) via explicit review" });
 }
 
 /** `formatReview`'s long, human-facing section titles, keyed by the short bucket names `--section`/`--summary` validate against. */
@@ -575,6 +592,7 @@ interface RecallCliOptions {
   readonly root?: string;
   readonly stable?: boolean;
   readonly hintStyle?: string;
+  readonly sinceEpoch?: number;
 }
 
 interface ExportCliOptions {
@@ -797,10 +815,11 @@ export function buildProgram(): Command {
     .option("--hint-format", "Emit the TGMEM/2 wire format for the token-goat seam")
     .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
-    .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/superseded/contradicted facts are never subject to this cap)", (v) => parseInt(v, 10))
     .option("--root <path>", "Project root for anchor evaluation")
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
     .option("--hint-style <full|terse>", "Display verbosity: full (default, unchanged) or terse (no CTA, short kind labels)", "full")
+    .option("--since-epoch <n>", "Only include facts with epoch greater than n (see `mem epoch`)", (v) => parseInt(v, 10))
     .action(
       guard(async (query: string | undefined, options: RecallCliOptions) => {
         const hintStyle = options.hintStyle !== undefined ? parseHintStyle(options.hintStyle) : "full";
@@ -825,7 +844,9 @@ export function buildProgram(): Command {
         }
 
         const root = resolveRoot(options.root);
-        const facts = await withDb((db) => listFacts(db, {}));
+        const facts = await withDb((db) =>
+          listFacts(db, options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { epochAfter: options.sinceEpoch } : {})
+        );
         const retrievalOptions: RetrievalOptions = {
           query: query ?? "",
           root,
@@ -835,10 +856,14 @@ export function buildProgram(): Command {
           ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
           ...(hintStyle !== "full" ? { hintStyle } : {}),
+          // Default (full) output drops the per-line CTA in favor of one shared trailing footer
+          // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
+          // footer precedent) -- terse already omits the CTA on its own, so nothing to override.
+          ...(hintStyle !== "terse" ? { includeDisplayCta: false } : {}),
         };
         // No embeddingBackend is wired: retrieval is BM25-only in v1 (see the
         // TODO(deferred, spec'd) note on retrieval.ts's EmbeddingBackend).
-        const results = await retrieve(facts, retrievalOptions);
+        const { results, totalNonWithheld, shownNonWithheld } = await retrieve(facts, retrievalOptions);
         if (results.length === 0) {
           process.stdout.write("no matching facts\n");
           return;
@@ -848,6 +873,12 @@ export function buildProgram(): Command {
         const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
         for (const result of ordered) {
           process.stdout.write(`${result.display}\n`);
+        }
+        if (hintStyle !== "terse") {
+          process.stdout.write("mem show <id> for detail; mem review to resolve contested/pending\n");
+        }
+        if (shownNonWithheld < totalNonWithheld) {
+          process.stdout.write(`showing ${shownNonWithheld} of ${totalNonWithheld} -- use --limit to see more\n`);
         }
       })
     );
@@ -859,7 +890,7 @@ export function buildProgram(): Command {
     .option("--status <status>", "Filter by status (comma-separated for multiple)")
     .option("--subject <key>", "Filter by subject")
     .option("--scope <scope>", "Filter by scope")
-    .option("--limit <n>", "Limit results", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Limit results (default 20)", (v) => parseInt(v, 10))
     .option(
       "--json",
       "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface)"
@@ -871,13 +902,18 @@ export function buildProgram(): Command {
           ...(options.status !== undefined ? { status: parseFactStatusList(options.status) } : {}),
           ...(options.subject !== undefined ? { subject: options.subject } : {}),
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
-          ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
         };
         const facts = await withDb((db) => listFacts(db, filter));
+        const total = facts.length;
+        const effectiveLimit = options.limit !== undefined && Number.isFinite(options.limit) ? options.limit : DEFAULT_LIST_LIMIT;
+        const shown = facts.slice(0, effectiveLimit);
+        const truncated = total > shown.length;
         if (options.json === true) {
           const envelope = {
             schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
-            facts: facts.map((fact) => factToExportJson(fact, { includeEmbedding: false })),
+            facts: shown.map((fact) => factToExportJson(fact, { includeEmbedding: false })),
+            total,
+            truncated,
           };
           process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
           return;
@@ -886,8 +922,11 @@ export function buildProgram(): Command {
           process.stdout.write("no facts stored\n");
           return;
         }
-        for (const fact of facts) {
+        for (const fact of shown) {
           process.stdout.write(`${formatFactSummary(fact)}\n`);
+        }
+        if (truncated) {
+          process.stdout.write(`showing ${shown.length} of ${total} -- use --limit to see more\n`);
         }
       })
     );
@@ -903,13 +942,10 @@ export function buildProgram(): Command {
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
         const output = await withDb((db) => {
-          const fact = getFactById(db, id);
-          if (fact === undefined) {
-            throw new UsageError(`no such fact: ${id}`);
-          }
+          const fact = resolveIdArgOrThrow(db, id);
           const root = resolveRoot(options.root ?? fact.scopeRoot ?? undefined);
           const freshness = evaluateAnchor(fact.anchor, root);
-          const sources = listSourcesForFact(db, id);
+          const sources = listSourcesForFact(db, fact.id);
           if (options.json === true) {
             const envelope = {
               schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
@@ -930,15 +966,13 @@ export function buildProgram(): Command {
     .description("Soft-delete a fact (marks superseded, kept for audit) and audit-log it")
     .action(
       guard(async (id: string) => {
-        await withDb((db) => {
-          const existing = getFactById(db, id);
-          if (existing === undefined) {
-            throw new UsageError(`no such fact: ${id}`);
-          }
-          setFactStatus(db, id, "superseded");
-          insertAuditLog(db, { event: "forget", factId: id, detail: `forgot fact (was ${existing.status})` });
+        const resolved = await withDb((db) => {
+          const existing = resolveIdArgOrThrow(db, id);
+          setFactStatus(db, existing.id, "superseded");
+          insertAuditLog(db, { event: "forget", factId: existing.id, detail: `forgot fact (was ${existing.status})` });
+          return existing.id;
         });
-        process.stdout.write(`forgot ${id}\n`);
+        process.stdout.write(`forgot ${resolved}\n`);
       })
     );
 
@@ -947,15 +981,13 @@ export function buildProgram(): Command {
     .description("Exempt a fact from time-decay (still subject to contradiction/anchor suppression)")
     .action(
       guard(async (id: string) => {
-        await withDb((db) => {
-          const existing = getFactById(db, id);
-          if (existing === undefined) {
-            throw new UsageError(`no such fact: ${id}`);
-          }
-          setFactStatus(db, id, "pinned");
-          insertAuditLog(db, { event: "pin", factId: id, detail: `pinned fact (was ${existing.status})` });
+        const resolved = await withDb((db) => {
+          const existing = resolveIdArgOrThrow(db, id);
+          setFactStatus(db, existing.id, "pinned");
+          insertAuditLog(db, { event: "pin", factId: existing.id, detail: `pinned fact (was ${existing.status})` });
+          return existing.id;
         });
-        process.stdout.write(`pinned ${id}\n`);
+        process.stdout.write(`pinned ${resolved}\n`);
       })
     );
 
@@ -991,10 +1023,7 @@ export function buildProgram(): Command {
         validateFactEditOrThrow(patch);
 
         const updated = await withDb((db) => {
-          const existing = getFactById(db, id);
-          if (existing === undefined) {
-            throw new UsageError(`no such fact: ${id}`);
-          }
+          const existing = resolveIdArgOrThrow(db, id);
           const allowlist = loadAllowlist(root);
           const matches = screenForSecrets(
             { text: patch.text, subject: patch.subject, value: patch.value, anchor: patch.anchor },
@@ -1003,16 +1032,16 @@ export function buildProgram(): Command {
           if (matches.length > 0) {
             insertAuditLog(db, {
               event: "edit_blocked_secret",
-              factId: id,
+              factId: existing.id,
               detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
             });
             throw new SecretDetectedError(matches);
           }
-          const fact = updateFact(db, id, patch);
+          const fact = updateFact(db, existing.id, patch);
           if (fact === undefined) {
-            throw new UsageError(`no such fact: ${id}`);
+            throw new UsageError(`no such fact: ${existing.id}`);
           }
-          insertAuditLog(db, { event: "edit", factId: id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
+          insertAuditLog(db, { event: "edit", factId: existing.id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
           return fact;
         });
         process.stdout.write(`edited ${updated.id}\n`);

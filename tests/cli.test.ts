@@ -15,7 +15,7 @@ import { join } from "node:path";
 
 import { run } from "../src/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
-import { openStorage } from "../src/storage.js";
+import { insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
 
 interface CliResult {
@@ -112,9 +112,9 @@ describe("mem CLI happy path", () => {
     expect(recalled.stdout).toContain("uses pnpm not npm");
     // Preferences always carry a caveat regardless of trust level (P6) -- never a bald assertion. No
     // anchor was set, so freshness is "unverified" (not "affirmed"), which buildDisplay renders as an
-    // explicit "verify" caveat rather than the terser "(verify)" tag reserved for affirmed facts.
+    // "(unverified, <month>)" tag. Default output no longer carries a per-line CTA (footer-ized).
     expect(recalled.stdout).toContain("stored pref (unverified,");
-    expect(recalled.stdout).toContain("verify;");
+    expect(recalled.stdout).toContain("mem show <id> for detail; mem review to resolve contested/pending");
 
     const edited = await runCli(["edit", id, "--text", "uses pnpm exclusively"]);
     expect(edited.exitCode).toBe(0);
@@ -458,8 +458,11 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
 
 describe("recall --stable (deterministic id-sorted ordering, strictly additive)", () => {
   it("sorts plain `mem recall` output by fact id ascending instead of recency", async () => {
-    await runCli(["remember", "captured earlier", "--kind", "fact"]);
-    await runCli(["remember", "captured later", "--kind", "fact"]);
+    // Default (full) recall output no longer embeds an id in a per-line CTA (footer-ized, Section 4),
+    // so ids are captured from `remember`'s own success line and matched back to each fact's line by
+    // its distinguishing text, rather than regex-extracted from recall's display text.
+    const idEarlier = extractRememberedId(await runCli(["remember", "captured earlier", "--kind", "fact"]));
+    const idLater = extractRememberedId(await runCli(["remember", "captured later", "--kind", "fact"]));
 
     const defaultOrder = await runCli(["recall"]);
     const stableOrder = await runCli(["recall", "--stable"]);
@@ -467,12 +470,16 @@ describe("recall --stable (deterministic id-sorted ordering, strictly additive)"
     // Same set of lines either way -- --stable only changes ordering, never which facts are included.
     expect([...stableOrder.stdout.split("\n")].sort()).toEqual([...defaultOrder.stdout.split("\n")].sort());
 
+    const textToId: ReadonlyMap<string, string> = new Map([
+      ["captured earlier", idEarlier],
+      ["captured later", idLater],
+    ]);
     const ids = stableOrder.stdout
       .split("\n")
-      .map((line) => /mem show (\S+)/.exec(line)?.[1])
+      .map((line) => [...textToId.entries()].find(([text]) => line.includes(text))?.[1])
       .filter((id): id is string => id !== undefined);
-    expect(ids.length).toBeGreaterThan(0);
-    expect([...ids].sort()).toEqual(ids);
+    expect(ids).toEqual([...ids].sort());
+    expect(ids).toEqual([idEarlier, idLater].sort());
   });
 
   it("sorts `mem recall --hint-format --stable` fact-lines by fact id ascending", async () => {
@@ -492,13 +499,17 @@ describe("recall --stable (deterministic id-sorted ordering, strictly additive)"
 // ─────────────────────────────────────────────────────────────────────────── recall --hint-style ───────────────────────────────────────────────────────────────────────────
 
 describe("recall --hint-style full|terse", () => {
-  it("defaults to full (byte-identical to omitting the flag)", async () => {
+  it("defaults to full (byte-identical to omitting the flag), with the per-line CTA replaced by one trailing footer", async () => {
     await runCli(["remember", "chose Postgres over Mongo", "--kind", "decision"]);
     const defaulted = await runCli(["recall"]);
     const explicitFull = await runCli(["recall", "--hint-style", "full"]);
     expect(explicitFull.stdout).toBe(defaulted.stdout);
     expect(defaulted.stdout).toContain("stored decision (unverified,");
-    expect(defaulted.stdout).toContain("mem show");
+    // Section 4: default output drops the per-line CTA in favor of one trailing footer line.
+    expect(defaulted.stdout).not.toContain("—");
+    const lines = defaulted.stdout.split("\n").filter((line) => line.length > 0);
+    expect(lines.at(-1)).toBe("mem show <id> for detail; mem review to resolve contested/pending");
+    expect(lines.filter((line) => line === "mem show <id> for detail; mem review to resolve contested/pending")).toHaveLength(1);
   });
 
   it("terse drops the CTA and shortens the kind label", async () => {
@@ -571,6 +582,191 @@ describe("review --summary, --section, --since-epoch", () => {
 
     const summaryFromZero = await runCli(["review", "--summary", "--since-epoch", "0"]);
     expect(summaryFromZero.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── recall --since-epoch ───────────────────────────────────────────────────────────────────────────
+
+describe("recall --since-epoch", () => {
+  it("excludes facts written at or before the given epoch, mirroring review --since-epoch", async () => {
+    const dbBefore = openStorage(resolveDbPath());
+    insertFact(dbBefore, { text: "captured before the cutoff", kind: "fact", scope: "global", source_type: "user" });
+    dbBefore.close();
+
+    const cutoff = await runCli(["epoch"]);
+    const cutoffEpoch = cutoff.stdout.trim();
+
+    const dbAfter = openStorage(resolveDbPath());
+    insertFact(dbAfter, { text: "captured after the cutoff", kind: "fact", scope: "global", source_type: "user" });
+    dbAfter.close();
+
+    const sinceCutoff = await runCli(["recall", "--since-epoch", cutoffEpoch]);
+    expect(sinceCutoff.stdout).toContain("captured after the cutoff");
+    expect(sinceCutoff.stdout).not.toContain("captured before the cutoff");
+
+    const fromZero = await runCli(["recall", "--since-epoch", "0"]);
+    expect(fromZero.stdout).toContain("captured after the cutoff");
+    expect(fromZero.stdout).toContain("captured before the cutoff");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── short id prefixes ───────────────────────────────────────────────────────────────────────────
+
+describe("short id prefixes (git-style, all 6 id-accepting commands)", () => {
+  function seedFactWithId(id: string, overrides: { readonly status?: "active" | "pending" } = {}): void {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, {
+      id,
+      text: `fact ${id}`,
+      kind: "fact",
+      scope: "global",
+      source_type: "user",
+      ...(overrides.status !== undefined ? { status: overrides.status } : {}),
+    });
+    db.close();
+  }
+
+  it("show/forget/pin/edit accept a unique short prefix (>= 4 chars)", async () => {
+    seedFactWithId("aaaa1111-0000-0000-0000-000000000001");
+
+    const shown = await runCli(["show", "aaaa1111"]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("id: aaaa1111-0000-0000-0000-000000000001");
+
+    const edited = await runCli(["edit", "aaaa1111", "--text", "edited via prefix"]);
+    expect(edited.exitCode).toBe(0);
+    expect(edited.stdout).toBe("edited aaaa1111-0000-0000-0000-000000000001\n");
+
+    const pinned = await runCli(["pin", "aaaa1111"]);
+    expect(pinned.exitCode).toBe(0);
+    expect(pinned.stdout).toBe("pinned aaaa1111-0000-0000-0000-000000000001\n");
+
+    const forgotten = await runCli(["forget", "aaaa1111"]);
+    expect(forgotten.exitCode).toBe(0);
+    expect(forgotten.stdout).toBe("forgot aaaa1111-0000-0000-0000-000000000001\n");
+  });
+
+  it("review --promote/--reject accept a unique short prefix", async () => {
+    seedFactWithId("bbbb1111-0000-0000-0000-000000000001", { status: "pending" });
+    const promoted = await runCli(["review", "--promote", "bbbb1111"]);
+    expect(promoted.exitCode).toBe(0);
+    expect(promoted.stdout).toBe("promoted bbbb1111\n");
+    const afterPromote = await runCli(["show", "bbbb1111"]);
+    expect(afterPromote.stdout).toContain("status: active");
+
+    seedFactWithId("cccc1111-0000-0000-0000-000000000001", { status: "pending" });
+    const rejected = await runCli(["review", "--reject", "cccc1111"]);
+    expect(rejected.exitCode).toBe(0);
+    expect(rejected.stdout).toBe("rejected cccc1111\n");
+    const afterReject = await runCli(["show", "cccc1111"]);
+    expect(afterReject.stdout).toContain("status: superseded");
+  });
+
+  it("rejects an ambiguous prefix with every match listed, on all 6 commands", async () => {
+    seedFactWithId("dddd1111-0000-0000-0000-000000000001");
+    seedFactWithId("dddd2222-0000-0000-0000-000000000002");
+
+    const expectAmbiguous = (result: CliResult): void => {
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain('ambiguous id prefix "dddd"');
+      expect(result.stderr).toContain("dddd1111-0000-0000-0000-000000000001");
+      expect(result.stderr).toContain("dddd2222-0000-0000-0000-000000000002");
+      expect(result.stderr).toContain("use more characters");
+    };
+
+    expectAmbiguous(await runCli(["show", "dddd"]));
+    expectAmbiguous(await runCli(["forget", "dddd"]));
+    expectAmbiguous(await runCli(["pin", "dddd"]));
+    expectAmbiguous(await runCli(["edit", "dddd", "--text", "x"]));
+    expectAmbiguous(await runCli(["review", "--promote", "dddd"]));
+    expectAmbiguous(await runCli(["review", "--reject", "dddd"]));
+  });
+
+  it("preserves the exact existing 'no such fact' error text for an unresolvable id", async () => {
+    const result = await runCli(["show", "does-not-exist"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("mem: no such fact: does-not-exist");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── default limits on list/recall ───────────────────────────────────────────────────────────────────────────
+
+describe("default limits on mem list / mem recall (never hiding pending/contested/superseded/contradicted)", () => {
+  /** Seeds `count` distinct active facts with strictly increasing `captured_at` (newest last), so `mem list`/`mem recall`'s default newest-first ordering is deterministic. */
+  function seedManyActiveFacts(count: number): void {
+    const db = openStorage(resolveDbPath());
+    for (let i = 0; i < count; i += 1) {
+      insertFact(db, {
+        text: `seeded active fact number ${i}`,
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: new Date(2026, 0, 1, 0, i).toISOString(),
+      });
+    }
+    db.close();
+  }
+
+  it("mem list caps at the default limit and prints a trailer when truncated", async () => {
+    seedManyActiveFacts(25);
+    const result = await runCli(["list"]);
+    expect(result.exitCode).toBe(0);
+    const factLines = result.stdout.split("\n").filter((line) => line.includes("seeded active fact number"));
+    expect(factLines).toHaveLength(20);
+    expect(result.stdout).toContain("showing 20 of 25 -- use --limit to see more");
+  });
+
+  it("mem list --json reflects the same slice plus total/truncated fields", async () => {
+    seedManyActiveFacts(25);
+    const result = await runCli(["list", "--json"]);
+    expect(result.exitCode).toBe(0);
+    const envelope = JSON.parse(result.stdout) as { facts: unknown[]; total: number; truncated: boolean };
+    expect(envelope.facts).toHaveLength(20);
+    expect(envelope.total).toBe(25);
+    expect(envelope.truncated).toBe(true);
+  });
+
+  it("mem list --limit overrides the default", async () => {
+    seedManyActiveFacts(25);
+    const result = await runCli(["list", "--limit", "5"]);
+    expect(result.exitCode).toBe(0);
+    const factLines = result.stdout.split("\n").filter((line) => line.includes("seeded active fact number"));
+    expect(factLines).toHaveLength(5);
+    expect(result.stdout).toContain("showing 5 of 25 -- use --limit to see more");
+  });
+
+  it("mem recall caps non-withheld results at the default limit and prints a trailer when truncated", async () => {
+    seedManyActiveFacts(25);
+    const result = await runCli(["recall"]);
+    expect(result.exitCode).toBe(0);
+    const factLines = result.stdout.split("\n").filter((line) => line.includes("seeded active fact number"));
+    expect(factLines).toHaveLength(20);
+    expect(result.stdout).toContain("showing 20 of 25 -- use --limit to see more");
+  });
+
+  it("never hides a pending fact behind the default recall limit, even with 20+ higher-ranked active facts ahead of it", async () => {
+    // The pending fact is captured first (oldest, so it would rank dead last in default
+    // newest-first ordering) -- if the default cap applied uniformly instead of exempting withheld
+    // results, it would never appear in the default (uncapped-for-pending) output.
+    const db = openStorage(resolveDbPath());
+    insertFact(db, {
+      text: "a pending candidate fact",
+      kind: "fact",
+      scope: "global",
+      source_type: "user",
+      status: "pending",
+      captured_at: new Date(2020, 0, 1).toISOString(),
+    });
+    db.close();
+    seedManyActiveFacts(22);
+
+    const result = await runCli(["recall"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("a pending candidate fact");
+    expect(result.stdout).toContain("(pending, unconfirmed)");
+    // 22 non-withheld facts matched; only 20 are shown by default -- the trailer reflects that,
+    // and it excludes the pending fact from both totals (it is never subject to the cap at all).
+    expect(result.stdout).toContain("showing 20 of 22 -- use --limit to see more");
   });
 });
 

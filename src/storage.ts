@@ -237,6 +237,49 @@ export function getFactById(db: Db, id: string): Fact | undefined {
   return row === undefined ? undefined : rowToFact(row);
 }
 
+/** Result of `resolveFactIdOrPrefix`: exactly one full id matched, no id (or no safely-scannable prefix) matched, or more than one id shares the given prefix. */
+export type IdResolution =
+  | { readonly kind: "found"; readonly fact: Fact }
+  | { readonly kind: "not-found" }
+  | { readonly kind: "ambiguous"; readonly matches: readonly Fact[] };
+
+/** Below this length, a partial id is never treated as a prefix -- too likely to collide across an unrelated store, and not worth a table scan. */
+const MIN_ID_PREFIX_LEN = 4;
+
+/** Fact ids are UUIDs (hex digits and dashes only); a `--` prefix scan is only attempted for input that could plausibly be one. */
+const ID_PREFIX_PATTERN = /^[0-9a-fA-F-]+$/;
+
+/** Escapes `%`, `_`, and `\` (the SQL `LIKE` wildcard/escape characters) so a caller-supplied prefix can never be interpreted as a wildcard pattern -- defensive, since real UUID characters never contain any of these. */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
+/**
+ * Resolves a fact id argument that may be a full id or a git-style short prefix (`MIN_ID_PREFIX_LEN`
+ * characters minimum). Tries an exact match first (the common case, and the only case for a full
+ * UUID); only falls back to a `LIKE 'prefix%'` scan when the exact match misses and the input looks
+ * like it could plausibly be a hex/dash id prefix.
+ */
+export function resolveFactIdOrPrefix(db: Db, idOrPrefix: string): IdResolution {
+  const exact = getFactRow(db, idOrPrefix);
+  if (exact !== undefined) {
+    return { kind: "found", fact: rowToFact(exact) };
+  }
+  if (idOrPrefix.length < MIN_ID_PREFIX_LEN || !ID_PREFIX_PATTERN.test(idOrPrefix)) {
+    return { kind: "not-found" };
+  }
+  const rows = db
+    .prepare<[string], FactRow>("SELECT * FROM facts WHERE id LIKE ? ESCAPE '\\'")
+    .all(`${escapeLikePattern(idOrPrefix)}%`);
+  if (rows.length === 0) {
+    return { kind: "not-found" };
+  }
+  if (rows.length > 1) {
+    return { kind: "ambiguous", matches: rows.map(rowToFact) };
+  }
+  return { kind: "found", fact: rowToFact(rows[0] as FactRow) };
+}
+
 /**
  * Builds the shared `WHERE` clause + bind params for `listFacts`/
  * `countFacts`. Returns `null` when the filter can be proven to match zero
