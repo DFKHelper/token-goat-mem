@@ -154,6 +154,18 @@ describe("claudeCode wiring", () => {
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
   });
 
+  it("aborts with WiringConflictError (not a raw TypeError) when a SessionStart entry's hooks array contains a null element", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [{ hooks: [null] }] } }));
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
+  it("aborts with WiringConflictError (not a raw TypeError) when a SessionStart entry's hooks array contains a non-object element", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [{ hooks: ["not-an-object"] }] } }));
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+  });
+
   it("uninstall on a SessionStart holding a null element does not crash and leaves the file untouched", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     const seeded = JSON.stringify({ hooks: { SessionStart: [null] } });

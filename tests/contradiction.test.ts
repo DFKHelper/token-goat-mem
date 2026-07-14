@@ -179,6 +179,70 @@ describe("detectContradictions", () => {
     }
   });
 
+  it("resolves rather than contests when tied-top-precedence facts agree with each other and only a lower-precedence fact disagrees", () => {
+    // Two independently-captured `user` facts tied in precedence (same provenance rank, same
+    // captured_at) both say the SAME value; a third, clearly lower-precedence `derived` fact says
+    // something different. There is no real ambiguity here -- the tied leaders agree with each
+    // other -- so the shared value should win outright and only the outranked fact is superseded.
+    const facts = [
+      makeFact({
+        id: "user-a",
+        subject: "package-manager",
+        value: "npm",
+        source_type: "user",
+        captured_at: "2026-04-01T00:00:00.000Z",
+      }),
+      makeFact({
+        id: "user-b",
+        subject: "package-manager",
+        value: "npm",
+        source_type: "user",
+        captured_at: "2026-04-01T00:00:00.000Z",
+      }),
+      makeFact({
+        id: "derived-old",
+        subject: "package-manager",
+        value: "pnpm",
+        source_type: "derived",
+        captured_at: "2026-01-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]).toMatchObject({
+      subject: "package-manager",
+      resolution: "resolved",
+    });
+    expect(["user-a", "user-b"]).toContain(result.groups[0]?.winnerId);
+    expect(result.updates).toEqual([
+      expect.objectContaining({ factId: "derived-old", nextStatus: "superseded" }),
+    ]);
+  });
+
+  it("still marks the tied facts contested when 3+ facts are tied for top precedence and disagree on value", () => {
+    const facts = [
+      makeFact({ id: "a", subject: "test-framework", value: "vitest", captured_at: "2026-04-01T00:00:00.000Z" }),
+      makeFact({ id: "b", subject: "test-framework", value: "jest", captured_at: "2026-04-01T00:00:00.000Z" }),
+      makeFact({ id: "c", subject: "test-framework", value: "mocha", captured_at: "2026-04-01T00:00:00.000Z" }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]).toMatchObject({
+      subject: "test-framework",
+      resolution: "contested",
+      winnerId: null,
+    });
+    expect(result.groups[0]?.factIds.sort()).toEqual(["a", "b", "c"]);
+    expect(result.updates).toHaveLength(3);
+    for (const update of result.updates) {
+      expect(update.nextStatus).toBe("contested");
+    }
+  });
+
   it("excludes already-contested facts from detection entirely, same as pending/superseded", () => {
     const facts = [
       makeFact({ id: "a", subject: "linter", value: "eslint", status: "contested" }),

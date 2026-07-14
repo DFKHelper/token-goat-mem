@@ -132,10 +132,13 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
     if (best === undefined) {
       continue;
     }
-    const runnerUp = sorted[1];
-    const isTied = runnerUp !== undefined && comparePrecedence(best, runnerUp) === 0;
+    // All facts tied for the top precedence rank (may be 2+, not just the top two array slots).
+    const topGroup = sorted.filter((fact) => comparePrecedence(fact, best) === 0);
+    const topValues = new Set(topGroup.map((fact) => fact.value));
+    // Genuinely ambiguous only when the tied-top-precedence facts themselves disagree on value.
+    const isGenuineTie = topGroup.length > 1 && topValues.size > 1;
 
-    if (isTied) {
+    if (isGenuineTie) {
       for (const fact of bucket.facts) {
         if (fact.status !== "contested") {
           updates.push({
@@ -154,6 +157,30 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
         factIds: bucket.facts.map((fact) => fact.id),
         resolution: "contested",
         winnerId: null,
+      });
+    } else if (topGroup.length > 1) {
+      // Tied-top-precedence facts agree on value: that value wins outright. Only facts holding a
+      // different (lower-precedence) value are superseded; the other tied leader(s) sharing the
+      // winning value are left untouched since they are not actually in conflict with the winner.
+      for (const fact of bucket.facts) {
+        if (fact.value === best.value) {
+          continue;
+        }
+        updates.push({
+          factId: fact.id,
+          previousStatus: fact.status,
+          nextStatus: "superseded",
+          reason:
+            `Superseded by fact ${best.id} on subject "${bucket.subject}" (scope=${bucket.scope}): ` +
+            `value "${fact.value}" superseded by newer/higher-provenance value "${best.value}".`,
+        });
+      }
+      groups.push({
+        subject: bucket.subject,
+        scope: bucket.scope,
+        factIds: bucket.facts.map((fact) => fact.id),
+        resolution: "resolved",
+        winnerId: best.id,
       });
     } else {
       for (const fact of bucket.facts) {

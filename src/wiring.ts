@@ -515,6 +515,15 @@ function installClaudeSettings(current: string | undefined, path: string): strin
     if (group["hooks"] !== undefined && !Array.isArray(group["hooks"])) {
       throw new WiringConflictError(`a hooks.SessionStart entry in ${path} has a non-array "hooks"; refusing to modify a hand-edited config`);
     }
+    // Also guard individual hook elements: a hand-edited hooks array may contain null, primitives, or
+    // other non-objects. Validate them upfront so later code doesn't crash when accessing .command.
+    if (Array.isArray(group["hooks"])) {
+      for (const hook of group["hooks"]) {
+        if (!isPlainObject(hook)) {
+          throw new WiringConflictError(`a hooks.SessionStart entry in ${path} contains a non-object hook element; refusing to modify a hand-edited config`);
+        }
+      }
+    }
   }
   const groups = sessionStart as ClaudeHookGroup[];
 
@@ -528,7 +537,7 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   }
 
   const hasUnstampedConflict = groups.some((group) =>
-    (group.hooks ?? []).some((hook) => !isStamped(hook) && hook.command === CLAUDE_HOOK_COMMAND)
+    (group.hooks ?? []).some((hook) => isPlainObject(hook) && !isStamped(hook) && hook.command === CLAUDE_HOOK_COMMAND)
   );
   if (hasUnstampedConflict && stampedHook === undefined) {
     throw new WiringConflictError(`a SessionStart hook with command "${CLAUDE_HOOK_COMMAND}" already exists in ${path} and was not created by mem; refusing to duplicate it`);
