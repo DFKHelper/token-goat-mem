@@ -793,25 +793,19 @@ This machine has token-goat-mem installed. Do not wait to be asked to run
 "from now on...", "never...", "don't...", or otherwise state a durable
 preference, decision, or correction, persist it yourself, right then:
 \`mem remember "<short fact>" --kind preference|decision|fact|correction --scope project --root .\`
-Use --subject/--value for anything that can be contradicted later
-(e.g. --subject package-manager --value pnpm).`;
+Use --subject/--value for anything that can be contradicted later.`;
 
 /**
  * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
- * reference-counted shared block (`codex`, `copilot-cli`, and `copilot-vscode`). Chosen from the
- * more general/tool-agnostic of the three tools' pre-existing wordings (copilot-cli's/copilot-vscode's
- * shared shape -- covering all four fact kinds and the --subject/--value guidance, matching
- * CLAUDE_CODE_CLAUDE_MD_BODY, where codex's was narrower: "decision" kind only, framed around code
- * review specifically), with the trigger clause reworded from "When the user states..." to "When a
- * durable ... is reached" so it reads naturally across all three tools' usage patterns.
+ * reference-counted shared block (`codex`, `copilot-cli`, and `copilot-vscode`).
  */
 const AGENTS_MD_SHARED_BODY = `## Memory
 
-This machine has token-goat-mem installed (\`mem\` on PATH).
+token-goat-mem is installed (\`mem\` on PATH).
 
 - At the start of a task, run \`mem recall --hint-format --root .\` and treat
   each returned line's \`display\` string as a prior fact, honoring its
-  embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+  embedded trust caveat.
 - Do not wait to be asked to run \`mem remember\` — when the user says things
   like "remember that...", "always...", "from now on...", "never...",
   "don't...", or otherwise reaches a durable preference, decision, or

@@ -221,7 +221,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const scoped = allFacts.filter((fact) => isInScope(fact, root, contextFiles));
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, RETRIEVAL_BUDGET_MS - (Date.now() - start));
-  const results = await retrieve(scoped, {
+  const { results } = await retrieve(scoped, {
     query: "",
     root,
     hintFormat: true,

@@ -88,7 +88,7 @@ describe("reciprocalRankFusion", () => {
 describe("retrieve", () => {
   it("marks a fact with no anchor as unverified/hint, with an unverified display", async () => {
     const facts = [makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision" })];
-    const [result] = await retrieve(facts, { query: "postgres", root });
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root });
     expect(result?.freshness).toBe("unverified");
     expect(result?.trust).toBe("hint");
     expect(result?.display).toContain("(unverified, 2026-01)");
@@ -99,7 +99,7 @@ describe("retrieve", () => {
     const facts = [
       makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
     ];
-    const [result] = await retrieve(facts, { query: "postgres", root });
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root });
     expect(result?.freshness).toBe("affirmed");
     expect(result?.trust).toBe("ground-truth");
     expect(result?.display).toBe("decision: chose Postgres over Mongo — mem show 1");
@@ -110,7 +110,7 @@ describe("retrieve", () => {
     const facts = [
       makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
     ];
-    const [result] = await retrieve(facts, { query: "postgres", root, includeDisplayCta: false });
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root, includeDisplayCta: false });
     expect(result?.display).toBe("decision: chose Postgres over Mongo");
   });
 
@@ -119,8 +119,8 @@ describe("retrieve", () => {
     const facts = [
       makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
     ];
-    const [defaulted] = await retrieve(facts, { query: "postgres", root });
-    const [explicit] = await retrieve(facts, { query: "postgres", root, hintStyle: "full" });
+    const { results: [defaulted] } = await retrieve(facts, { query: "postgres", root });
+    const { results: [explicit] } = await retrieve(facts, { query: "postgres", root, hintStyle: "full" });
     expect(defaulted?.display).toBe("decision: chose Postgres over Mongo — mem show 1");
     expect(explicit?.display).toBe(defaulted?.display);
   });
@@ -132,7 +132,7 @@ describe("retrieve", () => {
       makeFact({ id: "2", text: "never run npm install here", kind: "correction" }),
       makeFact({ id: "3", text: "staging DB host is db.internal", kind: "fact" }),
     ];
-    const results = await retrieve(facts, { query: "", root, hintStyle: "terse" });
+    const { results } = await retrieve(facts, { query: "", root, hintStyle: "terse" });
     const byId = new Map(results.map((result) => [result.fact.id, result.display]));
     expect(byId.get("1")).toBe("dec: chose Postgres over Mongo");
     expect(byId.get("2")).toContain("corr (unverified, 2026-01): never run npm install here");
@@ -153,7 +153,7 @@ describe("retrieve", () => {
       }),
     ];
     const now = new Date("2026-01-01T00:00:01.000Z");
-    const [result] = await retrieve(facts, { query: "pnpm", root, now, hintStyle: "terse" });
+    const { results: [result] } = await retrieve(facts, { query: "pnpm", root, now, hintStyle: "terse" });
     expect(result?.display).toBe("stored pref (verify): uses pnpm not npm");
   });
 
@@ -170,7 +170,7 @@ describe("retrieve", () => {
       }),
     ];
     const now = new Date("2026-01-01T00:00:01.000Z");
-    const [result] = await retrieve(facts, { query: "pnpm", root, now });
+    const { results: [result] } = await retrieve(facts, { query: "pnpm", root, now });
     expect(result?.freshness).toBe("affirmed");
     expect(result?.trust).toBe("ground-truth");
     expect(result?.display).toBe("stored pref (verify): uses pnpm not npm — mem show 1");
@@ -181,7 +181,7 @@ describe("retrieve", () => {
     const facts = [
       makeFact({ id: "1", text: "uses pnpm not npm", kind: "preference", anchor: "file-absent npm-only.txt" }),
     ];
-    const [result] = await retrieve(facts, { query: "pnpm", root });
+    const { results: [result] } = await retrieve(facts, { query: "pnpm", root });
     expect(result?.freshness).toBe("contradicted");
     expect(result?.trust).toBe("withheld");
     expect(result?.display).toContain("(contradicted, excluded)");
@@ -198,7 +198,7 @@ describe("retrieve", () => {
         status: "pinned",
       }),
     ];
-    const [result] = await retrieve(facts, { query: "pnpm", root });
+    const { results: [result] } = await retrieve(facts, { query: "pnpm", root });
     expect(result?.display).toContain("(pinned but contradicted)");
     expect(result?.trust).toBe("withheld");
   });
@@ -207,18 +207,18 @@ describe("retrieve", () => {
     const facts = [
       makeFact({ id: "1", text: "uses npm", kind: "preference", status: "superseded", subject: "package-manager", value: "npm" }),
     ];
-    const results = await retrieve(facts, { query: "npm", root });
+    const { results } = await retrieve(facts, { query: "npm", root });
     expect(results).toHaveLength(0);
   });
 
   it("shows a pending fact as unconfirmed in interactive mode but excludes it from hint-format", async () => {
     const facts = [makeFact({ id: "1", text: "uses tabs not spaces", kind: "preference", status: "pending" })];
 
-    const interactive = await retrieve(facts, { query: "tabs", root });
+    const { results: interactive } = await retrieve(facts, { query: "tabs", root });
     expect(interactive[0]?.trust).toBe("withheld");
     expect(interactive[0]?.display).toContain("(pending, unconfirmed)");
 
-    const hintFormat = await retrieve(facts, { query: "tabs", root, hintFormat: true });
+    const { results: hintFormat } = await retrieve(facts, { query: "tabs", root, hintFormat: true });
     expect(hintFormat).toHaveLength(0);
   });
 
@@ -228,14 +228,14 @@ describe("retrieve", () => {
       makeFact({ id: "2", text: "uses pnpm", kind: "preference", subject: "package-manager", value: "pnpm", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z" }),
     ];
 
-    const interactive = await retrieve(facts, { query: "package manager", root });
+    const { results: interactive } = await retrieve(facts, { query: "package manager", root });
     expect(interactive).toHaveLength(2);
     for (const result of interactive) {
       expect(result.trust).toBe("withheld");
       expect(result.display).toContain("(contested, excluded)");
     }
 
-    const hintFormat = await retrieve(facts, { query: "package manager", root, hintFormat: true });
+    const { results: hintFormat } = await retrieve(facts, { query: "package manager", root, hintFormat: true });
     expect(hintFormat).toHaveLength(0);
   });
 
@@ -244,7 +244,7 @@ describe("retrieve", () => {
       makeFact({ id: "old", text: "uses npm", kind: "preference", subject: "package-manager", value: "npm", captured_at: "2025-01-01T00:00:00.000Z" }),
       makeFact({ id: "new", text: "uses pnpm", kind: "preference", subject: "package-manager", value: "pnpm", captured_at: "2026-01-01T00:00:00.000Z" }),
     ];
-    const results = await retrieve(facts, { query: "package manager", root });
+    const { results } = await retrieve(facts, { query: "package manager", root });
     const ids = results.map((r) => r.fact.id);
     expect(ids).toEqual(["new"]);
     expect(results[0]?.trust).toBe("hint");
@@ -263,7 +263,7 @@ describe("retrieve", () => {
       }),
     ];
     const farFuture = new Date("2027-01-01T00:00:00.000Z");
-    const [result] = await retrieve(facts, { query: "pnpm", root, now: farFuture });
+    const { results: [result] } = await retrieve(facts, { query: "pnpm", root, now: farFuture });
     expect(result?.freshness).toBe("affirmed");
     expect(result?.trust).toBe("hint");
   });
@@ -282,7 +282,7 @@ describe("retrieve", () => {
       }),
     ];
     const farFuture = new Date("2027-01-01T00:00:00.000Z");
-    const [result] = await retrieve(facts, { query: "pnpm", root, now: farFuture });
+    const { results: [result] } = await retrieve(facts, { query: "pnpm", root, now: farFuture });
     expect(result?.trust).toBe("ground-truth");
   });
 
@@ -299,7 +299,7 @@ describe("retrieve", () => {
       }),
     ];
     const farFuture = new Date("2027-01-01T00:00:00.000Z");
-    const [result] = await retrieve(facts, { query: "postgres", root, now: farFuture });
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root, now: farFuture });
     expect(result?.trust).toBe("ground-truth");
   });
 
@@ -310,23 +310,23 @@ describe("retrieve", () => {
     ];
     const now = new Date("2026-01-15T00:00:00.000Z");
 
-    const byKind = await retrieve(facts, { query: "", root, kind: "decision", now });
+    const { results: byKind } = await retrieve(facts, { query: "", root, kind: "decision", now });
     expect(byKind.map((r) => r.fact.id)).toEqual(["2"]);
 
-    const bySubject = await retrieve(facts, { query: "", root, subject: "package-manager", now });
+    const { results: bySubject } = await retrieve(facts, { query: "", root, subject: "package-manager", now });
     expect(bySubject.map((r) => r.fact.id)).toEqual(["1"]);
 
     // Regression: a subject filter typed with different casing/whitespace than how storage.ts
     // normalized and stored it (trim + lowercase) must still match -- a raw, un-normalized `!==`
     // comparison here would silently return zero results for a perfectly valid, naturally-typed
     // `--subject Package-Manager`.
-    const bySubjectDifferentCasing = await retrieve(facts, { query: "", root, subject: "  Package-Manager  ", now });
+    const { results: bySubjectDifferentCasing } = await retrieve(facts, { query: "", root, subject: "  Package-Manager  ", now });
     expect(bySubjectDifferentCasing.map((r) => r.fact.id)).toEqual(["1"]);
 
-    const byScope = await retrieve(facts, { query: "", root, scope: "global", now });
+    const { results: byScope } = await retrieve(facts, { query: "", root, scope: "global", now });
     expect(byScope.map((r) => r.fact.id)).toEqual(["2"]);
 
-    const byAge = await retrieve(facts, { query: "", root, ageDays: 30, now });
+    const { results: byAge } = await retrieve(facts, { query: "", root, ageDays: 30, now });
     expect(byAge.map((r) => r.fact.id)).toEqual(["1"]);
   });
 
@@ -336,7 +336,7 @@ describe("retrieve", () => {
       makeFact({ id: "2", text: "fact two about pnpm", kind: "fact", captured_at: "2026-01-02T00:00:00.000Z" }),
       makeFact({ id: "3", text: "fact three about pnpm", kind: "fact", captured_at: "2026-01-03T00:00:00.000Z" }),
     ];
-    const results = await retrieve(facts, { query: "pnpm", root, limit: 2 });
+    const { results } = await retrieve(facts, { query: "pnpm", root, limit: 2 });
     expect(results).toHaveLength(2);
   });
 
@@ -349,7 +349,7 @@ describe("retrieve", () => {
     const facts = [
       makeFact({ id: "1", text: "uses pnpm not npm", kind: "preference", embedding: new Float32Array([1, 0]) }),
     ];
-    const results = await retrieve(facts, { query: "pnpm", root, embeddingBackend: throwingBackend });
+    const { results } = await retrieve(facts, { query: "pnpm", root, embeddingBackend: throwingBackend });
     expect(results).toHaveLength(1);
     expect(results[0]?.fact.id).toBe("1");
   });
@@ -365,7 +365,7 @@ describe("retrieve", () => {
     const backend: EmbeddingBackend = {
       embed: () => new Float32Array([1, 0]),
     };
-    const results = await retrieve(facts, { query: "pnpm", root, embeddingBackend: backend });
+    const { results } = await retrieve(facts, { query: "pnpm", root, embeddingBackend: backend });
     const ids = results.map((r) => r.fact.id);
     expect(ids).toContain("a");
     expect(ids).toContain("b");
@@ -376,7 +376,7 @@ describe("retrieve", () => {
 
   it("returns nothing when there are no candidate facts after filtering", async () => {
     const facts = [makeFact({ id: "1", text: "x", kind: "fact" })];
-    const results = await retrieve(facts, { query: "x", root, kind: "decision" });
+    const { results } = await retrieve(facts, { query: "x", root, kind: "decision" });
     expect(results).toHaveLength(0);
   });
 });

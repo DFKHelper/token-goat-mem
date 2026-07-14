@@ -10,7 +10,7 @@ You tell your AI "we use pnpm not npm" and it forgets. Every session. Then it ru
 
 Mem stores them. Locally, in your own SQLite database. Each fact carries a trust level and an anchor (a read-only predicate that tests whether the fact is still true). On recall, Mem re-validates anchors and surfaces only the facts that are fresh and trustworthy, with a confidence caveat so your agent never treats a hint as ground truth when it should not.
 
-Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). Optional one-way seam with **token-goat** for embedding memory hints into the token-reduction manifest.
+Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). Optional one-way seam with [**token-goat**](https://github.com/DFKHelper/token-goat), a sister CLI that gives agents narrow-slice code/doc reads to cut context burn, for embedding memory hints into its token-reduction manifest.
 
 **Install:**
 
@@ -108,8 +108,8 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | `mem export` | Writes stored facts to stdout as a JSON envelope: `{ schemaVersion, exportedAt, facts }`. Pair with `mem import --from-json` for backup/restore or full-fidelity migration between stores. This is the **stable** machine-readable surface. `--kind`, `--status` (comma-separated), `--subject`, `--scope` filter which facts are exported (default: every fact, any status). |
 | `mem import --from-md <path>` | **Advisory only.** Parses a markdown file (CLAUDE.md-style) for `-`/`*` bullet lines that look like preference/decision statements and imports each as a `pending`, `source_type: "derived"` fact — the same trust path as any other suggested candidate; never auto-promoted, no bulk-promote shortcut. Confirm each import via `mem review --promote <id>`. `--dry-run` (report candidates without writing), `--root <path>`, `--scope global\|project\|path` (default `project`), `--kind` (default `preference`). Re-importing the same file skips bullets already imported at the same file:line + text. |
 | `mem import --from-json <path>` | **Full-fidelity.** Imports a `mem export` file, preserving each fact's original `id`, `status`, `confidence`, and `captured_at` exactly — unlike `--from-md`, an imported fact keeps whatever status it was exported with (including already-`active`), not forced to `pending`. Still runs the same secret screening before writing. Idempotent: a fact whose `id` already exists in the target store is skipped as a duplicate, safe to re-run. `--dry-run` (report candidates without writing), `--root <path>` (used only for `.mem/allowlist` resolution). Exactly one of `--from-md`/`--from-json` is required. |
-| `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/2 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>`, `--root <path>`, `--stable` (deterministic id-sorted output instead of relevance/recency order), `--hint-style <full\|terse>` (default `full`; `terse` drops the CTA and shortens kind labels to `pref`/`dec`/`fact`/`corr`). |
-| `mem list` | Fact IDs and one-line summaries. `--kind`, `--status` (comma-separated), `--subject`, `--scope`, `--limit`, `--json` (machine-readable, **unstable pre-1.0** -- shape may change; same fact shape as `mem export` minus `embedding`; use `mem export` for a stable machine-readable surface). |
+| `mem recall [query]` | Retrieve facts by relevance with trust levels and freshness verdicts. Caps non-withheld results at 20 by default (a trailing `showing N of M` line appears when truncated) — pending/contested/superseded/contradicted facts are never subject to this cap, so a fact needing attention is never silently hidden. `--kind`, `--subject`, `--scope`, `--hint-format` (TGMEM/2 wire format for token-goat), `--context-files <a,b>` (scope=path matching, `--hint-format` only), `--age-days <n>`, `--limit <n>` (overrides the default 20), `--root <path>`, `--stable` (deterministic id-sorted output instead of relevance/recency order), `--hint-style <full\|terse>` (default `full`; `terse` drops the CTA and shortens kind labels to `pref`/`dec`/`fact`/`corr`), `--since-epoch <n>` (only include facts written after write-epoch `n`). Default (`full`) output ends with one trailing footer line (`mem show <id> for detail; mem review to resolve contested/pending`) instead of repeating a CTA per line. |
+| `mem list` | Fact IDs and one-line summaries. Caps at 20 by default (a trailing `showing N of M` line appears when truncated). `--kind`, `--status` (comma-separated), `--subject`, `--scope`, `--limit` (overrides the default 20), `--json` (machine-readable, **unstable pre-1.0** -- shape may change; same fact shape as `mem export` minus `embedding`, plus `total`/`truncated`; use `mem export` for a stable machine-readable surface). |
 | `mem show <id>` | One fact in full: text, provenance, anchor and its current freshness verdict. `--root <path>`, `--json` (machine-readable, **unstable pre-1.0**; also includes `freshness` and `sources`, which plain `mem export`/`mem list --json` do not). |
 | `mem review` | Pending, contested, and anchor-contradicted facts for human resolution. `--promote <id>` / `--reject <id>` act on pending facts; `--root <path>`; `--summary` (print per-bucket counts instead of full listings); `--section <pending|contested|contradicted|pins>` (restrict output to one bucket); `--since-epoch <n>` (only include facts written after write-epoch `n`). |
 | `mem forget <id>` | Soft-delete a fact (marks superseded, kept for audit) and audit-log it. Bumps epoch. |
@@ -119,6 +119,8 @@ Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_
 | `mem doctor` | Read-only environment/DB health check: db path, WAL journal mode, foreign-key setting, schema tables, current epoch, fact counts by status, source/audit-log row counts. No options. |
 | `mem init <tool>` | Wires mem into a coding tool's config -- `claude-code`, `codex`, `copilot-cli`, or `copilot-vscode` -- automating what `docs/integrations/*.md` otherwise asks you to hand-copy. Idempotent: re-running upgrades mem's own entries in place, never duplicates them; an unstamped hand-written entry with the same identity aborts with a conflict error instead of being overwritten. `--root <path>` (project root, default current directory), `--user` (write the tool's user-level config instead of project-level, where it has both), `--dry-run` (print what would be written without touching disk). |
 | `mem uninstall <tool\|--all>` | Removes exactly what `mem init` wrote for `tool` -- or every tool with `--all` -- leaving everything else untouched. A no-op (not an error) if there's nothing mem-authored to remove. `--root <path>`, `--user`, `--dry-run`. |
+
+Every `<id>` argument (`show`, `forget`, `pin`, `edit`, `review --promote`/`--reject`) accepts a git-style short prefix — at least 4 characters — instead of the full id, as long as it uniquely identifies one fact. A prefix matching more than one fact errors and lists every match.
 
 Every command supports `--help` for the authoritative flag list.
 
@@ -138,7 +140,8 @@ mem remember "switched to bun" --kind preference --subject package-manager --val
 # remembered preference fact 21a1330e-95d3-453c-81f0-49c792e1488f
 
 mem recall
-# stored pref (unverified, 2026-07): switched to bun — verify; mem show 21a1330e-...
+# stored pref (unverified, 2026-07): switched to bun
+# mem show <id> for detail; mem review to resolve contested/pending
 ```
 
 Both facts share the subject `package-manager` with different values — a contradiction. Recall already prefers the newer fact and hides the loser; `epoch --gc` persists that resolution:
@@ -158,7 +161,8 @@ Anchored facts are re-validated on every recall. An anchor that tests false excl
 mem remember "repo has a yarn.lock" --kind fact --anchor "file-exists yarn.lock" --scope project --root .
 
 mem recall --root . --scope project
-# fact (contradicted, excluded): repo has a yarn.lock — resolve via mem review
+# fact (contradicted, excluded): repo has a yarn.lock
+# mem show <id> for detail; mem review to resolve contested/pending
 
 mem review --root .
 # -- anchor-contradicted (suppressed from ground truth) (1) --
@@ -188,7 +192,7 @@ Each evaluation yields `affirmed`, `unverified` (missing file, no repo, malforme
 
 ## Optional token-goat seam
 
-Mem works standalone. When token-goat is on PATH, token-goat can call `mem recall --hint-format --root <project-root>` to embed memory hints into its token-reduction manifest.
+Mem works standalone. When [token-goat](https://github.com/DFKHelper/token-goat) is on PATH, token-goat can call `mem recall --hint-format --root <project-root>` to embed memory hints into its token-reduction manifest.
 
 The seam is one-directional (Mem reads nothing from token-goat), stateless (live calls, no caching), and self-caveating (display strings include their own trust caveats). Contested or low-trust facts are excluded from `--hint-format` entirely — only ground-truth-eligible or explicitly-caveated hints are emitted. Mem does not cache results; forget/edit reflect instantly. If mem is not on PATH or the call times out, token-goat falls back to no hints (fail-open).
 
