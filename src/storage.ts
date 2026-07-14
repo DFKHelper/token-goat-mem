@@ -412,8 +412,12 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
   const sql = `UPDATE facts SET ${sets.join(", ")} WHERE id = ?`;
 
   const tx = db.transaction((): void => {
-    const epoch = bumpEpoch(db);
-    db.prepare(sql).run(...params, epoch, id);
+    const current = getEpoch(db);
+    const next = current + 1;
+    const result = db.prepare(sql).run(...params, next, id);
+    if (result.changes > 0) {
+      db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+    }
   });
   tx();
 
@@ -432,8 +436,12 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
  */
 export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | undefined {
   const tx = db.transaction((): void => {
-    const epoch = bumpEpoch(db);
-    db.prepare("UPDATE facts SET status = ?, epoch = ? WHERE id = ?").run(status, epoch, id);
+    const current = getEpoch(db);
+    const next = current + 1;
+    const result = db.prepare("UPDATE facts SET status = ?, epoch = ? WHERE id = ?").run(status, next, id);
+    if (result.changes > 0) {
+      db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
+    }
   });
   tx();
   return getFactById(db, id);
@@ -450,7 +458,9 @@ export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | un
 export function deleteFact(db: Db, id: string): boolean {
   const tx = db.transaction((): number => {
     const result = db.prepare("DELETE FROM facts WHERE id = ?").run(id);
-    bumpEpoch(db);
+    if (result.changes > 0) {
+      bumpEpoch(db);
+    }
     return result.changes;
   });
   return tx() > 0;

@@ -229,6 +229,23 @@ describe("importFromJson", () => {
     expect(count).toBe(1);
   });
 
+  it("two facts sharing the same id within the same import file: first imports, second is skipped_error as a file-internal duplicate", () => {
+    const duplicateOfValid = { ...VALID_FACT, subject: "editor", value: "vim" };
+    writeFileSync(jsonPath, envelope([VALID_FACT, duplicateOfValid]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    if (result.outcomes[1]?.status === "skipped_error") {
+      expect(result.outcomes[1].reason).toContain("duplicate id within import file");
+      expect(result.outcomes[1].reason).toContain(VALID_FACT["id"] as string);
+    }
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
   it("an imported fact with out-of-range confidence is skipped with a per-item error", () => {
     const badConfidence = { ...VALID_FACT, id: "55555555-5555-5555-5555-555555555555", confidence: 999 };
     writeFileSync(jsonPath, envelope([VALID_FACT, badConfidence]), "utf8");
@@ -331,6 +348,33 @@ describe("importFromJson", () => {
     }
     expect(first.fact.status).toBe("active");
     expect(second.fact.status).toBe("pinned");
+  });
+
+  it("imports a fact with a multi-word file-contains substring anchor (json-import is exempt from the CLI arity check)", () => {
+    // Regression test for the round-trip bug: 008f60b accidentally routed json-import through the
+    // same `validateAnchorSyntax` arity check `mem edit`/`mem remember` use, which whitespace-splits
+    // the anchor and rejects a multi-word file-contains/file-not-contains substring as "expects 2
+    // argument(s), got N". That check only exists because those CLI commands parse the anchor out of
+    // a flat string; a JSON `anchor` field has no such parsing ambiguity, so json-import must accept
+    // it -- otherwise a previously-exported fact with a multi-word substring anchor could never be
+    // re-imported.
+    const multiWordAnchorFact = {
+      ...VALID_FACT,
+      id: "22222222-2222-2222-2222-222222222222",
+      subject: "greeting",
+      value: "hello world",
+      anchor: "file-contains some/path.txt hello world",
+    };
+    writeFileSync(jsonPath, envelope([multiWordAnchorFact]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(1);
+    const outcome = result.outcomes[0];
+    expect(outcome?.status).toBe("imported");
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.anchor).toBe("file-contains some/path.txt hello world");
   });
 
   it("an oversized import file throws JsonImportError before attempting to parse", () => {

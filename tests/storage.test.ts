@@ -287,8 +287,10 @@ describe("updateFact", () => {
     expect(getEpoch(db)).toBe(epochBefore);
   });
 
-  it("returns undefined for a nonexistent id", () => {
+  it("returns undefined and does not bump epoch for a nonexistent id", () => {
+    const epochBefore = getEpoch(db);
     expect(updateFact(db, "does-not-exist", { text: "x" })).toBeUndefined();
+    expect(getEpoch(db)).toBe(epochBefore);
   });
 });
 
@@ -307,8 +309,10 @@ describe("setFactStatus", () => {
     expect(updated?.status).toBe("contested");
   });
 
-  it("returns undefined for a nonexistent id", () => {
+  it("returns undefined and does not bump epoch for a nonexistent id", () => {
+    const epochBefore = getEpoch(db);
     expect(setFactStatus(db, "does-not-exist", "pinned")).toBeUndefined();
+    expect(getEpoch(db)).toBe(epochBefore);
   });
 });
 
@@ -321,10 +325,10 @@ describe("deleteFact", () => {
     expect(getEpoch(db)).toBe(epochBefore + 1);
   });
 
-  it("returns false and still bumps the epoch when the id does not exist", () => {
+  it("returns false and does not bump the epoch when the id does not exist", () => {
     const epochBefore = getEpoch(db);
     expect(deleteFact(db, "does-not-exist")).toBe(false);
-    expect(getEpoch(db)).toBe(epochBefore + 1);
+    expect(getEpoch(db)).toBe(epochBefore);
   });
 });
 
