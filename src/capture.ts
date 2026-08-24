@@ -173,6 +173,40 @@ function shannonEntropy(value: string): number {
  */
 const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor", "sourceRef"]);
 
+/** One `/`-delimited segment of a path-shaped token: a lowercase word (or digits) with `.`/`_`/`-` joining further lowercase words -- `agent-self-compaction`, `session_continuity.md`, `v2`. Deliberately rejects uppercase, `+`, and `=`, which is what separates a filename from a base64/random credential. */
+const PATH_SEGMENT = /^[a-z0-9]+([._-][a-z0-9]+)*$/;
+
+/** Longest unbroken `[a-z0-9]` run allowed inside a path segment. Real directory and file names this long are written as words joined by `-`/`_`/`.` (`very-long-nested-directory-name`), whereas an unbroken run of this length is the shape of a lowercase random token -- so requiring a separator past this length stops `<long-run>/x9` from buying an exemption on segment count alone. */
+const MAX_UNBROKEN_SEGMENT_RUN = 24;
+
+function isPathSegment(segment: string): boolean {
+  return PATH_SEGMENT.test(segment) && segment.split(/[._-]/).every((run) => run.length <= MAX_UNBROKEN_SEGMENT_RUN);
+}
+
+/**
+ * Whether a token is shaped like a relative filesystem path of ordinary lowercase identifiers,
+ * which the *generic* entropy heuristic must not flag: the same directory-name variety that the
+ * `GENERIC_ENTROPY_EXEMPT_FIELDS` comment above describes for anchors also pushes a perfectly
+ * benign path quoted inside a fact's `text` over the threshold (`agent-self-compaction/superman-state`
+ * scores 3.88 against a 3.8 cutoff), and a decision fact naturally cites file paths.
+ *
+ * The exemption is shape-based, never merely slash-based, because real credentials do contain
+ * slashes -- an AWS secret access key (`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, entropy 4.66)
+ * is exactly the prefix-less secret this entropy fallback exists to catch. Requiring every segment
+ * to be lowercase-word-shaped rejects it on the uppercase alone, as it does base64 blobs (`+`/`=`)
+ * and mixed-case tokens generally. Two or more non-empty segments are required so a single long
+ * lowercase run can never buy an exemption just by carrying one slash. Named `SECRET_PATTERNS`
+ * still run against every field regardless of this, so a recognized credential format is caught
+ * even when it happens to look path-like.
+ */
+function isPathShapedToken(token: string): boolean {
+  if (!token.includes("/")) {
+    return false;
+  }
+  const segments = token.split("/").filter((segment) => segment.length > 0);
+  return segments.length >= 2 && segments.every(isPathSegment);
+}
+
 function scanField(field: string, value: string): SecretMatch[] {
   const matches: SecretMatch[] = [];
 
@@ -195,6 +229,7 @@ function scanField(field: string, value: string): SecretMatch[] {
     const token = g[0];
     if (
       !(exemptField && token.includes("/")) &&
+      !isPathShapedToken(token) &&
       !HEX_ONLY.test(token) &&
       !DIGITS_ONLY.test(token) &&
       shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD

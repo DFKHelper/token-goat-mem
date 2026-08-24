@@ -12,6 +12,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
@@ -1683,5 +1685,71 @@ describe("mem init/uninstall", () => {
     expect(existsSync(keybindingsPath)).toBe(true);
     const keybindings = JSON.parse(readFileSync(keybindingsPath, "utf8"));
     expect(keybindings).toHaveLength(2);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression guards ───────────────────────────────────────────────────────────────────────────
+
+describe("mem --version (regression: the shipped bundle reports package.json's version)", () => {
+  it("reports exactly package.json's version, executed from the built dist bundle", () => {
+    // Asserts against the real artifact (built by tests/setup/build-bundle.ts), not the in-process
+    // `run()` the rest of this file drives, because the defect this guards was a hand-maintained
+    // literal in cli.ts that shipped 0.2.0 while package.json said 0.2.1 -- only the bundle proves
+    // the esbuild `define` that now supplies the version actually reached what users execute.
+    const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version: string };
+    const bundle = fileURLToPath(new URL("../dist/token-goat-mem.mjs", import.meta.url));
+    const reported = execFileSync(process.execPath, [bundle, "--version"], { encoding: "utf8" }).trim();
+    expect(reported).toBe(pkg.version);
+  });
+});
+
+describe("mem import summary wording (regression: must describe what was actually written)", () => {
+  it("does not claim `--from-json` imports landed as pending when their exported status was preserved", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+    const exported = await runCli(["export"]);
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-wording-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-wording-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-json", jsonPath]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+      // The fact is restored active, so the summary must not send the reader to a `mem review` that has nothing to show.
+      expect(imported.stdout).toContain("preserving each fact's exported status");
+      expect(imported.stdout).not.toContain("as pending");
+      expect(imported.stdout).not.toContain("mem review --promote");
+
+      const review = await runCli(["review", "--summary"]);
+      expect(review.stdout.trim()).toBe("pending: 0, contested: 0, contradicted: 0, pins: 0");
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("still labels `--from-md` bullets as pending, since those genuinely are", async () => {
+    const path = join(home, "NOTES.md");
+    writeFileSync(path, ["## Preferences", "- Always use pnpm, never npm."].join("\n"), "utf8");
+
+    const result = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("as pending");
+    expect(result.stdout).toContain("never auto-promoted -- confirm each via `mem review --promote <id>`");
+  });
+
+  it("reports nothing written when every candidate was a duplicate", async () => {
+    const path = join(home, "DUPES.md");
+    writeFileSync(path, ["## Preferences", "- Always use pnpm, never npm."].join("\n"), "utf8");
+
+    await runCli(["import", "--from-md", path, "--root", home]);
+    const second = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("imported 0 of 1 candidate fact(s)");
+    expect(second.stdout).toContain("no new facts were written");
+    expect(second.stdout).not.toContain("as pending");
   });
 });

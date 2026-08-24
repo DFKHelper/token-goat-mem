@@ -220,6 +220,56 @@ describe("captureExplicit (happy path)", () => {
     ).toThrow(SecretDetectedError);
   });
 
+  it("stores a fact whose text quotes an ordinary lowercase file path (regression: path-shaped tokens are not high-entropy secrets)", () => {
+    // `agent-self-compaction/superman-state` is 36 chars over the 32-char GENERIC_TOKEN floor and
+    // scores 3.88 against the 3.8 entropy cutoff purely from directory-name variety -- the exact
+    // false positive the anchor/sourceRef exemption already documents, which also blocked writing
+    // a perfectly benign decision fact that cited a file path.
+    const { fact } = captureExplicit(db, {
+      text: "route task scratch to agent-self-compaction/superman-state, durable facts to mem",
+      kind: "decision",
+      root,
+    });
+    expect(fact.text).toContain("agent-self-compaction/superman-state");
+  });
+
+  it("still catches an AWS secret access key in text even though it contains slashes", () => {
+    // The path exemption must be shape-based, never merely slash-based: a real AWS secret access
+    // key carries two slashes and is precisely the prefix-less credential the entropy fallback
+    // exists to catch. Its uppercase segments must defeat the exemption.
+    expect(() =>
+      captureExplicit(db, {
+        text: "the key is wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        kind: "fact",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
+  it("still catches a mixed-case base64-ish blob containing slashes in text", () => {
+    expect(() =>
+      captureExplicit(db, {
+        text: "token aB3xK9m2/ZpQwErTyUiOp/AsDfGhJkLzXcVbNm1234==",
+        kind: "fact",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
+  it("does not exempt a single long lowercase run that merely carries one slash", () => {
+    // Segment count alone is not enough: `<36-char-run>/x9` does split into two segments that are
+    // each lowercase-word-shaped, so the exemption additionally caps the longest unbroken run
+    // inside a segment. Real path segments that long are words joined by `-`/`_`/`.`; an unbroken
+    // run is the shape of the lowercase random token this entropy fallback exists to catch.
+    expect(() =>
+      captureExplicit(db, {
+        text: "value qwertyuiopasdfghjklzxcvbnmqwertyuiop/x9",
+        kind: "fact",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
   it("blocks a fact containing a known secret pattern, persists nothing, and audits the block", () => {
     const before = (db.prepare("SELECT COUNT(*) AS n FROM facts").get() as { n: number }).n;
 

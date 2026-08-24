@@ -1,6 +1,10 @@
 import esbuild from "esbuild";
+import { readFileSync } from "node:fs";
 
 const isWatch = process.argv.includes("--watch");
+
+/** Single source of truth for the version `mem --version` reports. Injected at build time so the CLI string can never drift from package.json the way a hand-maintained literal did (it shipped 0.2.0 while package.json said 0.2.1). */
+const pkgVersion = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8")).version;
 
 const config = {
   entryPoints: ["src/main.ts"],
@@ -21,6 +25,7 @@ const config = {
   external: ["better-sqlite3", "commander", "jsonc-parser"],
   define: {
     "process.env.NODE_ENV": JSON.stringify(process.env.NODE_ENV || "production"),
+    __MEM_VERSION__: JSON.stringify(pkgVersion),
   },
 };
 

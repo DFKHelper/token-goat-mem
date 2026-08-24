@@ -373,12 +373,16 @@ function formatImportResult(result: { filePath: string; outcomes: readonly Impor
   if (dryRun) {
     return [`would import ${result.outcomes.length} candidate fact(s) from ${result.filePath} (dry run -- nothing written):`, ...lines].join("\n");
   }
-  const imported = result.outcomes.filter((outcome) => outcome.status === "imported").length;
-  return [
-    `imported ${imported} of ${result.outcomes.length} candidate fact(s) from ${result.filePath} as pending ` +
-      "(never auto-promoted -- confirm each via `mem review --promote <id>`):",
-    ...lines,
-  ].join("\n");
+  const importedFacts = result.outcomes.flatMap((outcome) => (outcome.status === "imported" ? [outcome.fact] : []));
+  const imported = importedFacts.length;
+  // `--from-md` lands every bullet in `pending` (advisory source, S9), but `--from-json` is a full-fidelity restore that preserves each exported fact's own status -- so a fixed "as pending" line contradicted the rows printed directly beneath it and sent users to a `mem review` that had nothing to show. Derive the wording from what was actually written rather than from which flag was passed, so a mixed or future import mode cannot reintroduce the mismatch.
+  const disposition =
+    imported === 0
+      ? "-- no new facts were written"
+      : importedFacts.every((fact) => fact.status === "pending")
+        ? "as pending (never auto-promoted -- confirm each via `mem review --promote <id>`)"
+        : "preserving each fact's exported status (nothing was auto-promoted; `mem list` shows them)";
+  return [`imported ${imported} of ${result.outcomes.length} candidate fact(s) from ${result.filePath} ${disposition}:`, ...lines].join("\n");
 }
 
 // ─────────────────────────────────────────────────────────────────────────── review ───────────────────────────────────────────────────────────────────────────
@@ -679,9 +683,15 @@ function toWiringOpts(options: { readonly root?: string; readonly user?: boolean
 }
 
 /** Builds the Commander program. Exported so tests can introspect/parse it without going through `process.argv`. */
+/** Replaced at build time by esbuild's `define` with package.json's version. Declared (not imported) so the bundle stays a single file with no runtime JSON read; `typeof` on an undeclared identifier is safe in JS, so an unbundled `tsx src/main.ts` dev run falls back instead of throwing. */
+declare const __MEM_VERSION__: string | undefined;
+
+/** The version `mem --version` reports. Never hand-edit: it comes from package.json via the build. The `-dev` fallback only appears when running from source without the bundler. */
+const CLI_VERSION: string = typeof __MEM_VERSION__ === "string" ? __MEM_VERSION__ : "0.0.0-dev";
+
 export function buildProgram(): Command {
   const program = new Command();
-  program.name("mem").description("Long-term conversational memory for AI coding agents").version("0.2.0");
+  program.name("mem").description("Long-term conversational memory for AI coding agents").version(CLI_VERSION);
 
   program
     .command("remember <text>")
