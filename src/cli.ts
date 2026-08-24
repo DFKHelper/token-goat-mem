@@ -110,6 +110,11 @@ export class UsageError extends Error {
 }
 
 /** Classifies a thrown error per the exit-code contract: deliberate input-rejection errors are user errors; everything else (sqlite failures, bugs) is internal. */
+/** Renders a stored fact's noun phrase for CLI confirmations. Every kind reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself, where the template degenerates into "fact fact". */
+function factNounPhrase(kind: FactKind): string {
+  return kind === "fact" ? "fact" : `${kind} fact`;
+}
+
 function exitCodeForError(error: unknown): number {
   return error instanceof UsageError ||
     error instanceof CaptureValidationError ||
@@ -719,7 +724,7 @@ export function buildProgram(): Command {
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
         };
         const { fact } = await withDb((db) => captureExplicit(db, input));
-        process.stdout.write(`remembered ${fact.kind} fact ${fact.id}\n`);
+        process.stdout.write(`remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`);
       })
     );
 
@@ -752,7 +757,7 @@ export function buildProgram(): Command {
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
         };
         const { fact } = await withDb((db) => captureSuggested(db, input));
-        process.stdout.write(`suggested ${fact.kind} fact ${fact.id} (pending)\n`);
+        process.stdout.write(`suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`);
       })
     );
 

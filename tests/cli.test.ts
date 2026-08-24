@@ -55,9 +55,9 @@ async function runCli(args: readonly string[]): Promise<CliResult> {
   return { stdout, stderr, exitCode };
 }
 
-/** Extracts the fact id from `remembered <kind> fact <id>` (the `remember` command's success line). */
+/** Extracts the fact id from the `remember` command's success line. The noun phrase is `<kind> fact` for every kind except `fact` itself, which collapses to one word rather than printing "fact fact" -- so the kind portion has to be optional here, not a required token. */
 function extractRememberedId(result: CliResult): string {
-  const match = /remembered \S+ fact (\S+)/u.exec(result.stdout);
+  const match = /remembered (?:\S+ )?fact (\S+)/u.exec(result.stdout);
   if (match?.[1] === undefined) {
     throw new Error(`could not extract fact id from stdout: ${JSON.stringify(result.stdout)}`);
   }
@@ -1689,6 +1689,39 @@ describe("mem init/uninstall", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────── regression guards ───────────────────────────────────────────────────────────────────────────
+
+describe("capture confirmations never print a doubled noun (regression: `remembered fact fact <id>`)", () => {
+  it("collapses the noun phrase when the kind is `fact`", async () => {
+    const result = await runCli(["remember", "a plain fact", "--kind", "fact"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/^remembered fact \S+\n$/u);
+    expect(result.stdout).not.toContain("fact fact");
+  });
+
+  it("keeps the kind in the noun phrase for every other kind", async () => {
+    const result = await runCli(["remember", "a decision", "--kind", "decision"]);
+
+    expect(result.stdout).toMatch(/^remembered decision fact \S+\n$/u);
+  });
+
+  it("applies the same collapse to `suggest`, which shares the template", async () => {
+    const suggested = await runCli(["suggest", "a plain candidate", "--kind", "fact"]);
+    const typed = await runCli(["suggest", "a typed candidate", "--kind", "correction"]);
+
+    expect(suggested.stdout).toMatch(/^suggested fact \S+ \(pending\)\n$/u);
+    expect(suggested.stdout).not.toContain("fact fact");
+    expect(typed.stdout).toMatch(/^suggested correction fact \S+ \(pending\)\n$/u);
+  });
+
+  it("still yields an extractable id for a `fact`-kind capture", async () => {
+    // The shortened line must not break id extraction: the helper's own pattern required a kind
+    // token between "remembered" and "fact", which this collapse removes for exactly this kind.
+    const result = await runCli(["remember", "id must still parse", "--kind", "fact"]);
+
+    expect(extractRememberedId(result)).toMatch(/^[0-9a-f-]{36}$/u);
+  });
+});
 
 describe("mem --version (regression: the shipped bundle reports package.json's version)", () => {
   it("reports exactly package.json's version, executed from the built dist bundle", () => {
