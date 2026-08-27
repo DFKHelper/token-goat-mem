@@ -287,7 +287,14 @@ function contradictionFromStatus(status: FactStatus): ContradictionOutcome {
   return "none";
 }
 
-function decayedConfidence(fact: Fact, now: Date): number {
+/**
+ * Section 6 preference time-decay, computed fresh from `captured_at` on every read and never
+ * persisted back to `confidence`. Exported because `mem epoch --gc` reports a decayed-below-floor
+ * count and must report on exactly the facts `recall` will actually downgrade -- it previously
+ * hand-reimplemented this formula against the same exported constants, which left two copies of the
+ * curve with nothing asserting they agreed.
+ */
+export function decayedConfidence(fact: Fact, now: Date): number {
   if (fact.kind !== "preference" || fact.status === "pinned") {
     return fact.confidence;
   }
@@ -299,8 +306,8 @@ function decayedConfidence(fact: Fact, now: Date): number {
   return fact.confidence * Math.pow(0.5, ageDays / PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS);
 }
 
-/** Section 6: only preferences decay, and only from ground-truth to hint — never to a silent deletion. */
-function isDecayedBelowGroundTruth(fact: Fact, now: Date): boolean {
+/** Section 6: only preferences decay, and only from ground-truth to hint — never to a silent deletion. Exported alongside {@link decayedConfidence} as the single definition of the decay gate. */
+export function isDecayedBelowGroundTruth(fact: Fact, now: Date): boolean {
   return fact.kind === "preference" && fact.status !== "pinned" && decayedConfidence(fact, now) < GROUND_TRUTH_CONFIDENCE_FLOOR;
 }
 
@@ -415,6 +422,30 @@ function normalizeSubjectForFilter(subject: string): string {
   return subject.trim().toLowerCase();
 }
 
+/**
+ * The root a fact's anchor is meaningful relative to.
+ *
+ * mem's stated topology is one `~/.mem` shared across every project, and plain `mem recall` reads
+ * the whole store -- so without this, every fact's anchor was evaluated against whichever `--root`
+ * the *caller* happened to pass. A project-scoped fact from project A recalled from project B had
+ * its `file-exists` predicate resolved inside B, producing a confident `contradicted` (and, where
+ * sibling checkouts share filenames, a confident `affirmed`) about a file the fact never referred
+ * to. Freshness is the trust signal this tool exists to provide, so a wrong verdict is worse than
+ * no verdict.
+ *
+ * Only `scope="project"` is redirected, because only there is `scopeRoot` documented (types.ts) to
+ * be an absolute *project root directory*. `scope="path"` stores a file or directory inside some
+ * project whose root is not recorded anywhere, and `scope="global"` stores nothing -- for both, the
+ * caller's root remains the only root available, and using a file path as an anchor root would be
+ * strictly worse than the status quo.
+ */
+function anchorRootFor(fact: Fact, queryRoot: string): string {
+  if (fact.scope === "project" && typeof fact.scopeRoot === "string" && fact.scopeRoot.trim().length > 0) {
+    return fact.scopeRoot;
+  }
+  return queryRoot;
+}
+
 function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boolean {
   if (options.kind !== undefined && fact.kind !== options.kind) {
     return false;
@@ -496,7 +527,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       : new Map<string, number>(bm25RankIds.map((id) => [id, bm25Scores.get(id) ?? 0]));
 
   const results: RetrievedFact[] = filtered.map((fact) => {
-    const freshness = evaluateAnchor(fact.anchor, options.root, anchorDeadline);
+    const freshness = evaluateAnchor(fact.anchor, anchorRootFor(fact, options.root), anchorDeadline);
     const contradiction = contradictionFromStatus(fact.status);
     const trust = classifyTrust(fact, freshness, contradiction, now);
     return {

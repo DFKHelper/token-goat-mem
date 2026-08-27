@@ -19,11 +19,46 @@ import type { Fact, FactScope, FactStatus } from "./types.js";
 /** Statuses eligible to be surfaced as ground truth. Everything else (pending/superseded/contested) is withheld. */
 const GROUND_TRUTH_STATUSES: readonly FactStatus[] = ["active", "pinned"];
 
+/**
+ * Statuses that participate in *detection*. Deliberately wider than
+ * {@link GROUND_TRUTH_STATUSES} by exactly one entry: `contested`.
+ *
+ * `contested` is a cached outcome of this function, not an independent lifecycle state -- the fact
+ * is withheld because *this* detector previously found its subject+scope bucket ambiguous. Excluding
+ * it from detection therefore made the status unfalsifiable: once `mem epoch --gc` persisted it, the
+ * fact dropped out of every pool that could ever clear it (this detector, and `mem review`'s
+ * contested bucket, which is derived from the same pool), while `mem recall` kept withholding it
+ * from the persisted status forever. Forgetting or editing the other side of the contradiction did
+ * not help: the surviving fact stayed `contested` with nothing left to contest, and the documented
+ * escape ("resolve it via `mem review`") had no reachable command behind it.
+ *
+ * Feeding contested facts back through detection closes that trapdoor: a bucket that is still
+ * ambiguous re-emits nothing (the `fact.status !== "contested"` guard below keeps it idempotent),
+ * and a bucket that is no longer ambiguous produces a reinstatement update instead.
+ */
+const DETECTION_ELIGIBLE_STATUSES: readonly FactStatus[] = ["active", "pinned", "contested"];
+
 /** A fact narrowed to have a non-null `subject` and `value`, i.e. eligible for keyed contradiction detection. */
 type KeyedFact = Fact & { readonly subject: string; readonly value: string };
 
-function isKeyedGroundTruthFact(fact: Fact): fact is KeyedFact {
-  return fact.subject !== null && fact.value !== null && GROUND_TRUTH_STATUSES.includes(fact.status);
+function isKeyedDetectionFact(fact: Fact): fact is KeyedFact {
+  return fact.subject !== null && fact.value !== null && DETECTION_ELIGIBLE_STATUSES.includes(fact.status);
+}
+
+/** Whether a fact would be surfaceable as ground truth if nothing else withheld it. Kept as the separate, narrower predicate {@link DETECTION_ELIGIBLE_STATUSES} widens against. */
+export function isGroundTruthStatus(status: FactStatus): boolean {
+  return GROUND_TRUTH_STATUSES.includes(status);
+}
+
+/**
+ * The status a fact leaving `contested` returns to. A pin is a deliberate user act that exempts a
+ * fact from time-decay, and contesting it overwrote that status -- so reinstating unconditionally to
+ * `active` would silently destroy the pin as a side effect of an unrelated contradiction being
+ * resolved. `prior_status` (storage.setFactStatus) records what to come back to; `active` is the
+ * fallback for rows written before that column existed.
+ */
+function reinstatedStatus(fact: Fact): "active" | "pinned" {
+  return fact.prior_status === "pinned" ? "pinned" : "active";
 }
 
 /** One subject+scope bucket that contains two or more distinct values, i.e. a live contradiction. */
@@ -40,7 +75,7 @@ export interface ContradictionGroup {
 export interface FactStatusUpdate {
   readonly factId: string;
   readonly previousStatus: FactStatus;
-  readonly nextStatus: "superseded" | "contested";
+  readonly nextStatus: "superseded" | "contested" | "active" | "pinned";
   readonly reason: string;
 }
 
@@ -98,6 +133,20 @@ function bucketKey(subject: string, scope: FactScope, scopeRoot: string | null |
 }
 
 /**
+ * Whether two facts fall in the same contradiction bucket, i.e. whether they are candidates to
+ * contradict each other at all. Exported so `mem review --promote` can resolve a contested group in
+ * one fact's favor -- superseding exactly its rivals -- using the same bucket identity the detector
+ * itself uses, rather than a second, drifting definition of "same subject". Free-text facts (no
+ * `subject`) are never in any bucket.
+ */
+export function sameContradictionBucket(a: Fact, b: Fact): boolean {
+  if (a.subject === null || b.subject === null) {
+    return false;
+  }
+  return bucketKey(a.subject, a.scope, a.scopeRoot) === bucketKey(b.subject, b.scope, b.scopeRoot);
+}
+
+/**
  * Detects deterministic subject+value contradictions among the given facts and computes the status
  * updates required to resolve them. Pure function: does not mutate its input and performs no I/O.
  * Callers (e.g. a store module) are responsible for persisting `updates`.
@@ -106,7 +155,7 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
   const buckets = new Map<string, SubjectScopeBucket>();
 
   for (const fact of facts) {
-    if (!isKeyedGroundTruthFact(fact)) {
+    if (!isKeyedDetectionFact(fact)) {
       continue;
     }
     const key = bucketKey(fact.subject, fact.scope, fact.scopeRoot);
@@ -204,6 +253,29 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
         winnerId: best.id,
       });
     }
+  }
+
+  // Reinstatement pass. Anything still carrying a persisted `contested` status that this run did
+  // *not* place in a contested group is stale: the ambiguity that justified withholding it is gone
+  // (the other side was forgotten, edited to agree, or re-captured with higher precedence), or it
+  // was never keyed in the first place and so could never have been legitimately contested. Facts
+  // already receiving an update this run are skipped -- a contested fact that lost a now-resolvable
+  // bucket is correctly superseded above, and must not also be reinstated.
+  const contestedGroupIds = new Set(groups.filter((group) => group.resolution === "contested").flatMap((group) => group.factIds));
+  const alreadyUpdatedIds = new Set(updates.map((update) => update.factId));
+  for (const fact of facts) {
+    if (fact.status !== "contested" || contestedGroupIds.has(fact.id) || alreadyUpdatedIds.has(fact.id)) {
+      continue;
+    }
+    const restored = reinstatedStatus(fact);
+    updates.push({
+      factId: fact.id,
+      previousStatus: fact.status,
+      nextStatus: restored,
+      reason:
+        `Reinstated to ${restored}: no ambiguous contradiction remains for this fact, so the ` +
+        `contested status that was withholding it from ground truth no longer applies.`,
+    });
   }
 
   return { groups, updates };

@@ -24,6 +24,8 @@ function makeFact(overrides: Partial<Fact> & Pick<Fact, "id">): Fact {
     status: overrides.status ?? "active",
     confidence: overrides.confidence ?? 1,
     embedding: overrides.embedding ?? null,
+    status_changed_at: overrides.status_changed_at ?? null,
+    prior_status: overrides.prior_status ?? null,
   };
 }
 
@@ -243,7 +245,10 @@ describe("detectContradictions", () => {
     }
   });
 
-  it("excludes already-contested facts from detection entirely, same as pending/superseded", () => {
+  // Regression: `contested` used to be excluded from detection, which made the status
+  // unfalsifiable -- nothing that could clear it could see it, so a fact stayed withheld from
+  // ground truth forever even after the contradiction that caused it was gone.
+  it("re-evaluates already-contested facts and emits nothing new while the contradiction still stands", () => {
     const facts = [
       makeFact({ id: "a", subject: "linter", value: "eslint", status: "contested" }),
       makeFact({ id: "b", subject: "linter", value: "biome", status: "contested" }),
@@ -251,8 +256,51 @@ describe("detectContradictions", () => {
 
     const result = detectContradictions(facts);
 
-    expect(result.groups).toHaveLength(0);
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]).toMatchObject({ subject: "linter", resolution: "contested", winnerId: null });
+    // Idempotent: the facts already hold the status this detection would assign.
     expect(result.updates).toHaveLength(0);
+  });
+
+  it("reinstates a contested fact once nothing is left to contest it", () => {
+    const facts = [makeFact({ id: "survivor", subject: "linter", value: "eslint", status: "contested" })];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(0);
+    expect(result.updates).toEqual([
+      expect.objectContaining({ factId: "survivor", previousStatus: "contested", nextStatus: "active" }),
+    ]);
+  });
+
+  it("reinstates a formerly-pinned contested fact to pinned, never silently downgrading the pin", () => {
+    const facts = [
+      makeFact({ id: "survivor", subject: "linter", value: "eslint", status: "contested", prior_status: "pinned" }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.updates).toEqual([expect.objectContaining({ factId: "survivor", nextStatus: "pinned" })]);
+  });
+
+  it("supersedes rather than reinstates a contested fact that loses a now-resolvable bucket", () => {
+    const facts = [
+      makeFact({ id: "loser", subject: "linter", value: "biome", status: "contested", captured_at: "2026-01-01T00:00:00.000Z" }),
+      makeFact({ id: "winner", subject: "linter", value: "eslint", status: "active", captured_at: "2026-06-01T00:00:00.000Z" }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.updates).toHaveLength(1);
+    expect(result.updates[0]).toMatchObject({ factId: "loser", nextStatus: "superseded" });
+  });
+
+  it("reinstates a contested fact that was never keyed and so could never have been legitimately contested", () => {
+    const facts = [makeFact({ id: "free-text", status: "contested" })];
+
+    expect(detectContradictions(facts).updates).toEqual([
+      expect.objectContaining({ factId: "free-text", nextStatus: "active" }),
+    ]);
   });
 
   it("treats pinned facts as fully participating in contradiction resolution -- pins are not exempt", () => {

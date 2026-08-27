@@ -385,3 +385,45 @@ describe("loadAllowlist", () => {
     expect(loadAllowlist(root)).toEqual(["value-one", "value-two"]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── regression: keyword-adjacent hex secrets ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: screenForSecrets catches a hex secret sitting next to its own keyword", () => {
+  /**
+   * A 40-hex-char string is exactly a git SHA-1, so the entropy fallback deliberately allows it --
+   * which meant `password: <40 hex chars>` sailed through untouched. Length alone cannot tell a
+   * commit hash from a hashed credential; the surrounding keyword can, and that is what this
+   * pattern reads.
+   */
+  const SECRET = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+
+  it.each([
+    ["password", `password: ${SECRET}`],
+    ["api_key", `api_key=${SECRET}`],
+    ["api-key", `the api-key is ${SECRET}`],
+    ["access token", `access_token ${SECRET}`],
+    ["auth token", `auth-token: ${SECRET}`],
+    ["signing key", `signing_key => ${SECRET}`],
+    ["secret", `SECRET is ${SECRET}`],
+  ])("flags a %s carrying a hex value the entropy check alone would clear", (_label, text) => {
+    expect(screenForSecrets({ text }, [])).not.toHaveLength(0);
+  });
+
+  it("still leaves a bare commit hash alone -- the keyword, not the shape, is what makes it a secret", () => {
+    expect(screenForSecrets({ text: `fixed in commit ${SECRET}` }, [])).toHaveLength(0);
+  });
+
+  it("no longer waves through a non-canonical-length hex blob just because it is all hex digits", () => {
+    // 48 hex chars: not an MD5 (32), SHA-1 (40), or SHA-256 (64), so nothing about it says "hash".
+    // The hash allowlist used to be shape-only, which exempted every hex string of any length.
+    expect(screenForSecrets({ text: "3f9a1c7e2b8d04f65a93ce17b2408df6e5c1a97b3d2f8e40" }, [])).not.toHaveLength(0);
+  });
+
+  it("still exempts each canonical hash length, in either case", () => {
+    for (const length of [32, 40, 64]) {
+      const lower = "a1b2c3d4".repeat(length / 8);
+      expect(screenForSecrets({ text: `hash ${lower}` }, [])).toHaveLength(0);
+      expect(screenForSecrets({ text: `hash ${lower.toUpperCase()}` }, [])).toHaveLength(0);
+    }
+  });
+});

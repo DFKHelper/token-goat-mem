@@ -431,3 +431,82 @@ describe("resolveFactIdOrPrefix", () => {
     expect(resolution.kind).toBe("not-found");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── status_changed_at / prior_status ───────────────────────────────────────────────────────────────────────────
+
+describe("status bookkeeping (status_changed_at / prior_status)", () => {
+  function seed(overrides: Partial<NewFact> = {}): string {
+    return insertFact(db, { text: "a fact", kind: "fact", scope: "global", source_type: "user", ...overrides }).id;
+  }
+
+  it("stamps status_changed_at at insert time and leaves prior_status null", () => {
+    const id = seed({ captured_at: "2020-01-01T00:00:00.000Z" });
+    const fact = getFactById(db, id);
+    expect(fact?.status_changed_at).toBe("2020-01-01T00:00:00.000Z");
+    expect(fact?.prior_status).toBeNull();
+  });
+
+  it("advances status_changed_at and records the outgoing status on a real transition", () => {
+    const id = seed({ captured_at: "2020-01-01T00:00:00.000Z" });
+    setFactStatus(db, id, "pinned");
+
+    const fact = getFactById(db, id);
+    expect(fact?.status).toBe("pinned");
+    expect(fact?.prior_status).toBe("active");
+    expect(fact?.status_changed_at).not.toBe("2020-01-01T00:00:00.000Z");
+    expect(Date.parse(fact?.status_changed_at ?? "")).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
+  });
+
+  it("preserves prior_status when a status is re-written to the value it already holds", () => {
+    const id = seed();
+    setFactStatus(db, id, "pinned");
+    setFactStatus(db, id, "pinned");
+
+    // Re-pinning is how a user clears the re-confirmation nudge. Overwriting prior_status here
+    // would erase the fact that it used to be `active`, which is the value a later contradiction
+    // reinstatement needs to avoid inventing a pin the user never made.
+    expect(getFactById(db, id)?.prior_status).toBe("active");
+  });
+
+  it("still moves the clock on a same-value re-write, since that is the re-confirmation act", () => {
+    const id = seed();
+    setFactStatus(db, id, "pinned");
+    const first = getFactById(db, id)?.status_changed_at ?? "";
+    db.prepare("UPDATE facts SET status_changed_at = ? WHERE id = ?").run("2020-01-01T00:00:00.000Z", id);
+    setFactStatus(db, id, "pinned");
+
+    const second = getFactById(db, id)?.status_changed_at ?? "";
+    expect(Date.parse(second)).toBeGreaterThan(Date.parse("2020-01-01T00:00:00.000Z"));
+    expect(second).not.toBe("");
+    expect(first).not.toBe("");
+  });
+
+  it("applies the same bookkeeping when the status is changed through updateFact", () => {
+    const id = seed({ captured_at: "2020-01-01T00:00:00.000Z" });
+    updateFact(db, id, { status: "contested" });
+
+    const fact = getFactById(db, id);
+    expect(fact?.status).toBe("contested");
+    expect(fact?.prior_status).toBe("active");
+    expect(fact?.status_changed_at).not.toBe("2020-01-01T00:00:00.000Z");
+  });
+
+  it("leaves the status clock alone when updateFact touches only non-status fields", () => {
+    const id = seed({ captured_at: "2020-01-01T00:00:00.000Z" });
+    updateFact(db, id, { text: "an edited fact" });
+
+    const fact = getFactById(db, id);
+    expect(fact?.text).toBe("an edited fact");
+    expect(fact?.status_changed_at).toBe("2020-01-01T00:00:00.000Z");
+    expect(fact?.prior_status).toBeNull();
+  });
+
+  it("reads back null for a row written before the columns existed, so callers fall back to captured_at", () => {
+    const id = seed();
+    db.prepare("UPDATE facts SET status_changed_at = NULL, prior_status = NULL WHERE id = ?").run(id);
+
+    const fact = getFactById(db, id);
+    expect(fact?.status_changed_at).toBeNull();
+    expect(fact?.prior_status).toBeNull();
+  });
+});

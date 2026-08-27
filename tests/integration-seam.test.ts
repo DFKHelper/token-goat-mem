@@ -9,7 +9,7 @@
  *     are excluded from --hint-format entirely").
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db.js";
@@ -205,5 +205,79 @@ describe("buildHintFormat (integration seam)", () => {
     expect(result.lines).toHaveLength(2); // fact-line + TGMEM/2's shared footer-line
     expect(result.lines[0]).toContain("id=unrelated-1");
     expect(result.lines.some((line) => line.includes("tie-a") || line.includes("tie-b"))).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression: the seam is a library entry point, not a CLI sub-path ───────────────────────────────────────────────────────────────────────────
+
+describe("buildHintFormat as a long-lived embedder would call it", () => {
+  let workDir: string;
+  let root: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "mem-seam-embedder-"));
+    root = join(workDir, "project");
+    mkdirSync(root, { recursive: true });
+    dbPath = join(workDir, "mem.db");
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  function seedAnchoredFact(): void {
+    seedFacts(dbPath, [
+      {
+        id: "anchored-1",
+        text: "uses pnpm not npm",
+        kind: "preference",
+        subject: "package-manager",
+        value: "pnpm",
+        scope: "global",
+        source_type: "user",
+        captured_at: new Date().toISOString(),
+        anchor: "file-exists pnpm-lock.yaml",
+        status: "active",
+      },
+    ]);
+  }
+
+  it("re-evaluates anchors on every call instead of serving a verdict memoized by an earlier one", async () => {
+    seedAnchoredFact();
+    const lockfile = join(root, "pnpm-lock.yaml");
+    writeFileSync(lockfile, "x");
+
+    const first = await buildHintFormat({ root, dbPath });
+    expect(first.lines[0]).toContain("fresh=affirmed");
+
+    rmSync(lockfile);
+
+    // The anchor memo is scoped to the process, which is exactly one query for the `mem` CLI but
+    // unbounded for an embedder holding this module. Without a per-call reset the first verdict was
+    // served forever, no matter what happened on disk afterwards.
+    // Re-read, the anchor now contradicts the fact, which `--hint-format` drops entirely rather
+    // than emitting as a caveated line.
+    const second = await buildHintFormat({ root, dbPath });
+    expect(second.lines.some((line) => line.includes("anchored-1"))).toBe(false);
+  });
+
+  it("brings the storage schema up to date on a database the mem CLI has never opened", async () => {
+    seedAnchoredFact();
+    writeFileSync(join(root, "pnpm-lock.yaml"), "x");
+
+    const result = await buildHintFormat({ root, dbPath });
+    expect(result.lines[0]).toContain("id=anchored-1");
+
+    // `openDb` alone does not guarantee the storage-owned columns exist; reading a fact through a
+    // connection that skipped `ensureStorageSchema` worked only by accident of which columns this
+    // path happens to select today.
+    const db = openDb(dbPath);
+    const columns = db.prepare("PRAGMA table_info(facts)").all() as { name: string }[];
+    const names = columns.map((column) => column.name);
+    db.close();
+    expect(names).toContain("epoch");
+    expect(names).toContain("status_changed_at");
+    expect(names).toContain("prior_status");
   });
 });

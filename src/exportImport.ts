@@ -27,7 +27,7 @@ import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSec
 import { insertAuditLog } from "./db.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
-import { getFactById, insertFact } from "./storage.js";
+import { getFactById, ID_PREFIX_PATTERN, insertFact } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
 
@@ -82,6 +82,9 @@ function textGuess(obj: Record<string, unknown> | null, index: number): string {
  * touch the DB or screen for secrets (that is `importFromJson`'s job, since it needs `root` for
  * `.mem/allowlist`).
  */
+/** Generous ceiling on an imported fact id: a uuid is 36 characters, so this leaves room for any reasonable external id scheme while refusing an unbounded string as a primary key. */
+const MAX_IMPORTED_ID_LENGTH = 128;
+
 function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     const candidate: ImportCandidate = { text: textGuess(null, index), line: index + 1, sourceRef: `#${index}` };
@@ -97,6 +100,17 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
 
   if (typeof obj["id"] !== "string" || obj["id"].trim().length === 0) {
     return fail(`facts[${index}] is missing a valid "id"`);
+  }
+  // `--from-json` preserves each fact's exported id verbatim, so an id that does not look like the
+  // uuid-shaped ids mem generates is accepted into the store and then unreachable: every id-taking
+  // command resolves a prefix through storage's `ID_PREFIX_PATTERN`, which rejects anything outside
+  // `[0-9a-f-]` before it ever queries. The fact would exist, list, and recall, but could never be
+  // shown, edited, pinned, or forgotten -- with no diagnostic anywhere explaining why.
+  if (!ID_PREFIX_PATTERN.test(obj["id"]) || obj["id"].length > MAX_IMPORTED_ID_LENGTH) {
+    return fail(
+      `facts[${index}] has a malformed "id" ${JSON.stringify(obj["id"])} ` +
+        `(expected hex/dash characters, at most ${MAX_IMPORTED_ID_LENGTH} long -- ids outside this shape cannot be addressed by any mem command)`
+    );
   }
   if (typeof obj["text"] !== "string" || obj["text"].length === 0) {
     return fail(`facts[${index}] is missing a valid "text"`);
@@ -423,7 +437,9 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
       });
     }
   });
-  tx();
+  // BEGIN IMMEDIATE: `insertFact` reads the epoch before writing and degrades to a savepoint inside
+  // this outer transaction, so the outer variant decides concurrency safety. See storage.insertFact.
+  tx.immediate();
 
   for (const skip of skips) {
     outcomes[skip.index] = skip.outcome;

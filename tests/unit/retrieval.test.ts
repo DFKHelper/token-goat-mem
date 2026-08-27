@@ -380,3 +380,73 @@ describe("retrieve", () => {
     expect(results).toHaveLength(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── regression: project-scoped anchors evaluate against their own root ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: a project-scoped fact's anchor is evaluated against its own scopeRoot", () => {
+  let otherRoot: string;
+
+  beforeEach(() => {
+    otherRoot = mkdtempSync(join(tmpdir(), "mem-retrieval-other-"));
+  });
+
+  afterEach(() => {
+    rmSync(otherRoot, { recursive: true, force: true });
+  });
+
+  it("affirms a project fact whose anchor target lives under its scopeRoot, not under the querying root", async () => {
+    writeFileSync(join(otherRoot, "present.txt"), "x");
+    const facts = [
+      makeFact({
+        id: "1",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "project",
+        scopeRoot: otherRoot,
+        anchor: "file-exists present.txt",
+      }),
+    ];
+
+    // Evaluated against the *querying* root the file is absent, which under P3 is a `contradicted`
+    // verdict -- actively asserting the fact is wrong, and withholding it from ground truth, purely
+    // because the query came from a different directory than the one the fact is bound to.
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root });
+    expect(result?.freshness).toBe("affirmed");
+    expect(result?.trust).toBe("ground-truth");
+  });
+
+  it("still contradicts a project fact whose target is genuinely missing from its own scopeRoot", async () => {
+    const facts = [
+      makeFact({
+        id: "1",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "project",
+        scopeRoot: otherRoot,
+        anchor: "file-exists present.txt",
+      }),
+    ];
+
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root });
+    expect(result?.freshness).toBe("contradicted");
+  });
+
+  it("leaves path- and global-scoped facts on the caller's root, where scopeRoot is not a project directory", async () => {
+    writeFileSync(join(root, "present.txt"), "x");
+    const facts = [
+      makeFact({
+        id: "1",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "path",
+        // For `path` scope this is a file/dir path, not a project root -- resolving an anchor's
+        // relative target against it would be meaningless.
+        scopeRoot: join(otherRoot, "some", "file.ts"),
+        anchor: "file-exists present.txt",
+      }),
+    ];
+
+    const { results: [result] } = await retrieve(facts, { query: "postgres", root });
+    expect(result?.freshness).toBe("affirmed");
+  });
+});

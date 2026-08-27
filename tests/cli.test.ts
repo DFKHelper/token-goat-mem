@@ -343,7 +343,7 @@ describe("contradiction handling surfaced through the CLI (contradiction.ts, P4)
 
     const review = await runCli(["review"]);
     expect(review.exitCode).toBe(0);
-    expect(review.stdout).toContain("contested (ambiguous contradiction -- withheld from ground truth)");
+    expect(review.stdout).toContain("contested (ambiguous contradiction -- withheld from ground truth");
     expect(review.stdout).toContain(idA);
     expect(review.stdout).toContain(idB);
 
@@ -414,13 +414,13 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
     expect(activeAfterPromote.stdout).toContain(fact.id);
   });
 
-  it("refuses to promote a fact that is not pending", async () => {
+  it("refuses to promote a fact that is not in a review-resolvable status", async () => {
     const remembered = await runCli(["remember", "already active", "--kind", "fact"]);
     const id = extractRememberedId(remembered);
 
     const result = await runCli(["review", "--promote", id]);
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain(`fact ${id} is not pending (status=active)`);
+    expect(result.stderr).toContain(`fact ${id} is not pending or contested (status=active)`);
   });
 
   it("review --promote and --reject each write their audit_log row atomically with the status write on the normal path", async () => {
@@ -1861,5 +1861,185 @@ describe("mem import summary wording (regression: must describe what was actuall
     expect(second.stdout).toContain("imported 0 of 1 candidate fact(s)");
     expect(second.stdout).toContain("no new facts were written");
     expect(second.stdout).not.toContain("as pending");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression: withheld statuses are a trapdoor, not a one-way door ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: `contested` is escapable (it used to be excluded from the only pass that could clear it)", () => {
+  /**
+   * Seeds two facts that genuinely tie on precedence (same subject+scope, different value, identical
+   * `captured_at`, identical provenance), which is the exact shape P4 resolves to `contested` rather
+   * than picking a winner. Returns their ids in insertion order.
+   */
+  async function seedTiedPair(): Promise<readonly [string, string]> {
+    const first = await runCli(["remember", "uses pnpm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
+    const idA = extractRememberedId(first);
+    const second = await runCli(["remember", "uses npm", "--kind", "preference", "--subject", "package-manager", "--value", "npm"]);
+    const idB = extractRememberedId(second);
+
+    const db = openDb(resolveDbPath());
+    db.prepare("UPDATE facts SET captured_at = ? WHERE id IN (?, ?)").run("2026-01-01T00:00:00.000Z", idA, idB);
+    db.close();
+    return [idA, idB];
+  }
+
+  it("reinstates a stranded contested fact on the next gc once its rival is forgotten", async () => {
+    const [idA, idB] = await seedTiedPair();
+
+    // Persist the contested status. Before the fix this was the trapdoor: detection queried only
+    // active/pinned, so nothing that ran afterwards could ever see -- let alone clear -- the status
+    // this very pass had just written.
+    await runCli(["epoch", "--gc"]);
+    const contestedList = await runCli(["list", "--status", "contested"]);
+    expect(contestedList.stdout).toContain(idA);
+    expect(contestedList.stdout).toContain(idB);
+
+    await runCli(["forget", idB]);
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode).toBe(0);
+
+    const survivor = await runCli(["show", idA]);
+    expect(survivor.stdout).toContain("status: active");
+  });
+
+  it("still surfaces a persisted-contested fact in `mem review`, which used to query only active/pinned", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["epoch", "--gc"]);
+
+    const review = await runCli(["review"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain("contested (ambiguous contradiction -- withheld from ground truth");
+    expect(review.stdout).toContain(idA);
+    expect(review.stdout).toContain(idB);
+  });
+
+  it("`review --promote` resolves a contested group in one fact's favor and supersedes its rivals", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["epoch", "--gc"]);
+
+    const promoted = await runCli(["review", "--promote", idA]);
+    expect(promoted.exitCode).toBe(0);
+
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+    // Without superseding the rival, the very next detection pass would find the same tie and
+    // re-contest the pair -- making the promotion silently self-undoing.
+    expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
+    await runCli(["epoch", "--gc"]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+  });
+
+  it("`review --promote` restores a formerly-pinned contested fact to pinned, not active", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["pin", idA]);
+    await runCli(["epoch", "--gc"]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: contested");
+
+    await runCli(["review", "--promote", idA]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: pinned");
+    expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
+  });
+
+  it("`review --reject` on one side reinstates the survivor immediately, without waiting for a gc", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["epoch", "--gc"]);
+
+    const rejected = await runCli(["review", "--reject", idB]);
+    expect(rejected.exitCode).toBe(0);
+    expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression: `mem pin` is not a side door around review ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: `mem pin` refuses every withheld status instead of laundering it into maximal trust", () => {
+  it("refuses to pin a pending suggestion, and points at the review command that can resolve it", async () => {
+    const db = openStorage(resolveDbPath());
+    const { fact } = captureSuggested(db, { text: "an unreviewed suggestion", kind: "preference", root: home });
+    db.close();
+    const id = fact.id;
+
+    const result = await runCli(["pin", id]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("is pending, not active");
+    expect(result.stderr).toContain(`mem review --promote ${id}`);
+    expect((await runCli(["show", id])).stdout).toContain("status: pending");
+  });
+
+  it("refuses to pin a superseded (forgotten) fact back into ground truth", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a forgotten fact", "--kind", "fact"]));
+    await runCli(["forget", id]);
+
+    const result = await runCli(["pin", id]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("is superseded, not active");
+    expect(result.stderr).toContain("re-capture it with `mem remember`");
+    expect((await runCli(["show", id])).stdout).toContain("status: superseded");
+  });
+
+  it("still pins an active fact, and re-pinning an already-pinned fact stays a success", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a live fact", "--kind", "fact"]));
+    expect((await runCli(["pin", id])).exitCode).toBe(0);
+    expect((await runCli(["pin", id])).exitCode).toBe(0);
+    expect((await runCli(["show", id])).stdout).toContain("status: pinned");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression: retention clocks key on the status change, not the capture ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: gc and the pin nudge measure age from `status_changed_at`, not `captured_at`", () => {
+  it("keeps a long-lived fact that was superseded yesterday, instead of pruning it for being old", async () => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, {
+      text: "captured long ago, superseded only just now",
+      kind: "fact",
+      scope: "global",
+      source_type: "user",
+      captured_at: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+    const id = db.prepare<[], { id: string }>("SELECT id FROM facts LIMIT 1").get()?.id ?? "";
+    db.close();
+
+    await runCli(["forget", id]);
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode).toBe(0);
+
+    // The 90-day window exists to preserve the audit trail of a *recent* soft delete. Keyed on
+    // `captured_at` this fact was deleted on the very first pass after being forgotten.
+    const shown = await runCli(["show", id]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("status: superseded");
+  });
+
+  it("still prunes a fact that has actually been superseded past the window", async () => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { text: "long-superseded fact", kind: "fact", scope: "global", source_type: "user" });
+    const id = db.prepare<[], { id: string }>("SELECT id FROM facts LIMIT 1").get()?.id ?? "";
+    db.prepare("UPDATE facts SET status = 'superseded', status_changed_at = ? WHERE id = ?").run(
+      new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
+      id
+    );
+    db.close();
+
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+    expect((await runCli(["show", id])).exitCode).toBe(1);
+  });
+
+  it("clears a due pin's re-confirmation nudge when the user re-pins it", async () => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { text: "an old pinned fact", kind: "fact", scope: "global", source_type: "user", status: "pinned" });
+    const id = db.prepare<[], { id: string }>("SELECT id FROM facts LIMIT 1").get()?.id ?? "";
+    const longAgo = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare("UPDATE facts SET captured_at = ?, status_changed_at = ? WHERE id = ?").run(longAgo, longAgo, id);
+    db.close();
+
+    expect((await runCli(["review"])).stdout).toContain(id);
+
+    // Re-pinning is the act of re-confirming. Keyed on `captured_at` the nudge was unclearable:
+    // nothing a user can do changes when a fact was captured, so it nagged forever.
+    await runCli(["pin", id]);
+    const after = await runCli(["review"]);
+    expect(after.stdout).not.toContain("pins due for re-confirmation");
   });
 });
