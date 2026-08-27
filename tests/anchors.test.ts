@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { _clearAnchorMemoForTests, anchorPathWithinRoot, evaluateAnchor } from "../src/anchors.js";
+import { _clearAnchorMemoForTests, anchorPathWithinRoot, evaluateAnchor, mentionsAnchorableTarget } from "../src/anchors.js";
 
 let root: string;
 
@@ -484,5 +484,43 @@ describe("anchorPathWithinRoot", () => {
 
   it("returns null for a path that escapes root", () => {
     expect(anchorPathWithinRoot(root, "../escape.txt")).toBeNull();
+  });
+});
+
+describe("mentionsAnchorableTarget", () => {
+  /**
+   * The nomination predicate behind `mem review --section unanchored`. Its whole value depends on
+   * not firing on ordinary prose, so the negative cases below are the load-bearing ones: a bucket
+   * that flags "we standardised on Node.js" is a bucket nobody reads.
+   */
+  it.each([
+    ["a relative path with an extension", "the entry point is src/main.ts"],
+    ["a home-rooted path", "live-tested against the real ~/.claude/settings.json"],
+    ["a windows absolute path", "config is at C:\\Projects\\claude-skills\\CLAUDE.md"],
+    ["a url", "see https://github.com/DFKHelper/token-goat-mem for details"],
+    ["a posix absolute path", "the binary lands in /usr/local/bin/mem"],
+    ["an explicit-relative path", "we deleted ./scripts/legacy.sh last week"],
+    ["a nested path", "vendored under vendor/lib/thing.mjs"],
+    ["a bare config filename", "bump the version in package.json before publishing"],
+    ["a bare config filename in mid-sentence punctuation", "documented in CLAUDE.md, near the top"],
+    ["a bare config filename at end of sentence", "the answer is in pyproject.toml."],
+  ])("nominates %s", (_label, text) => {
+    expect(mentionsAnchorableTarget(text)).toBe(true);
+  });
+
+  it.each([
+    ["a plain preference", "prefer tabs over spaces"],
+    ["a slashed conjunction", "use and/or sparingly in prose"],
+    ["a duty cycle", "the service runs 24/7 with no downtime"],
+    ["a dotted product name", "we standardised on Node.js for the runtime"],
+    ["a version and a date", "released v1.2.3 on 2026-08-25"],
+    ["a slashed pronoun pair", "he/she may override the default"],
+    ["a fraction", "the ratio was 3/4 of the total"],
+    ["a bare instruction", "always run the full suite before pushing"],
+    ["a latin abbreviation", "e.g. the reviewer should check for races"],
+    ["empty text", ""],
+    ["whitespace only", "   "],
+  ])("does not nominate %s", (_label, text) => {
+    expect(mentionsAnchorableTarget(text)).toBe(false);
   });
 });

@@ -6,6 +6,8 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **`unanchored` review bucket** — `mem review` gained a fifth bucket listing ground-truth facts that carry no anchor but whose text names something an anchor could be written against (a path, a URL, or a conventionally-bare config filename such as `package.json`). Closes a real blind spot: an anchorless fact short-circuits to `unverified` in `evaluateAnchor`, so it could never reach the `contradicted` bucket, and no other bucket claimed it either — an environment-dependent fact captured without an anchor sat at `unverified` indefinitely, invisible to both `mem review` and `mem doctor`, however thoroughly the world had moved on beneath it. The bucket is a nudge, not a pending decision: nothing is withheld from ground truth and no status changes. `--section unanchored` and the `--summary` counts include it; `preference` facts are excluded by construction, since no filesystem predicate can confirm or deny a judgment claim that merely happens to mention a path. Backed by a new pure, IO-free `mentionsAnchorableTarget` predicate in `src/anchors.ts`, deliberately conservative so ordinary prose ("we standardised on Node.js", "use and/or sparingly", "runs 24/7") cannot flood the bucket — it nominates only what it can recognise with confidence, and misses a fact that names a bare directory rather than a path.
+
 ### Changed
 
 ### Fixed

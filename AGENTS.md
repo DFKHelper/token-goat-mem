@@ -28,7 +28,7 @@ All memory operations are explicit and auditable:
 
 - `mem remember <text> --kind <kind>` — capture a user-stated fact into active storage (`--kind` is required: preference/decision/fact/correction)
 - `mem recall [query] [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings
-- `mem review` — view pending, contested, or anchor-contradicted facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts)
+- `mem review` — view pending, contested, anchor-contradicted, or unanchored-but-checkable facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts; the `unanchored` bucket is an advisory nudge to add an anchor, not a pending decision)
 - `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
 - `mem edit <id>` — modify fact text, subject/value, anchor, or scope

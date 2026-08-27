@@ -715,7 +715,7 @@ describe("review --summary, --section, --since-epoch", () => {
 
     const result = await runCli(["review", "--summary"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+    expect(result.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
   });
 
   it("--section restricts the full listing to a single bucket", async () => {
@@ -750,14 +750,91 @@ describe("review --summary, --section, --since-epoch", () => {
     dbAfter.close();
 
     const summarySinceCutoff = await runCli(["review", "--summary", "--since-epoch", cutoffEpoch]);
-    expect(summarySinceCutoff.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+    expect(summarySinceCutoff.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
 
     const fullSinceCutoff = await runCli(["review", "--section", "pending", "--since-epoch", cutoffEpoch]);
     expect(fullSinceCutoff.stdout).toContain("captured after the cutoff");
     expect(fullSinceCutoff.stdout).not.toContain("captured before the cutoff");
 
     const summaryFromZero = await runCli(["review", "--summary", "--since-epoch", "0"]);
-    expect(summaryFromZero.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0");
+    expect(summaryFromZero.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── review --section unanchored ───────────────────────────────────────────────────────────────────────────
+
+describe("review unanchored bucket (environment-dependent facts nobody can verify)", () => {
+  it("nominates an active, anchorless fact whose text names a checkable path", async () => {
+    const created = await runCli(["remember", "the entry point is src/main.ts", "--kind", "fact"]);
+    expect(created.exitCode).toBe(0);
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 0, contested: 0, contradicted: 0, pins: 0, unanchored: 1");
+
+    const listing = await runCli(["review", "--section", "unanchored"]);
+    expect(listing.exitCode).toBe(0);
+    expect(listing.stdout).toContain("unanchored but checkable");
+    expect(listing.stdout).toContain("the entry point is src/main.ts");
+  });
+
+  it("does not nominate a fact that already carries an anchor", async () => {
+    const created = await runCli([
+      "remember",
+      "the entry point is src/main.ts",
+      "--kind",
+      "fact",
+      "--anchor",
+      "file-exists src/main.ts",
+    ]);
+    expect(created.exitCode).toBe(0);
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toContain("unanchored: 0");
+  });
+
+  it("does not nominate a preference, even when it names a path (judgment claims are not environment-checkable)", async () => {
+    const created = await runCli(["remember", "always edit src/main.ts with tabs", "--kind", "preference"]);
+    expect(created.exitCode).toBe(0);
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toContain("unanchored: 0");
+  });
+
+  it("does not nominate an anchorless fact whose text names nothing checkable", async () => {
+    const created = await runCli(["remember", "the team prefers trunk-based development", "--kind", "fact"]);
+    expect(created.exitCode).toBe(0);
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 0, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
+  });
+
+  it("does not double-list a pending fact -- the pending bucket already owns it", async () => {
+    const db = openStorage(resolveDbPath());
+    captureSuggested(db, { text: "the config lives in package.json", kind: "fact", root: home });
+    db.close();
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
+  });
+
+  it("accepts unanchored as a --section value and shows only that bucket", async () => {
+    const db = openStorage(resolveDbPath());
+    captureSuggested(db, { text: "a pending candidate", kind: "fact", root: home });
+    db.close();
+    await runCli(["remember", "the manifest is package.json", "--kind", "decision"]);
+
+    const listing = await runCli(["review", "--section", "unanchored"]);
+    expect(listing.exitCode).toBe(0);
+    expect(listing.stdout).toContain("the manifest is package.json");
+    expect(listing.stdout).not.toContain("a pending candidate");
+    expect(listing.stdout).not.toContain("never auto-promoted");
+  });
+
+  it("nominates a correction the same way it nominates a fact", async () => {
+    await runCli(["remember", "the lockfile is actually pnpm-lock.yaml", "--kind", "correction"]);
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toContain("unanchored: 1");
   });
 });
 
@@ -1027,7 +1104,7 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(listed.stdout).not.toContain("[preference/active]");
 
     const summary = await runCli(["review", "--summary"]);
-    expect(summary.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0");
+    expect(summary.stdout.trim()).toBe("pending: 2, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
   });
 
   it("skips non-bullet content", async () => {
@@ -1069,7 +1146,7 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(second.stdout).toContain("skipped (duplicate)");
 
     const summary = await runCli(["review", "--summary"]);
-    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
   });
 
   it("promoting an imported fact goes through the exact same `mem review --promote` path as any other pending fact", async () => {
@@ -1141,7 +1218,7 @@ describe("mem suggest (suggested/candidate capture, S9 trust path)", () => {
     expect(activeList.stdout).not.toContain(id as string);
 
     const summary = await runCli(["review", "--summary"]);
-    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0");
+    expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
   });
 
   it("rejects a malformed anchor the same way mem remember does", async () => {
@@ -1756,7 +1833,7 @@ describe("mem import summary wording (regression: must describe what was actuall
       expect(imported.stdout).not.toContain("mem review --promote");
 
       const review = await runCli(["review", "--summary"]);
-      expect(review.stdout.trim()).toBe("pending: 0, contested: 0, contradicted: 0, pins: 0");
+      expect(review.stdout.trim()).toBe("pending: 0, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
     } finally {
       process.env["TOKEN_GOAT_MEM_HOME"] = home;
       rmSync(targetHome, { recursive: true, force: true });

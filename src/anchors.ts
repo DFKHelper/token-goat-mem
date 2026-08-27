@@ -837,3 +837,94 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
 export function anchorPathWithinRoot(root: string, pathArg: string): string | null {
   return resolveWithinRoot(resolve(root), pathArg);
 }
+
+/**
+ * Bare filenames conventionally referenced without a directory component. A fact saying "the pin
+ * lives in package.json" names a checkable target just as concretely as one saying "src/db.ts",
+ * but carries no path separator for {@link ANCHORABLE_PATTERNS} to key on.
+ *
+ * Deliberately an explicit list rather than a general "word + known extension" rule: the general
+ * form also matches "Node.js", "asyncio.gather", and "v1.2.js"-shaped prose, and a review bucket
+ * that cries wolf on ordinary sentences is one nobody reads. Under-matching here is recoverable
+ * (the fact simply is not nominated); over-matching is not (the bucket degrades into noise).
+ */
+const ANCHORABLE_BARE_FILENAMES: readonly string[] = [
+  "package.json",
+  "package-lock.json",
+  "tsconfig.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "CLAUDE.md",
+  "AGENTS.md",
+  "README.md",
+  "CHANGELOG.md",
+  "Cargo.toml",
+  "Cargo.lock",
+  "go.mod",
+  "go.sum",
+  "pyproject.toml",
+  "requirements.txt",
+  "Gemfile",
+  "Gemfile.lock",
+  "Makefile",
+  "Dockerfile",
+  "docker-compose.yml",
+  ".gitignore",
+  ".env",
+];
+
+/** Lower-cased lookup set for {@link mentionsAnchorableTarget}'s bare-filename pass. */
+const ANCHORABLE_BARE_FILENAME_SET: ReadonlySet<string> = new Set(
+  ANCHORABLE_BARE_FILENAMES.map((filename) => filename.toLowerCase()),
+);
+
+/** Splits prose into candidate tokens for the bare-filename pass — whitespace plus the punctuation that commonly brackets a filename mid-sentence. */
+const TOKEN_SPLIT_RE = /[\s()[\]{}<>"'`,;:]+/u;
+
+/** Trailing sentence punctuation to shave off a token before the bare-filename lookup, so "…in package.json." still matches. */
+const TRAILING_PUNCTUATION_RE = /[.,;:!?]+$/u;
+
+/**
+ * Shapes that denote a concrete, re-checkable target. Each alternative is kept simple and
+ * independently testable rather than fused into one omnibus expression.
+ *
+ * The `relative-with-extension` case requires the final segment to carry a dot-extension precisely
+ * so that separator-bearing English ("and/or", "24/7", "he/she") cannot match; the rooted and
+ * absolute cases require a leading marker or two segments for the same reason.
+ */
+const ANCHORABLE_PATTERNS: readonly { readonly name: string; readonly re: RegExp }[] = [
+  { name: "url", re: /https?:\/\/[^\s)>\]"']+/iu },
+  { name: "windows-path", re: /(?:^|[\s"'`([<])[A-Za-z]:[\\/][^\s)>\]"']+/u },
+  { name: "rooted-path", re: /(?:^|[\s"'`([<])(?:~|\.{1,2})\/[\w.@+-]+(?:\/[\w.@+-]+)*/u },
+  { name: "absolute-path", re: /(?:^|[\s"'`([<])\/[\w.@+-]+(?:\/[\w.@+-]+)+/u },
+  {
+    name: "relative-with-extension",
+    re: /(?:^|[\s"'`([<])[\w.@+-]+\/(?:[\w.@+-]+\/)*[\w@+-]+\.[A-Za-z]\w{0,9}(?=$|[\s)>\]"',;:.])/u,
+  },
+];
+
+/**
+ * Reports whether `text` names something an anchor predicate could plausibly be written against —
+ * a path, a URL, or a conventionally-bare config filename.
+ *
+ * This is a *nomination* predicate for `mem review --section unanchored`, not a verification one:
+ * a true result means "a human could write an anchor for this", never "this fact is stale". It
+ * deliberately performs no filesystem I/O, so it stays pure, synchronous, and cheap enough to run
+ * over every ground-truth fact on every `mem review`.
+ *
+ * Motivation: an anchorless fact can never be `contradicted` — {@link evaluateAnchor} short-circuits
+ * a `null` anchor to `unverified` — so before this predicate existed such a fact could not reach any
+ * `mem review` bucket at all. It sat at `unverified` indefinitely, invisible to both `mem review`
+ * and `mem doctor`, however thoroughly the world had moved on beneath it.
+ */
+export function mentionsAnchorableTarget(text: string): boolean {
+  if (text.trim().length === 0) {
+    return false;
+  }
+  if (ANCHORABLE_PATTERNS.some((pattern) => pattern.re.test(text))) {
+    return true;
+  }
+  return text
+    .split(TOKEN_SPLIT_RE)
+    .some((token) => ANCHORABLE_BARE_FILENAME_SET.has(token.replace(TRAILING_PUNCTUATION_RE, "").toLowerCase()));
+}
