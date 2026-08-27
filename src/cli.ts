@@ -38,7 +38,7 @@ import { Command } from "commander";
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
-import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
+import { evaluateAnchor, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
 import {
   captureExplicit,
   captureSuggested,
@@ -395,8 +395,8 @@ function formatImportResult(result: { filePath: string; outcomes: readonly Impor
 /** Section 6 / review finding S8: "Pins get a re-confirmation nudge in review after N months so a year-old forgotten pin can't stay maximally-trusted forever." ~6 months. */
 const PIN_RECONFIRM_DAYS = 182;
 
-/** The four `mem review` buckets, in listing order. `formatReview`'s `--summary`/`--section` options validate against exactly this set. */
-const REVIEW_SECTIONS = ["pending", "contested", "contradicted", "pins"] as const;
+/** The five `mem review` buckets, in listing order. `formatReview`'s `--summary`/`--section` options validate against exactly this set. */
+const REVIEW_SECTIONS = ["pending", "contested", "contradicted", "pins", "unanchored"] as const;
 type ReviewSection = (typeof REVIEW_SECTIONS)[number];
 
 function parseReviewSection(raw: string): ReviewSection {
@@ -459,14 +459,25 @@ const REVIEW_SECTION_TITLES: Record<ReviewSection, string> = {
   contested: "contested (ambiguous contradiction -- withheld from ground truth)",
   contradicted: "anchor-contradicted (suppressed from ground truth)",
   pins: "pins due for re-confirmation",
+  unanchored: "unanchored but checkable (names a path/URL/config file; consider `mem edit <id> --anchor`)",
 };
+
+/**
+ * Kinds eligible for the `unanchored` nomination. `preference` is excluded by construction: a
+ * preference is a judgment claim ("prefer tabs over spaces"), and no filesystem predicate can
+ * confirm or deny one — mentioning a path incidentally does not make it environment-dependent.
+ * The remaining kinds all assert something about the world that an anchor could test.
+ */
+const UNANCHORED_ELIGIBLE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["decision", "fact", "correction"]);
 
 /**
  * Builds the `mem review` listing: pending facts (never auto-promoted, S9), contested facts
  * (deterministic contradiction detection re-run fresh over the live active/pinned pool, never
  * trusting a possibly-stale `status` column -- same discipline as retrieval.ts), anchor-contradicted
  * facts (including pins -- S8: a pin is exempt from decay, never from contradiction/anchor
- * suppression), and pins overdue for re-confirmation.
+ * suppression), pins overdue for re-confirmation, and unanchored-but-checkable facts (ground-truth
+ * facts carrying no anchor whose text names a path/URL/config file an anchor could be written
+ * against -- the one bucket that is a nudge rather than a pending decision).
  *
  * `options.sinceEpoch` restricts every bucket to facts with `epoch > sinceEpoch` (applied at the
  * source -- pending/groundTruth queries -- so contested/contradicted/pins, which are derived from
@@ -495,7 +506,20 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
     return Number.isFinite(ageDays) && ageDays >= PIN_RECONFIRM_DAYS;
   });
 
-  const buckets: Record<ReviewSection, readonly Fact[]> = { pending, contested, contradicted, pins: pinsDue };
+  // An anchorless fact short-circuits to `unverified` (anchors.ts), so it can never reach the
+  // `contradicted` bucket above and, before this bucket existed, reached no bucket at all — it was
+  // invisible to both `mem review` and `mem doctor` no matter how stale it had become. Nominating
+  // only facts that actually name a checkable target keeps this a short, actionable list rather
+  // than a restatement of "everything without an anchor".
+  const unanchored = groundTruth.filter(
+    (fact) =>
+      !contestedIds.has(fact.id) &&
+      (fact.anchor === null || fact.anchor.trim().length === 0) &&
+      UNANCHORED_ELIGIBLE_KINDS.has(fact.kind) &&
+      mentionsAnchorableTarget(fact.text)
+  );
+
+  const buckets: Record<ReviewSection, readonly Fact[]> = { pending, contested, contradicted, pins: pinsDue, unanchored };
   const shown: readonly ReviewSection[] = options.section !== undefined ? [options.section] : REVIEW_SECTIONS;
 
   if (options.summary === true) {
@@ -1129,12 +1153,12 @@ export function buildProgram(): Command {
 
   program
     .command("review")
-    .description("List pending, contested, and anchor-contradicted facts for human resolution")
+    .description("List pending, contested, anchor-contradicted, and unanchored-but-checkable facts for human resolution")
     .option("--promote <id>", "Promote a pending fact to active")
     .option("--reject <id>", "Reject a pending fact (marks superseded)")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: current directory)")
-    .option("--summary", "Print counts per bucket (pending/contested/contradicted/pins) instead of full listings")
-    .option("--section <pending|contested|contradicted|pins>", "Only show one bucket's full listing")
+    .option("--summary", "Print counts per bucket (pending/contested/contradicted/pins/unanchored) instead of full listings")
+    .option("--section <pending|contested|contradicted|pins|unanchored>", "Only show one bucket's full listing")
     .option("--since-epoch <n>", "Only include facts with epoch greater than n (see `mem epoch`)", (v) => parseInt(v, 10))
     .action(
       guard(async (options: ReviewCliOptions) => {
