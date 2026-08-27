@@ -39,6 +39,7 @@ import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
 import { evaluateAnchor, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
+import type { FactStatusUpdate } from "./contradiction.js";
 import {
   captureExplicit,
   captureSuggested,
@@ -50,7 +51,7 @@ import {
   type CaptureExplicitInput,
   type CaptureSuggestedInput,
 } from "./capture.js";
-import { detectContradictions } from "./contradiction.js";
+import { detectContradictions, sameContradictionBucket } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
 import { importFromJson, JsonImportError, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
 import { importFromMarkdown, MarkdownImportError, planImportFromMarkdown, type ImportOutcome } from "./import.js";
@@ -64,12 +65,7 @@ import {
   type WiringResult,
 } from "./wiring.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
-import {
-  GROUND_TRUTH_CONFIDENCE_FLOOR,
-  PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS,
-  retrieve,
-  type RetrievalOptions,
-} from "./retrieval.js";
+import { isDecayedBelowGroundTruth, retrieve, type RetrievalOptions } from "./retrieval.js";
 import {
   countFacts,
   deleteFact,
@@ -395,6 +391,22 @@ function formatImportResult(result: { filePath: string; outcomes: readonly Impor
 /** Section 6 / review finding S8: "Pins get a re-confirmation nudge in review after N months so a year-old forgotten pin can't stay maximally-trusted forever." ~6 months. */
 const PIN_RECONFIRM_DAYS = 182;
 
+/**
+ * When a fact entered the status it currently holds -- the basis for every "how long has it been
+ * like *this*" retention clock (the superseded-fact GC window, the pin re-confirmation nudge).
+ *
+ * These clocks previously read `captured_at`, which never moves, so both were wrong by
+ * construction: a fact captured 91 days ago and superseded yesterday was GC'd on the next pass
+ * despite the 90-day audit window it was supposed to get, and a pin's re-confirmation nudge could
+ * never be cleared because re-pinning does not change when the fact was captured. Falls back to
+ * `captured_at` for rows written before `status_changed_at` existed -- the same value those rows
+ * were already being judged by, so the migration changes nothing for them.
+ */
+function statusChangedAt(fact: Fact): string {
+  const changed = fact.status_changed_at;
+  return typeof changed === "string" && changed.length > 0 ? changed : fact.captured_at;
+}
+
 /** The five `mem review` buckets, in listing order. `formatReview`'s `--summary`/`--section` options validate against exactly this set. */
 const REVIEW_SECTIONS = ["pending", "contested", "contradicted", "pins", "unanchored"] as const;
 type ReviewSection = (typeof REVIEW_SECTIONS)[number];
@@ -432,31 +444,112 @@ function setStatusWithAudit(
     setFactStatus(db, factId, nextStatus);
     insertAuditLog(db, { event, factId, detail });
   });
-  tx();
+  // BEGIN IMMEDIATE: `setFactStatus` reads the current status and epoch before writing, and once
+  // this outer transaction is open it degrades to a savepoint -- so the outer variant is what
+  // decides whether the read-then-write pair survives a concurrent writer under WAL. See
+  // storage.insertFact for the SQLITE_BUSY_SNAPSHOT rationale.
+  tx.immediate();
 }
 
+/**
+ * Statuses `mem review --promote/--reject` can act on. Both are review-resolvable *withheld* states
+ * -- a fact recall refuses to surface until a human decides -- which is the whole population the
+ * review loop exists to drain.
+ */
+const REVIEW_RESOLVABLE_STATUSES: readonly FactStatus[] = ["pending", "contested"];
+
+/**
+ * Re-runs deterministic contradiction detection over the full detection pool and persists every
+ * transition it produces, including reinstatements of facts no longer contested.
+ *
+ * Shared by `mem epoch --gc` and by review's contested resolution so both agree, by construction,
+ * on which facts are still contested -- the divergence that let a `contested` status outlive the
+ * contradiction that caused it.
+ */
+function reconcileContradictions(db: Database.Database, event: string): readonly FactStatusUpdate[] {
+  const pool = listFacts(db, { status: ["active", "pinned", "contested"] });
+  const { updates } = detectContradictions(pool);
+  for (const update of updates) {
+    setStatusWithAudit(db, update.factId, update.nextStatus, event, update.reason);
+  }
+  return updates;
+}
+
+/**
+ * `mem review --promote <id>`: accept a withheld fact.
+ *
+ * For a `pending` fact that means activating it. For a `contested` one it means declaring it the
+ * winner of its ambiguous contradiction, which requires superseding exactly its bucket rivals --
+ * without that, the next detection pass would find the same tied precedence and re-contest the
+ * whole group, making the promotion silently self-undoing. The winner returns to `prior_status`
+ * where that was `pinned`, so resolving a contradiction never quietly discards a user's pin.
+ */
 function promotePending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
-  if (fact.status !== "pending") {
-    throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be promoted`);
+  if (!REVIEW_RESOLVABLE_STATUSES.includes(fact.status)) {
+    throw new UsageError(
+      `fact ${fact.id} is not pending or contested (status=${fact.status}) -- only withheld facts can be promoted`
+    );
+  }
+  if (fact.status === "contested") {
+    const restored: FactStatus = fact.prior_status === "pinned" ? "pinned" : "active";
+    setStatusWithAudit(
+      db,
+      fact.id,
+      restored,
+      "review_promote",
+      `resolved contested contradiction in this fact's favor via explicit review (restored to ${restored})`
+    );
+    const rivals = listFacts(db, { status: "contested" }).filter(
+      (other) => other.id !== fact.id && sameContradictionBucket(other, fact)
+    );
+    for (const rival of rivals) {
+      setStatusWithAudit(
+        db,
+        rival.id,
+        "superseded",
+        "review_promote",
+        `Superseded by fact ${fact.id}: contested contradiction resolved in that fact's favor via explicit review.`
+      );
+    }
+    return fact.id;
   }
   setStatusWithAudit(db, fact.id, "active", "review_promote", "promoted pending fact to active via explicit review");
   return fact.id;
 }
 
+/**
+ * `mem review --reject <id>`: discard a withheld fact (soft-delete, kept for audit).
+ *
+ * Rejecting one side of a contested group can leave the group unambiguous, so the reconciliation
+ * pass runs afterwards to reinstate any survivor that is no longer contested -- otherwise the
+ * survivor would stay withheld with nothing left to contest it until the next `mem epoch --gc`.
+ */
 function rejectPending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
-  if (fact.status !== "pending") {
-    throw new UsageError(`fact ${fact.id} is not pending (status=${fact.status}) -- only pending facts can be rejected`);
+  if (!REVIEW_RESOLVABLE_STATUSES.includes(fact.status)) {
+    throw new UsageError(
+      `fact ${fact.id} is not pending or contested (status=${fact.status}) -- only withheld facts can be rejected`
+    );
   }
-  setStatusWithAudit(db, fact.id, "superseded", "review_reject", "rejected pending fact (superseded) via explicit review");
+  const wasContested = fact.status === "contested";
+  setStatusWithAudit(
+    db,
+    fact.id,
+    "superseded",
+    "review_reject",
+    `rejected ${fact.status} fact (superseded) via explicit review`
+  );
+  if (wasContested) {
+    reconcileContradictions(db, "review_reject");
+  }
   return fact.id;
 }
 
 /** `formatReview`'s long, human-facing section titles, keyed by the short bucket names `--section`/`--summary` validate against. */
 const REVIEW_SECTION_TITLES: Record<ReviewSection, string> = {
   pending: "pending (never auto-promoted -- confirm with --promote/--reject)",
-  contested: "contested (ambiguous contradiction -- withheld from ground truth)",
+  contested: "contested (ambiguous contradiction -- withheld from ground truth; resolve with --promote/--reject)",
   contradicted: "anchor-contradicted (suppressed from ground truth)",
   pins: "pins due for re-confirmation",
   unanchored: "unanchored but checkable (names a path/URL/config file; consider `mem edit <id> --anchor`)",
@@ -487,11 +580,20 @@ const UNANCHORED_ELIGIBLE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["dec
 function formatReview(db: Database.Database, root: string, options: ReviewOptions = {}): string {
   const epochFilter: FactFilter = options.sinceEpoch !== undefined ? { epochAfter: options.sinceEpoch } : {};
   const pending = listFacts(db, { status: "pending", ...epochFilter });
-  const groundTruth = listFacts(db, { status: ["active", "pinned"], ...epochFilter });
+  // Persisted-`contested` facts are part of the detection pool, not just live ground truth. Querying
+  // only active/pinned meant a fact `mem epoch --gc` had already marked contested vanished from the
+  // one bucket that exists to surface it: `mem review --summary` reported `contested: 0` while
+  // `mem recall` was still withholding that fact as contested, and `--promote` refused to touch it.
+  const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"], ...epochFilter });
 
-  const { groups } = detectContradictions(groundTruth);
+  const { groups } = detectContradictions(detectionPool);
   const contestedIds = new Set(groups.filter((group) => group.resolution === "contested").flatMap((group) => group.factIds));
-  const contested = groundTruth.filter((fact) => contestedIds.has(fact.id));
+  // Both genuinely-contested facts and any stranded in the status after their rival was forgotten or
+  // edited away. The latter are cleared automatically by the next `mem epoch --gc` reconciliation,
+  // and immediately by `--promote`; either way they are withheld right now, so they belong here.
+  const contested = detectionPool.filter((fact) => contestedIds.has(fact.id) || fact.status === "contested");
+  const contestedShownIds = new Set(contested.map((fact) => fact.id));
+  const groundTruth = detectionPool.filter((fact) => !contestedShownIds.has(fact.id));
 
   const contradicted = groundTruth.filter(
     (fact) => !contestedIds.has(fact.id) && evaluateAnchor(fact.anchor, root) === "contradicted"
@@ -502,7 +604,7 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
     if (fact.status !== "pinned") {
       return false;
     }
-    const ageDays = (now - Date.parse(fact.captured_at)) / MS_PER_DAY;
+    const ageDays = (now - Date.parse(statusChangedAt(fact))) / MS_PER_DAY;
     return Number.isFinite(ageDays) && ageDays >= PIN_RECONFIRM_DAYS;
   });
 
@@ -547,25 +649,6 @@ const GC_SOURCES_MAX_AGE_DAYS = 90;
 const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
 
 /**
- * Reimplements retrieval.ts's private `decayedConfidence`/`isDecayedBelowGroundTruth` formula against
- * the same exported constants (`PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS`, `GROUND_TRUTH_CONFIDENCE_FLOOR`)
- * for a report-only count. Decay itself is never persisted here (Section 6: "never silent deletion" --
- * a decayed preference simply stops being ground-truth-eligible on the *next* `recall`, computed fresh
- * from `captured_at` every time; there is nothing to write back to `confidence`).
- */
-function isDecayedBelowFloor(fact: Fact, now: Date): boolean {
-  if (fact.kind !== "preference" || fact.status === "pinned") {
-    return false;
-  }
-  const ageDays = (now.getTime() - Date.parse(fact.captured_at)) / MS_PER_DAY;
-  if (!Number.isFinite(ageDays) || ageDays <= 0) {
-    return false;
-  }
-  const decayed = fact.confidence * Math.pow(0.5, ageDays / PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS);
-  return decayed < GROUND_TRUTH_CONFIDENCE_FLOOR;
-}
-
-/**
  * Runs the retention/GC pass (design plan Section 6): persists deterministic contradiction
  * resolutions over the live ground-truth pool (pinned facts included -- S8), reports (never rewrites)
  * preference decay, prunes superseded facts and offloaded sources past their GC bounds, and rotates
@@ -577,20 +660,28 @@ function isDecayedBelowFloor(fact: Fact, now: Date): boolean {
 function runRetentionPass(db: Database.Database): string {
   const now = new Date();
 
-  const groundTruth = listFacts(db, { status: ["active", "pinned"] });
-  const { updates } = detectContradictions(groundTruth);
-  for (const update of updates) {
-    setStatusWithAudit(db, update.factId, update.nextStatus, "epoch_contradiction", update.reason);
-  }
+  // Includes persisted-`contested` facts, so this pass both detects new contradictions and clears
+  // stale ones: a fact whose rival has since been forgotten or edited into agreement is reinstated
+  // (to `pinned` where it was pinned before) instead of staying withheld forever.
+  const updates = reconcileContradictions(db, "epoch_contradiction");
 
   const preferences = listFacts(db, { kind: "preference", status: "active" });
-  const decayedCount = preferences.filter((fact) => isDecayedBelowFloor(fact, now)).length;
+  // The single definition of the decay curve, shared with `recall`'s correctness gate -- this pass
+  // reports only, and must report on exactly the facts recall will actually downgrade.
+  const decayedCount = preferences.filter((fact) => isDecayedBelowGroundTruth(fact, now)).length;
 
   const supersededCutoff = new Date(now.getTime() - GC_SUPERSEDED_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
-  const superseded = listFacts(db, { status: "superseded" }); // newest captured_at first
+  // Ordered and cut by when each fact *became* superseded, not when it was captured. Keying the
+  // 90-day window on `captured_at` deleted a fact superseded yesterday purely because it had been
+  // captured 91 days ago -- destroying the audit trail the soft delete exists to preserve -- and
+  // made the 1000-row cap keep the most recently *authored* facts rather than the most recently
+  // superseded ones.
+  const superseded = [...listFacts(db, { status: "superseded" })].sort((a, b) =>
+    statusChangedAt(b).localeCompare(statusChangedAt(a))
+  );
   let prunedFacts = 0;
   superseded.forEach((fact, index) => {
-    if (fact.captured_at < supersededCutoff || index >= GC_SUPERSEDED_MAX_ROWS) {
+    if (statusChangedAt(fact) < supersededCutoff || index >= GC_SUPERSEDED_MAX_ROWS) {
       if (deleteFact(db, fact.id)) {
         prunedFacts += 1;
       }
@@ -1083,6 +1174,20 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
+          // Pinning is a promotion to decay-exempt ground truth, so it is gated exactly like
+          // `mem review --promote`. Without this it was a side door around every withheld status:
+          // an id copied out of `mem list` would launder a `pending` suggestion -- never reviewed by
+          // a human, which is the one invariant `captureSuggested` hardcodes its status to protect --
+          // straight into maximal trust, and would equally resurrect a `superseded` or `contested`
+          // fact that recall is deliberately withholding.
+          if (existing.status !== "active" && existing.status !== "pinned") {
+            throw new UsageError(
+              `fact ${existing.id} is ${existing.status}, not active -- only an active fact can be pinned. ` +
+                (existing.status === "pending" || existing.status === "contested"
+                  ? `Resolve it first with \`mem review --promote ${existing.id}\`, then pin it.`
+                  : `A ${existing.status} fact is withheld from ground truth; re-capture it with \`mem remember\` if it is still true.`)
+            );
+          }
           setStatusWithAudit(db, existing.id, "pinned", "pin", `pinned fact (was ${existing.status})`);
           return existing.id;
         });
@@ -1145,7 +1250,8 @@ export function buildProgram(): Command {
             insertAuditLog(db, { event: "edit", factId: existing.id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
             return fact;
           });
-          return tx();
+          // BEGIN IMMEDIATE: `updateFact` reads before writing; see storage.insertFact.
+          return tx.immediate();
         });
         process.stdout.write(`edited ${updated.id}\n`);
       })

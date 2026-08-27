@@ -42,8 +42,9 @@
  */
 
 import { resolve as resolvePath, sep } from "node:path";
-import type { AnchorVerdict } from "./anchors.js";
-import { openDb, resolveDbPath } from "./db.js";
+import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
+import { openStorage } from "./storage.js";
+import { resolveDbPath } from "./db.js";
 import { retrieve, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
@@ -204,13 +205,23 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
 
 async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFormatResult> {
   const start = Date.now();
+  // Anchor verdicts are memoized for the lifetime of the process, which is exactly one query for the
+  // `mem` CLI but unbounded for an embedder holding this module across calls -- there, a first-ever
+  // verdict would be served forever no matter what changed on disk. One logical hint-format query is
+  // the correct cache lifetime, so each call starts from a clean slate.
+  clearAnchorCaches();
   const root = resolvePath(options.root);
   const contextFiles = (options.contextFiles ?? []).map((file) => resolvePath(root, file));
   const now = options.now ?? new Date();
   const protocolVersion = resolveProtocolVersion(options.protocolVersion);
   const stable = options.stable === true;
 
-  const db = openDb(options.dbPath ?? resolveDbPath());
+  // `openStorage`, not the bare `openDb`: this is a library seam an embedder can call against a
+  // database mem's CLI has never opened, and `openDb` alone does not guarantee the storage-owned
+  // columns (`epoch`, `status_changed_at`, `prior_status`) or the `sources`/`meta` tables exist.
+  // Reading a fact through a connection that skipped `ensureStorageSchema` worked only by accident
+  // of which columns this path happens to select today.
+  const db = openStorage(options.dbPath ?? resolveDbPath());
   let allFacts: Fact[];
   try {
     allFacts = queryAllFacts(db);
@@ -273,7 +284,7 @@ interface RawFactRow {
   readonly confidence: number;
 }
 
-function queryAllFacts(db: ReturnType<typeof openDb>): Fact[] {
+function queryAllFacts(db: ReturnType<typeof openStorage>): Fact[] {
   const rows = db
     .prepare<
       [],

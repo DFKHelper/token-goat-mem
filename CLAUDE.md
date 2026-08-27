@@ -22,7 +22,7 @@ Token-Goat Mem preserves durable conversational knowledge across AI coding sessi
 ### Data flow
 
 1. **Explicit capture** — user or agent says "remember that X". Fact is stored `active` after secret screening.
-2. **Suggested capture** — `captureSuggested` (library seam in `src/capture.ts`, not yet exposed as a CLI command) stores candidates in `pending` status, always — no caller can request `active`. Pending facts never auto-promote; `mem review --promote <id>` / `--reject <id>` resolve them.
+2. **Suggested capture** — `captureSuggested` (`src/capture.ts`, surfaced as `mem suggest`) stores candidates in `pending` status, always — no caller can request `active`. Pending facts never auto-promote; `mem review --promote <id>` / `--reject <id>` resolve them, and `mem pin` refuses a pending fact rather than promoting it by a side door.
 3. **Staleness detection** — anchors are pure read-only predicates (file-newer-than, glob match, git-tracked) evaluated against an explicit `--root`. Three-valued verdict: `affirmed` (predicate confirms), `unverified` (can't confirm or deny), `contradicted` (predicate denies). Only `affirmed` surfaces as ground truth.
 4. **Contradiction resolution** — deterministic `subject`+`value` keying. Two active facts, same subject + scope, different value = mark loser `superseded`, prefer newer + higher-provenance. If genuinely ambiguous, mark `contested` and withhold from ground-truth surfacing.
 5. **Recall** — BM25 ranking for relevance (an embedding backend is an injectable seam in `src/retrieval.ts`, but no concrete backend ships in v1, so retrieval runs BM25-only in practice), then correctness gate (freshness re-validation, trust filtering, contradiction/contested exclusion). Output annotated with kind, trust level, freshness verdict, and date.
@@ -30,7 +30,7 @@ Token-Goat Mem preserves durable conversational knowledge across AI coding sessi
 ### Storage
 
 - **facts** table — the primary store. Columns: id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding.
-- **sources** table — redacted previews for audit/provenance; full content never persisted. GC'd after N days.
+- **sources** table — schema, storage API (`insertSource`/`listSourcesForFact`/`deleteSourcesOlderThan`), `mem show --json` surfacing, and gc pruning all exist and are tested, but **nothing in the capture path writes a row yet**, so the table is empty in practice. Redacted previews only; full content is never persisted. Treat it as a wired-but-unfed seam, not a live audit trail.
 - SQLite WAL mode for durability. Short-lived CLI processes + transactional single-writer.
 
 ### Testing

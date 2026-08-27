@@ -83,6 +83,23 @@ export interface Fact {
    * always populates it from the real `facts.epoch` column.
    */
   readonly epoch?: number;
+  /**
+   * ISO 8601 timestamp of the most recent write to `status`, or null/absent for rows written
+   * before this column existed. Deliberately separate from `captured_at`, which never moves:
+   * every "how long has this fact been in *its current state*" question -- the superseded-fact GC
+   * window and the pin re-confirmation nudge (both Section 6) -- keys on this. Readers must treat
+   * an absent/null value as "unknown" and fall back to `captured_at`, which is what those clocks
+   * incorrectly used unconditionally before this column existed.
+   */
+  readonly status_changed_at?: string | null;
+  /**
+   * The `status` this fact held immediately before its current one, or null when the status has
+   * never changed. Makes a reversible status transition undoable without guessing: contradiction
+   * reinstatement (src/contradiction.ts) restores a formerly-`pinned` fact to `pinned` instead of
+   * silently demoting a deliberate user pin to `active`. Preserved, not overwritten, when a status
+   * is re-written to the value it already held (e.g. re-pinning to refresh the reconfirm clock).
+   */
+  readonly prior_status?: FactStatus | null;
 }
 
 /**

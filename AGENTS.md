@@ -40,7 +40,7 @@ All memory operations are explicit and auditable:
 
 **facts** table: `id`, `text`, `kind` (preference/decision/fact/correction), `subject`, `value`, `scope` (global/project/path), `scope_root`, `source_type` (user/derived), `source_ref`, `captured_at`, `anchor`, `status` (active/pending/superseded/contested/pinned), `confidence`, `embedding`.
 
-**sources** table: `fact_id`, `excerpt` (redacted preview, full content never persisted in sources table), `stored_at`.
+**sources** table: `fact_id`, `excerpt` (redacted preview, full content never persisted in sources table), `stored_at`. The read/write/gc paths exist and are tested, but no capture path writes to it yet — the table is empty in practice.
 
 **Contradiction resolution:** deterministic `subject`+`value` keying. Two active facts, same subject + scope, different value = mark loser `superseded`, prefer newer + higher-provenance. If genuinely ambiguous (same recency/provenance), mark `contested` and withhold from ground-truth surfacing.
 

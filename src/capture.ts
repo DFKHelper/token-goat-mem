@@ -136,12 +136,51 @@ const SECRET_PATTERNS: readonly SecretPattern[] = [
     name: "password-assignment",
     regex: /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[^\s'"]{6,}['"]?/gi,
   },
+  /**
+   * A long hex run written near a credential word, in prose rather than assignment syntax.
+   *
+   * The entropy fallback below deliberately exempts pure-hex tokens so that quoting a commit SHA in
+   * a fact does not read as a credential -- but HMAC signing secrets, webhook secrets, and plenty of
+   * API keys are also pure hex, so that exemption doubled as a blanket bypass for an entire common
+   * secret format. `password-assignment` above did not close it either: it requires a `:`/`=`
+   * separator, and `the webhook signing secret is <64 hex>` has neither.
+   *
+   * Scoped to hex specifically, and only within a short window of a credential word, because that
+   * is exactly the class the exemption creates a hole in: a non-hex high-entropy secret is still
+   * caught by the entropy fallback on its own, so widening this pattern past hex would add false
+   * positives without adding coverage. A SHA that genuinely appears next to the word "secret" is
+   * the accepted cost, and the error message names the `.mem/allowlist` escape hatch.
+   */
+  {
+    name: "secret-keyword-hex",
+    regex: /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|signing[_-]?(?:key|secret))\b[^\n]{0,32}?\b[0-9a-fA-F]{32,}\b/gi,
+  },
 ];
 
 /** Generic fallback (design principle 7b: "entropy screening" as its own layer, not just named patterns). Standalone tokens of length >= 32 from a base64/hex-ish alphabet, excluding pure-hex/pure-digit runs (git SHAs, ids — common in legitimate project facts, not secrets) and low-entropy strings. */
 const GENERIC_TOKEN = /[A-Za-z0-9+/_=-]{32,}/g;
-const HEX_ONLY = /^[0-9a-f]{32,}$/i;
+const HEX_ONLY = /^[0-9a-f]+$/i;
 const DIGITS_ONLY = /^[0-9]{32,}$/;
+
+/**
+ * Hex-token lengths that correspond to a canonical content hash a project fact legitimately quotes:
+ * md5 (32), sha1 (40), sha256 (64). Anything else -- 48, 96, 33 -- is not a hash anyone writes down,
+ * and is far likelier an HMAC or API secret, so it gets no exemption from the entropy fallback.
+ *
+ * The exemption used to be unconditional for any hex run of 32 or more characters, which was
+ * strictly broader than its own stated rationale ("git SHAs, ids"): git SHAs are 7-12 characters
+ * abbreviated and 40 in full, so nothing under 32 ever reached {@link GENERIC_TOKEN}'s floor and
+ * nothing above 64 was ever a SHA. Perfect separation is impossible -- a 64-hex string is
+ * genuinely ambiguous between sha256 and an HMAC secret -- so the ambiguous lengths stay exempt
+ * here and are covered instead by the `secret-keyword-hex` pattern above, which only fires when the
+ * surrounding text says it is a credential.
+ */
+const CANONICAL_HEX_HASH_LENGTHS: ReadonlySet<number> = new Set([32, 40, 64]);
+
+/** Whether a token is a pure-hex run of a length that plausibly denotes a content hash rather than a secret. */
+function isCanonicalHexHash(token: string): boolean {
+  return HEX_ONLY.test(token) && CANONICAL_HEX_HASH_LENGTHS.has(token.length);
+}
 const GENERIC_ENTROPY_THRESHOLD = 3.8;
 
 function shannonEntropy(value: string): number {
@@ -230,7 +269,7 @@ function scanField(field: string, value: string): SecretMatch[] {
     if (
       !(exemptField && token.includes("/")) &&
       !isPathShapedToken(token) &&
-      !HEX_ONLY.test(token) &&
+      !isCanonicalHexHash(token) &&
       !DIGITS_ONLY.test(token) &&
       shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD
     ) {
@@ -604,7 +643,11 @@ function writeFact(
     insertAuditLog(db, { event: auditEvent, factId: fact.id, detail: detail(fact) });
     return fact;
   });
-  return tx();
+  // BEGIN IMMEDIATE: the inner `storageInsertFact` reads the epoch before writing, and once this
+  // outer transaction is open the inner one degrades to a savepoint -- so the outer variant is the
+  // one that decides whether the read-then-write pair is safe against a concurrent writer under WAL.
+  // See storage.insertFact for the full SQLITE_BUSY_SNAPSHOT rationale.
+  return tx.immediate();
 }
 
 /**

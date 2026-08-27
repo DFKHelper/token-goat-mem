@@ -6,7 +6,7 @@
  * project files.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -602,5 +602,40 @@ describe("writeManagedFile", () => {
     expect(calls).toBe(2);
     expect(result.action).toBe("update");
     expect(read(filePath)).toBe("v2-from-elsewhere\n-appended\n");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression: the atomic-write temp file never outlives the write ───────────────────────────────────────────────────────────────────────────
+
+describe("writeManagedFile leaves no temp file behind when the rename fails", () => {
+  function tempSiblings(filePath: string): string[] {
+    return readdirSync(dirname(filePath)).filter((name) => name.includes(".tmp-"));
+  }
+
+  // An open read-write handle on the destination makes Windows fail the rename with EPERM *after*
+  // the temp file has been written -- the one window where the scratch file can outlive the call.
+  // POSIX renames over an open file happily, so there is no equivalent failure to provoke there.
+  it.skipIf(process.platform !== "win32")("cleans up its scratch file when the rename fails", () => {
+    const target = join(root, "CLAUDE.md");
+    writeFileSync(target, "existing content\n");
+    const handle = openSync(target, "r+");
+
+    try {
+      // Without the cleanup, every failed write left a stray `<file>.token-goat-mem.tmp-<n>` next to
+      // the managed file -- in the user's project, or in their ~/.claude -- that no later run removes.
+      expect(() => writeManagedFile({ path: target, transform: () => "managed content\n" })).toThrow();
+      expect(tempSiblings(target)).toEqual([]);
+    } finally {
+      closeSync(handle);
+    }
+  });
+
+  it("leaves no temp file behind on the success path either", () => {
+    const target = join(root, "AGENTS.md");
+    const change = writeManagedFile({ path: target, transform: () => "managed content\n" });
+
+    expect(change.action).not.toBe("noop");
+    expect(readFileSync(target, "utf8")).toBe("managed content\n");
+    expect(tempSiblings(target)).toEqual([]);
   });
 });

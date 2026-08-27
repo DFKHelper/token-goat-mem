@@ -514,3 +514,45 @@ describe("planImportFromJson consistency with importFromJson --dry-run", () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── regression: imported ids must be addressable ───────────────────────────────────────────────────────────────────────────
+
+describe("imported fact ids are validated for shape, not just presence", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-import-id-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function planWith(id: unknown): ReturnType<typeof planImportFromJson> {
+    const path = join(dir, "facts.json");
+    writeFileSync(path, envelope([{ ...VALID_FACT, id }]), "utf8");
+    return planImportFromJson({ path });
+  }
+
+  it.each([
+    ["an id carrying an embedded space", "11111111 1111"],
+    ["an id carrying a shell metacharacter", "11111111-1111-1111-1111-111111111111; rm -rf /"],
+    ["an id carrying a path separator", "../../etc/passwd"],
+    ["an id carrying a SQL wildcard", "1111%"],
+    ["a non-hex id", "not-a-uuid-at-all"],
+  ])("rejects %s rather than writing a row no command can address", (_label, id) => {
+    const outcome = planWith(id).outcomes[0];
+    expect(outcome?.status).toBe("skipped_error");
+    expect(outcome?.status === "skipped_error" ? outcome.reason : "").toMatch(/malformed "id"/u);
+  });
+
+  it("rejects an absurdly long id", () => {
+    const outcome = planWith("a".repeat(129)).outcomes[0];
+    expect(outcome?.status).toBe("skipped_error");
+    expect(outcome?.status === "skipped_error" ? outcome.reason : "").toMatch(/at most 128 long/u);
+  });
+
+  it("still accepts a well-formed uuid", () => {
+    expect(planWith("22222222-2222-2222-2222-222222222222").candidates).toHaveLength(1);
+  });
+});

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { _clearAnchorMemoForTests, evaluateAnchor } from "../../src/anchors.js";
+import { _clearAnchorMemoForTests, clearAnchorCaches, evaluateAnchor } from "../../src/anchors.js";
 
 let root: string;
 
@@ -174,5 +174,72 @@ describe("evaluateAnchor", () => {
       // budget-limited "unverified" from the call above.
       expect(evaluateAnchor("file-exists a.txt", root)).toBe("affirmed");
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── regression: anchors match the case-sensitivity of the filesystem they run on ───────────────────────────────────────────────────────────────────────────
+
+describe("case sensitivity of glob-exists / git-tracked", () => {
+  /**
+   * On win32 the filesystem is case-insensitive, so `README.md` and `readme.md` are the same file.
+   * Matching case-sensitively there produced a `contradicted` verdict -- P3's strongest claim, one
+   * that actively withholds a fact from ground truth -- for a file that plainly exists. Folding is
+   * scoped to win32 on purpose: macOS ships case-sensitive APFS volumes too, and folding there
+   * would trade a false `contradicted` for a false `affirmed`, which is the worse error.
+   */
+  const foldsCase = process.platform === "win32";
+
+  it("glob-exists matches a differently-cased filename exactly where the filesystem does", () => {
+    writeFileSync(join(root, "README.md"), "x");
+    _clearAnchorMemoForTests();
+    expect(evaluateAnchor("glob-exists readme.md", root)).toBe(foldsCase ? "affirmed" : "contradicted");
+  });
+
+  it("glob-exists is unaffected for an exactly-cased target on every platform", () => {
+    writeFileSync(join(root, "README.md"), "x");
+    _clearAnchorMemoForTests();
+    expect(evaluateAnchor("glob-exists README.md", root)).toBe("affirmed");
+  });
+
+  it("glob-exists still contradicts a target that is absent under any casing", () => {
+    writeFileSync(join(root, "README.md"), "x");
+    _clearAnchorMemoForTests();
+    expect(evaluateAnchor("glob-exists CHANGELOG.md", root)).toBe("contradicted");
+  });
+
+  it("git-tracked matches a differently-cased path exactly where the filesystem does", () => {
+    writeFileSync(join(root, "Tracked.ts"), "x");
+    runGit(["init"], root);
+    runGit(["add", "Tracked.ts"], root);
+    _clearAnchorMemoForTests();
+
+    expect(evaluateAnchor("git-tracked Tracked.ts", root)).toBe("affirmed");
+    _clearAnchorMemoForTests();
+    expect(evaluateAnchor("git-tracked tracked.ts", root)).toBe(foldsCase ? "affirmed" : "contradicted");
+  });
+
+  it("git-tracked still contradicts a path that is in the tree but not in the index", () => {
+    writeFileSync(join(root, "Tracked.ts"), "x");
+    writeFileSync(join(root, "Untracked.ts"), "x");
+    runGit(["init"], root);
+    runGit(["add", "Tracked.ts"], root);
+    _clearAnchorMemoForTests();
+
+    expect(evaluateAnchor("git-tracked Untracked.ts", root)).toBe("contradicted");
+  });
+});
+
+describe("clearAnchorCaches", () => {
+  it("is the public name for the memo reset, and drops a verdict that is no longer true on disk", () => {
+    const anchorPath = join(root, "present.txt");
+    writeFileSync(anchorPath, "x");
+    expect(evaluateAnchor("file-exists present.txt", root)).toBe("affirmed");
+
+    rmSync(anchorPath);
+    // Still memoized: within one CLI process that is correct and is the point of the cache.
+    expect(evaluateAnchor("file-exists present.txt", root)).toBe("affirmed");
+
+    clearAnchorCaches();
+    expect(evaluateAnchor("file-exists present.txt", root)).toBe("contradicted");
   });
 });

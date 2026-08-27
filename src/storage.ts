@@ -96,6 +96,13 @@ export function ensureStorageSchema(db: Db): void {
   // only strictly increases (`bumpEpoch`), so no real write can ever be stamped `0` again, and
   // `epoch > n` for any `n >= 0` correctly excludes pre-migration rows without a separate NULL case.
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0");
+  // Status bookkeeping (types.ts `status_changed_at` / `prior_status`). Both are nullable with no
+  // backfill, unlike the `epoch` column above: there is no correct value to invent for a row whose
+  // status history predates the columns, and NULL is the honest "unknown" every reader falls back
+  // on (`status_changed_at ?? captured_at`) rather than a sentinel that would silently look like a
+  // real, very old status change and drag pre-migration rows into the GC window on first pass.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN status_changed_at TEXT");
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN prior_status TEXT");
 }
 
 /**
@@ -158,6 +165,8 @@ interface FactRow {
   confidence: number;
   embedding: Buffer | null;
   epoch: number;
+  status_changed_at: string | null;
+  prior_status: string | null;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -177,6 +186,8 @@ function rowToFact(row: FactRow): Fact {
     confidence: row.confidence,
     embedding: row.embedding === null ? null : unpackEmbedding(row.embedding),
     epoch: row.epoch,
+    status_changed_at: row.status_changed_at,
+    prior_status: row.prior_status as FactStatus | null,
   };
 }
 
@@ -198,8 +209,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
   );
 
   const tx = db.transaction((): void => {
@@ -219,10 +230,21 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       status,
       confidence,
       embeddingBlob,
-      epoch
+      epoch,
+      // A fact's status clock starts when the fact does, so a freshly-pinned-on-capture fact is not
+      // instantly "due for re-confirmation" and a freshly-superseded import is not instantly GC-able.
+      capturedAt
     );
   });
-  tx();
+  // BEGIN IMMEDIATE, not the deferred default: this transaction reads (`bumpEpoch` -> `getEpoch`)
+  // before it writes, and in WAL mode a deferred transaction that upgrades to a writer after
+  // another connection has committed in between fails with SQLITE_BUSY_SNAPSHOT -- which
+  // `busy_timeout` does not retry, because retrying cannot make the stale snapshot valid. Taking
+  // the write lock up front makes the read-then-write pair sound for concurrent `mem` processes,
+  // which is the tool's normal deployment (two agent sessions in two repos, one shared ~/.mem).
+  // Every other write path in this module, and every caller that wraps one in an outer transaction
+  // (capture.writeFact, cli's edit/setStatusWithAudit, exportImport's batch), does the same.
+  tx.immediate();
 
   const row = getFactRow(db, id);
   if (row === undefined) {
@@ -247,7 +269,7 @@ export type IdResolution =
 const MIN_ID_PREFIX_LEN = 4;
 
 /** Fact ids are UUIDs (hex digits and dashes only); a `--` prefix scan is only attempted for input that could plausibly be one. */
-const ID_PREFIX_PATTERN = /^[0-9a-fA-F-]+$/;
+export const ID_PREFIX_PATTERN = /^[0-9a-fA-F-]+$/;
 
 /** Escapes `%`, `_`, and `\` (the SQL `LIKE` wildcard/escape characters) so a caller-supplied prefix can never be interpreted as a wildcard pattern -- defensive, since real UUID characters never contain any of these. */
 function escapeLikePattern(value: string): string {
@@ -408,17 +430,31 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
     return getFactById(db, id);
   }
 
-  sets.push("epoch = ?");
-  const sql = `UPDATE facts SET ${sets.join(", ")} WHERE id = ?`;
-
   const tx = db.transaction((): void => {
+    const finalSets = [...sets];
+    const finalParams = [...params];
+    if (patch.status !== undefined) {
+      // A status write routed through `updateFact` must keep the same bookkeeping `setFactStatus`
+      // does, or the two write paths silently disagree about when a fact last changed state and the
+      // GC / pin-reconfirm clocks drift apart depending on which command happened to be used.
+      const current = db
+        .prepare<[string], { status: string; prior_status: string | null }>("SELECT status, prior_status FROM facts WHERE id = ?")
+        .get(id);
+      if (current !== undefined) {
+        finalSets.push("prior_status = ?");
+        finalParams.push(current.status === patch.status ? current.prior_status : current.status);
+      }
+      finalSets.push("status_changed_at = ?");
+      finalParams.push(new Date().toISOString());
+    }
+    finalSets.push("epoch = ?");
     const next = getEpoch(db) + 1;
-    const result = db.prepare(sql).run(...params, next, id);
+    const result = db.prepare(`UPDATE facts SET ${finalSets.join(", ")} WHERE id = ?`).run(...finalParams, next, id);
     if (result.changes > 0) {
       performEpochUpsert(db, next);
     }
   });
-  tx();
+  tx.immediate(); // read-then-write under WAL; see insertFact.
 
   return getFactById(db, id);
 }
@@ -435,13 +471,27 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
  */
 export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | undefined {
   const tx = db.transaction((): void => {
+    const current = db
+      .prepare<[string], { status: string; prior_status: string | null }>("SELECT status, prior_status FROM facts WHERE id = ?")
+      .get(id);
+    if (current === undefined) {
+      return;
+    }
+    // `status_changed_at` advances on every call, including a no-op re-write of the status a fact
+    // already holds -- that is exactly what `mem pin` on an already-pinned fact means, and it is
+    // how the six-month re-confirmation nudge gets cleared. `prior_status`, by contrast, only moves
+    // on a genuine transition, so re-pinning cannot erase the pre-pin status a later contradiction
+    // reinstatement needs to restore.
+    const priorStatus = current.status === status ? current.prior_status : current.status;
     const next = getEpoch(db) + 1;
-    const result = db.prepare("UPDATE facts SET status = ?, epoch = ? WHERE id = ?").run(status, next, id);
+    const result = db
+      .prepare("UPDATE facts SET status = ?, prior_status = ?, status_changed_at = ?, epoch = ? WHERE id = ?")
+      .run(status, priorStatus, new Date().toISOString(), next, id);
     if (result.changes > 0) {
       performEpochUpsert(db, next);
     }
   });
-  tx();
+  tx.immediate(); // read-then-write under WAL; see insertFact.
   return getFactById(db, id);
 }
 
@@ -461,7 +511,7 @@ export function deleteFact(db: Db, id: string): boolean {
     }
     return result.changes;
   });
-  return tx() > 0;
+  return tx.immediate() > 0; // read-then-write under WAL (bumpEpoch reads); see insertFact.
 }
 
 interface SourceRow {

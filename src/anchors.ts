@@ -64,15 +64,50 @@ const MAX_GLOB_ENTRIES_SCANNED = 20_000;
 /** Sanity bound on `.git/index` entry count — guards against a corrupt/hostile header, not real repos. */
 const MAX_GIT_INDEX_ENTRIES = 2_000_000;
 
+/**
+ * Whether this platform's filesystem resolves paths case-insensitively.
+ *
+ * Matters because mem's predicates split into two families that would otherwise disagree about the
+ * same file. The stat-based ones (`file-exists`, `file-newer-than`, `newest-of`) inherit the OS's
+ * own resolution and so already tolerate a casing difference; the two *string-matching* ones --
+ * `glob-exists` (regex against directory entries) and `git-tracked` (comparison against
+ * `.git/index` bytes) -- did not. On Windows that made `git-tracked SRC/Db.TS` return
+ * `contradicted` for a file `file-exists src/db.ts` affirms, and `contradicted` suppresses a fact
+ * from ground truth entirely: a casing typo became silent fact suppression, on the platform this
+ * project is developed on.
+ *
+ * win32 only, deliberately. macOS is case-insensitive by default but supports case-sensitive APFS
+ * volumes, so folding there would trade a false `contradicted` for a false `affirmed` -- the worse
+ * error, because P3 forbids fabricating a verdict but permits declining to give one.
+ */
+const FS_CASE_INSENSITIVE = process.platform === "win32";
+
 const memo = new Map<string, AnchorVerdict>();
 const gitDirCache = new Map<string, string | null>();
 const gitIndexCache = new Map<string, Set<string> | null>();
+/** Lazily-built lowercase view of `gitIndexCache`, only ever populated on {@link FS_CASE_INSENSITIVE} platforms, so a case-folded lookup stays O(1) instead of rescanning the index set on every miss. */
+const gitIndexFoldedCache = new Map<string, Set<string>>();
 
-/** Test-only: clears all in-process memoization/caches. */
-export function _clearAnchorMemoForTests(): void {
+/**
+ * Clears all in-process anchor memoization and caches.
+ *
+ * The memo has no invalidation and no size bound by design -- a `mem` CLI invocation is a
+ * short-lived process, so "cache for the lifetime of the process" and "cache for the lifetime of
+ * one command" are the same thing. That equivalence breaks for any embedder that keeps the module
+ * loaded across calls (`buildHintFormat` is exported as a library seam for exactly that), where a
+ * first-ever verdict would otherwise be served forever regardless of what changed on disk. Callers
+ * that span more than one logical query must call this at the start of each.
+ */
+export function clearAnchorCaches(): void {
   memo.clear();
   gitDirCache.clear();
   gitIndexCache.clear();
+  gitIndexFoldedCache.clear();
+}
+
+/** Test-only alias of {@link clearAnchorCaches}, kept for the existing test suite's call sites. */
+export function _clearAnchorMemoForTests(): void {
+  clearAnchorCaches();
 }
 
 /**
@@ -347,7 +382,10 @@ function segmentToRegExp(segment: string): RegExp {
     }
   }
   pattern += "$";
-  return new RegExp(pattern);
+  // See FS_CASE_INSENSITIVE: on Windows the walk below compares against real directory entries the
+  // OS itself would resolve case-insensitively, so a case-sensitive regex reports `contradicted`
+  // for a file that demonstrably exists.
+  return new RegExp(pattern, FS_CASE_INSENSITIVE ? "i" : "");
 }
 
 /**
@@ -617,7 +655,29 @@ function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
     return "unverified";
   }
   const relPath = relative(root, resolvedPath).split(sep).join("/");
-  return paths.has(relPath) ? "affirmed" : "contradicted";
+  if (paths.has(relPath)) {
+    return "affirmed";
+  }
+  // See FS_CASE_INSENSITIVE. `.git/index` stores one exact casing per path, but on Windows the
+  // anchor's casing and the index's casing both resolve to the same file, so an exact-bytes miss is
+  // not evidence the path is untracked.
+  if (FS_CASE_INSENSITIVE && foldedGitIndexPaths(gitDir, paths).has(relPath.toLowerCase())) {
+    return "affirmed";
+  }
+  return "contradicted";
+}
+
+function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): ReadonlySet<string> {
+  const cached = gitIndexFoldedCache.get(gitDir);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const folded = new Set<string>();
+  for (const path of paths) {
+    folded.add(path.toLowerCase());
+  }
+  gitIndexFoldedCache.set(gitDir, folded);
+  return folded;
 }
 
 /** Parses an anchor string into whitespace-separated tokens. No quoting support (not needed for fs/git paths). */

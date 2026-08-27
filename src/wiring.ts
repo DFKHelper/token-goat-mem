@@ -36,7 +36,7 @@
  * content.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { applyEdits, modify, parse as parseJsonc, type JSONPath, type ModificationOptions } from "jsonc-parser";
@@ -132,8 +132,19 @@ export function writeManagedFile(op: FileOp): WiringChange {
   const existedBefore = before !== undefined;
   mkdirSync(dirname(op.path), { recursive: true });
   const tmpPath = `${op.path}.token-goat-mem.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  writeFileSync(tmpPath, after, "utf8");
-  renameSync(tmpPath, op.path);
+  // The temp file is an implementation detail of the atomic write, so it must not survive a failure
+  // and litter the user's project (or their `~/.claude`) with a file no later run cleans up. On the
+  // success path the rename has already consumed it and the unlink is an expected no-op.
+  try {
+    writeFileSync(tmpPath, after, "utf8");
+    renameSync(tmpPath, op.path);
+  } finally {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort cleanup only: never mask the original failure with a cleanup failure.
+    }
+  }
   return {
     path: op.path,
     action: existedBefore ? "update" : "create",
