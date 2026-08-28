@@ -9,7 +9,7 @@
  *     are excluded from --hint-format entirely").
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db.js";
@@ -321,5 +321,28 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
     expect(names).toContain("epoch");
     expect(names).toContain("status_changed_at");
     expect(names).toContain("prior_status");
+  });
+});
+
+describe("regression: the seam's row mapper projects every column retrieval depends on", () => {
+  it("selects prior_status, which resolveContradictions reads when reinstating a pinned fact", () => {
+    const source = readFileSync(new URL("../src/integration-seam.ts", import.meta.url), "utf8");
+    const select = /SELECT id, text[\s\S]*?FROM facts/u.exec(source)?.[0] ?? "";
+    expect(select).not.toBe("");
+
+    // This is a structural assertion rather than a behavioural one, deliberately. `prior_status` is
+    // real input to `resolveContradictions`: reinstating a fact whose rival is gone restores `pinned`
+    // when the fact was pinned before it was contested, and `pinned` is what exempts a preference
+    // from time-decay. Omitting the column made every reinstatement in the hint path land on
+    // `active`.
+    //
+    // No assertion on `buildHintFormat`'s output can catch that today: the TGMEM line carries a kind
+    // tag, a freshness verdict, an id and a display string, and none of them encode trust level or
+    // pinned-ness -- `buildDisplay` renders an affirmed preference identically either way, and
+    // `hintFormat` drops only `withheld` results, never `hint` ones. The defect is therefore latent,
+    // and the only thing that can fail when someone adds a Fact field and forgets this SELECT is a
+    // check on the SELECT itself. If the wire format ever exposes trust, replace this with the
+    // behavioural test that then becomes possible.
+    expect(select).toContain("prior_status");
   });
 });

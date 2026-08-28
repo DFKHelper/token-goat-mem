@@ -65,7 +65,7 @@ import {
   type WiringResult,
 } from "./wiring.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
-import { isDecayedBelowGroundTruth, retrieve, type RetrievalOptions } from "./retrieval.js";
+import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, type RetrievalOptions } from "./retrieval.js";
 import {
   countFacts,
   deleteFact,
@@ -85,6 +85,18 @@ const MS_PER_DAY = 86_400_000;
 
 /** Default cap on `mem list` output when `--limit` is not given -- see the module doc comment on `retrieve()`'s own `DEFAULT_RECALL_LIMIT` in retrieval.ts for the recall-side analog. */
 const DEFAULT_LIST_LIMIT = 20;
+
+/**
+ * How much of a fact id `mem recall` prints ahead of each result line.
+ *
+ * Recall's footer says `mem show <id> for detail`, but the 0.2.2 change that replaced the per-line
+ * CTA with one shared footer also removed the only place an id was ever printed -- leaving the
+ * footer instructing the user to use something the command never showed them. Eight hex characters
+ * is the same git-style prefix `resolveFactIdOrPrefix` already resolves, so the printed handle is
+ * directly pasteable; an ambiguous prefix is reported by that resolver with its candidates rather
+ * than silently resolving to the wrong fact.
+ */
+const RECALL_SHORT_ID_LENGTH = 8;
 
 // ─────────────────────────────────────────────────────────────────────────── Exit-code contract ───────────────────────────────────────────────────────────────────────────
 
@@ -584,7 +596,13 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
   // only active/pinned meant a fact `mem epoch --gc` had already marked contested vanished from the
   // one bucket that exists to surface it: `mem review --summary` reported `contested: 0` while
   // `mem recall` was still withholding that fact as contested, and `--promote` refused to touch it.
-  const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"], ...epochFilter });
+  //
+  // The epoch window is deliberately NOT applied here. `detectContradictions` decides by comparing
+  // rivals, so a pool narrowed to one epoch reports a survivor whose rival fell outside the window as
+  // uncontested -- `mem review --since-epoch N` would call clean exactly the fact `mem recall` is
+  // still withholding. The window narrows what the user is asked to review, not what the detector is
+  // allowed to see, so it is applied to the derived buckets at display time instead.
+  const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"] });
 
   const { groups } = detectContradictions(detectionPool);
   const contestedIds = new Set(groups.filter((group) => group.resolution === "contested").flatMap((group) => group.factIds));
@@ -595,8 +613,14 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
   const contestedShownIds = new Set(contested.map((fact) => fact.id));
   const groundTruth = detectionPool.filter((fact) => !contestedShownIds.has(fact.id));
 
+  // `anchorRootFor`, not the bare caller root: a project-scoped fact carries the root its anchor is
+  // meaningful relative to, and evaluating it against wherever `mem review` happened to be run
+  // resolves the predicate inside an unrelated checkout. That produced a confident `contradicted`
+  // for a perfectly valid fact -- listed here, under the one heading that invites the user to forget
+  // it, while `mem recall` simultaneously affirmed the same fact. Retrieval has resolved roots this
+  // way since the scope_root fix; review is the path that fix did not reach.
   const contradicted = groundTruth.filter(
-    (fact) => !contestedIds.has(fact.id) && evaluateAnchor(fact.anchor, root) === "contradicted"
+    (fact) => !contestedIds.has(fact.id) && evaluateAnchor(fact.anchor, anchorRootFor(fact, root)) === "contradicted"
   );
 
   const now = Date.now();
@@ -621,7 +645,17 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
       mentionsAnchorableTarget(fact.text)
   );
 
-  const buckets: Record<ReviewSection, readonly Fact[]> = { pending, contested, contradicted, pins: pinsDue, unanchored };
+  // `pending` is already narrowed at its own query and takes no part in contradiction detection, so
+  // it needs no second pass; every other bucket is derived from the unfiltered detection pool and is
+  // narrowed here.
+  const withinEpoch = (fact: Fact): boolean => options.sinceEpoch === undefined || (fact.epoch ?? 0) > options.sinceEpoch;
+  const buckets: Record<ReviewSection, readonly Fact[]> = {
+    pending,
+    contested: contested.filter(withinEpoch),
+    contradicted: contradicted.filter(withinEpoch),
+    pins: pinsDue.filter(withinEpoch),
+    unanchored: unanchored.filter(withinEpoch),
+  };
   const shown: readonly ReviewSection[] = options.section !== undefined ? [options.section] : REVIEW_SECTIONS;
 
   if (options.summary === true) {
@@ -1033,9 +1067,13 @@ export function buildProgram(): Command {
         }
 
         const root = resolveRoot(options.root);
-        const facts = await withDb((db) =>
-          listFacts(db, options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { epochAfter: options.sinceEpoch } : {})
-        );
+        // The whole store, unfiltered. `--since-epoch` is deliberately NOT applied here: `retrieve`
+        // resolves contradictions across its entire input pool before any filter runs, and a
+        // pre-filtered pool is a partial one -- the reinstatement pass then reads a rival's absence
+        // as "nothing left to contest this" and un-contests the survivor. Narrowing in SQL therefore
+        // surfaced a genuinely contested fact as clean ground truth. The bound now rides in
+        // `RetrievalOptions.epochAfter` with every other filter, applied after resolution.
+        const facts = await withDb((db) => listFacts(db, {}));
         const retrievalOptions: RetrievalOptions = {
           query: query ?? "",
           root,
@@ -1044,6 +1082,7 @@ export function buildProgram(): Command {
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
           ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
+          ...(options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { epochAfter: options.sinceEpoch } : {}),
           ...(hintStyle !== "full" ? { hintStyle } : {}),
           // Default (full) output drops the per-line CTA in favor of one shared trailing footer
           // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
@@ -1061,7 +1100,7 @@ export function buildProgram(): Command {
         // deterministic id order instead of the default relevance/recency order.
         const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
         for (const result of ordered) {
-          process.stdout.write(`${result.display}\n`);
+          process.stdout.write(`${result.fact.id.slice(0, RECALL_SHORT_ID_LENGTH)}  ${result.display}\n`);
         }
         if (hintStyle !== "terse") {
           process.stdout.write("mem show <id> for detail; mem review to resolve contested/pending\n");
@@ -1126,7 +1165,7 @@ export function buildProgram(): Command {
   program
     .command("show <id>")
     .description("Show one fact in full, including provenance and anchor freshness")
-    .option("--root <path>", "Project root for anchor freshness evaluation (default: fact's scope root, then current directory)")
+    .option("--root <path>", "Project root for anchor freshness evaluation (default: a project-scoped fact's own scope root, else the current directory)")
     .option(
       "--json",
       "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Includes freshness and sources, unlike mem export/mem list --json."
@@ -1135,7 +1174,13 @@ export function buildProgram(): Command {
       guard(async (id: string, options: ShowCliOptions) => {
         const output = await withDb((db) => {
           const fact = resolveIdArgOrThrow(db, id);
-          const root = resolveRoot(options.root ?? fact.scopeRoot ?? undefined);
+          // `anchorRootFor` rather than a bare `?? fact.scopeRoot` fallback. `scopeRoot` is documented
+          // as an absolute project root only for `scope="project"`; for `scope="path"` it holds a
+          // file, and handing a file path to an anchor predicate as its root is (in retrieval.ts's
+          // own words) strictly worse than the status quo. The old fallback did exactly that, so
+          // `mem show` and `mem recall` could report different freshness for the same fact -- on the
+          // surface the recall footer points the user to for detail.
+          const root = anchorRootFor(fact, resolveRoot(options.root));
           const freshness = evaluateAnchor(fact.anchor, root);
           const sources = listSourcesForFact(db, fact.id);
           if (options.json === true) {

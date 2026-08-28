@@ -660,3 +660,22 @@ describe("writeManagedFile leaves no temp file behind when the rename fails", ()
     expect(tempSiblings(target)).toEqual([]);
   });
 });
+
+describe("regression: installed keybindings do not shadow VS Code defaults", () => {
+  it("binds chords rather than ctrl+shift+m / ctrl+shift+n", () => {
+    copilotVscode.install({ root, homeDir: home });
+    const keybindings = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<{ key: string }>;
+    const keys = keybindings.map((binding) => binding.key);
+
+    // Both originals were live VS Code defaults: ctrl+shift+m toggles the Problems panel and
+    // ctrl+shift+n opens a new window. A later entry in keybindings.json wins, so installing mem
+    // silently took both away from every user who ran `mem init copilot-vscode` -- a wiring command
+    // is expected to add capability, not remove two bindings the user never mentioned.
+    expect(keys).not.toContain("ctrl+shift+m");
+    expect(keys).not.toContain("ctrl+shift+n");
+
+    // `ctrl+k` is VS Code's conventional chord prefix: a second keystroke follows, so the binding
+    // reads as an extension's rather than a hijacked default, and collides with far less.
+    expect(keys.every((key) => key.startsWith("ctrl+k "))).toBe(true);
+  });
+});

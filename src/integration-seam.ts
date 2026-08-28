@@ -290,6 +290,7 @@ interface RawFactRow {
   readonly anchor: string | null;
   readonly status: Fact["status"];
   readonly confidence: number;
+  readonly prior_status: Fact["status"] | null;
 }
 
 function queryAllFacts(db: ReturnType<typeof openStorage>): Fact[] {
@@ -298,8 +299,13 @@ function queryAllFacts(db: ReturnType<typeof openStorage>): Fact[] {
       [],
       RawFactRow
     >(
+      // `prior_status` is not decoration here: `resolveContradictions` reinstates a fact whose rival
+      // is gone and restores `prior_status` when that fact was `pinned` before it was contested.
+      // Selecting without the column made every reinstatement in the hint path land on `active`,
+      // quietly stripping a pinned fact of its decay exemption on the one surface another tool
+      // consumes programmatically.
       `SELECT id, text, kind, subject, value, scope, scope_root as scopeRoot, source_type, source_ref,
-              captured_at, anchor, status, confidence
+              captured_at, anchor, status, confidence, prior_status
        FROM facts`
     )
     .all();
@@ -321,6 +327,7 @@ function toFact(row: RawFactRow): Fact {
     anchor: row.anchor,
     status: row.status,
     confidence: row.confidence,
+    prior_status: row.prior_status,
     embedding: null,
   };
 }

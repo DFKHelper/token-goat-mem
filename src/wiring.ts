@@ -789,15 +789,27 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
   return anyChanged ? text : current;
 }
 
+/**
+ * Both bindings are `ctrl+k` chords rather than plain `ctrl+shift` combinations.
+ *
+ * The previous `ctrl+shift+m` and `ctrl+shift+n` shadowed two VS Code defaults -- View: Problems and
+ * New Window -- so installing mem silently took over shortcuts the user already had muscle memory
+ * for, and the only signal was the built-in quietly not working any more. `ctrl+k` is VS Code's
+ * conventional chord prefix for exactly this reason: a second keystroke follows, so a chord collides
+ * with far less and reads as an extension binding rather than a hijacked default.
+ *
+ * `mem uninstall` removes these by their stamp, so a user who already installed the old bindings
+ * gets them replaced on the next `mem init` rather than accumulating both.
+ */
 const VSCODE_KEYBINDINGS: ReadonlyArray<Record<string, unknown>> = [
   {
-    key: "ctrl+shift+m",
+    key: "ctrl+k m",
     command: "workbench.action.terminal.sendSequence",
     args: { text: "mem recall --hint-format --root .\r" },
     [STAMP_KEY]: true,
   },
   {
-    key: "ctrl+shift+n",
+    key: "ctrl+k r",
     command: "workbench.action.terminal.sendSequence",
     args: { text: 'mem remember "" --kind preference ' },
     [STAMP_KEY]: true,

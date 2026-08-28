@@ -69,6 +69,18 @@ export interface RetrievalOptions {
   readonly scope?: FactScope;
   /** Exclude facts captured more than this many days ago. */
   readonly ageDays?: number;
+  /**
+   * Exclusive lower bound on `Fact.epoch` -- the backing filter for `mem recall --since-epoch <n>`.
+   *
+   * Deliberately applied here rather than in the caller's SQL. `retrieve` resolves contradictions
+   * across its whole input pool *before* any filter runs, so a pre-filtered pool is a partial pool --
+   * and `resolveContradictions`'s reinstatement pass reads the absence of a rival as "nothing is left
+   * to contest this fact" and un-contests it. Filtering by epoch in SQL therefore let a genuinely
+   * contested fact whose rival fell outside the epoch window surface as ordinary ground truth,
+   * silently defeating the withholding gate. Every other filter already lives here for this reason;
+   * epoch was the lone outlier because it was the only one the caller could express in SQL.
+   */
+  readonly epochAfter?: number;
   /** Cap on the number of results returned, applied after ranking and gating. */
   readonly limit?: number;
   /** When true, drop every `trust === "withheld"` result (contested/pending/anchor-contradicted) — the `--hint-format` contract (Section 4). */
@@ -439,7 +451,7 @@ function normalizeSubjectForFilter(subject: string): string {
  * caller's root remains the only root available, and using a file path as an anchor root would be
  * strictly worse than the status quo.
  */
-function anchorRootFor(fact: Fact, queryRoot: string): string {
+export function anchorRootFor(fact: Fact, queryRoot: string): string {
   if (fact.scope === "project" && typeof fact.scopeRoot === "string" && fact.scopeRoot.trim().length > 0) {
     return fact.scopeRoot;
   }
@@ -461,6 +473,11 @@ function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boole
     if (!Number.isFinite(ageDays) || ageDays > options.ageDays) {
       return false;
     }
+  }
+  // `epoch` is optional on Fact (types.ts): an absent value means "predates the epoch column" and is
+  // treated as 0, so a legacy row is excluded by any positive bound rather than silently included.
+  if (options.epochAfter !== undefined && (fact.epoch ?? 0) <= options.epochAfter) {
+    return false;
   }
   return true;
 }
