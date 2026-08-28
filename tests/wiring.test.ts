@@ -686,7 +686,7 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
     const doc = readFileSync(new URL("../docs/integrations/copilot-vscode.md", import.meta.url), "utf8");
     const afterHeading = doc.slice(doc.indexOf(heading));
     expect(afterHeading).not.toBe("");
-    const fence = /```json\n([\s\S]*?)\n```/u.exec(afterHeading);
+    const fence = /```json\r?\n([\s\S]*?)\r?\n```/u.exec(afterHeading);
     expect(fence?.[1]).toBeDefined();
     return JSON.parse(fence?.[1] ?? "");
   }
