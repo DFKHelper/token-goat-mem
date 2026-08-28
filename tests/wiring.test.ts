@@ -707,4 +707,22 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
     // asserts it directly rather than restating either side's literal values.
     expect(withoutStamp).toEqual(docJsonBlock("## Keybindings for quick memory"));
   });
+
+  it("documents the same tasks and input the installer writes", () => {
+    copilotVscode.install({ root, homeDir: home });
+    const installed = JSON.parse(read(join(root, ".vscode", "tasks.json"))) as {
+      readonly version: string;
+      readonly tasks: ReadonlyArray<Record<string, unknown>>;
+      readonly inputs: ReadonlyArray<Record<string, unknown>>;
+    };
+
+    const documented = docJsonBlock("## VS Code tasks") as typeof installed;
+
+    // Same invariant as the keybindings above, on the other half of what the doc tells a user to
+    // write by hand. This block was in sync when the test was added -- it is here to keep it that
+    // way, since the keybindings only drifted because nothing was watching.
+    expect(installed.version).toEqual(documented.version);
+    expect(installed.tasks.map(({ __token_goat_mem: _stamp, ...rest }) => rest)).toEqual(documented.tasks);
+    expect(installed.inputs.map(({ __token_goat_mem: _stamp, ...rest }) => rest)).toEqual(documented.inputs);
+  });
 });
