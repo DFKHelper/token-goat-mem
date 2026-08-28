@@ -6,7 +6,7 @@
  * project files.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -544,6 +544,27 @@ describe("describe() (dry-run plan)", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────── writeManagedFile: atomic write + retry ───────────────────────────────────────────────────────────────────────────
+
+describe("writeManagedFile permissions", () => {
+  /**
+   * A temp-file-plus-rename write replaces the inode rather than updating it, so without explicit
+   * mode preservation the replacement carries whatever the umask gave it. For a managed file the
+   * user deliberately restricted -- a `~/.claude/settings.json` at 0600 holding API configuration --
+   * that turns "add a mem block" into "make this world-readable". POSIX-only: on Windows `chmod`
+   * carries no read-permission meaning and the ACL is what protects the file.
+   */
+  it.skipIf(process.platform === "win32")("preserves a restrictive mode across the atomic replace", () => {
+    const target = join(root, "settings.json");
+    writeFileSync(target, "original\n", "utf8");
+    chmodSync(target, 0o600);
+
+    const change = writeManagedFile({ path: target, transform: (before) => `${before ?? ""}appended\n` });
+
+    expect(change.action).toBe("update");
+    expect(readFileSync(target, "utf8")).toContain("appended");
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+});
 
 describe("writeManagedFile", () => {
   it("writes new content and reports create/update correctly", () => {

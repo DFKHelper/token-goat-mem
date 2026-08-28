@@ -43,7 +43,7 @@ The following are not treated as security issues unless paired with a working pr
 
 ## Known advisories
 
-`npm audit` currently reports advisories in dev-only transitive dependencies (the esbuild/vite/vitest toolchain). These affect the local dev server only; none of the packages are runtime dependencies or present in the shipped `dist/token-goat-mem.mjs` bundle. Details and status are tracked in [CONTRIBUTING.md](CONTRIBUTING.md#known-dev-dependency-advisories).
+`npm audit` reports no advisories, across both runtime and dev dependencies. The five dev-only advisories that previously affected the esbuild/vite/vitest toolchain were cleared in 0.2.2; history and the reasoning behind the upgrade are in [CONTRIBUTING.md](CONTRIBUTING.md#known-dev-dependency-advisories).
 
 ## License
 
