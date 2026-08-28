@@ -48,3 +48,14 @@ One-directional, pull-based, stateless function call. `token-goat` optionally ca
 ### Reference
 
 Shared agent conventions (commands, data model, integration seam) live in [AGENTS.md](AGENTS.md); this file adds only Claude-Code-specific guidance. For full design reasoning, adversarial review findings, and open questions, consult the memory-companion design plan (kept outside this repository).
+
+<!-- token-goat-mem:claude-code:start -->
+## Memory
+
+This machine has token-goat-mem installed. Do not wait to be asked to run
+`mem remember` — when I say things like "remember that...", "always...",
+"from now on...", "never...", "don't...", or otherwise state a durable
+preference, decision, or correction, persist it yourself, right then:
+`mem remember "<short fact>" --kind preference|decision|fact|correction --scope project --root .`
+Use --subject/--value for anything that can be contradicted later.
+<!-- token-goat-mem:claude-code:end -->
