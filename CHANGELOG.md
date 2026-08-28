@@ -2,6 +2,23 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [0.2.5] - 2026-08-28
+
+Documentation and CI only -- no runtime change. `mem` behaves identically to 0.2.4.
+
+### Fixed
+
+- **The README no longer contradicts itself about installation** -- it carried two install sections, one saying `npm install -g token-goat-mem` and one saying "Not yet published to npm -- install from source". The claim was written at v0.1.0 when it was true; 0.2.0 updated the block at the top of the file and missed the `## Install` section further down, so the file has told readers both things at once through every release since. The duplication was the cause, so it is gone: `## Install` is now the single place carrying the npm command, the from-source steps, requirements and verification, and the top of the README is a one-line quick start that links to it. Published packages snapshot the README at publish time, so npmjs.com showed the stale text until this release.
+- **The copilot-vscode integration doc documented the keybindings 0.2.4 replaced** -- that release moved `ctrl+shift+m`/`ctrl+shift+n` to the chords `ctrl+k m`/`ctrl+k r` because the originals shadowed View: Problems and New Window, but only `src/wiring.ts` was updated. The doc presents itself as "what `mem init copilot-vscode` writes, if you'd rather do it by hand", so anyone following it installed by hand the exact two shadowing bindings the release had just removed.
+
+### Added
+
+- **A test asserting that integration doc matches what the installer actually writes** -- the keybinding drift above shipped with a green suite, because the regression test for it compared code against code and nothing looked at the documentation. The new test installs into a temp fixture and deep-compares the result against the fenced JSON blocks in the doc, covering both the keybindings and the tasks/input block, so the doc's own promise is the assertion rather than a third restatement of the values. Verified against the real drift: with the doc reverted to its 0.2.4 state, it fails with the exact `ctrl+shift+m` to `ctrl+k m` diff.
+
+### Changed
+
+- **CI moved `actions/checkout` and `actions/setup-node` from v4 to v7** -- the v4 actions target Node 20, which the runners now force onto Node 24. The breaking changes across the two intervening majors were checked against this workflow: setup-node v5's automatic caching activates only on a `packageManager` field, which this package does not have, and `registry-url`/`NODE_AUTH_TOKEN` (which the publish step depends on) are unchanged throughout. `node-version: 20` is untouched -- it selects the Node that builds the package, not the action runtime the deprecation concerns.
+
 ## [0.2.4] - 2026-08-28
 
 ### Fixed
