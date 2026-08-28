@@ -61,6 +61,17 @@ const MAX_CONTENT_READ_BYTES = 1_000_000;
 /** Cap on directory entries scanned for `glob-exists` — mirrors token-goat's bounded-walk precedent (S4). */
 const MAX_GLOB_ENTRIES_SCANNED = 20_000;
 
+/**
+ * Cap on bytes read for `.git/index`. Generous on purpose — a 100k-file working tree indexes at
+ * roughly 10 MB, so this bounds a pathological or adversarial file without rejecting a real repo.
+ * Enforced by `statSync` before `readFileSync`, since `MAX_GIT_INDEX_ENTRIES` can only be checked
+ * after the whole file is already resident.
+ */
+const MAX_GIT_INDEX_READ_BYTES = 32_000_000;
+
+/** Cap on bytes read for a `.git` *file*: a `gitdir:` pointer is one short line, never kilobytes. */
+const MAX_GIT_DIR_POINTER_BYTES = 4_096;
+
 /** Sanity bound on `.git/index` entry count — guards against a corrupt/hostile header, not real repos. */
 const MAX_GIT_INDEX_ENTRIES = 2_000_000;
 
@@ -124,6 +135,21 @@ function resolveWithinRoot(root: string, pathArg: string): string | null {
     return candidate;
   }
   return null;
+}
+
+/**
+ * Returns `true` if `path` is itself a symlink. Unlike {@link containsSymlink} this checks the single
+ * final component and takes no root, so it is usable on the `.git` machinery — whose resolved
+ * location is legitimately outside `root` for submodules and worktrees, and therefore cannot be
+ * root-contained without breaking them. Refusing a symlink is the containment that *is* available
+ * there: it stops a planted `.git` from redirecting a read, while leaving every real layout working.
+ */
+function isSymlink(path: string): boolean {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 /** Returns the file's mtime in ms, or `null` if it does not exist / cannot be stat'd. */
@@ -494,6 +520,12 @@ function evaluateGlobExists(
  */
 function resolveGitDirUncached(root: string): string | null {
   const dotGitPath = join(root, ".git");
+  // A symlinked `.git` would let anything that can write inside `root` redirect every subsequent
+  // `HEAD`/`index` read at a path of its choosing. `statSync` follows the link, so the refusal has to
+  // come first. Yields "unverified", never a fabricated verdict — matching `existsFile`'s stance.
+  if (isSymlink(dotGitPath)) {
+    return null;
+  }
   let stat;
   try {
     stat = statSync(dotGitPath);
@@ -503,7 +535,7 @@ function resolveGitDirUncached(root: string): string | null {
   if (stat.isDirectory()) {
     return dotGitPath;
   }
-  if (!stat.isFile()) {
+  if (!stat.isFile() || stat.size > MAX_GIT_DIR_POINTER_BYTES) {
     return null;
   }
   let content: string;
@@ -518,6 +550,9 @@ function resolveGitDirUncached(root: string): string | null {
     return null;
   }
   const gitDir = isAbsolute(pointer) ? resolve(pointer) : resolve(root, pointer);
+  if (isSymlink(gitDir)) {
+    return null;
+  }
   try {
     return statSync(gitDir).isDirectory() ? gitDir : null;
   } catch {
@@ -546,9 +581,13 @@ function evaluateGitBranchIs(root: string, branch: string): AnchorVerdict {
   if (gitDir === null) {
     return "unverified";
   }
+  const headPath = join(gitDir, "HEAD");
+  if (isSymlink(headPath)) {
+    return "unverified";
+  }
   let head: string;
   try {
-    head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
+    head = readFileSync(headPath, "utf8").trim();
   } catch {
     return "unverified";
   }
@@ -570,11 +609,23 @@ function evaluateGitBranchIs(root: string, branch: string): AnchorVerdict {
  */
 function readGitIndexPathsUncached(gitDir: string): Set<string> | null {
   const indexPath = join(gitDir, "index");
+  if (isSymlink(indexPath)) {
+    return null;
+  }
+  let size: number;
+  try {
+    size = statSync(indexPath).size;
+  } catch {
+    // No index file yet (freshly initialized, empty repo) — correctly "nothing tracked", not an error.
+    return new Set();
+  }
+  if (size > MAX_GIT_INDEX_READ_BYTES) {
+    return null;
+  }
   let buf: Buffer;
   try {
     buf = readFileSync(indexPath);
   } catch {
-    // No index file yet (freshly initialized, empty repo) — correctly "nothing tracked", not an error.
     return new Set();
   }
   if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "DIRC") {

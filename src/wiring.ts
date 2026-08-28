@@ -36,7 +36,7 @@
  * content.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { applyEdits, modify, parse as parseJsonc, type JSONPath, type ModificationOptions } from "jsonc-parser";
@@ -99,6 +99,26 @@ interface FileOp {
   readonly transform: FileTransform;
 }
 
+/**
+ * The permission bits of an existing file, or `null` on Windows or if it cannot be stat'd.
+ *
+ * A temp-file-plus-rename write does not update a file in place -- it replaces the inode -- so
+ * without this the new file carries whatever the umask gave it. For a managed file the user
+ * deliberately restricted (a `~/.claude/settings.json` at 0600, say), that silently *widens* the
+ * permissions of a file mem was only asked to add a block to. Windows is excluded for the same
+ * reason as in `db.ts`: `chmod` there carries no read permission meaning.
+ */
+function existingMode(filePath: string): number | null {
+  if (process.platform === "win32") {
+    return null;
+  }
+  try {
+    return statSync(filePath).mode & 0o777;
+  } catch {
+    return null;
+  }
+}
+
 function backupIfNeeded(filePath: string): void {
   const bakPath = `${filePath}.token-goat-mem.bak`;
   if (!existsSync(bakPath)) {
@@ -130,6 +150,7 @@ export function writeManagedFile(op: FileOp): WiringChange {
   }
 
   const existedBefore = before !== undefined;
+  const preservedMode = existingMode(op.path);
   mkdirSync(dirname(op.path), { recursive: true });
   const tmpPath = `${op.path}.token-goat-mem.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   // The temp file is an implementation detail of the atomic write, so it must not survive a failure
@@ -137,6 +158,9 @@ export function writeManagedFile(op: FileOp): WiringChange {
   // success path the rename has already consumed it and the unlink is an expected no-op.
   try {
     writeFileSync(tmpPath, after, "utf8");
+    if (preservedMode !== null) {
+      chmodSync(tmpPath, preservedMode);
+    }
     renameSync(tmpPath, op.path);
   } finally {
     try {

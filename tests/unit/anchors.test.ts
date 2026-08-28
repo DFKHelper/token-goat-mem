@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -241,5 +241,85 @@ describe("clearAnchorCaches", () => {
 
     clearAnchorCaches();
     expect(evaluateAnchor("file-exists present.txt", root)).toBe("contradicted");
+  });
+});
+
+/**
+ * The `.git` machinery is the one part of anchor evaluation that cannot be root-contained --
+ * submodules and worktrees legitimately point their gitdir outside the working tree, so
+ * `resolveWithinRoot` would break real repositories. Symlink refusal is the containment that *is*
+ * available there, and a size cap is what keeps an adversarial `index` from being read whole.
+ *
+ * Symlink creation needs SeCreateSymbolicLinkPrivilege on Windows, so those cases are POSIX-only.
+ */
+describe("git anchors: untrusted .git machinery", () => {
+  const isWindows = process.platform === "win32";
+
+  it.skipIf(isWindows)("refuses a symlinked .git rather than following it to another repository", () => {
+    // A real repository somewhere else on disk, standing in for whatever a planted link would target.
+    const elsewhere = mkdtempSync(join(tmpdir(), "mem-anchors-elsewhere-"));
+    try {
+      runGit(["init", "--initial-branch=main"], elsewhere);
+      // Sanity: read directly, the branch is knowable -- so a later "unverified" is the refusal
+      // talking, not an unreadable fixture.
+      expect(evaluateAnchor("git-branch-is main", elsewhere)).toBe("affirmed");
+
+      symlinkSync(join(elsewhere, ".git"), join(root, ".git"), "dir");
+      clearAnchorCaches();
+      expect(evaluateAnchor("git-branch-is main", root)).toBe("unverified");
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(isWindows)("refuses a .git file whose gitdir: pointer resolves to a symlink", () => {
+    const elsewhere = mkdtempSync(join(tmpdir(), "mem-anchors-elsewhere-"));
+    try {
+      runGit(["init", "--initial-branch=main"], elsewhere);
+      const linkPath = join(root, "linked-gitdir");
+      symlinkSync(join(elsewhere, ".git"), linkPath, "dir");
+      writeFileSync(join(root, ".git"), `gitdir: ${linkPath}\n`);
+      clearAnchorCaches();
+      expect(evaluateAnchor("git-branch-is main", root)).toBe("unverified");
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a .git pointer file too large to be a gitdir: line", () => {
+    // A real gitdir the pointer resolves to, so the pre-cap behaviour is a genuine "affirmed" and the
+    // post-cap "unverified" can only be the size check talking.
+    const elsewhere = mkdtempSync(join(tmpdir(), "mem-anchors-gitdir-"));
+    try {
+      runGit(["init", "--initial-branch=main"], elsewhere);
+      const pointer = `gitdir: ${join(elsewhere, ".git")}\n`;
+      writeFileSync(join(root, ".git"), pointer);
+      clearAnchorCaches();
+      expect(evaluateAnchor("git-branch-is main", root)).toBe("affirmed");
+
+      // Same pointer, padded past the cap: a real pointer is one short line, so kilobytes of it is a
+      // file being used as something other than a gitdir pointer.
+      writeFileSync(join(root, ".git"), pointer + "x".repeat(8192));
+      clearAnchorCaches();
+      expect(evaluateAnchor("git-branch-is main", root)).toBe("unverified");
+    } finally {
+      rmSync(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an oversized .git/index instead of reading it whole into memory", () => {
+    runGit(["init", "--initial-branch=main"], root);
+    writeFileSync(join(root, "tracked.txt"), "content");
+    runGit(["add", "tracked.txt"], root);
+    clearAnchorCaches();
+    // A genuinely parseable index, so the assertion below is about size alone.
+    expect(evaluateAnchor("git-tracked tracked.txt", root)).toBe("affirmed");
+
+    // Extend past the cap. `truncate` grows sparsely and leaves the real entries at the front, so a
+    // parser that ignores the tail would still succeed -- only the pre-read size check stops it.
+    truncateSync(join(root, ".git", "index"), 33_000_000);
+    clearAnchorCaches();
+    // Nothing can be confidently reported as tracked, so the verdict is withheld, never fabricated.
+    expect(evaluateAnchor("git-tracked tracked.txt", root)).toBe("unverified");
   });
 });

@@ -99,6 +99,8 @@ mem epoch
 
 Everything is stored in a single SQLite database at `~/.mem/mem.db`. Set `TOKEN_GOAT_MEM_HOME` to relocate it (the test suite uses this to isolate itself from your real data). No network calls, ever.
 
+On POSIX systems the directory is created `0700` and the database `0600`, so the store is readable only by you even on a shared machine -- and an existing home created by an earlier version is tightened on the next run. Windows relies on the ACL `~/.mem` inherits from your user profile, which restricts it the same way.
+
 ## CLI
 
 | Command | What it does |

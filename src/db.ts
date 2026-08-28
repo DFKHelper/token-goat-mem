@@ -18,11 +18,44 @@
 
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 const DB_FILE_NAME = "mem.db";
+
+/**
+ * Permissions mem forces on its own home directory and database file on POSIX systems.
+ *
+ * Facts are exactly the class of data that must not be world-readable: project internals, decisions,
+ * and whatever personal detail survived capture-time secret screening (which targets credentials, not
+ * PII). Left to a default umask of 022 the directory would be 0755 and the database 0644 -- readable
+ * by every local account on a shared host -- so the mode is stated here rather than inherited.
+ *
+ * Windows is excluded deliberately: `chmod` there only toggles the read-only bit and would say
+ * nothing about who can read the file, while the profile ACL `~/.mem` inherits already restricts it
+ * to the owning user.
+ */
+const MEM_HOME_MODE = 0o700;
+const MEM_DB_MODE = 0o600;
+
+/**
+ * Tightens `path` to `mode`, or does nothing on Windows or if the chmod is refused.
+ *
+ * Best-effort by design: a database mem can open but cannot chmod (an unusual ownership or mount
+ * setup) is still a working database, and failing the whole CLI over a permission hardening step
+ * would trade a confidentiality improvement for an availability regression.
+ */
+function restrictPermissions(path: string, mode: number): void {
+  if (process.platform === "win32") {
+    return;
+  }
+  try {
+    chmodSync(path, mode);
+  } catch {
+    // Intentionally silent: see the doc comment above.
+  }
+}
 
 /**
  * Resolves mem's home directory. `TOKEN_GOAT_MEM_HOME` overrides the default
@@ -92,9 +125,21 @@ CREATE TABLE IF NOT EXISTS meta (
  * `.close()` when done.
  */
 export function openDb(dbPath: string = resolveDbPath()): Database.Database {
-  mkdirSync(dirname(dbPath), { recursive: true });
+  const home = dirname(dbPath);
+  // `mode` applies only when mkdir actually creates the directory, so an existing home -- including
+  // one created 0755 by an earlier version of mem -- is tightened explicitly on the next line.
+  mkdirSync(home, { recursive: true, mode: MEM_HOME_MODE });
+  restrictPermissions(home, MEM_HOME_MODE);
   const db = new Database(dbPath);
+  // Order matters: SQLite creates the `-wal` and `-shm` sidecars with the database file's own
+  // permissions, so the database has to already be 0600 when the WAL pragma runs or the sidecars --
+  // which hold the same fact rows -- are born world-readable.
+  restrictPermissions(dbPath, MEM_DB_MODE);
   db.pragma("journal_mode = WAL");
+  // Belt-and-braces: sidecar creation is SQLite-internal, and a confidentiality guarantee should not
+  // rest on an implementation detail of a dependency. Absent sidecars are a no-op here.
+  restrictPermissions(`${dbPath}-wal`, MEM_DB_MODE);
+  restrictPermissions(`${dbPath}-shm`, MEM_DB_MODE);
   db.exec(FACTS_SCHEMA);
   db.exec(AUDIT_LOG_SCHEMA);
   db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();

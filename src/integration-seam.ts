@@ -260,7 +260,15 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     ordered.sort((a, b) => a.fact.id.localeCompare(b.fact.id));
   }
 
-  const lines = ordered.map(formatLine);
+  const emittable = ordered.filter((result) => {
+    if (isWireSafeId(result.fact.id)) {
+      return true;
+    }
+    logWarning(`dropped a fact whose id is not wire-safe for the TGMEM line format: ${JSON.stringify(result.fact.id)}`);
+    return false;
+  });
+
+  const lines = emittable.map(formatLine);
   if (protocolVersion === 2 && lines.length > 0) {
     lines.push(TGMEM_FOOTER_LINE);
   }
@@ -343,6 +351,34 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
 
 function normalizePath(path: string): string {
   return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+/**
+ * Whether `id` can occupy the unquoted `id=` field without being able to forge a line.
+ *
+ * `display` is JSON-encoded, so a newline or quote inside it cannot break the consumer's parse.
+ * `id` cannot be given the same treatment: the consumer reads it back out as a bare token to hand to
+ * `mem show`, so quoting it would be a breaking change to the published TGMEM wire contract. The
+ * emitter guarantees the property structurally instead -- one run of characters containing no
+ * whitespace and no control character, which is exactly what "cannot forge a second line" means here.
+ *
+ * Every id mem itself writes is a `randomUUID`, and `import --from-json` validates imported ids
+ * against `ID_PREFIX_PATTERN`, so no supported path can produce an unsafe id. This is the emitter
+ * declining to trust a database it did not write: one from a pre-0.2.2 version, or edited by hand.
+ * Deliberately weaker than `ID_PREFIX_PATTERN`: addressability is storage's and import's boundary to
+ * enforce, and an id that is merely unusual should still surface rather than vanish silently.
+ */
+function isWireSafeId(id: string): boolean {
+  if (id.length === 0 || /\s/u.test(id)) {
+    return false;
+  }
+  for (const ch of id) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function formatLine(result: RetrievedFact): string {

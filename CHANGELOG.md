@@ -2,7 +2,19 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
-## [Unreleased]
+## [0.2.3] - 2026-08-27
+
+### Security
+
+- **The database and its home directory are no longer left to the umask** — `openDb` created `~/.mem` and `mem.db` with no explicit mode, so under a default umask of 022 they landed at 0755 and 0644: readable by every local account on a shared machine. Facts are exactly the data that must not be, since capture-time secret screening targets credentials and says nothing about the project internals and personal detail a fact legitimately contains. The home is now 0700 and the database 0600, applied before the WAL pragma runs so SQLite's `-wal`/`-shm` sidecars -- which hold the same rows -- inherit the restriction rather than the umask, and re-applied to an existing home so upgrading repairs a directory an earlier version created world-readable. Best-effort and POSIX-only: a chmod that is refused must not take the CLI down with it, and on Windows `chmod` toggles only the read-only bit while the profile ACL already restricts the file.
+- **The `.git` machinery is no longer followed through a symlink** — every other file-touching anchor refuses a symlink at any path component, but the git predicates were exempt: a symlinked `.git`, or a `.git` file whose `gitdir:` pointer resolved to a symlink, redirected the subsequent `HEAD` and `index` reads to a path of the link's choosing. Root-containment is not available here -- submodules and worktrees legitimately keep their gitdir outside the working tree, so enforcing it would break real repositories -- but symlink refusal is, and it costs nothing a real layout depends on. A refused link yields `unverified`, never a fabricated verdict.
+- **Both git reads are now size-capped before the read, not after** — `.git/index` was read whole into memory and only then checked against `MAX_GIT_INDEX_ENTRIES`, so the bound arrived after the allocation it was supposed to prevent; the `.git` pointer file had no bound at all. The index is now capped at 32 MB (a 100k-file tree indexes at roughly 10 MB, so no real repository is affected) and the pointer file at 4 KB, both from `statSync` before any `readFileSync`. Over the cap is `unverified`: the parse cannot be completed confidently, so no verdict is claimed.
+- **The TGMEM emitter no longer trusts a fact id it did not write** — a line puts `id` in an unquoted, whitespace-delimited field, so an id carrying a newline could forge an entire second line in the consumer's parse. `display` is JSON-encoded and immune; `id` cannot be quoted without breaking the published wire contract, so the emitter drops any id containing whitespace or a control character and logs it, leaving well-formed neighbours untouched. No supported write path produces such an id (mem writes a `randomUUID`, and `import --from-json` validates), which is precisely why the check belongs at the emitter: it is the boundary that reads a database another version, or a person, may have written.
+- **The atomic config write no longer widens a restrictive file's permissions** — `writeManagedFile` replaces the inode rather than updating it, so the replacement carried whatever the umask gave it. Adding mem's block to a `~/.claude/settings.json` the user had deliberately set to 0600 silently made it world-readable. The target's mode is now captured before the write and applied to the temp file before the rename.
+
+### Changed
+
+- **`SECURITY.md` no longer claims outstanding dev-dependency advisories** — those were cleared in 0.2.2 (esbuild 0.24 to 0.28, vitest 2 to 4); `npm audit` reports zero across prod and dev.
 
 ## [0.2.2] - 2026-08-27
 
