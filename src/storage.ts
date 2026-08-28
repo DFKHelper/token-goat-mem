@@ -231,9 +231,17 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       confidence,
       embeddingBlob,
       epoch,
-      // A fact's status clock starts when the fact does, so a freshly-pinned-on-capture fact is not
-      // instantly "due for re-confirmation" and a freshly-superseded import is not instantly GC-able.
-      capturedAt
+      // A fact's status clock starts when the fact does -- for an `active` fact those are the same
+      // moment, and starting at `capturedAt` keeps a freshly-pinned-on-capture fact from being
+      // instantly "due for re-confirmation".
+      //
+      // Any other status takes the current time instead, because `capturedAt` is caller-supplied and
+      // the import path backdates it. A superseded fact restored from a `mem export` written months
+      // ago arrived with its 90-day retention window already elapsed and was deleted by the very next
+      // `mem epoch --gc` -- silent data loss on the documented backup path. The envelope carries no
+      // status timestamp to restore (see exportImport.ts), so the honest clock start is when this
+      // store learned of the status, which is now.
+      status === "active" ? capturedAt : new Date().toISOString()
     );
   });
   // BEGIN IMMEDIATE, not the deferred default: this transaction reads (`bumpEpoch` -> `getEpoch`)
@@ -391,7 +399,12 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
 
   if (patch.text !== undefined) {
     sets.push("text = ?");
-    params.push(patch.text);
+    // Trimmed, matching capture.ts's write path (`validateCommonInput` stores `input.text.trim()`).
+    // `mem edit` validated the trimmed form but stored the raw one, so a value that only differed by
+    // surrounding whitespace became a distinct `value` to the contradiction detector -- two facts
+    // that agree, keyed as rivals, and on a captured_at/provenance tie marked `contested` and
+    // withheld from ground truth for disagreeing with themselves.
+    params.push(patch.text.trim());
   }
   if (patch.subject !== undefined) {
     sets.push("subject = ?");
@@ -399,7 +412,9 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
   }
   if (patch.value !== undefined) {
     sets.push("value = ?");
-    params.push(patch.value);
+    // Trimmed for the same reason as `text` above: `value` is half the contradiction key, so
+    // untrimmed input is the field where the whitespace asymmetry actually does damage.
+    params.push(patch.value === null ? null : patch.value.trim());
   }
   if (patch.scope !== undefined) {
     sets.push("scope = ?");

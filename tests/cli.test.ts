@@ -2043,3 +2043,196 @@ describe("regression: gc and the pin nudge measure age from `status_changed_at`,
     expect(after.stdout).not.toContain("pins due for re-confirmation");
   });
 });
+
+// --- regression: anchor roots resolve per fact, not per caller ---
+
+describe("regression: review and show resolve anchor roots the way recall does", () => {
+  it("does not list a valid project-scoped fact as contradicted when review runs from another project", async () => {
+    const projA = mkdtempSync(join(tmpdir(), "mem-proj-a-"));
+    const projB = mkdtempSync(join(tmpdir(), "mem-proj-b-"));
+    writeFileSync(join(projA, "package.json"), "{}\n");
+    try {
+      const db = openStorage(resolveDbPath());
+      insertFact(db, {
+        text: "this project has a package json manifest",
+        kind: "fact",
+        scope: "project",
+        scopeRoot: projA,
+        source_type: "user",
+        anchor: "file-exists package.json",
+      });
+      db.close();
+
+      // projB has no package.json. Evaluated against the caller's root, the predicate denies a fact
+      // that is perfectly valid in its own project, and files it under the one review heading whose
+      // whole purpose is to invite the user to forget what it lists.
+      const review = await runCli(["review", "--root", projB]);
+      expect(review.exitCode).toBe(0);
+      expect(review.stdout).not.toContain("this project has a package json manifest");
+
+      // ...while recall, from that same foreign root, affirms it. Two surfaces disagreeing about one
+      // fact is the defect; either verdict on its own could be argued for.
+      const recalled = await runCli(["recall", "package json manifest", "--root", projB]);
+      expect(recalled.stdout).toContain("this project has a package json manifest");
+    } finally {
+      rmSync(projA, { recursive: true, force: true });
+      rmSync(projB, { recursive: true, force: true });
+    }
+  });
+
+  it("does not use a path-scoped fact's file path as an anchor root in show", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-path-scope-"));
+    const notes = join(dir, "notes.txt");
+    writeFileSync(notes, "some notes\n");
+    try {
+      const db = openStorage(resolveDbPath());
+      const inserted = insertFact(db, {
+        text: "a fact scoped to one single file",
+        kind: "fact",
+        scope: "path",
+        scopeRoot: notes,
+        source_type: "user",
+        anchor: "file-exists package.json",
+      });
+      db.close();
+
+      // With no --root, the old `?? fact.scopeRoot` fallback took over, and for scope="path"
+      // scopeRoot is a *file*. Resolving a predicate beneath a file path can only fail, so show
+      // reported a confident contradiction that no other surface agreed with. The repo root this
+      // suite runs from does have a package.json, so the correct verdict here is affirmed.
+      const shown = await runCli(["show", inserted.id]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).not.toContain("freshness=contradicted");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- regression: --since-epoch is a display window, not a detection window ---
+
+describe("regression: --since-epoch cannot defeat the contested gate", () => {
+  /** Two facts, same subject and scope, different values, identical capture time and provenance: a genuine tie, which the detector resolves to `contested` and withholds rather than guessing a winner. The second fact gets the higher epoch, so `--since-epoch 1` keeps it and drops its rival. */
+  async function seedTiedPair(): Promise<void> {
+    const db = openStorage(resolveDbPath());
+    const capturedAt = new Date().toISOString();
+    for (const value of ["npm", "pnpm"]) {
+      insertFact(db, {
+        text: `the package manager for this repo is ${value}`,
+        kind: "decision",
+        subject: "package manager",
+        value,
+        scope: "global",
+        source_type: "user",
+        captured_at: capturedAt,
+      });
+    }
+    db.close();
+  }
+
+  it("keeps recall's contested annotation when the rival falls outside the epoch window", async () => {
+    await seedTiedPair();
+
+    // A tie is surfaced with a `(contested, ...)` annotation instead of a guessed winner. Assert on
+    // that annotation, not on the bare word "contested": recall's footer prints "mem review to
+    // resolve contested/pending" on every call, so the looser assertion passes vacuously and the
+    // first draft of this test did exactly that -- it passed against the unfixed code.
+    const plain = await runCli(["recall", "package manager"]);
+    expect(plain.stdout).toContain("(contested,");
+
+    // Filtering the pool in SQL left the survivor alone, and resolveContradictions' reinstatement
+    // pass reads "no rival present" as "nothing is left to contest this" and un-contests it -- so
+    // the epoch window silently promoted a withheld fact to ground truth. The filter now runs after
+    // contradiction resolution, over the whole store, like every other filter.
+    const filtered = await runCli(["recall", "package manager", "--since-epoch", "1"]);
+    expect(filtered.exitCode).toBe(0);
+    expect(filtered.stdout).toContain("(contested,");
+  });
+
+  it("keeps review's contested bucket populated when the rival falls outside the epoch window", async () => {
+    await seedTiedPair();
+
+    const plain = await runCli(["review", "--summary"]);
+    expect(plain.stdout).toContain("contested: 2");
+
+    // Same defect one function over: `formatReview` fed `detectContradictions` an epoch-filtered
+    // pool, so the surviving half of a tie was reported clean by the exact command whose job is to
+    // surface it -- while `mem recall` went on withholding it.
+    const filtered = await runCli(["review", "--summary", "--since-epoch", "1"]);
+    expect(filtered.exitCode).toBe(0);
+    expect(filtered.stdout).toContain("contested: 1");
+  });
+});
+
+// --- regression: recall prints an id its own footer can be followed with ---
+
+describe("regression: recall prints a usable fact id", () => {
+  it("prefixes each result with a short id that show actually resolves", async () => {
+    await runCli(["remember", "the footer says to run mem show for detail", "--kind", "fact"]);
+
+    const recalled = await runCli(["recall", "footer"]);
+    expect(recalled.stdout).toContain("mem show <id> for detail");
+
+    const shortId = (recalled.stdout.split("\n")[0] ?? "").split(/\s+/u)[0] ?? "";
+    // A git-style prefix: the exact shape `resolveFactIdOrPrefix` accepts, so the footer's own
+    // instruction is followable by copying what is on screen rather than by first running `mem list`
+    // to find an id the command that told you to use one declined to print.
+    expect(shortId).toMatch(/^[0-9a-f]{8}$/u);
+
+    const shown = await runCli(["show", shortId]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("the footer says to run mem show for detail");
+  });
+});
+
+// --- regression: a restored backup is not instantly garbage ---
+
+describe("regression: import --from-json does not restore facts that are already GC-expired", () => {
+  it("keeps a superseded fact restored from an old export instead of pruning it on the next gc", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-clock-"));
+    const envelopePath = join(dir, "backup.json");
+    const longAgo = new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString();
+    const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+    try {
+      writeFileSync(
+        envelopePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          exportedAt: new Date().toISOString(),
+          facts: [
+            {
+              id,
+              text: "an old fact superseded long before this backup was taken",
+              kind: "fact",
+              subject: null,
+              value: null,
+              scope: "global",
+              scopeRoot: null,
+              source_type: "user",
+              source_ref: null,
+              captured_at: longAgo,
+              anchor: null,
+              status: "superseded",
+              confidence: 1,
+              embedding: null,
+            },
+          ],
+        })
+      );
+
+      expect((await runCli(["import", "--from-json", envelopePath])).exitCode).toBe(0);
+      expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+
+      // The 90-day superseded retention window is measured from `status_changed_at`, and the export
+      // envelope carries no status timestamp to restore. Starting that clock at the envelope's
+      // backdated `captured_at` meant every restored superseded fact arrived with its window already
+      // elapsed and was destroyed by the first gc after the restore: silent data loss on the one
+      // path the docs recommend for backups.
+      const shown = await runCli(["show", id]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toContain("an old fact superseded long before this backup was taken");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

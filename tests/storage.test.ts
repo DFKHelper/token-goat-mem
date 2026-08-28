@@ -510,3 +510,17 @@ describe("status bookkeeping (status_changed_at / prior_status)", () => {
     expect(fact?.prior_status).toBeNull();
   });
 });
+
+describe("regression: updateFact trims the same fields insertFact trims", () => {
+  it("strips surrounding whitespace from an edited text and value", () => {
+    const fact = insertFact(db, baseFact({ subject: "package manager", value: "pnpm" }));
+    const updated = updateFact(db, fact.id, { text: "   uses yarn now   ", value: "  yarn  " });
+
+    // `insertFact` normalizes on the way in and `updateFact` did not, so the same content arrived
+    // trimmed or untrimmed depending on which door it came through. That is not cosmetic: `value`
+    // is half the contradiction key, so " yarn " and "yarn" are two different values to the
+    // detector, and an edit that should have superseded a rival silently failed to match it.
+    expect(updated?.text).toBe("uses yarn now");
+    expect(updated?.value).toBe("yarn");
+  });
+});
