@@ -83,20 +83,22 @@ Add to `keybindings.json` (Command Palette > "Preferences: Open Keyboard Shortcu
 ```json
 [
   {
-    "key": "ctrl+shift+m",
+    "key": "ctrl+k m",
     "command": "workbench.action.terminal.sendSequence",
     "args": { "text": "mem recall --hint-format --root .\u000d" }
   },
   {
-    "key": "ctrl+shift+n",
+    "key": "ctrl+k r",
     "command": "workbench.action.terminal.sendSequence",
     "args": { "text": "mem remember \"\" --kind preference " }
   }
 ]
 ```
 
-- **Ctrl+Shift+M** — runs recall immediately (the trailing `\u000d` is Enter)
-- **Ctrl+Shift+N** — types a `mem remember` skeleton into the terminal for you to complete
+- **Ctrl+K M** — runs recall immediately (the trailing `\u000d` is Enter)
+- **Ctrl+K R** — types a `mem remember` skeleton into the terminal for you to complete
+
+These are chords: press `Ctrl+K`, release, then the second key. `Ctrl+K` is VS Code's conventional prefix for extension bindings, so a chord collides with far less than a plain `Ctrl+Shift+<key>` would. Versions before 0.2.4 bound `Ctrl+Shift+M` and `Ctrl+Shift+N` directly, which shadowed the built-in View: Problems and New Window -- a later entry in `keybindings.json` wins, so those defaults silently stopped working. `mem init` replaces the old pair on its next run.
 
 ## How Copilot sees memory hints
 

@@ -19,16 +19,7 @@ npm install -g token-goat-mem
 mem --help
 ```
 
-**Or from source:**
-
-```
-git clone https://github.com/DFKHelper/token-goat-mem.git
-cd token-goat-mem
-npm install
-npm run build
-npm link
-mem --help
-```
+Building from source, requirements, and verifying the install: [Install](#install).
 
 [![PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)](LICENSE) ![requires Node.js](https://img.shields.io/badge/requires-Node.js%20%3E%3D18-339933?logo=node.js&logoColor=white)
 
@@ -74,7 +65,11 @@ The defining engineering problem is not *retrieval* — it is **correctness and 
 
 **Requirements:** Node.js 18 or later
 
-Not yet published to npm — install from source:
+```
+npm install -g token-goat-mem
+```
+
+Or from source:
 
 ```
 git clone https://github.com/DFKHelper/token-goat-mem.git
