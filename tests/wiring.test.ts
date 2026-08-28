@@ -679,3 +679,32 @@ describe("regression: installed keybindings do not shadow VS Code defaults", () 
     expect(keys.every((key) => key.startsWith("ctrl+k "))).toBe(true);
   });
 });
+
+describe("regression: the copilot-vscode doc matches what mem init actually writes", () => {
+  /** Extracts the first ```json fenced block appearing after `heading` in the integration doc. */
+  function docJsonBlock(heading: string): unknown {
+    const doc = readFileSync(new URL("../docs/integrations/copilot-vscode.md", import.meta.url), "utf8");
+    const afterHeading = doc.slice(doc.indexOf(heading));
+    expect(afterHeading).not.toBe("");
+    const fence = /```json\n([\s\S]*?)\n```/u.exec(afterHeading);
+    expect(fence?.[1]).toBeDefined();
+    return JSON.parse(fence?.[1] ?? "");
+  }
+
+  it("documents the same keybindings the installer writes", () => {
+    copilotVscode.install({ root, homeDir: home });
+    const installed = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<Record<string, unknown>>;
+
+    // The stamp is installer bookkeeping for reference-counted uninstall, not something a user
+    // hand-copying the doc would type, so it is not part of what the doc is expected to show.
+    const withoutStamp = installed.map(({ __token_goat_mem: _stamp, ...rest }) => rest);
+
+    // 0.2.4 changed these bindings from `ctrl+shift+m`/`ctrl+shift+n` (which shadowed View: Problems
+    // and New Window) to chords, and updated only src/wiring.ts. The suite stayed green because
+    // every existing test compared code against code, so the doc went on handing users by hand the
+    // exact two shadowing bindings the release had just removed. The doc's own promise -- "what
+    // `mem init copilot-vscode` writes, if you'd rather do it by hand" -- is the invariant, and this
+    // asserts it directly rather than restating either side's literal values.
+    expect(withoutStamp).toEqual(docJsonBlock("## Keybindings for quick memory"));
+  });
+});
