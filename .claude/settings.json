@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "mem recall --hint-format --root \"$CLAUDE_PROJECT_DIR\"",
+            "__token_goat_mem": true
+          }
+        ]
+      }
+    ]
+  }
+}
