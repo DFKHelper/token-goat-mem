@@ -766,14 +766,23 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
     expect(read(path)).toBe(CRLF_MD);
   });
 
-  it("restores a CRLF CLAUDE.md byte-for-byte even after an editor re-saves the installed file", () => {
-    // The realistic Windows sequence: mem installs, the user opens the file in an editor whose
-    // default ending is CRLF, and the save normalizes mem's own block too. Uninstall must still
-    // recognise its separator.
+  it("restores the file when an editor converts an LF-installed block to CRLF before uninstall", () => {
+    // The realistic Windows sequence: mem installs into an LF file, the user opens it in an editor
+    // whose default ending is CRLF, and the save converts the whole file -- mem's own block and its
+    // separator included. Uninstall has to recognise a separator it did not write.
+    //
+    // Seeded LF on purpose. Seeding CRLF makes the conversion below an identity transform, since
+    // install already writes CRLF into a CRLF file, and the test then silently restates the one
+    // above it.
+    const lfOriginal = CRLF_MD.replace(/\r\n/gu, "\n");
     const path = join(root, "CLAUDE.md");
-    seed(path, CRLF_MD);
+    seed(path, lfOriginal);
     claudeCode.install({ root, homeDir: home });
-    writeFileSync(path, read(path).replace(/\r?\n/gu, "\r\n"), "utf8");
+    expect(read(path)).not.toContain("\r");
+
+    const converted = read(path).replace(/\r?\n/gu, "\r\n");
+    writeFileSync(path, converted, "utf8");
+    expect(converted).toContain("\r\n");
 
     claudeCode.uninstall({ root, homeDir: home });
     expect(read(path)).toBe(CRLF_MD);
@@ -809,6 +818,44 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
 
     const after = read(path);
     expect(JSON.parse(after).hooks.SessionStart).toHaveLength(1);
+    expect(lfOnlyLineCount(after)).toBe(0);
+  });
+
+  it("restores a file that has no trailing newline", () => {
+    // Nothing forces a config file to end in a newline, and the separator install writes has to be
+    // removable without knowing whether the original ended in one. Padding the file up to a blank
+    // line makes "<text>\n\n" mean either an original "<text>" or an original "<text>\n", and
+    // uninstall then has to guess -- it guessed "<text>\n", so an unterminated file silently gained
+    // a newline on the first install/uninstall cycle.
+    const original = "# Notes\r\nno trailing newline here";
+    const path = join(root, "CLAUDE.md");
+    seed(path, original);
+    claudeCode.install({ root, homeDir: home });
+    expect(read(path)).toContain("token-goat-mem:claude-code:start");
+
+    claudeCode.uninstall({ root, homeDir: home });
+    expect(read(path)).toBe(original);
+  });
+
+  it("restores a whitespace-only file rather than swallowing its contents", () => {
+    // Blank-looking is not the same as absent: these bytes are the user's, and install treated any
+    // whitespace-only file as an empty one and dropped them.
+    const original = "\r\n";
+    const path = join(root, "CLAUDE.md");
+    seed(path, original);
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+
+    expect(read(path)).toBe(original);
+  });
+
+  it("keeps a CRLF keybindings.json CRLF, the other half of the JSONC path", () => {
+    const path = join(vscodeUserDir(home), "keybindings.json");
+    seed(path, '// my own bindings\r\n[\r\n  { "key": "ctrl+q", "command": "noop" }\r\n]\r\n');
+    copilotVscode.install({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("__token_goat_mem");
     expect(lfOnlyLineCount(after)).toBe(0);
   });
 

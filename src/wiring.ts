@@ -11,7 +11,7 @@
  *   is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` /
  *   `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install
  *   replaces everything between an existing pair (upgrade in place) or appends a new marked block at
- *   end of file; uninstall strips the marked block plus the one blank-line separator install adds,
+ *   end of file; uninstall strips the marked block plus the one separator newline install adds,
  *   leaving everything else untouched.
  * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, and `copilot-vscode`): all
  *   three tools want the same "## Memory" prose in the same file, so instead of near-duplicate
@@ -287,30 +287,44 @@ function withEol(text: string, eol: "\r\n" | "\n"): string {
   return eol === "\n" ? text.replace(/\r\n/gu, "\n") : text.replace(/\r?\n/gu, "\r\n");
 }
 
-/** Appends `block` to `content`, separated from any existing content by exactly one blank line, in whichever line ending `content` already uses. If `content` is blank (absent or whitespace-only), writes just the block (no leading separator). Shared by both the per-tool and reference-counted shared marker implementations. */
+/**
+ * Appends `block` to `content` in whichever line ending `content` already uses, adding exactly one
+ * newline between the two. Writes just the block when `content` is empty.
+ *
+ * The single newline is what makes the append invertible. A file that already ends in a newline gets
+ * the blank line you would expect; one that does not gets the block on the very next line instead,
+ * and `stripBlockSeparators` restores either by removing exactly one newline. Padding an
+ * unterminated file up to a blank line reads better but destroys information: the result `<text>\n\n`
+ * is then produced by both an original `<text>` and an original `<text>\n`, and uninstall has to
+ * guess. It used to guess `<text>\n`, so a file with no trailing newline silently gained one on the
+ * first install/uninstall cycle.
+ *
+ * Emptiness is tested by length, not by `trim()`: a whitespace-only file is the user's bytes, not an
+ * absent file, and treating the two alike dropped its contents on install.
+ */
 function appendBlock(content: string, block: string): string {
   const eol = detectEol(content);
   const eolBlock = withEol(block, eol);
-  if (content.trim().length === 0) {
+  if (content.length === 0) {
     return `${eolBlock}${eol}`;
   }
-  const base = content.endsWith("\n") ? content : `${content}${eol}`;
-  return `${base}${eol}${eolBlock}${eol}`;
+  return `${content}${eol}${eolBlock}${eol}`;
 }
 
-/** Removes the `[startIdx, blockEnd)` slice of `content` plus the one blank-line separator `appendBlock` adds, leaving the rest of the file untouched. Shared by both the per-tool and reference-counted shared marker implementations. */
+/** Removes the `[startIdx, blockEnd)` slice of `content` plus the one separator newline `appendBlock` adds, leaving the rest of the file untouched. Shared by both the per-tool and reference-counted shared marker implementations. */
 function stripBlockSeparators(content: string, startIdx: number, blockEnd: number): string {
   const before = content.slice(0, startIdx);
   const after = content.slice(blockEnd);
-  // Matched as a pattern rather than as the literal "\n\n": in a CRLF file the separator is
-  // "\r\n\r\n", which does not end with "\n\n", so a literal test silently left the blank line
-  // behind on every uninstall.
-  const beforeStripped = before.replace(/(\r?\n)\r?\n$/u, "$1");
+  // Removes exactly the one newline `appendBlock` inserted, in whichever ending the file uses --
+  // the inverse of that function, and the reason it inserts one newline rather than padding to a
+  // blank line. Matched as a pattern rather than as a literal, since a CRLF file's separator is
+  // "\r\n" and a literal "\n" test would leave the carriage return behind.
+  const beforeStripped = before.replace(/\r?\n$/u, "");
   const afterStripped = after.replace(/^\r?\n/u, "");
   return `${beforeStripped}${afterStripped}`;
 }
 
-/** Inserts/replaces a tool-namespaced marked block. Replaces everything between an existing marker pair in place (upgrade); otherwise appends a new marked block at end of file, separated from any existing content by exactly one blank line. */
+/** Inserts/replaces a tool-namespaced marked block. Replaces everything between an existing marker pair in place (upgrade); otherwise appends a new marked block at end of file, separated from any existing content by one newline. */
 function upsertMarkedBlock(content: string, tool: string, body: string): string {
   const start = markerStart(tool);
   const end = markerEnd(tool);
@@ -325,7 +339,7 @@ function upsertMarkedBlock(content: string, tool: string, body: string): string 
   return appendBlock(content, block);
 }
 
-/** Strips a tool-namespaced marked block plus the one blank-line separator `upsertMarkedBlock` adds, leaving the rest of the file untouched. No-op (returns `content` unchanged) if the marker pair isn't present. */
+/** Strips a tool-namespaced marked block plus the one separator newline `upsertMarkedBlock` adds, leaving the rest of the file untouched. No-op (returns `content` unchanged) if the marker pair isn't present. */
 function stripMarkedBlock(content: string, tool: string): string {
   const start = markerStart(tool);
   const end = markerEnd(tool);
@@ -441,7 +455,7 @@ function upsertSharedMarkedBlock(content: string, tool: string, body: string): s
 /**
  * Removes `thisTool` from the shared block's `tools=` list. If other tools remain listed, rewrites
  * only the marker line and leaves the block body in place. If `thisTool` was the only tool listed,
- * removes the whole block plus the one blank-line separator install adds (same rule as
+ * removes the whole block plus the one separator newline install adds (same rule as
  * `stripMarkedBlock`). No-op if the block doesn't exist or doesn't list `thisTool`.
  */
 function stripSharedMarkedBlock(content: string, tool: string): string {
