@@ -49,7 +49,7 @@ Every documented flag and example must match the real CLI. If you change a comma
 
 ## Known dev-dependency advisories
 
-`npm audit` currently reports 5 advisories, all in the dev-only esbuild/vite/vitest transitive chain (GHSA-67mh-4wv8-2f99 and its dependents). These affect the vite dev server's exposure only; none of these packages are runtime dependencies and none are present in the shipped `dist/token-goat-mem.mjs` bundle (built with esbuild at build time, not shipped). `npm audit fix` without `--force` resolves nothing; the `--force` path is a breaking major-version jump of the toolchain and is deliberately not applied. Tracked here until the toolchain is upgraded intentionally.
+`npm audit` reports zero advisories. It stayed at five dev-only ones in the esbuild/vite/vitest chain for several releases, on the reasoning that none of those packages are runtime dependencies and none reach the shipped `dist/token-goat-mem.mjs` bundle; the toolchain upgrade that cleared them (esbuild 0.24 to 0.28, vitest 2 to 4) has since landed. Keep it at zero: an advisory that is genuinely not worth fixing belongs here with its reasoning, not left unmentioned.
 
 Do not add, remove, or bump runtime dependencies (`dependencies` / `optionalDependencies`) as a side effect of unrelated work — the runtime surface is `better-sqlite3`, `commander`, `zod`, and optional `sqlite-vec`, and it is kept deliberately small.
 
