@@ -726,3 +726,101 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
     expect(installed.inputs.map(({ __token_goat_mem: _stamp, ...rest }) => rest)).toEqual(documented.inputs);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── CRLF-authored config files ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Every string this module generates is written with LF, but the files it edits belong to the user
+ * and on Windows are routinely CRLF -- that is the editor default, not an exotic case. Appending LF
+ * text to a CRLF file leaves it with mixed endings, and worse, the blank-line separator `install`
+ * inserts then no longer matches on the way out, so `uninstall` leaves a growing gap behind instead
+ * of restoring the file byte-for-byte as it advertises.
+ *
+ * These tests pin the file's own ending as the one mem writes in. They assert on exact bytes rather
+ * than on parsed structure, because the whole failure mode is invisible to a parser.
+ */
+describe("regression: config files authored with CRLF stay CRLF", () => {
+  const CRLF_MD = "# Project notes\r\n\r\nExisting guidance the user wrote.\r\n";
+
+  /** Counts LF line endings not preceded by CR -- i.e. lines mem wrote in the wrong ending. */
+  function lfOnlyLineCount(content: string): number {
+    return (content.match(/(?<!\r)\n/gu) ?? []).length;
+  }
+
+  it("does not mix LF lines into a CRLF CLAUDE.md on install", () => {
+    const path = join(root, "CLAUDE.md");
+    seed(path, CRLF_MD);
+    claudeCode.install({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("token-goat-mem:claude-code:start");
+    expect(lfOnlyLineCount(after)).toBe(0);
+  });
+
+  it("restores a CRLF CLAUDE.md byte-for-byte on uninstall", () => {
+    const path = join(root, "CLAUDE.md");
+    seed(path, CRLF_MD);
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+
+    expect(read(path)).toBe(CRLF_MD);
+  });
+
+  it("restores a CRLF CLAUDE.md byte-for-byte even after an editor re-saves the installed file", () => {
+    // The realistic Windows sequence: mem installs, the user opens the file in an editor whose
+    // default ending is CRLF, and the save normalizes mem's own block too. Uninstall must still
+    // recognise its separator.
+    const path = join(root, "CLAUDE.md");
+    seed(path, CRLF_MD);
+    claudeCode.install({ root, homeDir: home });
+    writeFileSync(path, read(path).replace(/\r?\n/gu, "\r\n"), "utf8");
+
+    claudeCode.uninstall({ root, homeDir: home });
+    expect(read(path)).toBe(CRLF_MD);
+  });
+
+  it("restores a CRLF AGENTS.md byte-for-byte through the shared reference-counted block", () => {
+    const path = join(root, "AGENTS.md");
+    seed(path, CRLF_MD);
+    codex.install({ root, homeDir: home });
+    expect(lfOnlyLineCount(read(path))).toBe(0);
+
+    codex.uninstall({ root, homeDir: home });
+    expect(read(path)).toBe(CRLF_MD);
+  });
+
+  it("keeps the shared marker line CRLF when a second tool joins the tools= list", () => {
+    // Joining rewrites only the marker line, slicing the rest of the file back on. Slicing from the
+    // "\n" rather than the "\r" drops the CR and silently converts that one line to LF.
+    const path = join(root, "AGENTS.md");
+    seed(path, CRLF_MD);
+    codex.install({ root, homeDir: home });
+    copilotCli.install({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("tools=codex,copilot-cli");
+    expect(lfOnlyLineCount(after)).toBe(0);
+  });
+
+  it("keeps a CRLF .claude/settings.json CRLF when stamping the hook", () => {
+    const path = join(root, ".claude", "settings.json");
+    seed(path, '{\r\n  "permissions": {\r\n    "allow": []\r\n  }\r\n}\r\n');
+    claudeCode.install({ root, homeDir: home });
+
+    const after = read(path);
+    expect(JSON.parse(after).hooks.SessionStart).toHaveLength(1);
+    expect(lfOnlyLineCount(after)).toBe(0);
+  });
+
+  it("keeps a CRLF tasks.json CRLF when inserting tasks through the JSONC editor", () => {
+    // The JSONC path is a surgical edit rather than a reserialize, so a hardcoded LF here lands
+    // inside an otherwise-CRLF file and produces mixed endings in the region mem touched.
+    const path = join(root, ".vscode", "tasks.json");
+    seed(path, '{\r\n  "version": "2.0.0",\r\n  "tasks": [],\r\n  "inputs": []\r\n}\r\n');
+    copilotVscode.install({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("Mem: Recall project facts");
+    expect(lfOnlyLineCount(after)).toBe(0);
+  });
+});

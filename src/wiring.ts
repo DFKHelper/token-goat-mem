@@ -260,21 +260,53 @@ function markerEnd(tool: string): string {
   return `<!-- token-goat-mem:${tool}:end -->`;
 }
 
-/** Appends `block` to `content`, separated from any existing content by exactly one blank line. If `content` is blank (absent or whitespace-only), writes just the block (no leading separator). Shared by both the per-tool and reference-counted shared marker implementations. */
+/**
+ * The line ending `content` already uses, which is the one mem writes back into it.
+ *
+ * Every string this module generates is LF, but the files it edits belong to the user and on Windows
+ * are routinely CRLF -- that is the editor default, not an exotic case. Appending LF text to a CRLF
+ * file leaves it with mixed endings, and the blank-line separator `appendBlock` inserts then fails to
+ * match on the way out, so `uninstall` leaves a growing gap behind instead of restoring the file
+ * byte-for-byte the way it advertises. Detecting once and emitting in the file's own ending removes
+ * both failures at the source.
+ *
+ * A file with no CRLF anywhere -- including a blank or absent one -- gets LF.
+ */
+function detectEol(content: string | undefined): "\r\n" | "\n" {
+  return content !== undefined && content.includes("\r\n") ? "\r\n" : "\n";
+}
+
+/**
+ * Rewrites every line ending in generated text to `eol`.
+ *
+ * Safe on `JSON.stringify` output: a literal newline there is always formatting, because a newline
+ * inside a string value is emitted escaped and so is never matched here. The lone carriage return in
+ * the VS Code `sendSequence` task argument is escaped for the same reason and survives untouched.
+ */
+function withEol(text: string, eol: "\r\n" | "\n"): string {
+  return eol === "\n" ? text.replace(/\r\n/gu, "\n") : text.replace(/\r?\n/gu, "\r\n");
+}
+
+/** Appends `block` to `content`, separated from any existing content by exactly one blank line, in whichever line ending `content` already uses. If `content` is blank (absent or whitespace-only), writes just the block (no leading separator). Shared by both the per-tool and reference-counted shared marker implementations. */
 function appendBlock(content: string, block: string): string {
+  const eol = detectEol(content);
+  const eolBlock = withEol(block, eol);
   if (content.trim().length === 0) {
-    return `${block}\n`;
+    return `${eolBlock}${eol}`;
   }
-  const base = content.endsWith("\n") ? content : `${content}\n`;
-  return `${base}\n${block}\n`;
+  const base = content.endsWith("\n") ? content : `${content}${eol}`;
+  return `${base}${eol}${eolBlock}${eol}`;
 }
 
 /** Removes the `[startIdx, blockEnd)` slice of `content` plus the one blank-line separator `appendBlock` adds, leaving the rest of the file untouched. Shared by both the per-tool and reference-counted shared marker implementations. */
 function stripBlockSeparators(content: string, startIdx: number, blockEnd: number): string {
   const before = content.slice(0, startIdx);
   const after = content.slice(blockEnd);
-  const beforeStripped = before.endsWith("\n\n") ? before.slice(0, -1) : before;
-  const afterStripped = after.startsWith("\n") ? after.slice(1) : after;
+  // Matched as a pattern rather than as the literal "\n\n": in a CRLF file the separator is
+  // "\r\n\r\n", which does not end with "\n\n", so a literal test silently left the blank line
+  // behind on every uninstall.
+  const beforeStripped = before.replace(/(\r?\n)\r?\n$/u, "$1");
+  const afterStripped = after.replace(/^\r?\n/u, "");
   return `${beforeStripped}${afterStripped}`;
 }
 
@@ -287,7 +319,7 @@ function upsertMarkedBlock(content: string, tool: string, body: string): string 
   const startIdx = content.indexOf(start);
   const endIdx = content.indexOf(end);
   if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    return content.slice(0, startIdx) + block + content.slice(endIdx + end.length);
+    return content.slice(0, startIdx) + withEol(block, detectEol(content)) + content.slice(endIdx + end.length);
   }
 
   return appendBlock(content, block);
@@ -362,7 +394,12 @@ function findSharedBlock(content: string): SharedBlockLocation | undefined {
       continue;
     }
     const startIdx = start.index;
-    const startLineEndIdx = content.indexOf("\n", startIdx);
+    // Index of where the start-marker line's terminator begins, not of its newline: on CRLF the
+    // carriage return sits one character earlier, and the tools= rewrite slices the rest of the file
+    // back on from here -- slicing from the newline would drop that CR and convert the marker line
+    // alone to LF.
+    const newlineIdx = content.indexOf("\n", startIdx);
+    const startLineEndIdx = newlineIdx > 0 && content[newlineIdx - 1] === "\r" ? newlineIdx - 1 : newlineIdx;
     const endIdx = startLineEndIdx === -1 ? -1 : content.indexOf(SHARED_BLOCK_END, startLineEndIdx);
     if (startLineEndIdx === -1 || endIdx === -1) {
       continue;
@@ -588,7 +625,7 @@ function installClaudeSettings(current: string | undefined, path: string): strin
     groups.push({ hooks: [{ type: "command", command: CLAUDE_HOOK_COMMAND, [STAMP_KEY]: true }] });
   }
 
-  return `${JSON.stringify(parsed, null, 2)}\n`;
+  return withEol(`${JSON.stringify(parsed, null, 2)}\n`, detectEol(current));
 }
 
 function uninstallClaudeSettings(current: string | undefined, path: string): string | undefined {
@@ -631,7 +668,7 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
   if (parsed.hooks !== undefined) {
     parsed.hooks.SessionStart = filtered;
   }
-  return `${JSON.stringify(parsed, null, 2)}\n`;
+  return withEol(`${JSON.stringify(parsed, null, 2)}\n`, detectEol(current));
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Copilot VS Code: tasks.json / keybindings.json (JSONC) ───────────────────────────────────────────────────────────────────────────
