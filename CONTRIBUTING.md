@@ -48,6 +48,8 @@ entirely, `git config --unset core.hooksPath`.
 
 A command with no E2E coverage fails the gate by design. Add it to the root-level tier; add a `tests/bundle/` case as well when the command writes to a file the user owns, since only byte-level assertions against the real artifact catch formatting damage.
 
+`npm run test:coverage` runs the same suite with v8 coverage over `src/` and enforces the floors in `vitest.config.ts`. CI runs this rather than a bare `npm test`, so a module losing its tests fails the build. The floors are ratchets set a couple of points under actual coverage — raise them when real coverage rises; do not lower one to make a build pass.
+
 ## Docs discipline
 
 Every documented flag and example must match the real CLI. If you change a command's surface, re-run `node dist/token-goat-mem.mjs <command> --help` and update `README.md`, `AGENTS.md`, and `docs/integrations/` in the same change. The README walkthrough is verified against a scratch `TOKEN_GOAT_MEM_HOME`; keep it copy-paste-runnable.
