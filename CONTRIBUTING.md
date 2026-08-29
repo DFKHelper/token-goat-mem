@@ -39,9 +39,12 @@ back in it, and the "config files authored with CRLF stay CRLF" tests hold it to
 No hook manager is wired yet, so the gate is manual:
 
 - **Before committing (fast):** `npm run lint && npm run typecheck && npm run test:guards`. The guards (`tests/guards/`) are pure-introspection invariants with no I/O — no bundle build, no SQLite DB. They catch the *implemented-but-unregistered / broken-schema* bug class before a commit lands.
-- **Before pushing (full):** `npm test`, which includes end-to-end tests that build and exercise the shipped `dist/token-goat-mem.mjs` bundle against a real (isolated) SQLite database. Tests set `TOKEN_GOAT_MEM_HOME` to a temp directory via `tests/setup/`, so they never touch your real `~/.mem`.
+- **Before pushing (full):** `npm test`. Tests set `TOKEN_GOAT_MEM_HOME` to a temp directory via `tests/setup/`, so they never touch your real `~/.mem`. Three tiers run here:
+  - **`tests/*.test.ts` (root level)** — end-to-end against the CLI surface, driving the real `run()` entry point in-process against a real (isolated) SQLite database. This is where a new command's coverage belongs.
+  - **`tests/unit/`** — direct imports of a single `src/` module, for behaviour that has no clean CLI expression (a ranking function, a scope predicate, a permission mode). Four modules have both tiers; put a test here only when it cannot be stated through a command.
+  - **`tests/bundle/`** — spawns the built `dist/token-goat-mem.mjs` as a subprocess. Deliberately small: it guards the bundling layer itself (externals resolving at runtime, the esbuild `define`, native-module loading, exit codes, stdout vs stderr) and asserts on file *bytes* for the config files `mem init` edits. Every other tier loads transformed TS and cannot see any of that.
 
-A command with no E2E coverage fails the gate by design — if you add a CLI command, add a test that drives the built bundle.
+A command with no E2E coverage fails the gate by design. Add it to the root-level tier; add a `tests/bundle/` case as well when the command writes to a file the user owns, since only byte-level assertions against the real artifact catch formatting damage.
 
 ## Docs discipline
 
