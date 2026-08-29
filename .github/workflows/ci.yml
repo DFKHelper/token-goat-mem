@@ -45,8 +45,10 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      # Coverage rather than a bare `npm test`: the suite is the same, plus the floors in
+      # vitest.config.ts, so a chunk of src/ losing its tests fails here instead of silently.
       - name: Test
-        run: npm test
+        run: npm run test:coverage
 
   runtime-floor:
     # package.json promises `engines: { node: ">=18" }` and esbuild builds with `target: node18`,
