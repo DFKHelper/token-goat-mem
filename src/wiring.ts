@@ -39,7 +39,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
-import { applyEdits, modify, parse as parseJsonc, type JSONPath, type ModificationOptions } from "jsonc-parser";
+import { applyEdits, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type JSONPath, type ModificationOptions, type Node } from "jsonc-parser";
 
 // ─────────────────────────────────────────────────────────────────────────── Public types ───────────────────────────────────────────────────────────────────────────
 
@@ -597,6 +597,144 @@ function parseJsonOrConflict(current: string, label: string): unknown {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────── Surgical JSON/JSONC editing ───────────────────────────────────────────────────────────────────────────
+
+const JSONC_PARSE = { allowTrailingComma: true } as const;
+
+/** The node at `path`, or `undefined` when the document is empty or the path does not resolve. */
+function jsoncNodeAt(content: string, path: JSONPath): Node | undefined {
+  const tree = parseTree(content, [], JSONC_PARSE);
+  return tree === undefined ? undefined : findNodeAtLocation(tree, path);
+}
+
+/** Last-resort formatting for `surgicalJsoncEdit`'s fallback path; never used on the surgical path. */
+const JSONC_FORMAT: ModificationOptions = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } };
+
+/**
+ * The indentation unit the document already uses, so mem's inserts match the file instead of
+ * restyling it. Heuristic: a tab-indented line wins outright, otherwise the narrowest positive space
+ * indent in the file. Guessing wrong only affects the block mem itself writes.
+ */
+function detectIndentUnit(content: string): string {
+  if (/^\t+\S/mu.test(content)) {
+    return "\t";
+  }
+  let narrowest: number | undefined;
+  for (const match of content.matchAll(/^( +)\S/gmu)) {
+    const width = match[1]?.length ?? 0;
+    if (width > 0 && (narrowest === undefined || width < narrowest)) {
+      narrowest = width;
+    }
+  }
+  return " ".repeat(narrowest ?? 2);
+}
+
+/** Leading whitespace of the line `offset` sits on, up to `offset`. */
+function lineIndentAt(content: string, offset: number): string {
+  const lineStart = content.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+  return /^[ \t]*/u.exec(content.slice(lineStart, offset))?.[0] ?? "";
+}
+
+/** `value` as JSON text indented with `unit`, every line after the first prefixed by `base`. */
+function renderJsonAt(value: unknown, unit: string, base: string, eol: string): string {
+  return JSON.stringify(value, null, unit)
+    .split("\n")
+    .map((line, index) => (index === 0 ? line : `${base}${line}`))
+    .join(eol);
+}
+
+/**
+ * `modify` + `applyEdits` that does not reformat text mem did not write.
+ *
+ * Handing `modify` a `formattingOptions` makes it rewrite the whole containing array or object, so a
+ * hand-written `{ "key": "ctrl+q", "command": "noop" }` came back exploded over five lines and a
+ * 4-space-indented settings.json came back 2-space -- mem restyling a file it does not own. Passing
+ * `{}` instead produces a genuinely surgical (usually zero-length) edit that touches nothing else,
+ * at the cost of a minified payload; this re-renders only that payload at the document's own
+ * indentation and end-of-line.
+ *
+ * Falls back to the old whole-container reformat when the edit is not a plain insert of `value` --
+ * chiefly when `modify` had to create intermediate objects, where the payload is a nested wrapper
+ * rather than `value` itself. Correct output, just less careful about the neighbours.
+ */
+function surgicalJsoncEdit(content: string, path: JSONPath, value: unknown): string {
+  const edits = modify(content, path, value, {});
+  const edit = edits[0];
+  if (edits.length !== 1 || edit === undefined || edit.content === "") {
+    return applyEdits(content, edits);
+  }
+  const prefix = /^,?\s*(?:"(?:[^"\\]|\\.)*"\s*:\s*)?/u.exec(edit.content)?.[0] ?? "";
+  if (edit.content !== `${prefix}${JSON.stringify(value)}`) {
+    return applyEdits(content, modify(content, path, value, JSONC_FORMAT));
+  }
+
+  const eol = detectEol(content);
+  const unit = detectIndentUnit(content);
+  const outer = lineIndentAt(content, edit.offset);
+  const key = prefix.replace(/^,\s*/u, "").trim();
+  const spacer = key === "" ? "" : " ";
+  const before = content.slice(0, edit.offset);
+  const after = content.slice(edit.offset + edit.length);
+
+  if (edit.length > 0) {
+    // Replacing a value in place -- the surrounding text already positions it.
+    return `${before}${key}${spacer}${renderJsonAt(value, unit, outer, eol)}${after}`;
+  }
+
+  if (prefix.startsWith(",")) {
+    // A container the user keeps on one line stays on one line.
+    const container = jsoncNodeAt(content, path.slice(0, -1));
+    if (container !== undefined && !content.slice(container.offset, edit.offset).includes("\n")) {
+      return `${before}, ${key}${spacer}${JSON.stringify(value)}${after}`;
+    }
+    return `${before},${eol}${outer}${key}${spacer}${renderJsonAt(value, unit, outer, eol)}${after}`;
+  }
+
+  // First child of an empty container: open it up one level.
+  const base = outer + unit;
+  const tail = /^[ \t]*\r?\n/u.test(after) ? "" : `${eol}${outer}`;
+  return `${before}${eol}${base}${key}${spacer}${renderJsonAt(value, unit, base, eol)}${tail}${after}`;
+}
+
+/**
+ * Deletes element `index` of the array at `arrayPath`, leaving every other byte alone.
+ *
+ * jsonc-parser's own deletion swallows the line break before the closing bracket when the last
+ * element goes (`[a,\n  b\n]` becomes `[a ]`), which breaks the install/uninstall round trip this
+ * module promises. Returns `content` unchanged when the path or index does not resolve.
+ */
+function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, index: number): string {
+  const array = jsoncNodeAt(content, arrayPath);
+  const children = array?.children;
+  const node = children?.[index];
+  if (array === undefined || children === undefined || node === undefined) {
+    return content;
+  }
+  let start = node.offset;
+  let end = node.offset + node.length;
+  if (children.length === 1) {
+    const inner = array.offset + 1;
+    const close = array.offset + array.length - 1;
+    // Collapse to `[]` only when whitespace is all that surrounds the element. A comment in there is
+    // the user's, and dropping it is exactly the collateral this whole path exists to avoid.
+    if (`${content.slice(inner, start)}${content.slice(end, close)}`.trim() === "") {
+      start = inner;
+      end = close;
+    }
+  } else if (index > 0) {
+    const previous = children[index - 1];
+    if (previous !== undefined) {
+      start = previous.offset + previous.length;
+    }
+  } else {
+    const next = children[1];
+    if (next !== undefined) {
+      end = next.offset;
+    }
+  }
+  return content.slice(0, start) + content.slice(end);
+}
+
 // ─────────────────────────────────────────────────────────────────────────── Claude Code: settings.json hook ───────────────────────────────────────────────────────────────────────────
 
 const CLAUDE_HOOK_COMMAND = 'mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"';
@@ -626,6 +764,10 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   if (parsed.hooks !== undefined && !isPlainObject(parsed.hooks)) {
     throw new WiringConflictError(`hooks in ${path} is not an object; refusing to modify a hand-edited config`);
   }
+  // Which containers the file actually had decides where the single surgical insert lands below; the
+  // defaulting on the next lines exists only so the analysis can run over a uniform shape.
+  const hadHooks = parsed.hooks !== undefined;
+  const hadSessionStart = hadHooks && parsed.hooks?.SessionStart !== undefined;
   if (parsed.hooks === undefined) {
     parsed.hooks = {};
   }
@@ -660,14 +802,17 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   }
   const groups = sessionStart as ClaudeHookGroup[];
 
-  let stampedHook: ClaudeHook | undefined;
-  for (const group of groups) {
-    const found = (group.hooks ?? []).find((hook) => isStamped(hook));
-    if (found !== undefined) {
-      stampedHook = found;
-      break;
+  // Indices, not just the object: the write below is a surgical edit addressed by JSON path.
+  let stampedGroupIdx = -1;
+  let stampedHookIdx = -1;
+  for (let index = 0; index < groups.length && stampedGroupIdx === -1; index += 1) {
+    const hookIdx = (groups[index]?.hooks ?? []).findIndex((hook) => isStamped(hook));
+    if (hookIdx !== -1) {
+      stampedGroupIdx = index;
+      stampedHookIdx = hookIdx;
     }
   }
+  const stampedHook: ClaudeHook | undefined = stampedGroupIdx === -1 ? undefined : groups[stampedGroupIdx]?.hooks?.[stampedHookIdx];
 
   const hasUnstampedConflict = groups.some((group) =>
     (group.hooks ?? []).some((hook) => isPlainObject(hook) && !isStamped(hook) && hook.command === CLAUDE_HOOK_COMMAND)
@@ -676,17 +821,30 @@ function installClaudeSettings(current: string | undefined, path: string): strin
     throw new WiringConflictError(`a SessionStart hook with command "${CLAUDE_HOOK_COMMAND}" already exists in ${path} and was not created by mem; refusing to duplicate it`);
   }
 
+  // Edit the text, never a reserialize of the parsed object. `JSON.stringify(parsed, null, 2)` threw
+  // away everything the user's file expressed and mem has no opinion about -- indentation width, key
+  // layout, the blank lines between sections -- on every install of a one-line hook.
+  const text = isBlank(current) ? "{}\n" : (current as string);
+
   if (stampedHook !== undefined) {
     if (stampedHook.type === "command" && stampedHook.command === CLAUDE_HOOK_COMMAND) {
       return current;
     }
-    (stampedHook as { type: string; command: string }).type = "command";
-    (stampedHook as { type: string; command: string }).command = CLAUDE_HOOK_COMMAND;
-  } else {
-    groups.push({ hooks: [{ type: "command", command: CLAUDE_HOOK_COMMAND, [STAMP_KEY]: true }] });
+    const hookPath: JSONPath = ["hooks", "SessionStart", stampedGroupIdx, "hooks", stampedHookIdx];
+    const retyped = surgicalJsoncEdit(text, [...hookPath, "type"], "command");
+    return surgicalJsoncEdit(retyped, [...hookPath, "command"], CLAUDE_HOOK_COMMAND);
   }
 
-  return withEol(`${JSON.stringify(parsed, null, 2)}\n`, detectEol(current));
+  // Insert at the deepest container the file already has, so `modify` never has to synthesise
+  // intermediates -- that is the one case surgicalJsoncEdit has to fall back to a reformat.
+  const group = { hooks: [{ type: "command", command: CLAUDE_HOOK_COMMAND, [STAMP_KEY]: true }] };
+  if (!hadHooks) {
+    return surgicalJsoncEdit(text, ["hooks"], { SessionStart: [group] });
+  }
+  if (!hadSessionStart) {
+    return surgicalJsoncEdit(text, ["hooks", "SessionStart"], [group]);
+  }
+  return surgicalJsoncEdit(text, ["hooks", "SessionStart", -1], group);
 }
 
 function uninstallClaudeSettings(current: string | undefined, path: string): string | undefined {
@@ -704,37 +862,65 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
     return current;
   }
 
-  let changed = false;
-  const filtered: ClaudeHookGroup[] = [];
-  for (const group of sessionStart as unknown[]) {
+  // Plan the removals as JSON paths, then apply them to the text. Rebuilding the object and
+  // reserializing it would hand the user back a file reindented to mem's taste.
+  // Built in descending index order -- groups first, then hooks within a group -- so applying them in
+  // sequence never shifts the index of one still to come.
+  const removals: JSONPath[] = [];
+  for (let index = (sessionStart as unknown[]).length - 1; index >= 0; index -= 1) {
     // Access `.hooks` only through an isPlainObject guard: a hand-edited SessionStart may hold a
     // `null`/primitive element, and `null.hooks` would throw a raw TypeError. Uninstall stays lenient
     // (leave anything mem didn't stamp untouched) rather than crashing on such an entry.
+    const group: unknown = (sessionStart as unknown[])[index];
     const hooks = isPlainObject(group) ? group["hooks"] : undefined;
     if (!Array.isArray(hooks) || !hooks.some((hook) => isStamped(hook))) {
-      filtered.push(group as ClaudeHookGroup);
       continue;
     }
-    changed = true;
-    const remaining = hooks.filter((hook) => !isStamped(hook));
-    if (remaining.length > 0) {
-      filtered.push({ ...(group as ClaudeHookGroup), hooks: remaining });
+    if (hooks.every((hook) => isStamped(hook))) {
+      // The whole group was mem's addition -- drop it rather than leave an empty `hooks: []` behind.
+      removals.push(["hooks", "SessionStart", index]);
+      continue;
     }
-    // else: this group was entirely mem's addition -- drop it whole.
+    for (let hookIdx = hooks.length - 1; hookIdx >= 0; hookIdx -= 1) {
+      if (isStamped(hooks[hookIdx])) {
+        removals.push(["hooks", "SessionStart", index, "hooks", hookIdx]);
+      }
+    }
   }
 
-  if (!changed) {
+  if (removals.length === 0) {
     return current;
   }
-  if (parsed.hooks !== undefined) {
-    parsed.hooks.SessionStart = filtered;
+
+  let text = current as string;
+  for (const removal of removals) {
+    const arrayPath = removal.slice(0, -1);
+    const index = removal[removal.length - 1];
+    if (typeof index === "number") {
+      text = surgicalJsoncRemoveArrayEntry(text, arrayPath, index);
+    }
   }
-  return withEol(`${JSON.stringify(parsed, null, 2)}\n`, detectEol(current));
+
+  // Prune the containers mem's own removals just emptied. Install creates `hooks` and
+  // `hooks.SessionStart` when a settings.json has neither -- the common case -- so stopping at the
+  // group removal left a `"hooks": { "SessionStart": [] }` husk behind and broke the "uninstall
+  // reverses exactly what init wrote" promise. An empty SessionStart array, or a hooks object with
+  // nothing but one, is inert, so pruning one a user happened to have written costs them nothing.
+  const settingsAfter: unknown = parseJsonc(text, [], JSONC_PARSE);
+  const hooksAfter: unknown = isPlainObject(settingsAfter) ? settingsAfter["hooks"] : undefined;
+  if (isPlainObject(hooksAfter)) {
+    const sessionStartAfter = hooksAfter["SessionStart"];
+    if (Array.isArray(sessionStartAfter) && sessionStartAfter.length === 0) {
+      text =
+        Object.keys(hooksAfter).length === 1
+          ? surgicalJsoncEdit(text, ["hooks"], undefined)
+          : surgicalJsoncEdit(text, ["hooks", "SessionStart"], undefined);
+    }
+  }
+  return text;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Copilot VS Code: tasks.json / keybindings.json (JSONC) ───────────────────────────────────────────────────────────────────────────
-
-const JSONC_FORMAT: ModificationOptions = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } };
 
 const VSCODE_TASKS: ReadonlyArray<Record<string, unknown>> = [
   {
@@ -789,7 +975,7 @@ function upsertJsoncArrayEntries(
     const identity = entry[identityKey];
     const idx = findIndexByKey(existing, identityKey, identity);
     if (idx === -1) {
-      result = applyEdits(result, modify(result, [...arrayPath, -1], entry, JSONC_FORMAT));
+      result = surgicalJsoncEdit(result, [...arrayPath, -1], entry);
       continue;
     }
     const found = existing[idx];
@@ -797,7 +983,7 @@ function upsertJsoncArrayEntries(
       throw new WiringConflictError(`a ${kindLabel} with ${identityKey}=${JSON.stringify(identity)} already exists in ${path} and was not created by mem; refusing to duplicate or overwrite it`);
     }
     if (!deepEqual(found, entry)) {
-      result = applyEdits(result, modify(result, [...arrayPath, idx], entry, JSONC_FORMAT));
+      result = surgicalJsoncEdit(result, [...arrayPath, idx], entry);
     }
   }
   return result;
@@ -814,7 +1000,7 @@ function removeStampedJsoncArrayEntries(text: string, arrayPath: JSONPath, exist
   }
   let result = text;
   for (const idx of stampedIndices) {
-    result = applyEdits(result, modify(result, [...arrayPath, idx], undefined, JSONC_FORMAT));
+    result = surgicalJsoncRemoveArrayEntry(result, arrayPath, idx);
   }
   return { text: result, changed: true };
 }
@@ -837,7 +1023,7 @@ function installTasksJson(current: string | undefined, path: string): string | u
   const parsed = (rawParsed ?? {}) as Record<string, unknown>;
 
   if (typeof parsed["version"] !== "string") {
-    text = applyEdits(text, modify(text, ["version"], "2.0.0", JSONC_FORMAT));
+    text = surgicalJsoncEdit(text, ["version"], "2.0.0");
   }
 
   // A present-but-non-array `tasks`/`inputs` is a hand-edited config mem can't reason about: appending
@@ -884,7 +1070,22 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
   text = inputsResult.text;
   anyChanged = anyChanged || inputsResult.changed;
 
-  return anyChanged ? text : current;
+  if (!anyChanged) {
+    return current;
+  }
+
+  // Drop the arrays mem's own removals just emptied, same rule as the settings.json hook containers:
+  // install has to create `tasks`/`inputs` when the file has no such key, and leaving `"inputs": []`
+  // behind is not the pre-install state uninstall promises. An empty array here is inert, so pruning
+  // one a user happened to have written costs them nothing.
+  for (const key of ["tasks", "inputs"] as const) {
+    const after: unknown = parseJsoncOrConflict(text, path);
+    const value = isPlainObject(after) ? after[key] : undefined;
+    if (Array.isArray(value) && value.length === 0) {
+      text = surgicalJsoncEdit(text, [key], undefined);
+    }
+  }
+  return text;
 }
 
 /**

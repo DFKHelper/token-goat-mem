@@ -517,7 +517,8 @@ describe("copilotVscode wiring", () => {
     copilotVscode.uninstall({ root, homeDir: home });
     tasks = JSON.parse(read(tasksPath));
     expect(tasks.tasks).toEqual([{ label: "Build", type: "shell", command: "npm run build" }]);
-    expect(tasks.inputs).toEqual([]);
+    // The `inputs` key was mem's own -- uninstall prunes the array it emptied rather than leave `[]`.
+    expect(tasks.inputs).toBeUndefined();
 
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     expect(JSON.parse(read(keybindingsPath))).toEqual([]);
@@ -800,6 +801,147 @@ describe("regression: the shared block body is upgraded, not left stale", () => 
     const agents = plan.entries.find((e) => e.path.endsWith("AGENTS.md"));
     expect(agents?.detail).toContain("refresh the shared block body");
     expect(agents?.detail).not.toContain("adds codex to tools=");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── hand-authored config formatting ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * mem edits four files it does not own. Two of them were being rewritten wholesale on every install:
+ * settings.json went through `JSON.stringify(parsed, null, 2)`, and the JSONC array writes passed
+ * jsonc-parser a `formattingOptions`, which makes `modify` reformat the entire containing array. A
+ * user who indents with four spaces, or keeps a keybinding on one line, got it back mem's way.
+ */
+describe("regression: mem does not restyle config files it did not author", () => {
+  const FOUR_SPACE_SETTINGS = [
+    "{",
+    '    "model": "opus",',
+    '    "permissions": {',
+    '        "allow": ["Bash(ls:*)"]',
+    "    },",
+    '    "hooks": {',
+    '        "SessionStart": [',
+    '            { "hooks": [{ "type": "command", "command": "echo hi" }] }',
+    "        ]",
+    "    }",
+    "}",
+    "",
+  ].join("\n");
+
+  it("keeps a 4-space settings.json on 4 spaces and leaves the user's own hook entry untouched", () => {
+    const settingsPath = join(home, ".claude", "settings.json");
+    seed(settingsPath, FOUR_SPACE_SETTINGS);
+
+    claudeCode.install({ root, homeDir: home, user: true });
+
+    const after = read(settingsPath);
+    expect(after).toContain('    "model": "opus",');
+    expect(after).toContain('        "allow": ["Bash(ls:*)"]');
+    // The user's single-line hook group is byte-identical, not exploded across five lines.
+    expect(after).toContain('            { "hooks": [{ "type": "command", "command": "echo hi" }] }');
+    expect(after).not.toMatch(/^ {2}"/mu);
+    // ...and the file is still valid JSON with both hooks present.
+    const parsed = JSON.parse(after);
+    expect(parsed.hooks.SessionStart).toHaveLength(2);
+    expect(parsed.model).toBe("opus");
+  });
+
+  it("round-trips a hand-formatted settings.json byte-for-byte through install and uninstall", () => {
+    const settingsPath = join(home, ".claude", "settings.json");
+    seed(settingsPath, FOUR_SPACE_SETTINGS);
+
+    claudeCode.install({ root, homeDir: home, user: true });
+    claudeCode.uninstall({ root, homeDir: home, user: true });
+
+    expect(read(settingsPath)).toBe(FOUR_SPACE_SETTINGS);
+  });
+
+  it("removes the hooks container it created, so a settings.json with no hooks round-trips exactly", () => {
+    // The common shape: the user has never written a hook. Install has to create both `hooks` and
+    // `hooks.SessionStart`; stopping at the group removal used to leave that husk behind.
+    const settingsPath = join(home, ".claude", "settings.json");
+    const original = '{\n    "model": "opus",\n    "permissions": {\n        "allow": ["Bash(ls:*)"]\n    }\n}\n';
+    seed(settingsPath, original);
+
+    claudeCode.install({ root, homeDir: home, user: true });
+    expect(read(settingsPath)).toContain('        "SessionStart": [');
+
+    claudeCode.uninstall({ root, homeDir: home, user: true });
+    expect(read(settingsPath)).toBe(original);
+  });
+
+  it("keeps a hooks object that still holds another event, dropping only SessionStart", () => {
+    const settingsPath = join(home, ".claude", "settings.json");
+    const original = '{\n    "hooks": {\n        "PreToolUse": [\n            { "matcher": "Bash" }\n        ]\n    }\n}\n';
+    seed(settingsPath, original);
+
+    claudeCode.install({ root, homeDir: home, user: true });
+    claudeCode.uninstall({ root, homeDir: home, user: true });
+
+    expect(read(settingsPath)).toBe(original);
+  });
+
+  it("keeps a tab-indented settings.json on tabs", () => {
+    const settingsPath = join(home, ".claude", "settings.json");
+    const tabbed = '{\n\t"model": "opus",\n\t"hooks": {\n\t\t"SessionStart": []\n\t}\n}\n';
+    seed(settingsPath, tabbed);
+
+    claudeCode.install({ root, homeDir: home, user: true });
+
+    const after = read(settingsPath);
+    expect(after).toContain('\t"model": "opus",');
+    expect(after).toMatch(/\n\t{3}\{/u);
+    expect(after).not.toMatch(/\n {2}"/u);
+    expect(JSON.parse(after).hooks.SessionStart).toHaveLength(1);
+  });
+
+  it("leaves a user's single-line keybinding entry exactly as written", () => {
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    const original = [
+      "// my own bindings",
+      "[",
+      '    { "key": "ctrl+q", "command": "noop" }',
+      "]",
+      "",
+    ].join("\n");
+    seed(keybindingsPath, original);
+
+    copilotVscode.install({ root, homeDir: home });
+
+    const after = read(keybindingsPath);
+    expect(after).toContain('    { "key": "ctrl+q", "command": "noop" }');
+    expect(after).toContain("// my own bindings");
+    expect(after).not.toContain('"key": "ctrl+q",\n');
+
+    copilotVscode.uninstall({ root, homeDir: home });
+    expect(read(keybindingsPath)).toBe(original);
+  });
+
+  it("leaves a user's own task and its comments alone in a 4-space tasks.json", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    const original = [
+      "{",
+      '    "version": "2.0.0",',
+      "    // do not reformat me",
+      '    "tasks": [',
+      '        { "label": "Build", "type": "shell", "command": "make" }',
+      "    ]",
+      "}",
+      "",
+    ].join("\n");
+    seed(tasksPath, original);
+
+    copilotVscode.install({ root, homeDir: home });
+
+    const after = read(tasksPath);
+    expect(after).toContain("// do not reformat me");
+    expect(after).toContain('        { "label": "Build", "type": "shell", "command": "make" }');
+    expect(after).toContain('    "version": "2.0.0",');
+
+    // Byte-identical, including the `"inputs"` key install had to create and the comment above the
+    // user's task -- uninstall prunes the array it emptied rather than leaving `"inputs": []`.
+    copilotVscode.uninstall({ root, homeDir: home });
+    expect(read(tasksPath)).toBe(original);
   });
 });
 

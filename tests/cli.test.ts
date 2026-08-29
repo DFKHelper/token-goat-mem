@@ -1648,8 +1648,10 @@ describe("mem init/uninstall", () => {
     const uninstalled = await runCli(["uninstall", "claude-code", "--root", toolRoot]);
     expect(uninstalled.exitCode).toBe(0);
 
+    // Install created `hooks` and `hooks.SessionStart` here, so uninstall takes them away again --
+    // an empty husk is not "the pre-install state" this test's own name promises.
     const settings = JSON.parse(readFileSync(join(toolRoot, ".claude", "settings.json"), "utf8"));
-    expect(settings.hooks.SessionStart).toEqual([]);
+    expect(settings.hooks).toBeUndefined();
     const claudeMd = readFileSync(join(toolRoot, "CLAUDE.md"), "utf8");
     expect(claudeMd).not.toContain("token-goat-mem");
     expect(readFileSync(join(toolRoot, "unrelated.txt"), "utf8")).toBe("leave me alone\n");
@@ -1667,7 +1669,7 @@ describe("mem init/uninstall", () => {
 
     await runCli(["uninstall", "claude-code", "--root", toolRoot, "--user"]);
     const settings = JSON.parse(readFileSync(join(toolHome, ".claude", "settings.json"), "utf8"));
-    expect(settings.hooks.SessionStart).toEqual([]);
+    expect(settings.hooks).toBeUndefined();
   });
 
   it("uninstall --all removes every tool's wiring in one call", async () => {
