@@ -52,8 +52,7 @@
   "dependencies": {
     "better-sqlite3": "^11.3.0",
     "commander": "^12.1.0",
-    "jsonc-parser": "^3.3.1",
-    "zod": "^4.4.3"
+    "jsonc-parser": "^3.3.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -65,8 +64,5 @@
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.62.0",
     "vitest": "^4.1.11"
-  },
-  "optionalDependencies": {
-    "sqlite-vec": "^0.1.9"
   }
 }
