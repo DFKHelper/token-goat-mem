@@ -2072,10 +2072,17 @@ describe("regression: review and show resolve anchor roots the way recall does",
       expect(review.exitCode).toBe(0);
       expect(review.stdout).not.toContain("this project has a package json manifest");
 
-      // ...while recall, from that same foreign root, affirms it. Two surfaces disagreeing about one
-      // fact is the defect; either verdict on its own could be argued for.
-      const recalled = await runCli(["recall", "package json manifest", "--root", projB]);
-      expect(recalled.stdout).toContain("this project has a package json manifest");
+      // ...and recall, from that same foreign root, no longer surfaces it either -- it is bound to
+      // projA. Two surfaces disagreeing about one fact was the original defect here; they agree by
+      // omission now, where they used to agree only if recall affirmed a fact review had hidden.
+      const fromForeign = await runCli(["recall", "package json manifest", "--root", projB]);
+      expect(fromForeign.stdout).not.toContain("this project has a package json manifest");
+
+      // From its own project the fact is present and affirmed -- excluded above by its binding, not
+      // by a contradicted anchor.
+      const fromOwn = await runCli(["recall", "package json manifest", "--root", projA]);
+      expect(fromOwn.stdout).toContain("this project has a package json manifest");
+      expect(fromOwn.stdout).not.toContain("contradicted");
     } finally {
       rmSync(projA, { recursive: true, force: true });
       rmSync(projB, { recursive: true, force: true });
@@ -2235,6 +2242,91 @@ describe("regression: import --from-json does not restore facts that are already
       expect(shown.stdout).toContain("an old fact superseded long before this backup was taken");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- regression: recall binds facts to the project they were captured in ---
+
+describe("regression: recall does not surface another project's facts", () => {
+  it("excludes a project-scoped fact belonging to a different root, including under --scope project", async () => {
+    const projA = mkdtempSync(join(tmpdir(), "mem-recall-a-"));
+    const projB = mkdtempSync(join(tmpdir(), "mem-recall-b-"));
+    try {
+      const db = openStorage(resolveDbPath());
+      insertFact(db, {
+        text: "deploys go out on Tuesdays",
+        kind: "decision",
+        scope: "project",
+        scopeRoot: projA,
+        source_type: "user",
+      });
+      insertFact(db, {
+        text: "deploys go out on Thursdays",
+        kind: "decision",
+        scope: "project",
+        scopeRoot: projB,
+        source_type: "user",
+      });
+      insertFact(db, {
+        text: "deploys always need a changelog entry",
+        kind: "decision",
+        scope: "global",
+        scopeRoot: null,
+        source_type: "user",
+      });
+      db.close();
+
+      // `--root` used to reach only anchor evaluation, so the store was searched whole and a user
+      // standing in projB was told projA's release schedule.
+      const fromB = await runCli(["recall", "deploys", "--root", projB]);
+      expect(fromB.exitCode).toBe(0);
+      expect(fromB.stdout).toContain("deploys go out on Thursdays");
+      expect(fromB.stdout).not.toContain("deploys go out on Tuesdays");
+
+      // Global facts are bound to no project and stay visible from either one.
+      expect(fromB.stdout).toContain("deploys always need a changelog entry");
+
+      // `--scope project` filtered on the scope *label*, so it narrowed to "scoped to some project"
+      // and still returned the wrong project's fact -- the exact shape of README's own example.
+      const scoped = await runCli(["recall", "deploys", "--root", projB, "--scope", "project"]);
+      expect(scoped.exitCode).toBe(0);
+      expect(scoped.stdout).toContain("deploys go out on Thursdays");
+      expect(scoped.stdout).not.toContain("deploys go out on Tuesdays");
+    } finally {
+      rmSync(projA, { recursive: true, force: true });
+      rmSync(projB, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces a path-scoped fact bound to a file inside the querying root", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-recall-path-"));
+    const outside = mkdtempSync(join(tmpdir(), "mem-recall-out-"));
+    try {
+      const db = openStorage(resolveDbPath());
+      insertFact(db, {
+        text: "this module owns retry backoff",
+        kind: "fact",
+        scope: "path",
+        scopeRoot: join(proj, "src", "retry.ts"),
+        source_type: "user",
+      });
+      insertFact(db, {
+        text: "this module owns rate limiting",
+        kind: "fact",
+        scope: "path",
+        scopeRoot: join(outside, "src", "limit.ts"),
+        source_type: "user",
+      });
+      db.close();
+
+      const recalled = await runCli(["recall", "module owns", "--root", proj]);
+      expect(recalled.exitCode).toBe(0);
+      expect(recalled.stdout).toContain("this module owns retry backoff");
+      expect(recalled.stdout).not.toContain("this module owns rate limiting");
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
     }
   });
 });

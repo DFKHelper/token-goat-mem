@@ -2,6 +2,12 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Changed
+
+- **`mem recall` now binds facts to the project they were captured in** -- `--root` reached only anchor evaluation, so the store was searched whole: standing in one project and running `mem recall` surfaced another project's decisions as if they were local. `--scope project` did not help, because it matched the scope *label* rather than the binding, narrowing to "scoped to some project" instead of "scoped to this one" -- so even the README's own `mem recall --root . --scope project` example returned the wrong project's facts. A `project` fact now surfaces only from its own root, a `path` fact only from a root containing its file, and `global` facts from anywhere, unchanged. The filter runs inside `retrieve` alongside every other filter rather than narrowing the SQL query, because a pre-filtered pool hides a fact's rival from contradiction resolution, whose reinstatement pass then reads that absence as "nothing contests this" -- and scope binding is the filter most likely to separate two rivals, since a contradiction is keyed on subject + scope. `mem recall --hint-format` already scoped this way; the two paths now agree.
+
 ## [0.2.6] - 2026-08-29
 
 Every fix in this release is in `mem init` / `mem uninstall`. The documented promise for those two
