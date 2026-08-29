@@ -14,6 +14,26 @@ npm run build                # bundle to dist/token-goat-mem.mjs
 npm run dev                  # run the CLI from source (tsx src/main.ts)
 ```
 
+## Line endings
+
+`.gitattributes` pins every tracked text file to LF in the working tree, so a clone made with
+`core.autocrlf=true` -- what the Windows git installer offers by default -- checks out the same bytes
+as everywhere else. Repo files are read back and parsed in a few places (the doc-vs-code test in
+`tests/wiring.test.ts` is one), and a CRLF checkout used to break them in a way invisible on an
+LF machine.
+
+If you cloned before this landed and your working tree is CRLF, git will report every file as
+modified until you renormalize once:
+
+```bash
+git add --renormalize .
+```
+
+None of this applies to the files mem *edits*. A user's own `CLAUDE.md`, `AGENTS.md`, or
+`settings.json` is frequently CRLF; `src/wiring.ts` detects each file's existing ending and writes
+back in it, and the "config files authored with CRLF stay CRLF" tests hold it to that. Never hardcode
+`\n` when writing into a file mem did not create.
+
 ## Test tiers
 
 No hook manager is wired yet, so the gate is manual:

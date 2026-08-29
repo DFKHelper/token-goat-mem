@@ -1,0 +1,18 @@
+# Tracked text files are LF in the working tree on every platform, Windows included.
+#
+# Without this, a clone made with core.autocrlf=true -- the default the Windows git installer
+# offers -- rewrites every tracked text file to CRLF on checkout. Any code that then reads a repo
+# file back and parses its line structure sees endings the author never ran against, and the failure
+# is invisible on the author's own machine. That is not hypothetical: the doc-vs-code test in
+# tests/wiring.test.ts extracted a fenced block with a /```json\n/ regex, which matched nothing on a
+# CRLF checkout and failed inside JSON.parse(""). Normalizing here removes the variable instead of
+# asking every future reader of a repo file to remember it.
+#
+# This says nothing about the files mem *edits*. A user's own CLAUDE.md, AGENTS.md, settings.json, or
+# an imported markdown file is not tracked here and is routinely CRLF; src/wiring.ts detects and
+# preserves whatever ending it finds, and the "config files authored with CRLF stay CRLF" tests in
+# tests/wiring.test.ts hold it to that.
+* text=auto eol=lf
+
+# Detected as binary by text=auto anyway; stated so the intent survives a future audit.
+*.png binary
