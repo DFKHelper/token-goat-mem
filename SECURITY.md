@@ -41,6 +41,16 @@ The following are not treated as security issues unless paired with a working pr
 - Issues that require an already-compromised local user account
 - Anchor false negatives (a stale fact is not detected as stale) without an attack vector
 
+## What secret screening does and does not catch
+
+Every fact is screened before it is stored, and the check is deliberately a floor rather than a guarantee. Stating the boundary explicitly, because "refuses to store secrets" reads as broader than it is:
+
+Screening fires on three things: a named credential format (AWS access key ids, GitHub/Slack/Google/Stripe/Anthropic/OpenAI-style keys, PEM private-key blocks, JWTs); a credential word followed by a `:` or `=` separator and a value, or followed within ~32 characters by a run of 32+ hex characters; and, as a generic fallback, any standalone high-entropy token of 32 characters or more, excluding pure-hex and pure-digit runs so that quoting a commit SHA is not treated as a credential.
+
+The consequence worth knowing: **a short secret stated in prose is stored verbatim.** `password = Xk9mP2vL8nQ4wR` is refused, because the separator makes it an assignment. `the staging password is Xk9mP2vL8nQ4wR` is stored, because there is no separator, the value is not hex, and 14 characters is under the entropy floor. Raising that floor is not free -- it is what keeps ordinary project facts (file paths, identifiers, version strings, prose containing a credential word) from being refused -- so the boundary is an accepted design position, not an open defect. Report a bypass of a pattern that *should* have matched; a short prose secret is the documented limit.
+
+Two things follow from this. Screening is a backstop against accidental paste, not a control you can rely on to sanitize untrusted input: do not point capture at a source you would not read yourself. And because the database is a plain local SQLite file, treat `~/.mem/mem.db` with the same care as any file that has passed through your shell history.
+
 ## Known advisories
 
 `npm audit` reports no advisories, across both runtime and dev dependencies. The five dev-only advisories that previously affected the esbuild/vite/vitest toolchain were cleared in 0.2.2; history and the reasoning behind the upgrade are in [CONTRIBUTING.md](CONTRIBUTING.md#known-dev-dependency-advisories).

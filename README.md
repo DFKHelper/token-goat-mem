@@ -10,7 +10,7 @@ You tell your AI "we use pnpm not npm" and it forgets. Every session. Then it ru
 
 Mem stores them. Locally, in your own SQLite database. Each fact carries a trust level and an anchor (a read-only predicate that tests whether the fact is still true). On recall, Mem re-validates anchors and surfaces only the facts that are fresh and trustworthy, with a confidence caveat so your agent never treats a hint as ground truth when it should not.
 
-Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). Optional one-way seam with [**token-goat**](https://github.com/DFKHelper/token-goat), a sister CLI that gives agents narrow-slice code/doc reads to cut context burn, for embedding memory hints into its token-reduction manifest.
+Works with **Claude Code**, **Copilot CLI**, **Copilot in VS Code**, **Codex**, and any agent that can run a shell command — integration guides for the first four live in [`docs/integrations/`](docs/integrations/). There is also an optional *seam* -- a one-way integration point, where the other tool calls mem and mem knows nothing about it -- with [**token-goat**](https://github.com/DFKHelper/token-goat), a sister CLI that gives agents narrow-slice code/doc reads to cut context burn. Through it, memory hints are embedded into token-goat's token-reduction manifest.
 
 **Install:**
 
@@ -55,10 +55,10 @@ The defining engineering problem is not *retrieval* — it is **correctness and 
 
 ## How it works
 
-1. **Explicit capture** — `mem remember "uses pnpm not npm" --kind preference` stores a fact with a source reference and timestamp. `--kind` is required: `preference`, `decision`, `fact`, or `correction`.
+1. **Explicit capture** — `mem remember "uses pnpm not npm" --kind preference` stores a fact with a source reference (`source_ref`: where the fact came from, such as the command or file that produced it -- not to be confused with the separate `sources` table `mem show --json` exposes, which is designed to hold redacted content previews and is not yet written to by any capture path) and timestamp. `--kind` is required: `preference`, `decision`, `fact`, or `correction`.
 2. **Optional anchors** — Add an anchor: `mem remember "uses pnpm" --kind preference --anchor 'file-newer-than pnpm-lock.yaml package-lock.json'`. The anchor is a read-only predicate; on recall, Mem tests it and returns one of three verdicts: `affirmed` (ground truth), `unverified` (hint to verify), or `contradicted` (suppressed, flagged in review).
 3. **Recall with trust levels** — `mem recall --kind preference` returns active facts annotated by trust level, freshness verdict, and age. Low-trust facts are marked "verify" so your AI never mistakes a hint for ground truth.
-4. **Review and resolution** — `mem review` lists pending, contested, and anchor-contradicted facts. Contradictions (same subject + scope, different values, ambiguous winner) are never surfaced as ground truth — they appear here for you to resolve. Resolution runs both ways: once the rival is forgotten or edited into agreement, the next `mem epoch --gc` reinstates the survivor (back to `pinned` if it was pinned) instead of leaving it withheld.
+4. **Review and resolution** — `mem review` lists pending, contested, and anchor-contradicted facts. The two words are different mechanisms and both appear throughout: *contested* is fact-versus-fact (two facts disagree with each other, and neither clearly wins), while *contradicted* is fact-versus-world (an anchor predicate tested reality and denied the fact). A fact can be either without being the other. Contradictions (same subject + scope, different values, ambiguous winner) are never surfaced as ground truth — they appear here for you to resolve. Resolution runs both ways: once the rival is forgotten or edited into agreement, the next `mem epoch --gc` reinstates the survivor (back to `pinned` if it was pinned) instead of leaving it withheld.
 5. **Forget and edit** — `mem forget <id>` soft-deletes a fact (marks it superseded, kept for audit); `mem edit <id>` updates text, subject/value, anchor, or scope. Both bump an internal epoch so the token-goat seam always sees the latest state.
 
 ## Install

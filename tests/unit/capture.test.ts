@@ -214,3 +214,32 @@ describe("loadAllowlist", () => {
     expect(loadAllowlist(root)).toEqual(["value-one", "value-two"]);
   });
 });
+
+/**
+ * SECURITY.md documents where screening stops, using these three strings as its worked example. A
+ * documented boundary drifts as silently as any other doc claim -- and this one drifting in the
+ * permissive direction would be read by users as a guarantee the code no longer honours -- so the
+ * examples are asserted rather than left as prose. If a change here makes one of these fail, the
+ * fix is to update SECURITY.md in the same commit, not to delete the case.
+ */
+describe("the screening floor SECURITY.md documents", () => {
+  const screen = (text: string): readonly unknown[] => screenForSecrets({ text }, []);
+
+  it("refuses a credential word joined to its value by a separator", () => {
+    expect(screen("password = Xk9mP2vL8nQ4wR").length).toBeGreaterThan(0);
+  });
+
+  it("refuses any standalone high-entropy token at or above the 32-character floor", () => {
+    expect(screen("the staging password is Xk9mP2vL8nQ4wRq7Tz3Yb6Nc1Vd8Fg5Hj").length).toBeGreaterThan(0);
+  });
+
+  it("stores a short secret stated in prose, which is the documented limit", () => {
+    // No separator, not hex, and 14 characters is under the entropy floor. Raising that floor is
+    // what would start refusing ordinary project facts, so this is an accepted position.
+    expect(screen("the staging password is Xk9mP2vL8nQ4wR")).toHaveLength(0);
+  });
+
+  it("still stores a commit SHA quoted next to no credential word", () => {
+    expect(screen("fixed in 5b743089c1e4f2a6b8d0c3e7f9a1b2c4d6e8f0a2")).toHaveLength(0);
+  });
+});
