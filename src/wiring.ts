@@ -324,16 +324,56 @@ function stripBlockSeparators(content: string, startIdx: number, blockEnd: numbe
   return `${beforeStripped}${afterStripped}`;
 }
 
+/** Every offset at which `marker` occurs in `content`, ascending. */
+function allOccurrences(content: string, marker: string): number[] {
+  const out: number[] = [];
+  for (let idx = content.indexOf(marker); idx !== -1; idx = content.indexOf(marker, idx + marker.length)) {
+    out.push(idx);
+  }
+  return out;
+}
+
+/**
+ * The first `start` occurrence that resolves to a complete block -- an `end` marker after it with no
+ * other `start` in between -- or `undefined` if none does.
+ *
+ * A bare `indexOf(start)` / `indexOf(end)` pair is not equivalent, and the difference destroys data.
+ * A hand-edit, a crashed write, or a merge conflict can leave an orphaned start marker with no end
+ * of its own; pairing that orphan with a *later* block's end marker makes uninstall delete every
+ * byte between them -- the user's own content along with mem's block. Scanning past a start that
+ * does not resolve also stops installs from appending a duplicate block whenever a stray end marker
+ * happens to sit earlier in the file. `findSharedBlock` has always reasoned this way; this is the
+ * same rule for the per-tool markers.
+ */
+function resolveMarkedBlock(content: string, start: string, end: string): { startIdx: number; endIdx: number } | undefined {
+  const starts = allOccurrences(content, start);
+  for (let i = 0; i < starts.length; i++) {
+    const startIdx = starts[i];
+    if (startIdx === undefined) {
+      continue;
+    }
+    const endIdx = content.indexOf(end, startIdx + start.length);
+    if (endIdx === -1) {
+      continue;
+    }
+    const nextStart = starts[i + 1];
+    if (nextStart !== undefined && nextStart < endIdx) {
+      continue;
+    }
+    return { startIdx, endIdx };
+  }
+  return undefined;
+}
+
 /** Inserts/replaces a tool-namespaced marked block. Replaces everything between an existing marker pair in place (upgrade); otherwise appends a new marked block at end of file, separated from any existing content by one newline. */
 function upsertMarkedBlock(content: string, tool: string, body: string): string {
   const start = markerStart(tool);
   const end = markerEnd(tool);
   const block = `${start}\n${body.trim()}\n${end}`;
 
-  const startIdx = content.indexOf(start);
-  const endIdx = content.indexOf(end);
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    return content.slice(0, startIdx) + withEol(block, detectEol(content)) + content.slice(endIdx + end.length);
+  const found = resolveMarkedBlock(content, start, end);
+  if (found !== undefined) {
+    return content.slice(0, found.startIdx) + withEol(block, detectEol(content)) + content.slice(found.endIdx + end.length);
   }
 
   return appendBlock(content, block);
@@ -341,15 +381,12 @@ function upsertMarkedBlock(content: string, tool: string, body: string): string 
 
 /** Strips a tool-namespaced marked block plus the one separator newline `upsertMarkedBlock` adds, leaving the rest of the file untouched. No-op (returns `content` unchanged) if the marker pair isn't present. */
 function stripMarkedBlock(content: string, tool: string): string {
-  const start = markerStart(tool);
   const end = markerEnd(tool);
-  const startIdx = content.indexOf(start);
-  const endIdx = content.indexOf(end);
-  if (startIdx === -1 || endIdx === -1 || endIdx < startIdx) {
+  const found = resolveMarkedBlock(content, markerStart(tool), end);
+  if (found === undefined) {
     return content;
   }
-  const blockEnd = endIdx + end.length;
-  return stripBlockSeparators(content, startIdx, blockEnd);
+  return stripBlockSeparators(content, found.startIdx, found.endIdx + end.length);
 }
 
 function markdownFile(path: string, tool: string, body: string): ManagedFile {
@@ -441,11 +478,17 @@ function findSharedBlock(content: string): SharedBlockLocation | undefined {
 function upsertSharedMarkedBlock(content: string, tool: string, body: string): string {
   const found = findSharedBlock(content);
   if (found !== undefined) {
-    if (found.tools.includes(tool)) {
+    // Rebuilt whole rather than rewriting just the `tools=` line. Returning early once the tool was
+    // already listed meant a body written by an older version of mem was never refreshed, so a
+    // reinstall upgraded the per-tool blocks and silently left this one stale. The body is generated
+    // from one constant shared by every tool that writes here, so regenerating it is the upgrade.
+    const tools = found.tools.includes(tool) ? found.tools : [...found.tools, tool];
+    const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
+    const block = withEol(`${sharedMarkerStart(tools)}\n${body.trim()}\n${SHARED_BLOCK_END}`, detectEol(content));
+    if (content.slice(found.startIdx, blockEnd) === block) {
       return content;
     }
-    const newStartLine = sharedMarkerStart([...found.tools, tool]);
-    return content.slice(0, found.startIdx) + newStartLine + content.slice(found.startLineEndIdx);
+    return content.slice(0, found.startIdx) + block + content.slice(blockEnd);
   }
 
   const block = `${sharedMarkerStart([tool])}\n${body.trim()}\n${SHARED_BLOCK_END}`;
@@ -481,7 +524,11 @@ function describeSharedBlockDetail(tool: string, current: string | undefined, in
     return undefined;
   }
   if (installAction !== "noop") {
-    return `install would join existing shared block (adds ${tool} to tools=)`;
+    // A listed tool can still have work to do now that install refreshes a stale body, so the two
+    // reasons a shared-block install is non-noop have to read differently.
+    return found.tools.includes(tool)
+      ? `install would refresh the shared block body (${tool} already in tools=)`
+      : `install would join existing shared block (adds ${tool} to tools=)`;
   }
   if (uninstallAction !== "noop") {
     const remaining = found.tools.filter((t) => t !== tool);
