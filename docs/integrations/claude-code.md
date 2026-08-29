@@ -90,8 +90,7 @@ This machine has token-goat-mem installed. Do not wait to be asked to run
 "from now on...", "never...", "don't...", or otherwise state a durable
 preference, decision, or correction, persist it yourself, right then:
 `mem remember "<short fact>" --kind preference|decision|fact|correction --scope project --root .`
-Use --subject/--value for anything that can be contradicted later
-(e.g. --subject package-manager --value pnpm).
+Use --subject/--value for anything that can be contradicted later.
 ```
 
 ## Embedding memory into token-goat

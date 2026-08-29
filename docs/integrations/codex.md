@@ -41,11 +41,11 @@ Codex reads the project's `AGENTS.md` as instructions. The reliable integration 
 ```markdown
 ## Memory
 
-This machine has token-goat-mem installed (`mem` on PATH).
+token-goat-mem is installed (`mem` on PATH).
 
 - At the start of a task, run `mem recall --hint-format --root .` and treat
   each returned line's `display` string as a prior fact, honoring its
-  embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+  embedded trust caveat.
 - Do not wait to be asked to run `mem remember` — when the user says things
   like "remember that...", "always...", "from now on...", "never...",
   "don't...", or otherwise reaches a durable preference, decision, or
