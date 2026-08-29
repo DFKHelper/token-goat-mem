@@ -126,11 +126,11 @@ Copilot's agent mode reads a workspace `AGENTS.md`. Document Mem there so agents
 ```markdown
 ## Memory
 
-This machine has token-goat-mem installed (`mem` on PATH).
+token-goat-mem is installed (`mem` on PATH).
 
 - At the start of a task, run `mem recall --hint-format --root .` and treat
   each returned line's `display` string as a prior fact, honoring its
-  embedded trust caveat ("verify", "unverified", "contradicted, excluded").
+  embedded trust caveat.
 - Do not wait to be asked to run `mem remember` — when the user says things
   like "remember that...", "always...", "from now on...", "never...",
   "don't...", or otherwise reaches a durable preference, decision, or
@@ -145,9 +145,9 @@ No extension needed. The CLI is a standard tool like `npm` or `git`. If Codex or
 ## Workflow example
 
 1. **Start session** — open VS Code
-2. **Recall facts** — Ctrl+Shift+M (or Run Task > "Mem: Recall project facts")
+2. **Recall facts** — Ctrl+K M (or Run Task > "Mem: Recall project facts")
 3. **Chat with Copilot** — reference the recalled facts from the terminal
-4. **Discover a new preference** — store it: `mem remember "no default exports in barrel files" --kind preference` (Ctrl+Shift+N, complete it)
+4. **Discover a new preference** — store it: `mem remember "no default exports in barrel files" --kind preference` (Ctrl+K R, complete it)
 5. **Next session** — repeat step 2; Copilot has continuity
 
 ## Fail-open: what happens if Mem is missing

@@ -1089,3 +1089,98 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
     expect(lfOnlyLineCount(after)).toBe(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── markdown doc drift ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The JSON half of this invariant has been covered since 0.2.5, but the helper doing it only ever
+ * matched ` ```json ` fences -- so every markdown block mem writes was unwatched, and three drifts
+ * accumulated behind it. Each doc's own promise is that it shows what `mem init <tool>` writes, for
+ * a user who would rather do it by hand; a doc that shows something else is worse than no doc,
+ * because it is confidently wrong.
+ *
+ * Compared against what `install()` actually writes to disk, not against the source constant: the
+ * constant is one input to the written block, and a defect in the wrapping would slip past a
+ * constant-to-doc comparison entirely.
+ */
+describe("regression: integration docs match the markdown mem init actually writes", () => {
+  /**
+   * The single ```markdown fence in an integration doc -- the block that doc tells a user to paste.
+   *
+   * Anchored on the fence rather than on a preceding heading, because every one of these blocks
+   * *starts* with `## Memory`: a heading-anchored search finds the copy inside the fence and then
+   * looks for an opening fence that is already behind it. Asserting the fence is unique also turns
+   * a second markdown block into a visible failure rather than a silently unchecked one.
+   */
+  function soleMarkdownFence(docName: string): string {
+    const doc = readFileSync(new URL(`../docs/integrations/${docName}.md`, import.meta.url), "utf8");
+    const fences = [...doc.matchAll(/^```markdown\r?\n([\s\S]*?)\r?\n^```/gmu)];
+    expect(fences.length, `expected exactly one markdown fence in ${docName}.md`).toBe(1);
+    return (fences[0]?.[1] ?? "").replace(/\r\n/gu, "\n").trim();
+  }
+
+  /** The body mem wrote between its markers, with the markers themselves stripped. */
+  function writtenBlock(path: string, startMarkerPrefix: string, endMarker: string): string {
+    const content = read(path).replace(/\r\n/gu, "\n");
+    const startIndex = content.indexOf(startMarkerPrefix);
+    expect(startIndex, `no start marker in ${path}`).toBeGreaterThanOrEqual(0);
+    const afterStart = content.slice(startIndex);
+    const bodyStart = afterStart.indexOf("\n") + 1;
+    const bodyEnd = afterStart.indexOf(endMarker);
+    expect(bodyEnd, `no end marker in ${path}`).toBeGreaterThan(0);
+    return afterStart.slice(bodyStart, bodyEnd).trim();
+  }
+
+  it("claude-code.md shows the CLAUDE.md block the installer writes", () => {
+    claudeCode.install({ root, homeDir: home });
+    const written = writtenBlock(
+      join(root, "CLAUDE.md"),
+      "<!-- token-goat-mem:claude-code:start -->",
+      "<!-- token-goat-mem:claude-code:end -->",
+    );
+
+    // Drifted: the doc appended an `(e.g. --subject package-manager --value pnpm)` example the
+    // installer never writes, while claiming above the fence to show exactly what mem writes.
+    expect(soleMarkdownFence("claude-code")).toBe(written);
+  });
+
+  it.each(["codex", "copilot-cli", "copilot-vscode"] as const)(
+    "%s.md shows the shared AGENTS.md block the installer writes",
+    (docName) => {
+      codex.install({ root, homeDir: home });
+      const written = writtenBlock(join(root, "AGENTS.md"), "<!-- token-goat-mem:start", "<!-- token-goat-mem:end -->");
+
+      // All three tools share one reference-counted AGENTS.md block, so all three docs must show
+      // the same text -- and all three had drifted from it identically, opening with "This machine
+      // has token-goat-mem installed" where the installer writes "token-goat-mem is installed".
+      expect(soleMarkdownFence(docName)).toBe(written);
+    },
+  );
+
+  it("copilot-vscode.md's walkthrough names the keybindings the installer actually writes", () => {
+    copilotVscode.install({ root, homeDir: home });
+    const installed = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<{ key: string }>;
+    const doc = readFileSync(new URL("../docs/integrations/copilot-vscode.md", import.meta.url), "utf8");
+
+    // The prose walkthrough is outside every fenced block, so neither the JSON test above nor the
+    // markdown one sees it. It told the reader to press Ctrl+Shift+M and Ctrl+Shift+N for four
+    // releases after 0.2.4 replaced those bindings -- in the same file whose own keybindings section
+    // explains that they were removed for shadowing View: Problems and New Window.
+    const walkthrough = doc.slice(doc.indexOf("## Workflow example"));
+    expect(walkthrough).not.toBe("");
+
+    for (const { key } of installed) {
+      // "ctrl+k m" as written to keybindings.json is "Ctrl+K M" in prose.
+      const display = key
+        .split(" ")
+        .map((chord) => chord.split("+").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join("+"))
+        .join(" ");
+      expect(walkthrough).toContain(display);
+    }
+
+    // The superseded pair may still appear in the section that explains why they were dropped, but
+    // never in the walkthrough, which is instruction rather than history.
+    expect(walkthrough).not.toContain("Ctrl+Shift+M");
+    expect(walkthrough).not.toContain("Ctrl+Shift+N");
+  });
+});
