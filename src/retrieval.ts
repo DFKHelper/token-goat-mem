@@ -26,6 +26,8 @@
  *      hint as unconditional truth by accident (S3) — the caveat travels with the payload.
  */
 
+import { resolve as resolvePath, sep } from "node:path";
+
 import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
 import { resolveContradictions } from "./contradiction.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
@@ -81,6 +83,19 @@ export interface RetrievalOptions {
    * epoch was the lone outlier because it was the only one the caller could express in SQL.
    */
   readonly epochAfter?: number;
+  /**
+   * When true, drop facts whose scope binding does not resolve to {@link root} -- a `project` fact
+   * belonging to a different project, or a `path` fact bound outside this tree. `global` facts always
+   * survive. Defaults to `false`, which is the store-wide behaviour every existing caller relies on.
+   *
+   * This is a filter, not a pre-selection, for the reason spelled out on {@link epochAfter}: narrowing
+   * the pool before `retrieve` runs hides a fact's rival from `resolveContradictions`, whose
+   * reinstatement pass then reads that absence as "nothing contests this" and surfaces a genuinely
+   * contested fact as clean ground truth. Scope-binding is exactly the filter most likely to separate
+   * two rivals (a contradiction is keyed on subject + scope, so rivals routinely differ by scopeRoot),
+   * so applying it early would defeat the withholding gate on precisely the facts it exists to catch.
+   */
+  readonly restrictToRoot?: boolean;
   /** Cap on the number of results returned, applied after ranking and gating. */
   readonly limit?: number;
   /** When true, drop every `trust === "withheld"` result (contested/pending/anchor-contradicted) — the `--hint-format` contract (Section 4). */
@@ -458,7 +473,49 @@ export function anchorRootFor(fact: Fact, queryRoot: string): string {
   return queryRoot;
 }
 
+/**
+ * Case-folds a path for comparison on filesystems that ignore case.
+ *
+ * win32 only, matching anchors.ts's `FS_CASE_INSENSITIVE` and for the same reason: macOS is
+ * case-insensitive by default but supports case-sensitive APFS volumes, so folding there would
+ * trade a missed match for a false one.
+ */
+function normalizePath(path: string): string {
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+/**
+ * Whether `fact`'s scope binding resolves to `root` -- the predicate behind
+ * {@link RetrievalOptions.restrictToRoot}.
+ *
+ * A `path` fact counts as bound when its `scopeRoot` names a file or directory *inside* `root`,
+ * which is the containment direction the CLI needs: the caller supplies a project directory and
+ * the fact is bound to a file within it. integration-seam.ts's `isInScope` tests the opposite
+ * direction against open editor files, so the two predicates are deliberately not shared.
+ */
+function isBoundToRoot(fact: Fact, root: string): boolean {
+  if (fact.scope === "global") {
+    return true;
+  }
+  const scopeRootRaw = fact.scopeRoot ?? null;
+  if (scopeRootRaw === null || scopeRootRaw.trim().length === 0) {
+    // A project/path fact with no binding cannot be resolved against any root. Exclude rather than
+    // guess: that fails toward under-recall, which is the safe direction.
+    return false;
+  }
+  const scopeRoot = normalizePath(resolvePath(scopeRootRaw));
+  const normalizedRoot = normalizePath(resolvePath(root));
+  if (fact.scope === "project") {
+    return normalizedRoot === scopeRoot;
+  }
+  // scope === "path": bound when the target sits at or beneath the querying root.
+  return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot + sep);
+}
+
 function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boolean {
+  if (options.restrictToRoot === true && !isBoundToRoot(fact, options.root)) {
+    return false;
+  }
   if (options.kind !== undefined && fact.kind !== options.kind) {
     return false;
   }

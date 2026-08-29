@@ -450,3 +450,73 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
     expect(result?.freshness).toBe("affirmed");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── regression: restrictToRoot binds facts to the querying root ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: restrictToRoot excludes facts bound to a different root", () => {
+  let otherRoot: string;
+
+  beforeEach(() => {
+    otherRoot = mkdtempSync(join(tmpdir(), "mem-retrieval-scope-"));
+  });
+
+  afterEach(() => {
+    rmSync(otherRoot, { recursive: true, force: true });
+  });
+
+  it("drops a project fact bound to another project, and keeps the one bound here", async () => {
+    const facts = [
+      makeFact({ id: "here", text: "chose Postgres", kind: "decision", scope: "project", scopeRoot: root }),
+      makeFact({ id: "there", text: "chose Postgres", kind: "decision", scope: "project", scopeRoot: otherRoot }),
+    ];
+
+    const { results } = await retrieve(facts, { query: "postgres", root, restrictToRoot: true });
+    expect(results.map((result) => result.fact.id)).toEqual(["here"]);
+  });
+
+  it("keeps global facts regardless of where the query came from", async () => {
+    const facts = [makeFact({ id: "g", text: "chose Postgres", kind: "decision", scope: "global", scopeRoot: null })];
+
+    const { results } = await retrieve(facts, { query: "postgres", root, restrictToRoot: true });
+    expect(results.map((result) => result.fact.id)).toEqual(["g"]);
+  });
+
+  it("keeps a path fact bound beneath the querying root and drops one bound outside it", async () => {
+    const facts = [
+      makeFact({
+        id: "inside",
+        text: "chose Postgres",
+        kind: "decision",
+        scope: "path",
+        scopeRoot: join(root, "src", "db.ts"),
+      }),
+      makeFact({
+        id: "outside",
+        text: "chose Postgres",
+        kind: "decision",
+        scope: "path",
+        scopeRoot: join(otherRoot, "src", "db.ts"),
+      }),
+    ];
+
+    const { results } = await retrieve(facts, { query: "postgres", root, restrictToRoot: true });
+    expect(results.map((result) => result.fact.id)).toEqual(["inside"]);
+  });
+
+  it("drops a project fact carrying no binding rather than guessing it belongs here", async () => {
+    const facts = [makeFact({ id: "unbound", text: "chose Postgres", kind: "decision", scope: "project", scopeRoot: null })];
+
+    const { results } = await retrieve(facts, { query: "postgres", root, restrictToRoot: true });
+    expect(results).toHaveLength(0);
+  });
+
+  it("leaves the pool untouched when restrictToRoot is not set, which every other caller relies on", async () => {
+    const facts = [
+      makeFact({ id: "here", text: "chose Postgres", kind: "decision", scope: "project", scopeRoot: root }),
+      makeFact({ id: "there", text: "chose Redis", kind: "decision", scope: "project", scopeRoot: otherRoot }),
+    ];
+
+    const { results } = await retrieve(facts, { query: "chose", root });
+    expect(results.map((result) => result.fact.id).sort()).toEqual(["here", "there"]);
+  });
+});

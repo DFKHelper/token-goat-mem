@@ -1077,6 +1077,12 @@ export function buildProgram(): Command {
         const retrievalOptions: RetrievalOptions = {
           query: query ?? "",
           root,
+          // Facts bind to the project they were captured in. Without this, `--root` reached only
+          // anchor evaluation and `--scope project` matched the scope *label* rather than the
+          // binding, so `mem recall --root . --scope project` run in one project surfaced another
+          // project's decisions. `global` facts are unaffected; see RetrievalOptions.restrictToRoot
+          // for why this is a filter inside `retrieve` rather than a narrower `listFacts` query.
+          restrictToRoot: true,
           ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
           ...(options.subject !== undefined ? { subject: options.subject } : {}),
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
