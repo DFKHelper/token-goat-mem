@@ -727,6 +727,82 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────── malformed per-tool markers ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * The shared reference-counted locator already scans every start marker and skips the ones that do
+ * not resolve to a complete block, because a hand-edit, a crashed write, or a merge conflict can
+ * leave an orphaned start marker behind. The per-tool path took the first `start` and the first
+ * `end` with a bare `indexOf` pair, so an orphan ahead of the real block made uninstall delete
+ * everything between the two -- the user's content included.
+ */
+describe("regression: per-tool marker pairing survives malformed markers", () => {
+  const START = "<!-- token-goat-mem:claude-code:start -->";
+  const END = "<!-- token-goat-mem:claude-code:end -->";
+
+  it("does not delete user content between an orphaned start marker and the real block", () => {
+    const path = join(root, "CLAUDE.md");
+    seed(path, `# My notes\n\n${START}\n\nUSER CONTENT THAT MUST SURVIVE\n\n${START}\nmem body\n${END}\n`);
+
+    claudeCode.uninstall({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("USER CONTENT THAT MUST SURVIVE");
+    expect(after).toContain("# My notes");
+    // The real block is gone; the orphaned start marker is left alone rather than guessed at.
+    expect(after).not.toContain("mem body");
+    expect(after).not.toContain(END);
+  });
+
+  it("finds the real block when a stray end marker precedes it", () => {
+    const path = join(root, "CLAUDE.md");
+    seed(path, `# Notes\n\n${END}\n\nuser text\n\n${START}\nmem body\n${END}\n`);
+
+    claudeCode.uninstall({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("user text");
+    expect(after).not.toContain("mem body");
+    expect(after).not.toContain(START);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── shared block body upgrades ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: the shared block body is upgraded, not left stale", () => {
+  it("rewrites a stale shared body when a listed tool is reinstalled", () => {
+    // The shared body is identical prose for every tool that writes it, so a tool already named in
+    // tools= still has to refresh it. Returning early on `tools.includes(tool)` meant a body written
+    // by an older version was never upgraded -- the per-tool path replaces its body on reinstall, and
+    // the two diverged silently.
+    const path = join(root, "AGENTS.md");
+    codex.install({ root, homeDir: home });
+
+    const installed = read(path);
+    const stale = installed.replace(/(<!-- token-goat-mem:start tools=codex -->\n)[\s\S]*?(\n<!-- token-goat-mem:end -->)/u, "$1OLD STALE BODY FROM AN EARLIER VERSION$2");
+    expect(stale).toContain("OLD STALE BODY");
+    writeFileSync(path, stale, "utf8");
+
+    codex.install({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).not.toContain("OLD STALE BODY");
+    expect(after).toBe(installed);
+  });
+
+  it("says the dry run would refresh the body, not that it would join tools=", () => {
+    const path = join(root, "AGENTS.md");
+    codex.install({ root, homeDir: home });
+    const stale = read(path).replace(/(<!-- token-goat-mem:start tools=codex -->\n)[\s\S]*?(\n<!-- token-goat-mem:end -->)/u, "$1OLD STALE BODY$2");
+    writeFileSync(path, stale, "utf8");
+
+    const plan = codex.describe({ root, homeDir: home });
+    const agents = plan.entries.find((e) => e.path.endsWith("AGENTS.md"));
+    expect(agents?.detail).toContain("refresh the shared block body");
+    expect(agents?.detail).not.toContain("adds codex to tools=");
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────── CRLF-authored config files ───────────────────────────────────────────────────────────────────────────
 
 /**
