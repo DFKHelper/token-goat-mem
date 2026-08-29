@@ -191,12 +191,14 @@ describe("claudeCode wiring", () => {
 
   it("uninstall on a file with nothing stamped is a no-op, not an error", () => {
     const settingsPath = join(root, ".claude", "settings.json");
+    // Four-space indent, so byte-identity is a real assertion: a reserialize would come back at two.
     const original = { hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo one" }] }] } };
-    seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
+    const originalText = `${JSON.stringify(original, null, 4)}\n`;
+    seed(settingsPath, originalText);
 
     const result = claudeCode.uninstall({ root, homeDir: home });
     expect(result.changes.find((c) => c.path === settingsPath)?.action).toBe("noop");
-    expect(JSON.parse(read(settingsPath))).toEqual(original);
+    expect(read(settingsPath)).toBe(originalText);
   });
 
   it("uninstall on a completely fresh directory is a no-op for every file", () => {
@@ -206,19 +208,21 @@ describe("claudeCode wiring", () => {
 
   it("takes a .bak snapshot on first write and never overwrites it on a later re-init", () => {
     const settingsPath = join(root, ".claude", "settings.json");
-    const original = { hooks: { SessionStart: [] } };
-    seed(settingsPath, JSON.stringify(original));
+    // Compact and unterminated on purpose: the .bak has to be a byte copy of what was on disk, not a
+    // reserialization of what mem parsed out of it.
+    const originalText = `{"hooks":{"SessionStart":[]}}`;
+    seed(settingsPath, originalText);
 
     claudeCode.install({ root, homeDir: home });
     const bakPath = `${settingsPath}.token-goat-mem.bak`;
-    expect(JSON.parse(read(bakPath))).toEqual(original);
+    expect(read(bakPath)).toBe(originalText);
 
     // Mutate the live file directly (simulating manual edits) and re-init; the .bak must stay frozen.
     const mutated = JSON.parse(read(settingsPath));
     mutated.extra = "hand-added";
     seed(settingsPath, JSON.stringify(mutated));
     claudeCode.install({ root, homeDir: home });
-    expect(JSON.parse(read(bakPath))).toEqual(original);
+    expect(read(bakPath)).toBe(originalText);
   });
 });
 
@@ -435,10 +439,12 @@ describe("copilotVscode wiring", () => {
       version: "2.0.0",
       tasks: [{ label: "Mem: Recall project facts", type: "shell", command: "echo not-mem" }],
     };
-    seed(tasksPath, JSON.stringify(original, null, 2));
+    // Four-space indent: an aborted install must leave the file untouched down to its formatting.
+    const originalText = JSON.stringify(original, null, 4);
+    seed(tasksPath, originalText);
 
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
-    expect(JSON.parse(read(tasksPath))).toEqual(original);
+    expect(read(tasksPath)).toBe(originalText);
   });
 
   it("install is idempotent for tasks.json and keybindings.json", () => {
