@@ -54,7 +54,7 @@ Every documented flag and example must match the real CLI. If you change a comma
 
 `npm audit` reports zero advisories. It stayed at five dev-only ones in the esbuild/vite/vitest chain for several releases, on the reasoning that none of those packages are runtime dependencies and none reach the shipped `dist/token-goat-mem.mjs` bundle; the toolchain upgrade that cleared them (esbuild 0.24 to 0.28, vitest 2 to 4) has since landed. Keep it at zero: an advisory that is genuinely not worth fixing belongs here with its reasoning, not left unmentioned.
 
-Do not add, remove, or bump runtime dependencies (`dependencies` / `optionalDependencies`) as a side effect of unrelated work — the runtime surface is `better-sqlite3`, `commander`, `zod`, and optional `sqlite-vec`, and it is kept deliberately small.
+Do not add, remove, or bump runtime dependencies (`dependencies` / `optionalDependencies`) as a side effect of unrelated work — the runtime surface is `better-sqlite3`, `commander`, and `jsonc-parser` -- the same three esbuild marks `external`, resolved from `node_modules` at runtime -- and it is kept deliberately small. `tests/guards/dependencies.test.ts` fails if a declared runtime dependency is imported nowhere in `src/`, which is how `zod` and `sqlite-vec` sat in the manifest unused through six releases.
 
 ## Release flow
 
