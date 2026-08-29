@@ -39,6 +39,7 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { applyEdits, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type JSONPath, type ModificationOptions, type Node } from "jsonc-parser";
 
 // ─────────────────────────────────────────────────────────────────────────── Public types ───────────────────────────────────────────────────────────────────────────
@@ -556,29 +557,6 @@ function isStamped(value: unknown): boolean {
   return typeof value === "object" && value !== null && (value as Record<string, unknown>)[STAMP_KEY] === true;
 }
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (a === b) {
-    return true;
-  }
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) {
-    return false;
-  }
-  if (Array.isArray(a) || Array.isArray(b)) {
-    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) {
-      return false;
-    }
-    return a.every((value, index) => deepEqual(value, b[index]));
-  }
-  const aRecord = a as Record<string, unknown>;
-  const bRecord = b as Record<string, unknown>;
-  const aKeys = Object.keys(aRecord).sort();
-  const bKeys = Object.keys(bRecord).sort();
-  if (aKeys.length !== bKeys.length || aKeys.some((key, index) => key !== bKeys[index])) {
-    return false;
-  }
-  return aKeys.every((key) => deepEqual(aRecord[key], bRecord[key]));
-}
-
 /** True for `undefined` (file absent) or a file that exists but contains only whitespace -- neither has any hand-written content that could conflict, so both are treated identically to "start fresh" by every JSON/JSONC entry point below. */
 function isBlank(content: string | undefined): boolean {
   return content === undefined || content.trim().length === 0;
@@ -982,7 +960,7 @@ function upsertJsoncArrayEntries(
     if (!isStamped(found)) {
       throw new WiringConflictError(`a ${kindLabel} with ${identityKey}=${JSON.stringify(identity)} already exists in ${path} and was not created by mem; refusing to duplicate or overwrite it`);
     }
-    if (!deepEqual(found, entry)) {
+    if (!isDeepStrictEqual(found, entry)) {
       result = surgicalJsoncEdit(result, [...arrayPath, idx], entry);
     }
   }
@@ -1064,7 +1042,11 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
   text = tasksResult.text;
   anyChanged = anyChanged || tasksResult.changed;
 
-  const reparsed = (parseJsoncOrConflict(text, path) as Record<string, unknown>) ?? {};
+  // Re-parsed rather than reused: the `tasks` removal above edited `text`, so `parsed` is stale.
+  // Guarded like every other call site -- `parseJsoncOrConflict` returns undefined for an empty
+  // document, which the previous cast-then-`?? {}` hid from the type system while it still fired.
+  const rawReparsed = parseJsoncOrConflict(text, path);
+  const reparsed = isPlainObject(rawReparsed) ? rawReparsed : {};
   const inputs = Array.isArray(reparsed["inputs"]) ? (reparsed["inputs"] as unknown[]) : [];
   const inputsResult = removeStampedJsoncArrayEntries(text, ["inputs"], inputs);
   text = inputsResult.text;
