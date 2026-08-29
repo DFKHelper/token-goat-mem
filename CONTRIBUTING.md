@@ -36,7 +36,9 @@ back in it, and the "config files authored with CRLF stay CRLF" tests hold it to
 
 ## Test tiers
 
-No hook manager is wired yet, so the gate is manual:
+`npm install` runs the `prepare` script, which points `core.hooksPath` at `.githooks/`. The fast gate
+below then runs automatically on every commit. To skip it once, `git commit --no-verify`; to disable it
+entirely, `git config --unset core.hooksPath`.
 
 - **Before committing (fast):** `npm run lint && npm run typecheck && npm run test:guards`. The guards (`tests/guards/`) are pure-introspection invariants with no I/O — no bundle build, no SQLite DB. They catch the *implemented-but-unregistered / broken-schema* bug class before a commit lands.
 - **Before pushing (full):** `npm test`. Tests set `TOKEN_GOAT_MEM_HOME` to a temp directory via `tests/setup/`, so they never touch your real `~/.mem`. Three tiers run here:

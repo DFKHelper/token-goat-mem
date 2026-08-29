@@ -1,0 +1,19 @@
+#!/bin/sh
+#
+# The fast gate CONTRIBUTING.md specifies before every commit. Enabled by `npm install`, which runs
+# the `prepare` script and points core.hooksPath here.
+#
+# Deliberately not the full suite: this has to stay fast enough that nobody is tempted to reach for
+# --no-verify out of habit. The guards tier is pure introspection with no I/O -- no bundle build, no
+# SQLite -- and catches the implemented-but-unregistered and broken-schema classes before a commit
+# lands. `npm test` stays a pre-push concern.
+#
+# To skip deliberately: git commit --no-verify
+# To disable entirely: git config --unset core.hooksPath
+
+set -e
+
+echo "pre-commit: lint, typecheck, guards"
+npm run lint
+npm run typecheck
+npm run test:guards
