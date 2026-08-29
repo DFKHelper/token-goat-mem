@@ -274,6 +274,11 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
       (error: unknown) => {
         clearTimeout(timer);
+        // Forwards the backend's own rejection reason verbatim. `prefer-promise-reject-errors` wants
+        // an Error, but this is a pass-through, not an origination: an embedding backend is
+        // caller-supplied and may reject with anything, and wrapping it here would bury the original
+        // reason the caller needs to diagnose it.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         fail(error);
       },
     );

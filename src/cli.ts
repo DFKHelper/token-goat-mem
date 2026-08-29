@@ -961,7 +961,7 @@ export function buildProgram(): Command {
         // the db file, WAL sidecars, and schema on disk, which contradicts --dry-run's "nothing
         // written". Both plan* functions need only the source file, no db.
         if (hasFromJson) {
-          const fromJson = options.fromJson as string;
+          const fromJson = options.fromJson;
           const result = dryRun
             ? planImportFromJson({ path: fromJson })
             : await withDb((db) => importFromJson(db, { path: fromJson, root: resolveRoot(options.root) }));
@@ -1411,7 +1411,7 @@ export function buildProgram(): Command {
     .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")
     .option("--dry-run", "Print what would be written without touching disk")
     .action(
-      guard(async (tool: string, options: InitCliOptions) => {
+      guard((tool: string, options: InitCliOptions) => {
         const wiring = getToolWiring(parseToolName(tool));
         const wiringOpts = toWiringOpts(options);
         if (options.dryRun === true) {
@@ -1433,7 +1433,7 @@ export function buildProgram(): Command {
     .option("--user", "Also target the tool's user-level config, where the tool has both")
     .option("--dry-run", "Print what would be removed without touching disk")
     .action(
-      guard(async (tool: string | undefined, options: UninstallCliOptions) => {
+      guard((tool: string | undefined, options: UninstallCliOptions) => {
         if (options.all === true && tool !== undefined) {
           throw new UsageError("cannot combine a tool name with --all");
         }

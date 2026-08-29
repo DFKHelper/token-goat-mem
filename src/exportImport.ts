@@ -140,7 +140,7 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
     return fail(`facts[${index}] has a non-string "captured_at"`);
   }
   if (obj["captured_at"] !== undefined && typeof obj["captured_at"] === "string") {
-    const capturedAtStr = obj["captured_at"] as string;
+    const capturedAtStr = obj["captured_at"];
     if (capturedAtStr.length === 0 || isNaN(Date.parse(capturedAtStr))) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}`);
     }
@@ -162,7 +162,7 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
     if (!Array.isArray(rawEmbedding) || !rawEmbedding.every((value) => typeof value === "number")) {
       return fail(`facts[${index}] has an invalid "embedding" (expected number[] or null)`);
     }
-    embedding = Float32Array.from(rawEmbedding as number[]);
+    embedding = Float32Array.from(rawEmbedding);
   }
 
   // Plain conditional assignment (not spreading possibly-`undefined` values into the literal),
@@ -365,7 +365,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
   const allowlist = loadAllowlist(root);
 
   const candidates = entries.map((entry) => entry.candidate);
-  const outcomes: (ImportOutcome | undefined)[] = new Array(entries.length).fill(undefined);
+  const outcomes: (ImportOutcome | undefined)[] = Array.from({ length: entries.length }, () => undefined);
   const toInsert: { readonly index: number; readonly newFact: NewFact & { id: string } }[] = [];
   const skips: PlannedSkip[] = [];
   const seenIds = new Set<string>();
