@@ -423,11 +423,29 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
   });
 
   const insertedFacts = new Map<number, Fact>();
+  // Ids that were absent during classification above but present by the time the write lock was
+  // taken -- i.e. a concurrent import inserted them in between. See the re-check inside the
+  // transaction for why they are recorded rather than allowed to fail.
+  const lateDuplicates = new Set<number>();
   const tx = db.transaction((): void => {
     for (const skip of skips) {
       insertAuditLog(db, { event: skip.event, factId: skip.factId, detail: skip.detail });
     }
     for (const { index, newFact } of toInsert) {
+      // The dedupe check in the classification pass ran before this transaction took the write lock,
+      // so a concurrent import can have inserted the same id in between. Re-checking under the lock
+      // keeps that case a per-row skip: without it the insert hits the `facts.id` primary key and
+      // rolls back this entire batch, so an import that overlaps another by one fact loses every
+      // fact it was going to add rather than the one that was already there.
+      if (getFactById(db, newFact.id) !== undefined) {
+        lateDuplicates.add(index);
+        insertAuditLog(db, {
+          event: "json_import_skipped_duplicate",
+          factId: newFact.id,
+          detail: `skipped: fact ${newFact.id} already exists`,
+        });
+        continue;
+      }
       const fact = insertFact(db, newFact);
       insertedFacts.set(index, fact);
       insertAuditLog(db, {
@@ -445,6 +463,10 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
     outcomes[skip.index] = skip.outcome;
   }
   for (const { index } of toInsert) {
+    if (lateDuplicates.has(index)) {
+      outcomes[index] = { status: "skipped_duplicate", candidate: candidates[index] as ImportCandidate };
+      continue;
+    }
     const fact = insertedFacts.get(index);
     if (fact === undefined) {
       throw new Error(`exportImport: importFromJson failed to read back an inserted fact at index ${index}`);

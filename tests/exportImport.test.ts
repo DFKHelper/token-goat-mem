@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { openStorage } from "../src/storage.js";
+import { getFactById, insertFact, openStorage } from "../src/storage.js";
+import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
 
 // ─────────────────────────────────────────────────────────────────────────── planImportFromJson (dry-run, DB-free) ───────────────────────────────────────────────────────────────────────────
@@ -554,5 +555,70 @@ describe("imported fact ids are validated for shape, not just presence", () => {
 
   it("still accepts a well-formed uuid", () => {
     expect(planWith("22222222-2222-2222-2222-222222222222").candidates).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── concurrent-import race ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Regression: the duplicate-id check that decides whether to insert a fact runs in the
+ * classification pass, which is outside the transaction that takes the write lock. Two imports
+ * sharing one id could therefore both classify it as new; the loser then hit the `facts.id` primary
+ * key and rolled back its *whole* batch, losing every unrelated fact it was going to add.
+ *
+ * The interleave is reproduced exactly rather than approximated: `db` is proxied so the rival's
+ * insert lands on the first `db.transaction(...)` call, which is the line immediately after the
+ * classification pass and immediately before the write lock is taken -- precisely the window a
+ * second process occupies. Racing two real processes would test the same thing nondeterministically.
+ */
+describe("regression: an id inserted between classification and the write lock", () => {
+  const FACT_A: Record<string, unknown> = { ...VALID_FACT, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", text: "rival wins this id" };
+  const FACT_B: Record<string, unknown> = { ...VALID_FACT, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", text: "unrelated fact in the same batch" };
+
+  /** `db` with the rival import spliced into the race window, fired once. */
+  function dbWithRivalInsertAtLockTime(realDb: Database.Database, rival: Record<string, unknown>): Database.Database {
+    let fired = false;
+    return new Proxy(realDb, {
+      get(target, prop, receiver): unknown {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop !== "transaction" || typeof value !== "function") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (fn: () => void): unknown => {
+          if (!fired) {
+            // Set before inserting: insertFact opens its own transaction and would re-enter here.
+            fired = true;
+            insertFact(target, rival as unknown as NewFact);
+          }
+          return target.transaction(fn);
+        };
+      },
+    });
+  }
+
+  it("skips only the raced id and still imports the rest of the batch", () => {
+    writeFileSync(jsonPath, envelope([FACT_A, FACT_B]), "utf8");
+    const raced = dbWithRivalInsertAtLockTime(db, FACT_A);
+
+    const result = importFromJson(raced, { path: jsonPath, root });
+
+    expect(result.outcomes[0]?.status).toBe("skipped_duplicate");
+    expect(result.outcomes[1]?.status).toBe("imported");
+    // The batch's unrelated fact must survive the collision, not roll back with it.
+    expect(getFactById(db, FACT_B["id"] as string)?.text).toBe("unrelated fact in the same batch");
+    // And the rival's row is the one left standing, not overwritten.
+    expect(getFactById(db, FACT_A["id"] as string)?.text).toBe("rival wins this id");
+  });
+
+  it("records the raced id as a duplicate skip in the audit log, not as an error", () => {
+    writeFileSync(jsonPath, envelope([FACT_A, FACT_B]), "utf8");
+    const raced = dbWithRivalInsertAtLockTime(db, FACT_A);
+
+    importFromJson(raced, { path: jsonPath, root });
+
+    const events = db
+      .prepare("SELECT event, fact_id FROM audit_log WHERE fact_id = ? ORDER BY rowid")
+      .all(FACT_A["id"]) as { event: string }[];
+    expect(events.some((row) => row.event === "json_import_skipped_duplicate")).toBe(true);
   });
 });
