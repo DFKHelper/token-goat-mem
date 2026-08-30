@@ -479,7 +479,7 @@ describe("buildHintFormat", () => {
    * failing on the first Windows CI run this project ever did. Forcing the budget to 0 exercises it
    * on purpose, so the degradation contract is pinned rather than inferred from a flake.
    */
-  it("drops to the truncated caps and says so when the soft budget is exceeded", async () => {
+  it("returns an empty hint set, not a smaller one, when the soft budget is exceeded", async () => {
     seedFacts(dbPath, [
       ...Array.from({ length: 6 }, (_, i) => ({
         id: `pref-${i}`,
@@ -504,10 +504,52 @@ describe("buildHintFormat", () => {
     const full = await buildHint({ root, dbPath });
     expect(full.truncated).toBe(false);
 
-    const truncated = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
-    expect(truncated.truncated).toBe(true);
-    // 2 aggressive (preference/correction) + 1 precision, against 8 + 4 untruncated.
-    expect(factLines(truncated).length).toBeLessThan(factLines(full).length);
-    expect(factLines(truncated).length).toBe(3);
+    expect(factLines(full).length).toBeGreaterThan(0);
+
+    const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
+    expect(exhausted.truncated).toBe(true);
+
+    // The invariant, and the whole point of the fix: a budget-exhausted response must not be a
+    // *subset* of a healthy one. It used to emit 3 of 12 facts (caps dropped to 2 aggressive + 1
+    // precision) in a payload byte-indistinguishable from a complete response -- same TGMEM/2
+    // header, same line grammar, same footer -- so a consumer surfacing `display` verbatim
+    // presented a quarter of what was found as though it were all of it. TGMEM/2's grammar is
+    // closed, so there is no in-band way to say "partial"; the only honest options are complete
+    // or empty. Asserting emptiness rather than `< full` is deliberate: `< full` would pass again
+    // the moment someone reintroduces a reduced cap, which is the bug.
+    expect(exhausted.lines).toEqual([]);
+    expect(factLines(exhausted)).toEqual([]);
+  });
+
+  /**
+   * The wire-level half of the assertion above, at the boundary the consumer actually sees.
+   *
+   * `buildHintFormat`'s return value is in-process; what token-goat parses is stdout. A response
+   * that withholds facts has to be distinguishable *there* -- and the distinguishing signal is the
+   * absence of fact-lines, not a flag, because `HintFormatResult.truncated` never reaches the wire
+   * and cannot be made to without a version bump that fails un-upgraded consumers open to nothing.
+   */
+  it("emits no fact-lines and no footer on the wire when the budget is exhausted", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "pref-wire",
+        text: "uses pnpm not npm",
+        kind: "preference" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active" as const,
+      },
+    ]);
+
+    const healthy = await buildHint({ root, dbPath });
+    expect(healthy.lines).toContain(TGMEM_FOOTER_LINE);
+
+    const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
+    // No footer either: TGMEM/2 emits one only alongside at least one fact-line, so a lone
+    // footer would itself be an off-grammar response.
+    expect(exhausted.lines).not.toContain(TGMEM_FOOTER_LINE);
+    expect(exhausted.header).toBe(TGMEM_HEADER);
+    expect(exhausted.lines).toEqual([]);
   });
 });

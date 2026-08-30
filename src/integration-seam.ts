@@ -119,8 +119,19 @@ function tgmemHeaderFor(protocolVersion: number): string {
  * plan Section 4: the token-goat side applies its own ~150ms hard timeout
  * around the whole subprocess call; this is mem's internal budget for the
  * work it does, so it degrades gracefully well before that outer timeout
- * would fire). Once exceeded, this module truncates its own output rather
- * than trusting an unbounded result set — "truncate ... do not hang".
+ * would fire). Once exceeded, this module returns an empty hint set rather
+ * than trusting an unbounded result set — "do not hang".
+ *
+ * It returns *empty* rather than a smaller slice because there is nowhere in
+ * TGMEM/2 to say "this is partial". The grammar below is closed: an off-grammar
+ * line is dropped by a conforming consumer, and adding one bumps the version,
+ * at which point consumers that have not upgraded fail open to no hints at all.
+ * So a reduced slice is indistinguishable on the wire from a complete one, and
+ * a consumer told to surface `display` verbatim would present 2 of 12 facts as
+ * though they were all of them -- the exact opposite of the self-caveating
+ * guarantee this seam is documented to provide. An empty set is already this
+ * module's shape for "I could not deliver" (see the catch in `buildHintFormat`),
+ * and the consumer's documented fail-open path already handles it correctly.
  */
 const RETRIEVAL_BUDGET_MS = 150;
 
@@ -136,10 +147,6 @@ const MIN_ANCHOR_BUDGET_MS = 20;
 const AGGRESSIVE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["preference", "correction"]);
 const AGGRESSIVE_CAP = 8;
 const PRECISION_CAP = 4;
-
-/** Caps applied when the soft time budget was exceeded (design plan Section 4: "truncate ... if exceeded"). */
-const TRUNCATED_AGGRESSIVE_CAP = 2;
-const TRUNCATED_PRECISION_CAP = 1;
 
 /** Short wire-protocol tag for the leading column of a TGMEM line (distinct from the prose label embedded inside `display`, which retrieval.ts owns). */
 const PROTOCOL_KIND_TAG: Record<FactKind, string> = {
@@ -176,11 +183,11 @@ export interface HintFormatOptions {
   /**
    * Test override for the soft time budget in {@link RETRIEVAL_BUDGET_MS}, in milliseconds.
    *
-   * Truncation is wall-clock-driven, which makes it the one behaviour here a test cannot pin
-   * without control of the clock: a machine slow enough to blow the budget silently drops the caps
-   * to 2/1, so an assertion about *which* facts came back becomes an assertion about how busy the
-   * runner was. Passing a large value takes truncation out of the picture; passing 0 forces it, so
-   * the truncated path can be tested on purpose rather than only by accident on a slow machine.
+   * Budget exhaustion is wall-clock-driven, which makes it the one behaviour here a test cannot
+   * pin without control of the clock: a machine slow enough to blow the budget returns an empty
+   * hint set, so an assertion about *which* facts came back becomes an assertion about how busy
+   * the runner was. Passing a large value takes it out of the picture; passing 0 forces it, so
+   * the exhausted path can be tested on purpose rather than only by accident on a slow machine.
    */
   readonly retrievalBudgetMs?: number | undefined;
 }
@@ -190,7 +197,15 @@ export interface HintFormatResult {
   readonly header: string;
   /** Fully formatted, ready-to-print lines, one per surfaced fact. */
   readonly lines: readonly string[];
-  /** True if the soft time budget was exceeded and `lines` was truncated as a result. */
+  /**
+   * True if the soft time budget was exceeded, in which case `lines` is empty.
+   *
+   * The name is historical: this once selected a smaller set of caps, which put a partial
+   * response on a wire that cannot express partialness. It now means "this response carries
+   * nothing because the budget blew", and it exists for callers inside this process (the CLI
+   * logs against it); on the wire the condition is expressed by the absence of fact-lines,
+   * which the consumer's fail-open path already reads correctly.
+   */
   readonly truncated: boolean;
 }
 
@@ -258,13 +273,15 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const elapsed = Date.now() - start;
   const truncated = elapsed > budgetMs;
   if (truncated) {
-    logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); truncating output`);
+    // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is
+    // byte-indistinguishable from a complete one in TGMEM/2, so emitting one would
+    // hand the consumer a subset while its own contract says it received everything.
+    logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning an empty hint set`);
+    return { header: tgmemHeaderFor(protocolVersion), lines: [], truncated: true };
   }
-  const aggressiveCap = truncated ? TRUNCATED_AGGRESSIVE_CAP : AGGRESSIVE_CAP;
-  const precisionCap = truncated ? TRUNCATED_PRECISION_CAP : PRECISION_CAP;
 
-  const aggressive = results.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, aggressiveCap);
-  const precision = results.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, precisionCap);
+  const aggressive = results.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
+  const precision = results.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
 
   const ordered = [...aggressive, ...precision];
   if (stable) {
