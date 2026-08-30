@@ -14,7 +14,32 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db.js";
 import { buildHintFormat, TGMEM_HEADER } from "../src/integration-seam.js";
+import type { HintFormatOptions, HintFormatResult } from "../src/integration-seam.js";
 import type { Fact } from "../src/types.js";
+
+/** A soft budget no test machine can exceed. */
+const NO_TRUNCATION_BUDGET_MS = 3_600_000;
+
+/**
+ * `buildHintFormat` with budget exhaustion taken out of the picture, and the only entry point this
+ * file should use.
+ *
+ * The seam returns an *empty* hint set when it overruns its 150ms soft budget, because TGMEM/2 has
+ * no way to say "this is partial" and a reduced response is indistinguishable from a complete one.
+ * That is deliberate -- but it means every assertion here about which facts come back is silently
+ * also an assertion about how fast the runner is, and on a cold Windows CI runner the budget can go
+ * on opening the database alone.
+ *
+ * `tests/unit/integration-seam.test.ts` already routes through a wrapper for exactly this reason.
+ * This file was left out, which stayed survivable only while exhaustion merely *shrank* the result:
+ * a content assertion could still pass against the smaller set. Now that it empties the result,
+ * every such assertion fails outright, which is how two tests here went red on Windows CI while
+ * passing everywhere else. Defaulting the budget here means a new test cannot acquire the flake by
+ * omission; the spread puts `options` last so a test that is *about* exhaustion can still force it.
+ */
+async function buildHint(options: HintFormatOptions): Promise<HintFormatResult> {
+  return buildHintFormat({ retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS, ...options });
+}
 
 interface FactSeed {
   readonly id: string;
@@ -86,7 +111,7 @@ describe("buildHintFormat (integration seam)", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
 
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.header).toBe("TGMEM/2");
@@ -133,7 +158,7 @@ describe("buildHintFormat (integration seam)", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
 
     // The well-formed neighbour still surfaces -- the drop is targeted, not a fail-closed sweep.
     expect(result.lines.some((line) => line.includes("id=pref-legit"))).toBe(true);
@@ -150,8 +175,8 @@ describe("buildHintFormat (integration seam)", () => {
     const brokenDbPath = join(workDir, "not-a-sqlite-file");
     mkdirSync(brokenDbPath); // a directory, not a valid sqlite file -- `new Database()` on this must throw
 
-    await expect(buildHintFormat({ root, dbPath: brokenDbPath })).resolves.not.toThrow();
-    const result = await buildHintFormat({ root, dbPath: brokenDbPath });
+    await expect(buildHint({ root, dbPath: brokenDbPath })).resolves.not.toThrow();
+    const result = await buildHint({ root, dbPath: brokenDbPath });
 
     expect(result).toEqual({ header: TGMEM_HEADER, lines: [], truncated: false });
   });
@@ -161,7 +186,7 @@ describe("buildHintFormat (integration seam)", () => {
     // inside openDb()/mkdirSync() rather than depending on OS-specific permission setup.
     const invalidDbPath = join(workDir, "bad\0path", "mem.db");
 
-    const result = await buildHintFormat({ root, dbPath: invalidDbPath });
+    const result = await buildHint({ root, dbPath: invalidDbPath });
 
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([]);
@@ -196,7 +221,7 @@ describe("buildHintFormat (integration seam)", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
 
     // Neither side of the tied contradiction is surfaced -- the seam never hands the caller an
     // unresolved either/or to gamble on (design plan P4 / Section 4).
@@ -242,7 +267,7 @@ describe("buildHintFormat (integration seam)", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
 
     expect(result.lines).toHaveLength(2); // fact-line + TGMEM/2's shared footer-line
     expect(result.lines[0]).toContain("id=unrelated-1");
@@ -290,7 +315,7 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
     const lockfile = join(root, "pnpm-lock.yaml");
     writeFileSync(lockfile, "x");
 
-    const first = await buildHintFormat({ root, dbPath });
+    const first = await buildHint({ root, dbPath });
     expect(first.lines[0]).toContain("fresh=affirmed");
 
     rmSync(lockfile);
@@ -300,7 +325,7 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
     // served forever, no matter what happened on disk afterwards.
     // Re-read, the anchor now contradicts the fact, which `--hint-format` drops entirely rather
     // than emitting as a caveated line.
-    const second = await buildHintFormat({ root, dbPath });
+    const second = await buildHint({ root, dbPath });
     expect(second.lines.some((line) => line.includes("anchored-1"))).toBe(false);
   });
 
@@ -308,7 +333,7 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
     seedAnchoredFact();
     writeFileSync(join(root, "pnpm-lock.yaml"), "x");
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(result.lines[0]).toContain("id=anchored-1");
 
     // `openDb` alone does not guarantee the storage-owned columns exist; reading a fact through a
