@@ -2,7 +2,7 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
-## [Unreleased]
+## [0.3.0] - 2026-08-29
 
 ### Added
 
