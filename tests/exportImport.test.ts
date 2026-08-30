@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -381,11 +381,20 @@ describe("importFromJson", () => {
   it("an oversized import file throws JsonImportError before attempting to parse", () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-size-"));
     const path = join(dir, "huge.json");
-    // Create a file just over the 50MB limit
-    const hugeContent = "x".repeat(50_000_001);
-    writeFileSync(path, hugeContent, "utf8");
+    // Just over the 50MB limit, by setting EOF rather than writing 50MB of bytes.
+    // The guard in src/exportImport.ts reads `stat.size` and rejects before it ever opens the
+    // file for reading, so the content is irrelevant -- only the size the filesystem reports is.
+    // Materialising it was ~100MB of JS string plus a 50MB write, which took over 5s on a cold
+    // Windows CI runner and timed the test out. `truncateSync` is O(1) on NTFS and ext4 alike.
+    writeFileSync(path, "", "utf8");
+    truncateSync(path, 50_000_001);
     try {
+      // Asserting on the message, not just the class: `JsonImportError` is also what a parse
+      // failure raises, and a 50MB file of any filler is invalid JSON -- so `toThrow(JsonImportError)`
+      // alone passed even with the size limit raised 10x, i.e. it never verified the guard this
+      // test is named for. The size check must reject the file *before* the parse it precedes.
       expect(() => importFromJson(db, { path, root })).toThrow(JsonImportError);
+      expect(() => importFromJson(db, { path, root })).toThrow(/is too large \(50000001 bytes, max 50000000 bytes\)/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
