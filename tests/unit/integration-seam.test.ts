@@ -5,15 +5,28 @@ import { join } from "node:path";
 import { openDb } from "../../src/db.js";
 import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
-import type { HintFormatResult } from "../../src/integration-seam.js";
+import type { HintFormatOptions, HintFormatResult } from "../../src/integration-seam.js";
+
+/** A soft budget no test machine can exceed. */
+const NO_TRUNCATION_BUDGET_MS = 3_600_000;
 
 /**
- * A soft budget no test machine can exceed, for assertions about *which* facts come back.
- * Truncation is wall-clock-driven, so leaving it at the 150ms default makes any such
- * assertion depend on how busy the runner is -- the failure mode that surfaced two of these
- * tests as red on the first Windows CI run.
+ * `buildHintFormat` with truncation taken out of the picture, and the only entry point this file
+ * should use.
+ *
+ * The seam degrades gracefully when retrieval overruns its 150ms soft budget: it drops to the
+ * TRUNCATED_* caps and returns fewer lines. That is correct, deliberate behaviour -- but it means
+ * every assertion about *which* facts come back is silently also an assertion about how fast the
+ * runner is. On the first two CI runs that turned three selection tests red on Windows and green
+ * on Linux, for no reason connected to what they test.
+ *
+ * Pinning per-test only fixes the tests that happened to go red, so the next slow runner finds the
+ * next one. Defaulting it here means a new test cannot acquire the flake by omission; the spread
+ * puts `options` last so the one test that *is* about truncation can still force the budget to 0.
  */
-const NO_TRUNCATION_BUDGET_MS = 3_600_000;
+async function buildHint(options: HintFormatOptions): Promise<HintFormatResult> {
+  return buildHintFormat({ retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS, ...options });
+}
 
 /** TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the fact caps/ordering that predate the footer line. */
 function factLines(result: HintFormatResult): readonly string[] {
@@ -80,7 +93,7 @@ describe("buildHintFormat", () => {
   it("returns just the header with no lines when the store is empty", async () => {
     // Budget pinned high: `truncated` is wall-clock-driven, and a cold CI runner can spend more than
     // the 150ms default just opening the database -- which reported truncation on an empty store.
-    const result = await buildHintFormat({ root, dbPath, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+    const result = await buildHint({ root, dbPath });
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([]);
     expect(result.truncated).toBe(false);
@@ -89,14 +102,14 @@ describe("buildHintFormat", () => {
   it("fails open (never throws, returns an empty result) when the db cannot be opened", async () => {
     const brokenDbPath = join(workDir, "not-a-sqlite-file");
     mkdirSync(brokenDbPath); // a directory, not a valid sqlite file -- new Database() on this must throw
-    const result = await buildHintFormat({ root, dbPath: brokenDbPath });
+    const result = await buildHint({ root, dbPath: brokenDbPath });
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([]);
   });
 
   it("fails open when root does not resolve to anything usable", async () => {
     // No facts seeded at all; this mainly asserts the function still resolves cleanly end to end.
-    const result = await buildHintFormat({ root: join(root, "deeply", "nested", "missing"), dbPath });
+    const result = await buildHint({ root: join(root, "deeply", "nested", "missing"), dbPath });
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([]);
   });
@@ -114,7 +127,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
+    const result = await buildHint({ root, dbPath, protocolVersion: 1 });
     expect(result.lines).toHaveLength(1);
     expect(result.lines[0]).toContain("pref  fresh=unverified  id=pref-1");
     expect(result.lines[0]).toContain("verify");
@@ -135,7 +148,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(factLines(result)).toHaveLength(1);
     expect(result.lines[0]).toContain("dec  fresh=affirmed  id=dec-1");
     expect(result.lines[0]).not.toContain("(verify)");
@@ -156,7 +169,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(result.lines).toEqual([]);
   });
 
@@ -172,7 +185,7 @@ describe("buildHintFormat", () => {
         status: "pending",
       },
     ]);
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(result.lines).toEqual([]);
   });
 
@@ -203,7 +216,7 @@ describe("buildHintFormat", () => {
         status: "active",
       },
     ]);
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(result.lines).toEqual([]);
   });
 
@@ -223,10 +236,10 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const resultForRoot = await buildHintFormat({ root, dbPath });
+    const resultForRoot = await buildHint({ root, dbPath });
     expect(resultForRoot.lines).toEqual([]);
 
-    const resultForOtherRoot = await buildHintFormat({ root: otherRoot, dbPath });
+    const resultForOtherRoot = await buildHint({ root: otherRoot, dbPath });
     expect(factLines(resultForOtherRoot)).toHaveLength(1);
   });
 
@@ -245,10 +258,10 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const withoutContext = await buildHintFormat({ root, dbPath });
+    const withoutContext = await buildHint({ root, dbPath });
     expect(withoutContext.lines).toEqual([]);
 
-    const withContext = await buildHintFormat({ root, dbPath, contextFiles: ["src/auth.ts"] });
+    const withContext = await buildHint({ root, dbPath, contextFiles: ["src/auth.ts"] });
     expect(factLines(withContext)).toHaveLength(1);
   });
 
@@ -267,7 +280,7 @@ describe("buildHintFormat", () => {
     }
     seedFacts(dbPath, seeds);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(factLines(result)).toHaveLength(8);
   });
 
@@ -286,7 +299,7 @@ describe("buildHintFormat", () => {
     }
     seedFacts(dbPath, seeds);
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(factLines(result)).toHaveLength(4);
   });
 
@@ -303,7 +316,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
+    const result = await buildHint({ root, dbPath, protocolVersion: 1 });
     expect(result.lines).toHaveLength(1);
     const line = result.lines[0];
     expect(line).toBeDefined();
@@ -353,7 +366,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
+    const result = await buildHint({ root, dbPath, protocolVersion: 1 });
     expect(result.header).toBe("TGMEM/1");
     expect(result.lines).toHaveLength(4);
 
@@ -386,7 +399,7 @@ describe("buildHintFormat", () => {
     ]);
     writeFileSync(join(root, "schema.sql"), "-- postgres schema");
 
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(result.header).toBe("TGMEM/2");
     expect(result.lines).toHaveLength(2);
     expect(result.lines[0]).toBe('dec  fresh=affirmed  id=dec-cta  display="decision: chose Postgres over Mongo"');
@@ -394,7 +407,7 @@ describe("buildHintFormat", () => {
   });
 
   it("TGMEM/2: omits the footer line when there are no fact-lines", async () => {
-    const result = await buildHintFormat({ root, dbPath });
+    const result = await buildHint({ root, dbPath });
     expect(result.header).toBe("TGMEM/2");
     expect(result.lines).toEqual([]);
   });
@@ -414,7 +427,7 @@ describe("buildHintFormat", () => {
     ]);
     writeFileSync(join(root, "schema.sql"), "-- postgres schema");
 
-    const result = await buildHintFormat({ root, dbPath, protocolVersion: 1 });
+    const result = await buildHint({ root, dbPath, protocolVersion: 1 });
     expect(result.header).toBe("TGMEM/1");
     expect(result.lines).toHaveLength(1);
     expect(result.lines[0]).toBe('dec  fresh=affirmed  id=dec-v1  display="decision: chose Postgres over Mongo — mem show dec-v1"');
@@ -453,10 +466,10 @@ describe("buildHintFormat", () => {
 
     // Budget pinned high: this asserts an *ordering*, and blowing the soft budget drops the caps to
     // 2/1, which turns the assertion into a question of how busy the machine was.
-    const defaultOrder = await buildHintFormat({ root, dbPath, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+    const defaultOrder = await buildHint({ root, dbPath });
     expect(factLines(defaultOrder).map((line) => line.split("  ")[2])).toEqual(["id=z-newest", "id=m-middle", "id=a-oldest"]);
 
-    const stableOrder = await buildHintFormat({ root, dbPath, stable: true, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+    const stableOrder = await buildHint({ root, dbPath, stable: true });
     expect(factLines(stableOrder).map((line) => line.split("  ")[2])).toEqual(["id=a-oldest", "id=m-middle", "id=z-newest"]);
   });
 
@@ -488,10 +501,10 @@ describe("buildHintFormat", () => {
       })),
     ]);
 
-    const full = await buildHintFormat({ root, dbPath, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+    const full = await buildHint({ root, dbPath });
     expect(full.truncated).toBe(false);
 
-    const truncated = await buildHintFormat({ root, dbPath, retrievalBudgetMs: 0 });
+    const truncated = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
     expect(truncated.truncated).toBe(true);
     // 2 aggressive (preference/correction) + 1 precision, against 8 + 4 untruncated.
     expect(factLines(truncated).length).toBeLessThan(factLines(full).length);
