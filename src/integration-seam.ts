@@ -173,6 +173,16 @@ export interface HintFormatOptions {
   readonly stable?: boolean | undefined;
   /** Threaded straight through to `retrieve()`'s `RetrievalOptions.hintStyle` -- see retrieval.ts's doc comment. Defaults to `"full"`. */
   readonly hintStyle?: "full" | "terse" | undefined;
+  /**
+   * Test override for the soft time budget in {@link RETRIEVAL_BUDGET_MS}, in milliseconds.
+   *
+   * Truncation is wall-clock-driven, which makes it the one behaviour here a test cannot pin
+   * without control of the clock: a machine slow enough to blow the budget silently drops the caps
+   * to 2/1, so an assertion about *which* facts came back becomes an assertion about how busy the
+   * runner was. Passing a large value takes truncation out of the picture; passing 0 forces it, so
+   * the truncated path can be tested on purpose rather than only by accident on a slow machine.
+   */
+  readonly retrievalBudgetMs?: number | undefined;
 }
 
 export interface HintFormatResult {
@@ -221,6 +231,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // columns (`epoch`, `status_changed_at`, `prior_status`) or the `sources`/`meta` tables exist.
   // Reading a fact through a connection that skipped `ensureStorageSchema` worked only by accident
   // of which columns this path happens to select today.
+  const budgetMs = options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS;
   const db = openStorage(options.dbPath ?? resolveDbPath());
   let allFacts: Fact[];
   try {
@@ -231,7 +242,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
 
   const scoped = allFacts.filter((fact) => isInScope(fact, root, contextFiles));
 
-  const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, RETRIEVAL_BUDGET_MS - (Date.now() - start));
+  const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
   const { results } = await retrieve(scoped, {
     query: "",
     root,
@@ -245,9 +256,9 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   });
 
   const elapsed = Date.now() - start;
-  const truncated = elapsed > RETRIEVAL_BUDGET_MS;
+  const truncated = elapsed > budgetMs;
   if (truncated) {
-    logWarning(`hint-format exceeded its ${RETRIEVAL_BUDGET_MS}ms soft budget (took ${elapsed}ms); truncating output`);
+    logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); truncating output`);
   }
   const aggressiveCap = truncated ? TRUNCATED_AGGRESSIVE_CAP : AGGRESSIVE_CAP;
   const precisionCap = truncated ? TRUNCATED_PRECISION_CAP : PRECISION_CAP;

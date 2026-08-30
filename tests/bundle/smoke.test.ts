@@ -9,7 +9,7 @@
  * stderr. A build can be broken in every one of those ways with all 550-odd in-process tests green.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,5 +103,44 @@ describe("the shipped bundle runs end to end", () => {
     expect(result.exitCode).toBe(0);
     // Guards the esbuild `define`: an unsubstituted `__MEM_VERSION__` would still exit 0.
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/u);
+  });
+
+  /**
+   * Regression: `mem recall | head -1` and `mem recall | grep -q pnpm` close the pipe as soon as the
+   * reader is satisfied. Without an EPIPE handler the next write becomes an unhandled `error` event,
+   * so a pipeline that did exactly what the user asked dies with a stack trace and exit code 1.
+   *
+   * Only reachable from this tier: the handler is installed in `main.ts`, which the in-process
+   * `run()` tests never load, and it mutates process-global state so it could not be installed
+   * anywhere they would see it.
+   */
+  it("exits quietly when the reader of its stdout closes the pipe early", async () => {
+    for (let i = 0; i < 5; i += 1) {
+      runBundle(["remember", `piped fact number ${i}`, "--kind", "fact", "--scope", "global"]);
+    }
+
+    const child = spawn(process.execPath, [BUNDLE, "recall"], {
+      env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    // Stand in for `head -1`: take the first chunk, then hang up.
+    child.stdout.once("data", () => {
+      child.stdout.destroy();
+    });
+
+    const exitCode = await new Promise<number | null>((resolveExit) => {
+      child.on("close", (code) => {
+        resolveExit(code);
+      });
+    });
+
+    expect(stderr).not.toMatch(/EPIPE|Unhandled|ERR_STREAM/u);
+    expect(exitCode).toBe(0);
   });
 });

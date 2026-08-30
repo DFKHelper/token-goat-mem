@@ -7,6 +7,14 @@ import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/inte
 import type { Fact } from "../../src/types.js";
 import type { HintFormatResult } from "../../src/integration-seam.js";
 
+/**
+ * A soft budget no test machine can exceed, for assertions about *which* facts come back.
+ * Truncation is wall-clock-driven, so leaving it at the 150ms default makes any such
+ * assertion depend on how busy the runner is -- the failure mode that surfaced two of these
+ * tests as red on the first Windows CI run.
+ */
+const NO_TRUNCATION_BUDGET_MS = 3_600_000;
+
 /** TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the fact caps/ordering that predate the footer line. */
 function factLines(result: HintFormatResult): readonly string[] {
   return result.lines.filter((line) => line !== TGMEM_FOOTER_LINE);
@@ -70,7 +78,9 @@ describe("buildHintFormat", () => {
   });
 
   it("returns just the header with no lines when the store is empty", async () => {
-    const result = await buildHintFormat({ root, dbPath });
+    // Budget pinned high: `truncated` is wall-clock-driven, and a cold CI runner can spend more than
+    // the 150ms default just opening the database -- which reported truncation on an empty store.
+    const result = await buildHintFormat({ root, dbPath, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([]);
     expect(result.truncated).toBe(false);
@@ -441,10 +451,50 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    const defaultOrder = await buildHintFormat({ root, dbPath });
+    // Budget pinned high: this asserts an *ordering*, and blowing the soft budget drops the caps to
+    // 2/1, which turns the assertion into a question of how busy the machine was.
+    const defaultOrder = await buildHintFormat({ root, dbPath, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
     expect(factLines(defaultOrder).map((line) => line.split("  ")[2])).toEqual(["id=z-newest", "id=m-middle", "id=a-oldest"]);
 
-    const stableOrder = await buildHintFormat({ root, dbPath, stable: true });
+    const stableOrder = await buildHintFormat({ root, dbPath, stable: true, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
     expect(factLines(stableOrder).map((line) => line.split("  ")[2])).toEqual(["id=a-oldest", "id=m-middle", "id=z-newest"]);
+  });
+
+  /**
+   * The truncated path had no deterministic coverage at all: it was only ever reached by a machine
+   * slow enough to blow the 150ms soft budget, which is how it turned up -- as two unrelated tests
+   * failing on the first Windows CI run this project ever did. Forcing the budget to 0 exercises it
+   * on purpose, so the degradation contract is pinned rather than inferred from a flake.
+   */
+  it("drops to the truncated caps and says so when the soft budget is exceeded", async () => {
+    seedFacts(dbPath, [
+      ...Array.from({ length: 6 }, (_, i) => ({
+        id: `pref-${i}`,
+        text: `preference number ${i}`,
+        kind: "preference" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active" as const,
+      })),
+      ...Array.from({ length: 4 }, (_, i) => ({
+        id: `dec-${i}`,
+        text: `decision number ${i}`,
+        kind: "decision" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active" as const,
+      })),
+    ]);
+
+    const full = await buildHintFormat({ root, dbPath, retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+    expect(full.truncated).toBe(false);
+
+    const truncated = await buildHintFormat({ root, dbPath, retrievalBudgetMs: 0 });
+    expect(truncated.truncated).toBe(true);
+    // 2 aggressive (preference/correction) + 1 precision, against 8 + 4 untruncated.
+    expect(factLines(truncated).length).toBeLessThan(factLines(full).length);
+    expect(factLines(truncated).length).toBe(3);
   });
 });
