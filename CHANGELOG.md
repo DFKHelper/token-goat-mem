@@ -2,6 +2,16 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **The agent-facing seam withheld facts while its output claimed to be complete** -- when `buildHintFormat` exceeded its 150 ms soft budget it dropped its emission caps from 8/4 to 2/1 and returned the smaller set. Measured against a real store: 500 facts returned 12 lines, 2,000 returned 12, 10,000 returned 8, and 40,000 returned 2. The payload at 40,000 was byte-shape-identical to a healthy one -- same `TGMEM/2` header, same line grammar, same footer -- so a consumer had no way to tell 2 facts from all of them. `HintFormatResult.truncated` was computed and returned, but `src/cli.ts` never read it, and the only other signal was a `logWarning` on stderr, which the documented consumer contract does not read: README describes exactly two consumer failure modes, a missing binary and a caller timeout, and this is neither. Truncation fires when mem overruns its *own* budget and still answers inside the caller's window, so the caller's fail-open path never engages. For a seam whose stated guarantee is self-caveating output, that is the one failure it is not allowed to have.
+
+  There is no way to say "this is partial" in TGMEM/2. The grammar is closed: a conforming consumer drops an off-grammar line rather than guessing at it, `footer-text` is pinned to one exact string, and any grammar change bumps the version -- at which point consumers that have not upgraded fail open to no hints at all. So annotating a reduced response is not available, and a reduced response cannot be distinguished from a complete one. The budget-exhausted path now returns an empty hint set instead, which is already this module's shape for "I could not deliver" (`buildHintFormat`'s internal-failure catch returns the same thing) and which the consumer's fail-open path already handles. `TRUNCATED_AGGRESSIVE_CAP` and `TRUNCATED_PRECISION_CAP` are gone; no wire change and no version bump were needed.
+
+  Verified end to end against the built bundle at 40,001 facts over six runs: output is now strictly binary -- 10 lines (header, 8 fact-lines, footer) or 1 line (bare `TGMEM/2`), never a subset. Both regression tests were confirmed failing before the fix, emitting 4 and 2 lines respectively. The in-process test asserts `lines` is exactly empty rather than merely shorter than a healthy response, because a `shorter-than` assertion would pass again the moment a reduced cap was reintroduced, which is the defect; the wire-level test asserts no fact-lines and no footer reach stdout, since TGMEM/2 emits a footer only alongside at least one fact-line and a lone footer would itself be off-grammar.
+
 ## [0.3.0] - 2026-08-29
 
 ### Added
