@@ -65,5 +65,8 @@ Do not add, remove, or bump runtime dependencies (`dependencies` / `optionalDepe
 1. Bump `version` in `package.json` and run `npm install` to update `package-lock.json`.
 2. Fold `[Unreleased]` CHANGELOG entries into the new `[X.Y.Z] - YYYY-MM-DD` heading.
 3. Run the full gate: `npm run lint && npm run typecheck && npm test && npm run build`.
-4. Commit, push `master`, tag `vX.Y.Z`, and publish with `npm publish`.
+4. Commit and push `master`, then push the tag `vX.Y.Z`. Do not run `npm publish` by hand:
+   `.github/workflows/publish.yml` fires on the tag, checks the tag against `package.json`,
+   publishes, and opens a GitHub release from this version's CHANGELOG section. Publishing
+   locally as well would leave the second attempt to fail on an already-published version.
 5. Verify at `https://www.npmjs.com/package/token-goat-mem`.
