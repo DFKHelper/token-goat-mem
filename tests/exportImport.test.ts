@@ -69,6 +69,7 @@ describe("planImportFromJson", () => {
     writeFileSync(path, JSON.stringify({ schemaVersion: 2, exportedAt: new Date().toISOString(), facts: [] }), "utf8");
     try {
       expect(() => planImportFromJson({ path })).toThrow(JsonImportError);
+      expect(() => planImportFromJson({ path })).toThrow(/unsupported schemaVersion 2 \(expected 1\)/u);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -80,6 +81,7 @@ describe("planImportFromJson", () => {
     writeFileSync(path, "{ not valid json", "utf8");
     try {
       expect(() => planImportFromJson({ path })).toThrow(JsonImportError);
+      expect(() => planImportFromJson({ path })).toThrow(/invalid JSON in /u);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

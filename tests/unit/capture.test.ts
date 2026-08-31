@@ -71,11 +71,20 @@ describe("captureExplicit", () => {
     expect(fact.subject).toBe("package manager");
     expect(fact.value).toBe("pnpm");
 
+    // Both orphans trip the same pairing guard, but CaptureValidationError covers 19 distinct
+    // messages -- without pinning one, either assertion would be satisfied by any other guard in
+    // the function, including the length cap a later test exists to check.
     expect(() => captureExplicit(db, { text: "orphan subject", kind: "fact", subject: "x", root })).toThrow(
       CaptureValidationError
     );
+    expect(() => captureExplicit(db, { text: "orphan subject", kind: "fact", subject: "x", root })).toThrow(
+      /subject and value must be provided together or not at all/u
+    );
     expect(() => captureExplicit(db, { text: "orphan value", kind: "fact", value: "x", root })).toThrow(
       CaptureValidationError
+    );
+    expect(() => captureExplicit(db, { text: "orphan value", kind: "fact", value: "x", root })).toThrow(
+      /subject and value must be provided together or not at all/u
     );
   });
 
@@ -89,6 +98,7 @@ describe("captureExplicit", () => {
 
   it("rejects fact text over the length cap", () => {
     expect(() => captureExplicit(db, { text: "x".repeat(501), kind: "fact", root })).toThrow(CaptureValidationError);
+    expect(() => captureExplicit(db, { text: "x".repeat(501), kind: "fact", root })).toThrow(/fact text exceeds \d+ characters/u);
   });
 
   it("rejects an invalid kind", () => {
@@ -96,6 +106,10 @@ describe("captureExplicit", () => {
       // @ts-expect-error -- intentionally invalid kind to exercise runtime validation
       captureExplicit(db, { text: "bad kind", kind: "opinion", root })
     ).toThrow(CaptureValidationError);
+    expect(() =>
+      // @ts-expect-error -- intentionally invalid kind to exercise runtime validation
+      captureExplicit(db, { text: "bad kind", kind: "opinion", root })
+    ).toThrow(/invalid kind "opinion"/u);
   });
 
   it("accepts a syntactically valid anchor and stores it verbatim", () => {
@@ -112,12 +126,18 @@ describe("captureExplicit", () => {
     expect(() => captureExplicit(db, { text: "bad anchor", kind: "fact", anchor: "rm -rf /", root })).toThrow(
       InvalidAnchorError
     );
+    expect(() => captureExplicit(db, { text: "bad anchor", kind: "fact", anchor: "rm -rf /", root })).toThrow(
+      /unknown predicate "rm"/u
+    );
   });
 
   it("rejects an anchor with the wrong argument count", () => {
     expect(() =>
       captureExplicit(db, { text: "bad arity", kind: "fact", anchor: "file-newer-than only-one-arg", root })
     ).toThrow(InvalidAnchorError);
+    expect(() =>
+      captureExplicit(db, { text: "bad arity", kind: "fact", anchor: "file-newer-than only-one-arg", root })
+    ).toThrow(/"file-newer-than" expects 2 argument\(s\), got 1/u);
   });
 
   it("blocks a fact containing a known secret pattern and persists nothing", () => {
