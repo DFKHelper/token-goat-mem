@@ -1194,7 +1194,7 @@ export function buildProgram(): Command {
     .option("--root <path>", "Project root for anchor freshness evaluation (default: a project-scoped fact's own scope root, else the current directory)")
     .option(
       "--json",
-      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Includes freshness and sources, unlike mem export/mem list --json."
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none."
     )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {

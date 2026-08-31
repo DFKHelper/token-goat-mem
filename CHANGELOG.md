@@ -46,6 +46,14 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
   **No production defect was found.** Every path already behaved correctly; this closes a test gap, not a bug. The remaining uncovered branches are individually accounted for rather than left unexplained: five symlink-refusal tests are `skipIf(isWindows)` and run on the Linux CI jobs, one branch is a per-platform ternary that only the CI matrix can cover both sides of, two are the 20,000-entry glob cap, and the rest are narrowing guards a preceding regex or arity check already makes unreachable. Whole-suite coverage rises to 94.23% statements / 87.89% branches / 98.31% functions / 94.10% lines.
 
+- **`mem show --json` told every consumer a fact had no recorded sources, when mem records none for any fact** -- the envelope carries a `sources` array, and because nothing in the capture path ever writes a source row, that array is `[]` for every fact in every install. `[]` is the same value a fact with genuinely no sources would produce, so a consumer had no way to tell "this fact has none" from "mem has none, ever" -- a well-formed payload indistinguishable from a truthful one, the same class of defect as a seam that withholds facts while its output claims completeness. `mem show --help` made it worse by advertising the field as a capability: *"Includes freshness and sources, unlike mem export/mem list --json"*, naming an always-empty array alongside a verdict that is always real. The honest description existed, but only in `AGENTS.md` and `CLAUDE.md` -- the two agent-facing files. Both user-facing surfaces, the README table and the CLI's own help text, claimed the capability without the caveat.
+
+  Both now say the array is reserved and always empty, and say what `[]` therefore means. The human `mem show` needed no change: it omits the `sources:` block entirely when there are none, so it never made the claim.
+
+- **The `sources` table stays, and that is now a recorded decision rather than an unexplained gap** -- the table, its storage API and its gc pruning are fully implemented and tested with no caller, which invites deletion as dead code. Deleting it is a schema migration plus a break of three exports in `src/index.ts`, a one-way door bought for no correctness gain; feeding it is a new feature. Neither is worth doing, so it is kept as an explicitly unfed seam and `AGENTS.md` records why.
+
+  `tests/guards/unfed-sources.test.ts` holds that state to the code in both directions: while no `src/` file calls `insertSource`, every surface mentioning `sources` must carry the "always empty" disclosure; the moment one does, the guard fails and names the disclosures that have just become false. Both directions were confirmed failing before being relied on -- stripping the README caveat fails the first test by name, adding a single `insertSource` call to the capture path fails the second with its file and line.
+
 ## [0.3.0] - 2026-08-29
 
 ### Added
