@@ -122,48 +122,56 @@ describe("claudeCode wiring", () => {
     seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
 
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/already exists in .* and was not created by mem/u);
   });
 
   it("aborts when hooks.SessionStart exists but is not an array", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, JSON.stringify({ hooks: { SessionStart: "not-an-array" } }));
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/hooks\.SessionStart in .* is not an array/u);
   });
 
   it("aborts with WiringConflictError (not a raw TypeError) when hooks is null", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, JSON.stringify({ hooks: null }));
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/hooks in .* is not an object/u);
   });
 
   it("aborts with WiringConflictError (not a raw TypeError) when the settings.json root is not an object", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, "5");
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/does not contain a JSON object at its root/u);
   });
 
   it("aborts with WiringConflictError (not a raw TypeError) when SessionStart contains a null element", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [null] } }));
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/hooks\.SessionStart in .* contains a non-object entry/u);
   });
 
   it("aborts with WiringConflictError (not a raw TypeError) when a SessionStart entry's hooks is not an array", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [{ hooks: "not-an-array" }] } }));
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/has a non-array "hooks"/u);
   });
 
   it("aborts with WiringConflictError (not a raw TypeError) when a SessionStart entry's hooks array contains a null element", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [{ hooks: [null] }] } }));
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/contains a non-object hook element/u);
   });
 
   it("aborts with WiringConflictError (not a raw TypeError) when a SessionStart entry's hooks array contains a non-object element", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(settingsPath, JSON.stringify({ hooks: { SessionStart: [{ hooks: ["not-an-object"] }] } }));
     expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/contains a non-object hook element/u);
   });
 
   it("uninstall on a SessionStart holding a null element does not crash and leaves the file untouched", () => {
@@ -444,6 +452,7 @@ describe("copilotVscode wiring", () => {
     seed(tasksPath, originalText);
 
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(/already exists in .* and was not created by mem/u);
     expect(read(tasksPath)).toBe(originalText);
   });
 
@@ -468,6 +477,7 @@ describe("copilotVscode wiring", () => {
     const tasksPath = join(root, ".vscode", "tasks.json");
     seed(tasksPath, "5");
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(/does not contain a JSON object at its root/u);
   });
 
   it("uninstall on a tasks.json whose root is not an object does not crash and leaves the file untouched", () => {
@@ -481,12 +491,14 @@ describe("copilotVscode wiring", () => {
     const tasksPath = join(root, ".vscode", "tasks.json");
     seed(tasksPath, JSON.stringify({ version: "2.0.0", tasks: "oops" }));
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(/"tasks" in .* is not an array/u);
   });
 
   it("aborts with WiringConflictError (not a raw jsonc-parser Error) when tasks.json's inputs is not an array", () => {
     const tasksPath = join(root, ".vscode", "tasks.json");
     seed(tasksPath, JSON.stringify({ version: "2.0.0", tasks: [], inputs: {} }));
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(/"inputs" in .* is not an array/u);
   });
 
   it("aborts with WiringConflictError (not a raw jsonc-parser Error) when keybindings.json parses to literal null", () => {
@@ -496,12 +508,14 @@ describe("copilotVscode wiring", () => {
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     seed(keybindingsPath, "null");
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(/does not contain a JSON array/u);
   });
 
   it("aborts with WiringConflictError when keybindings.json's root is a JSON object, not an array", () => {
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     seed(keybindingsPath, JSON.stringify({ not: "an array" }));
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(/does not contain a JSON array/u);
   });
 
   it("uninstall on a keybindings.json whose root is not an array does not crash and leaves the file untouched", () => {

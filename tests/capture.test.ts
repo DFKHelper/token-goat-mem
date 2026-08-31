@@ -75,11 +75,20 @@ describe("captureExplicit (happy path)", () => {
     expect(fact.subject).toBe("package manager");
     expect(fact.value).toBe("pnpm");
 
+    // Both orphans trip the same pairing guard, but CaptureValidationError covers 19 distinct
+    // messages -- without pinning one, either assertion would be satisfied by any other guard in
+    // the function, including the length cap the very next test exists to check.
     expect(() => captureExplicit(db, { text: "orphan subject", kind: "fact", subject: "x", root })).toThrow(
       CaptureValidationError
     );
+    expect(() => captureExplicit(db, { text: "orphan subject", kind: "fact", subject: "x", root })).toThrow(
+      /subject and value must be provided together or not at all/u
+    );
     expect(() => captureExplicit(db, { text: "orphan value", kind: "fact", value: "x", root })).toThrow(
       CaptureValidationError
+    );
+    expect(() => captureExplicit(db, { text: "orphan value", kind: "fact", value: "x", root })).toThrow(
+      /subject and value must be provided together or not at all/u
     );
   });
 
@@ -87,10 +96,17 @@ describe("captureExplicit (happy path)", () => {
     expect(() => captureExplicit(db, { text: "x".repeat(501), kind: "fact", root })).toThrow(
       CaptureValidationError
     );
+    // Both halves of this test raise the same class for different reasons, so the class alone lets
+    // either one pass on the other's guard. The messages are what keep them separate assertions.
+    expect(() => captureExplicit(db, { text: "x".repeat(501), kind: "fact", root })).toThrow(/fact text exceeds \d+ characters/u);
     expect(() =>
       // @ts-expect-error -- intentionally invalid kind to exercise runtime validation
       captureExplicit(db, { text: "bad kind", kind: "opinion", root })
     ).toThrow(CaptureValidationError);
+    expect(() =>
+      // @ts-expect-error -- intentionally invalid kind to exercise runtime validation
+      captureExplicit(db, { text: "bad kind", kind: "opinion", root })
+    ).toThrow(/invalid kind "opinion"/u);
   });
 
   it("accepts a syntactically valid anchor and rejects an unknown/malformed one", () => {
@@ -105,9 +121,16 @@ describe("captureExplicit (happy path)", () => {
     expect(() =>
       captureExplicit(db, { text: "bad anchor", kind: "fact", anchor: "rm -rf /", root })
     ).toThrow(InvalidAnchorError);
+    // "unknown predicate" and "wrong arity" are different guards behind one class; pin which fired.
+    expect(() =>
+      captureExplicit(db, { text: "bad anchor", kind: "fact", anchor: "rm -rf /", root })
+    ).toThrow(/unknown predicate "rm"/u);
     expect(() =>
       captureExplicit(db, { text: "bad arity", kind: "fact", anchor: "file-exists a b", root })
     ).toThrow(InvalidAnchorError);
+    expect(() =>
+      captureExplicit(db, { text: "bad arity", kind: "fact", anchor: "file-exists a b", root })
+    ).toThrow(/"file-exists" expects 1 argument\(s\), got 2/u);
   });
 
   it("accepts every predicate anchors.ts documents, not just the four ANCHOR_ARITY originally listed", () => {
@@ -141,6 +164,10 @@ describe("captureExplicit (happy path)", () => {
     expect(() =>
       captureExplicit(db, { text: "bad newest-of arity", kind: "fact", anchor: "newest-of pnpm-lock.yaml", root })
     ).toThrow(InvalidAnchorError);
+    // Specifically the arity floor, not "unknown predicate" -- newest-of must still be recognised.
+    expect(() =>
+      captureExplicit(db, { text: "bad newest-of arity", kind: "fact", anchor: "newest-of pnpm-lock.yaml", root })
+    ).toThrow(/"newest-of" expects/u);
   });
 
   it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long nested-path anchor argument", () => {
