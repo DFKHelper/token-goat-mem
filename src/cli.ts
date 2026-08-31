@@ -1105,6 +1105,21 @@ export function buildProgram(): Command {
         // --stable is a strictly-additive output-ordering override: same facts, same caps, just a
         // deterministic id order instead of the default relevance/recency order.
         const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
+        // A query is a *ranking* input, not a filter: BM25 orders the candidate set and never
+        // removes from it, so `results.length === 0` above cannot fire for a query that simply
+        // matched nothing -- only for one whose filters excluded everything. Without the line
+        // below, `mem recall xyzzy` on a three-fact store returns all three facts in an output
+        // byte-identical to `mem recall` with no query at all: the reader is shown unrelated facts
+        // with no cue that their query contributed nothing to the ordering.
+        //
+        // Every result scoring 0 is the exact signal, and it is the documented meaning of an empty
+        // query ("all candidates tie at score 0", src/retrieval.ts). It also covers the case of a
+        // term so common it appears in every fact -- zero discriminating power, so "did not narrow
+        // these results" is true there too, which is why the wording claims that rather than
+        // claiming the term is absent.
+        if (query !== undefined && query !== "" && ordered.every((result) => result.score === 0)) {
+          process.stdout.write("note: query matched no fact text -- showing most recent instead\n");
+        }
         for (const result of ordered) {
           process.stdout.write(`${result.fact.id.slice(0, RECALL_SHORT_ID_LENGTH)}  ${result.display}\n`);
         }
@@ -1156,7 +1171,12 @@ export function buildProgram(): Command {
           return;
         }
         if (facts.length === 0) {
-          process.stdout.write("no facts stored\n");
+          // "no facts stored" is a claim about the whole store, so it must not be printed for a run
+          // that only excluded everything with a filter -- `mem list --kind decision` on a store
+          // full of preferences would otherwise report the store as empty, which is false and is
+          // exactly the shape of failure this contract's "nothing found" outcomes exist to avoid.
+          const filtered = Object.keys(filter).length > 0;
+          process.stdout.write(filtered ? "no facts match these filters\n" : "no facts stored\n");
           return;
         }
         for (const fact of shown) {
@@ -1466,7 +1486,19 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   const program = buildProgram();
   // Commander's exitOverride lets us catch its internal exits (help, version, unknown command)
   // instead of letting it call process.exit() mid-flush.
+  //
+  // It is not inherited: a Command applies it to itself alone, so setting it only on the root left
+  // all 15 subcommands calling `process.exit()` directly on any parse error of their own -- exactly
+  // the mid-flush exit the line above exists to prevent, and the same class as the EPIPE truncation
+  // fixed in 0.3.0. It also made the `commander.`-prefixed branch below unreachable for every
+  // subcommand: a subcommand parse failure surfaced here as a plain Error with no `code`, so it was
+  // classified as an internal bug (exit 2) rather than the usage error (exit 1) the contract
+  // specifies. Production masked this -- Commander's own `process.exit(1)` happened to produce the
+  // right code before our handler ran -- which is why only the in-process path could reveal it.
   program.exitOverride();
+  for (const command of program.commands) {
+    command.exitOverride();
+  }
   try {
     await program.parseAsync(argv);
   } catch (error) {
