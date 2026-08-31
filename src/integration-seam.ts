@@ -148,6 +148,23 @@ const AGGRESSIVE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["preference",
 const AGGRESSIVE_CAP = 8;
 const PRECISION_CAP = 4;
 
+/**
+ * The recall limit this module passes to `retrieve()`, deliberately unbounded.
+ *
+ * `retrieve()` defaults to `DEFAULT_RECALL_LIMIT` (20) and applies it as a post-ranking slice of
+ * the non-withheld set (src/retrieval.ts). That slice lands *before* the kind-split below, so the
+ * split sees a top-20 rather than the full ranked list -- and a store whose top 20 all share one
+ * kind starves the other cap completely. Measured: 300 preferences + 200 decisions emitted 8
+ * preference lines and zero decision lines, in a payload byte-indistinguishable from one saying
+ * this project has no decisions at all.
+ *
+ * The default limit could never bound this module's output anyway -- AGGRESSIVE_CAP + PRECISION_CAP
+ * is 12, already under 20 -- so it only ever distorted composition. The caps above are what bounds
+ * the wire; the recall limit must not silently pre-empt them. Costs nothing: the limit is a slice
+ * applied after scoring and anchor evaluation have already run over every scoped fact.
+ */
+const HINT_FORMAT_RECALL_LIMIT = Number.MAX_SAFE_INTEGER;
+
 /** Short wire-protocol tag for the leading column of a TGMEM line (distinct from the prose label embedded inside `display`, which retrieval.ts owns). */
 const PROTOCOL_KIND_TAG: Record<FactKind, string> = {
   preference: "pref",
@@ -262,6 +279,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     query: "",
     root,
     hintFormat: true,
+    limit: HINT_FORMAT_RECALL_LIMIT,
     now,
     anchorTimeBudgetMs,
     // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc

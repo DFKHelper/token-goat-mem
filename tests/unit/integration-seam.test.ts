@@ -14,15 +14,16 @@ const NO_TRUNCATION_BUDGET_MS = 3_600_000;
  * `buildHintFormat` with truncation taken out of the picture, and the only entry point this file
  * should use.
  *
- * The seam degrades gracefully when retrieval overruns its 150ms soft budget: it drops to the
- * TRUNCATED_* caps and returns fewer lines. That is correct, deliberate behaviour -- but it means
- * every assertion about *which* facts come back is silently also an assertion about how fast the
- * runner is. On the first two CI runs that turned three selection tests red on Windows and green
- * on Linux, for no reason connected to what they test.
+ * The seam returns an *empty* hint set when retrieval overruns its 150ms soft budget, because
+ * TGMEM/2 has no way to say "this is partial" and a reduced response is byte-indistinguishable
+ * from a complete one. That is correct, deliberate behaviour -- but it means every assertion about
+ * *which* facts come back is silently also an assertion about how fast the runner is. On the first
+ * two CI runs that turned three selection tests red on Windows and green on Linux, for no reason
+ * connected to what they test.
  *
  * Pinning per-test only fixes the tests that happened to go red, so the next slow runner finds the
  * next one. Defaulting it here means a new test cannot acquire the flake by omission; the spread
- * puts `options` last so the one test that *is* about truncation can still force the budget to 0.
+ * puts `options` last so the tests that *are* about exhaustion can still force the budget to 0.
  */
 async function buildHint(options: HintFormatOptions): Promise<HintFormatResult> {
   return buildHintFormat({ retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS, ...options });
@@ -88,6 +89,88 @@ describe("buildHintFormat", () => {
 
   afterEach(() => {
     rmSync(workDir, { recursive: true, force: true });
+  });
+
+  // ── Scale invariant ──────────────────────────────────────────────────────────────────────────
+  //
+  // The seam has exactly two legal shapes on the wire, and the gap between them is the whole point
+  // of returning empty rather than a smaller slice when the budget blows (see RETRIEVAL_BUDGET_MS
+  // in src/integration-seam.ts). Nothing in the suite exercised that at a store size where the caps
+  // actually bind, which is why a silent 40,000-fact degradation to 2 lines was found by hand-run
+  // benchmarking rather than by CI.
+  //
+  // Deliberately an invariant guard, not a latency budget: recall is linear in store size, and a
+  // wall-clock assertion on a shared CI runner is precisely the flake this file already carries a
+  // wrapper to prevent. The assertions below hold whether the runner is fast or slow.
+  describe("at a store size where the emission caps bind", () => {
+    const AGGRESSIVE_CAP = 8;
+    const PRECISION_CAP = 4;
+    const FULL_EMISSION = AGGRESSIVE_CAP + PRECISION_CAP;
+
+    /** Seeds `preferences` aggressive-kind and `decisions` precision-kind facts, all in scope and all active. */
+    function seedAtScale(preferences: number, decisions: number): void {
+      const seeds: FactSeed[] = [];
+      for (let i = 0; i < preferences; i += 1) {
+        seeds.push({
+          id: `scale-pref-${String(i).padStart(4, "0")}`,
+          text: `scale preference number ${i}`,
+          kind: "preference",
+          scope: "global",
+          source_type: "user",
+          captured_at: "2026-07-01T00:00:00.000Z",
+          status: "active",
+        });
+      }
+      for (let i = 0; i < decisions; i += 1) {
+        seeds.push({
+          id: `scale-dec-${String(i).padStart(4, "0")}`,
+          text: `scale decision number ${i}`,
+          kind: "decision",
+          scope: "global",
+          source_type: "user",
+          captured_at: "2026-07-01T00:00:00.000Z",
+          status: "active",
+        });
+      }
+      seedFacts(dbPath, seeds);
+    }
+
+    it("emits exactly the cap-limited set, not everything eligible, when the budget is ample", async () => {
+      seedAtScale(300, 200);
+      const result = await buildHint({ root, dbPath });
+      const lines = factLines(result);
+      expect(result.truncated).toBe(false);
+      // 500 eligible facts, 12 emitted. The caps are the *designed* bound on a hint set and are not
+      // the defect -- withholding *below* them without saying so was.
+      expect(lines).toHaveLength(FULL_EMISSION);
+      expect(lines.filter((line) => line.startsWith("pref"))).toHaveLength(AGGRESSIVE_CAP);
+      expect(lines.filter((line) => line.startsWith("dec"))).toHaveLength(PRECISION_CAP);
+    });
+
+    it("emits nothing at all, rather than a reduced slice, when the budget is exhausted at scale", async () => {
+      seedAtScale(300, 200);
+      const result = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
+      expect(result.truncated).toBe(true);
+      // The regression this pins: the deleted TRUNCATED_AGGRESSIVE_CAP/TRUNCATED_PRECISION_CAP pair
+      // returned 2 + 1 = 3 lines here, in a payload a consumer could not tell from a complete one.
+      // Any reintroduction of a reduced-cap path makes this a non-zero count.
+      expect(factLines(result)).toEqual([]);
+      expect(result.lines).toEqual([]);
+    });
+
+    it("never emits a third size: at scale the fact-line count is the full cap set or zero", async () => {
+      seedAtScale(300, 200);
+      // The real invariant, run against the *default* 150ms budget at a scale where blowing it is
+      // plausible on a loaded runner. Whichever way it lands is legal; landing between them is not.
+      // This is the one assertion here that would catch a future third emission path, whatever
+      // mechanism introduced it.
+      const result = await buildHintFormat({ root, dbPath });
+      const count = factLines(result).length;
+      expect([0, FULL_EMISSION]).toContain(count);
+      // ...and the two shapes stay distinguishable on the wire: a complete set carries the footer,
+      // an empty one carries nothing at all.
+      expect(result.lines).toHaveLength(count === 0 ? 0 : count + 1);
+    });
   });
 
   it("returns just the header with no lines when the store is empty", async () => {
