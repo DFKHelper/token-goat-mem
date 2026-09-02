@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -656,6 +656,16 @@ describe("recall --stable (deterministic id-sorted ordering, strictly additive)"
       .filter((id): id is string => id !== undefined);
     expect(ids).toEqual([...ids].sort());
     expect(ids).toEqual([idEarlier, idLater].sort());
+  });
+
+  it("does not print an anchor-budget note for an ordinary small-store `mem recall`", async () => {
+    // The message text itself (and the count) is covered directly against `retrieve()`'s
+    // `anchorBudgetHits` in tests/unit/retrieval.test.ts, since there is no CLI flag to force the
+    // anchor deadline low enough to reproduce a real budget hit here. This only pins the negative:
+    // a normal store small enough to finish every anchor within the default budget stays silent.
+    await runCli(["remember", "captured just now", "--kind", "fact"]);
+    const result = await runCli(["recall"]);
+    expect(result.stdout).not.toContain("anchor budget exhausted");
   });
 
   it("sorts `mem recall --hint-format --stable` fact-lines by fact id ascending", async () => {
@@ -1668,12 +1678,13 @@ describe("mem init/uninstall", () => {
     const uninstalled = await runCli(["uninstall", "claude-code", "--root", toolRoot]);
     expect(uninstalled.exitCode).toBe(0);
 
-    // Install created `hooks` and `hooks.SessionStart` here, so uninstall takes them away again --
-    // an empty husk is not "the pre-install state" this test's own name promises.
-    const settings = JSON.parse(readFileSync(join(toolRoot, ".claude", "settings.json"), "utf8"));
-    expect(settings.hooks).toBeUndefined();
-    const claudeMd = readFileSync(join(toolRoot, "CLAUDE.md"), "utf8");
-    expect(claudeMd).not.toContain("token-goat-mem");
+    // Neither file existed before this init created them, so "the pre-install state" is absence --
+    // an empty `.claude/settings.json` or `CLAUDE.md` husk left behind would not be that state, and
+    // is exactly what a coding tool picks up as a real (if empty) instruction file.
+    expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+    expect(existsSync(`${join(toolRoot, ".claude", "settings.json")}.token-goat-mem.bak`)).toBe(false);
+    expect(existsSync(join(toolRoot, "CLAUDE.md"))).toBe(false);
+    expect(existsSync(`${join(toolRoot, "CLAUDE.md")}.token-goat-mem.bak`)).toBe(false);
     expect(readFileSync(join(toolRoot, "unrelated.txt"), "utf8")).toBe("leave me alone\n");
 
     // Uninstalling again is a no-op, not an error.
@@ -1682,14 +1693,38 @@ describe("mem init/uninstall", () => {
     expect(again.stdout).toContain("noop");
   });
 
+  it("a full install/uninstall round trip on a fresh root leaves the directory listing exactly as it started, one tool at a time", async () => {
+    // `.claude` and `.vscode` are directories mem creates that this fix deliberately leaves in place
+    // (only files are unlinked, never directories), so they are excluded from the comparison.
+    //
+    // Each tool is installed and uninstalled to completion before the next one starts, rather than
+    // installing all four and then uninstalling all four: codex/copilot-cli/copilot-vscode share
+    // AGENTS.md, and a *second* tool installing into a file a *different* tool's install already
+    // created legitimately takes a `.bak` of that (now mem-authored) content -- a real, unrelated
+    // feature of install, not the residue this fix removes. One tool at a time isolates the case this
+    // test exists to cover: a file no tool has touched yet, created and then fully uninstalled.
+    const before = readdirSync(toolRoot).filter((name) => name !== ".claude" && name !== ".vscode");
+
+    for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
+      const initResult = await runCli(["init", tool, "--root", toolRoot]);
+      expect(initResult.exitCode).toBe(0);
+      const uninstallResult = await runCli(["uninstall", tool, "--root", toolRoot]);
+      expect(uninstallResult.exitCode).toBe(0);
+    }
+
+    const after = readdirSync(toolRoot).filter((name) => name !== ".claude" && name !== ".vscode");
+    expect(after).toEqual(before);
+  });
+
   it("--user writes/removes the user-level settings.json (under the isolated TOKEN_GOAT_MEM_WIRING_HOME) instead of the project one", async () => {
     await runCli(["init", "claude-code", "--root", toolRoot, "--user"]);
     expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
     expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(true);
 
     await runCli(["uninstall", "claude-code", "--root", toolRoot, "--user"]);
-    const settings = JSON.parse(readFileSync(join(toolHome, ".claude", "settings.json"), "utf8"));
-    expect(settings.hooks).toBeUndefined();
+    // settings.json never existed before this init created it under toolHome, so uninstall removes
+    // the file rather than leaving an empty `{}` behind.
+    expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(false);
   });
 
   it("uninstall --all removes every tool's wiring in one call", async () => {
@@ -1703,7 +1738,28 @@ describe("mem init/uninstall", () => {
     for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
       expect(result.stdout).toContain(`${tool}:`);
     }
-    expect(readFileSync(join(toolRoot, "AGENTS.md"), "utf8")).not.toContain("token-goat-mem");
+    // AGENTS.md never existed before the first of codex/copilot-cli/copilot-vscode's init created it,
+    // so once the last of the three is uninstalled the shared block empties and the file is removed.
+    expect(existsSync(join(toolRoot, "AGENTS.md"))).toBe(false);
+  });
+
+  it("uninstall --all reports a per-tool failure and keeps going, exiting 1, instead of hiding tools that already finished", async () => {
+    // Before this fix, `uninstall --all` buffered every tool's output into one array and only wrote
+    // it to stdout after the whole loop finished, so a thrown error from one tool's file (a JSON
+    // parse failure here) discarded the output for every tool already uninstalled before it -- the
+    // opposite of what codex's successful uninstall, which ran first, deserves to have reported.
+    const codexResult = await runCli(["init", "codex", "--root", toolRoot]);
+    expect(codexResult.exitCode).toBe(0);
+    const copilotVscodeResult = await runCli(["init", "copilot-vscode", "--root", toolRoot]);
+    expect(copilotVscodeResult.exitCode).toBe(0);
+
+    writeFileSync(join(toolRoot, ".vscode", "tasks.json"), "{", "utf8");
+
+    const result = await runCli(["uninstall", "--all", "--root", toolRoot]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toContain("codex:");
+    expect(result.stdout).toContain(join(toolRoot, "AGENTS.md"));
+    expect(result.stdout).toContain("copilot-vscode: failed");
   });
 
   it("uninstall requires a tool name or --all, and rejects combining them", async () => {
@@ -1764,9 +1820,9 @@ describe("mem init/uninstall", () => {
 
     const uninstallCodex = await runCli(["uninstall", "codex", "--root", toolRoot]);
     expect(uninstallCodex.exitCode).toBe(0);
-    current = readFileSync(agentsMdPath, "utf8");
-    expect(current).not.toContain("token-goat-mem");
-    expect(current).not.toContain("## Memory");
+    // AGENTS.md never existed before codex's own init created it, so once the last tool tracked in
+    // the shared block is uninstalled, the file is removed rather than left empty.
+    expect(existsSync(agentsMdPath)).toBe(false);
   });
 
   it("copilot-vscode init writes tasks.json, keybindings.json (under the isolated home), and AGENTS.md", async () => {

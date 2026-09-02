@@ -53,7 +53,7 @@ export interface WiringOpts {
   readonly homeDir?: string;
 }
 
-export type WiringFileAction = "create" | "update" | "remove" | "noop";
+export type WiringFileAction = "create" | "update" | "remove" | "delete" | "noop";
 
 export interface WiringChange {
   readonly path: string;
@@ -127,16 +127,62 @@ function backupIfNeeded(filePath: string): void {
   }
 }
 
-/** Writes the result of `op.transform` to `op.path` atomically (temp file + rename), taking a one-time `.bak` snapshot before the first write and retrying the transform once if the file changed between the initial read and the pre-write check. Exported for direct unit testing of the retry path. */
-export function writeManagedFile(op: FileOp): WiringChange {
+/**
+ * True when `content` holds nothing a user could have written: the empty string, or a JSON document
+ * whose root is an empty object or empty array. Uninstall transforms prune mem's own entries out of
+ * a shared container (`hooks`, `tasks`, `inputs`, a keybindings array) but stop short of deleting the
+ * file, so a file whose *entire* content was mem's collapses to one of these shapes.
+ *
+ * Deliberately stricter than `isBlank`: a markdown/text file that strips down to whitespace (say a
+ * lone "\r\n") is not treated as empty here, because those bytes were the user's before mem ever
+ * touched the file and `stripBlockSeparators` hands them straight back unmodified -- collapsing that
+ * to "delete" would erase pre-existing (if blank-looking) content. The JSON managed files never hit
+ * this function in that state at all: `isBlank(current)` short-circuits their uninstall transform to
+ * `undefined` (a no-op, file untouched) before any pruning happens, so an empty *object or array* seen
+ * here can only mean every key/entry mem's pruning left behind is gone -- i.e. nothing outside mem's
+ * own stamped content survived.
+ */
+function isEmptyManagedContent(content: string): boolean {
+  if (content === "") {
+    return true;
+  }
+  try {
+    const parsed: unknown = JSON.parse(content);
+    if (isPlainObject(parsed)) {
+      return Object.keys(parsed).length === 0;
+    }
+    if (Array.isArray(parsed)) {
+      return parsed.length === 0;
+    }
+  } catch {
+    // Not JSON (or not valid JSON) -- not empty by this function's definition.
+  }
+  return false;
+}
+
+/**
+ * Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the
+ * transform once if the file changed between the initial read and the pre-write check. Exported for
+ * direct unit testing of the retry path.
+ *
+ * `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before
+ * its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever
+ * capture content mem is about to touch for the first time (install), never a snapshot of mem's own
+ * managed content on the way out.
+ *
+ * `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed
+ * `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the
+ * uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by
+ * uninstall rather than left behind empty.
+ */
+export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfEmpty?: boolean } = {}): WiringChange {
+  const backup = opts.backup ?? true;
+  const deleteIfEmpty = opts.deleteIfEmpty ?? false;
+
   let before = existsSync(op.path) ? readFileSync(op.path, "utf8") : undefined;
   let after = op.transform(before);
   if (after === undefined || after === before) {
     return { path: op.path, action: "noop", detail: "already up to date" };
-  }
-
-  if (before !== undefined) {
-    backupIfNeeded(op.path);
   }
 
   // Re-check immediately before writing: if the file changed underneath us since the read above,
@@ -148,6 +194,15 @@ export function writeManagedFile(op: FileOp): WiringChange {
     if (after === undefined || after === before) {
       return { path: op.path, action: "noop", detail: "already up to date" };
     }
+  }
+
+  if (deleteIfEmpty && before !== undefined && isEmptyManagedContent(after)) {
+    rmSync(op.path, { force: true });
+    return { path: op.path, action: "delete", detail: "removed file that held only mem's own content" };
+  }
+
+  if (before !== undefined && backup) {
+    backupIfNeeded(op.path);
   }
 
   const existedBefore = before !== undefined;
@@ -195,12 +250,31 @@ interface ManagedFile {
   readonly describeDetail?: (current: string | undefined, installAction: WiringFileAction, uninstallAction: WiringFileAction) => string | undefined;
 }
 
+/**
+ * Computes every file's next content up front -- discarding the result -- before any file is
+ * written, so a `WiringConflictError` thrown by a later file's transform is raised before an
+ * earlier file has been written to disk. Mirrors the read-then-transform shape `runDescribe` already
+ * uses to compute a dry-run plan without writing anything.
+ */
+function validateAll(files: readonly ManagedFile[], transformOf: (file: ManagedFile) => FileTransform): void {
+  for (const file of files) {
+    const current = existsSync(file.path) ? readFileSync(file.path, "utf8") : undefined;
+    transformOf(file)(current);
+  }
+}
+
 function runInstall(files: readonly ManagedFile[]): WiringResult {
+  validateAll(files, (file) => file.install);
   return { changes: files.map((file) => writeManagedFile({ path: file.path, transform: file.install })) };
 }
 
 function runUninstall(files: readonly ManagedFile[]): WiringResult {
-  return { changes: files.map((file) => writeManagedFile({ path: file.path, transform: file.uninstall })) };
+  validateAll(files, (file) => file.uninstall);
+  return {
+    changes: files.map((file) =>
+      writeManagedFile({ path: file.path, transform: file.uninstall }, { backup: false, deleteIfEmpty: true })
+    ),
+  };
 }
 
 function runDescribe(files: readonly ManagedFile[]): WiringPlan {
@@ -1072,6 +1146,17 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
     if (Array.isArray(value) && value.length === 0) {
       text = surgicalJsoncEdit(text, [key], undefined);
     }
+  }
+
+  // A `"version": "2.0.0"` left as the only remaining key is the exact skeleton install writes when
+  // `tasks.json` didn't exist yet (`installTasksJson`'s `isBlank(current)` branch) -- functionally
+  // identical to no file at all, since VS Code treats a missing tasks.json and one with just its
+  // default schema version and no tasks the same way. Pruning it here, only after both `tasks` and
+  // `inputs` are already gone, lets a from-scratch install/uninstall round trip collapse the whole
+  // file to nothing instead of leaving this one inert key behind.
+  const finalParsed: unknown = parseJsoncOrConflict(text, path);
+  if (isPlainObject(finalParsed) && Object.keys(finalParsed).length === 1 && finalParsed["version"] === "2.0.0") {
+    text = surgicalJsoncEdit(text, ["version"], undefined);
   }
   return text;
 }

@@ -24,8 +24,11 @@
  * other path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`,
  * `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check
  * before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived`
- * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified (or, for a
- * detected symlink escape, contradicted) rather than followed.
+ * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified. A detected
+ * symlink escape is *not* uniformly `contradicted`: `file-exists`/`file-absent` return `unverified`
+ * (a symlink means mem cannot safely resolve the path, so it can assert neither presence nor absence —
+ * `contradicted` would be a lie for whichever of the pair asserts absence, per P3), while
+ * `file-newer-than`/`newest-of` still return `contradicted` for a symlinked comparison target.
  *
  * Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`,
  * `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`,
@@ -95,7 +98,7 @@ const FS_CASE_INSENSITIVE = process.platform === "win32";
 
 const memo = new Map<string, AnchorVerdict>();
 const gitDirCache = new Map<string, string | null>();
-const gitIndexCache = new Map<string, Set<string> | null>();
+const gitIndexCache = new Map<string, GitIndexParseResult | null>();
 /** Lazily-built lowercase view of `gitIndexCache`, only ever populated on {@link FS_CASE_INSENSITIVE} platforms, so a case-folded lookup stays O(1) instead of rescanning the index set on every miss. */
 const gitIndexFoldedCache = new Map<string, Set<string>>();
 
@@ -197,15 +200,12 @@ function containsSymlink(root: string, target: string): boolean {
 
 /**
  * `file-exists <path>` / `file-absent <path>` — affirmed/contradicted based on whether `path` exists
- * as a plain, non-symlinked entity reachable through `root` alone. Refuses to follow a symlink at
- * `path` or at any directory component between `root` and `path` ({@link containsSymlink}): such a
- * path is treated as not existing, so `file-exists` contradicts and `file-absent` affirms, rather than
- * following the symlink to probe whatever it actually points at.
+ * as a plain entity reachable through `root` alone. Symlink refusal is handled by the caller
+ * ({@link evaluateTokens}), which checks {@link containsSymlink} *before* calling this function and
+ * returns `unverified` rather than treating the path as absent — this function is never reached for a
+ * symlinked path or intermediate directory, so it performs a plain `statSync`.
  */
-function existsFile(root: string, path: string): boolean {
-  if (containsSymlink(root, path)) {
-    return false;
-  }
+function existsFile(path: string): boolean {
   try {
     statSync(path);
     return true;
@@ -232,21 +232,24 @@ interface BudgetState {
 
 /**
  * `file-newer-than <a> <b>` — tests whether `a` is the currently-active file relative to `b`.
- * affirmed: `a` exists and is newer than `b` (or `b` does not exist).
- * contradicted: `b` exists and is newer than `a` (or `a` does not exist while `b` does), or `a`/`b`
+ * affirmed: `a` exists and is newer than `b`.
+ * contradicted: `b` exists and is newer than `a`, or `a` does not exist while `b` does, or `a`/`b`
  * (or a directory component between `root` and either) is a symlink ({@link containsSymlink}) —
  * refused rather than followed, for the same reason as `file-contains`.
- * unverified: neither file exists, or both exist with identical mtimes (ambiguous).
+ * unverified: neither file exists, both exist with identical mtimes (ambiguous), or `b` does not
+ * exist (whether or not `a` does) — you cannot compare two files when one of them is missing, so
+ * this can assert neither "newer" nor "older" (P3: never fabricate a verdict). Concretely: a fact
+ * anchored `file-newer-than generated.ts schema.prisma` must not stay `affirmed` forever once
+ * `schema.prisma` is deleted or moved — that is exactly the moment the fact stops being true, and
+ * silently reporting "b does not exist" as "a is newer" would hide the staleness this anchor exists
+ * to catch.
  */
 function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): AnchorVerdict {
-  if (mtimeA === null && mtimeB === null) {
+  if (mtimeB === null) {
     return "unverified";
   }
   if (mtimeA === null) {
     return "contradicted";
-  }
-  if (mtimeB === null) {
-    return "affirmed";
   }
   if (mtimeA === mtimeB) {
     return "unverified";
@@ -415,12 +418,19 @@ function segmentToRegExp(segment: string): RegExp {
 }
 
 /**
- * `glob-exists <pattern>` — pattern segments are separated by `/` and support `*`, `?`, and a
- * recursive `**` segment. Affirmed if at least one filesystem entry under `root` matches; contradicted
- * if the walk completes with no match; unverified if the walk exceeds its entry-count or time budget
- * before resolving (S4: never guess under a budget cutoff). Symlinks are never followed (root-scoping
- * — a symlink could otherwise point outside `root`) and `.git`/`node_modules` are always skipped
- * (S4: anchors must stay cheap; those trees are large and never what a fact's proposition means).
+ * `glob-exists <pattern>` — pattern segments are separated by `/` (and, on {@link FS_CASE_INSENSITIVE}
+ * platforms, also by `\` — Windows paths are routinely typed with either) and support `*`, `?`, and a
+ * recursive `**` segment. A `.` segment (e.g. a leading `./`) is dropped rather than rejected, so
+ * `./src/*.ts` and `src/*.ts` are the same pattern. Affirmed if at least one filesystem entry under
+ * `root` matches; contradicted if the walk completes with no match; unverified if the walk exceeds its
+ * entry-count or time budget before resolving (S4: never guess under a budget cutoff). Symlinks are
+ * never followed (root-scoping — a symlink could otherwise point outside `root`). `.git`/`node_modules`
+ * are skipped *only* when reached via a wildcard segment (`*`, `?`, or `**`) — that is the S4 cost
+ * guard against walking those large, usually-irrelevant trees when the pattern didn't ask for them.
+ * A pattern that *literally* names `.git` or `node_modules` as a segment (e.g.
+ * `node_modules/pkg/index.js`, or `node_modules/**` to search inside it) is an explicit request to
+ * descend there and is honored — contradicting a pattern that plainly names a file that exists is
+ * exactly the fabrication P3 forbids.
  */
 function evaluateGlobExists(
   root: string,
@@ -428,7 +438,9 @@ function evaluateGlobExists(
   deadlineMs: number | undefined,
   budgetState: BudgetState,
 ): AnchorVerdict {
-  const segments = pattern.split("/").filter((segment) => segment.length > 0);
+  const segments = pattern
+    .split(FS_CASE_INSENSITIVE ? /[/\\]/u : "/")
+    .filter((segment) => segment.length > 0 && segment !== ".");
   if (segments.length === 0 || segments.includes("..")) {
     return "unverified";
   }
@@ -492,6 +504,10 @@ function evaluateGlobExists(
 
     const isLast = top.segIdx === segments.length - 1;
     const regex = segmentToRegExp(segment);
+    // A literal segment (no `*`/`?`) names its target explicitly, so it is exempt from the
+    // .git/node_modules skip below -- only a wildcard segment matched an entry it didn't ask for by
+    // name.
+    const segmentIsWildcard = /[*?]/u.test(segment);
     for (const entry of entries) {
       scanned += 1;
       if (scanned > MAX_GLOB_ENTRIES_SCANNED) {
@@ -504,7 +520,8 @@ function evaluateGlobExists(
       if (isLast) {
         return "affirmed";
       }
-      if (entry.isDirectory() && entry.name !== ".git" && entry.name !== "node_modules") {
+      const skipCostlyDir = segmentIsWildcard && (entry.name === ".git" || entry.name === "node_modules");
+      if (entry.isDirectory() && !skipCostlyDir) {
         stack.push({ dir: join(top.dir, entry.name), segIdx: top.segIdx + 1 });
       }
     }
@@ -600,14 +617,93 @@ function evaluateGitBranchIs(root: string, branch: string): AnchorVerdict {
 }
 
 /**
+ * Result of parsing `.git/index`'s entry table. `complete` is `false` when the index carries a
+ * mandatory extension this parser does not understand — see {@link walkGitIndexExtensions} — meaning
+ * `paths` reflects only what the entry table itself lists, not necessarily every path the index
+ * actually tracks (a split index's main-index entry table omits paths unchanged since the last
+ * split; a sparse index's collapsed directory entries omit paths outside the sparse cone). A miss
+ * against `paths` when `complete` is `false` is not evidence of absence.
+ */
+interface GitIndexParseResult {
+  readonly paths: Set<string>;
+  readonly complete: boolean;
+}
+
+/** SHA-1 and SHA-256 digest lengths, in bytes — the two possible index-file trailers (`git-index-format`). */
+const GIT_INDEX_TRAILER_LENGTHS = [20, 32] as const;
+
+/**
+ * Walks `.git/index`'s optional trailing extensions, starting at `startOffset` (immediately after
+ * the last parsed entry), for one candidate trailer length. Returns `null` if the walk cannot be
+ * made to land exactly on the trailer boundary with this trailer length (signaling the caller to
+ * retry with the other length, or give up); otherwise returns whether every extension encountered
+ * was safely skippable.
+ *
+ * Git's index-extension format (`git-index-format` documentation) reserves the case of an
+ * extension's 4-byte signature to mean something: an uppercase first letter is optional -- a reader
+ * that does not recognize it is free to skip the extension's `size` bytes and move on, which is
+ * exactly what this walker always does, for every signature, known or not. A *lowercase* first
+ * letter marks the extension mandatory: a reader that does not understand it is supposed to refuse
+ * the whole index rather than silently proceed as if the extension were not there. `link` (split
+ * index -- the main index holds only entries that differ from a `sharedindex.*` file, so the entry
+ * table alone understates what is tracked) and `sdir` (sparse index -- an entire directory outside
+ * the sparse-checkout cone collapses into one entry, so files under it never appear individually)
+ * are the two mandatory extensions real repositories produce; both are lowercase for exactly this
+ * reason. Skipping their bytes without reading their content is safe -- this parser makes no attempt
+ * to resolve a delta or expand a collapsed directory -- but the *caller* must treat a lowercase-only
+ * skip as "the entry table is not the whole truth" (`complete: false`) rather than "there are no
+ * more tracked paths" (P3: a miss must not read as a fabricated absence).
+ */
+function walkGitIndexExtensionsWithTrailer(buf: Buffer, startOffset: number, trailerLength: number): boolean | null {
+  let offset = startOffset;
+  let sawMandatoryExtension = false;
+  const end = buf.length - trailerLength;
+  while (offset + 8 <= end) {
+    const signature = buf.toString("ascii", offset, offset + 4);
+    const size = buf.readUInt32BE(offset + 4);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + size;
+    if (dataEnd > end) {
+      return null;
+    }
+    if (/^[a-z]/u.test(signature)) {
+      sawMandatoryExtension = true;
+    }
+    offset = dataEnd;
+  }
+  if (offset !== end) {
+    return null;
+  }
+  return !sawMandatoryExtension;
+}
+
+/**
+ * Tries both possible trailer lengths ({@link GIT_INDEX_TRAILER_LENGTHS}) and accepts the first one
+ * whose extension walk lands exactly on the trailer boundary. Returns `null` if neither does --
+ * an index this parser cannot confidently account for byte-for-byte is one it refuses to trust at
+ * all (P3), consistent with every other anomaly in {@link readGitIndexPathsUncached} aborting the
+ * whole parse rather than returning a partial answer.
+ */
+function walkGitIndexExtensions(buf: Buffer, startOffset: number): boolean | null {
+  for (const trailerLength of GIT_INDEX_TRAILER_LENGTHS) {
+    const result = walkGitIndexExtensionsWithTrailer(buf, startOffset, trailerLength);
+    if (result !== null) {
+      return result;
+    }
+  }
+  return null;
+}
+
+/**
  * Parses `.git/index` (version 2 or 3 only — version 4 uses path-prefix compression, a materially
  * different byte layout, and is deliberately not supported) and returns the set of tracked path
- * strings (POSIX-style, relative to the working tree root), or `null` if the index cannot be
- * confidently parsed. Every offset is bounds-checked before use; any anomaly aborts the whole parse
- * and returns `null` rather than risk silently misreading a later entry (P3: never fabricate a
- * verdict from an uncertain read).
+ * strings the entry table lists (POSIX-style, relative to the working tree root), plus whether that
+ * set is the *complete* set of tracked paths ({@link GitIndexParseResult}) — or `null` if the index
+ * cannot be confidently parsed. Every offset is bounds-checked before use; any anomaly aborts the
+ * whole parse and returns `null` rather than risk silently misreading a later entry (P3: never
+ * fabricate a verdict from an uncertain read).
  */
-function readGitIndexPathsUncached(gitDir: string): Set<string> | null {
+function readGitIndexPathsUncached(gitDir: string): GitIndexParseResult | null {
   const indexPath = join(gitDir, "index");
   if (isSymlink(indexPath)) {
     return null;
@@ -617,7 +713,7 @@ function readGitIndexPathsUncached(gitDir: string): Set<string> | null {
     size = statSync(indexPath).size;
   } catch {
     // No index file yet (freshly initialized, empty repo) — correctly "nothing tracked", not an error.
-    return new Set();
+    return { paths: new Set(), complete: true };
   }
   if (size > MAX_GIT_INDEX_READ_BYTES) {
     return null;
@@ -626,7 +722,7 @@ function readGitIndexPathsUncached(gitDir: string): Set<string> | null {
   try {
     buf = readFileSync(indexPath);
   } catch {
-    return new Set();
+    return { paths: new Set(), complete: true };
   }
   if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "DIRC") {
     return null;
@@ -677,10 +773,14 @@ function readGitIndexPathsUncached(gitDir: string): Set<string> | null {
       return null;
     }
   }
-  return paths;
+  const complete = walkGitIndexExtensions(buf, offset);
+  if (complete === null) {
+    return null;
+  }
+  return { paths, complete };
 }
 
-function readGitIndexPaths(gitDir: string): Set<string> | null {
+function readGitIndexPaths(gitDir: string): GitIndexParseResult | null {
   const cached = gitIndexCache.get(gitDir);
   if (cached !== undefined) {
     return cached;
@@ -692,19 +792,26 @@ function readGitIndexPaths(gitDir: string): Set<string> | null {
 
 /**
  * `git-tracked <path>` — parses `.git/index` directly (no `git` subprocess). Affirmed if `path`
- * (relative to `root`) appears in the index; contradicted if the index parses cleanly and `path` is
- * absent from it; unverified if `root` is not a git working tree or the index cannot be confidently
- * parsed (e.g. index format version 4, corrupt header).
+ * (relative to `root`) appears in the index's entry table; unverified if `root` is not a git working
+ * tree, the index cannot be confidently parsed (e.g. index format version 4, corrupt header), or
+ * `path` is absent from the entry table but the index carries a mandatory extension this parser
+ * cannot account for ({@link GitIndexParseResult.complete}) — a split index's `link` extension means
+ * the main index's entry table omits paths unchanged since the last split, and a sparse index's
+ * `sdir` extension means an entire directory outside the sparse-checkout cone collapses into one
+ * entry, so a path under it never appears individually; either way, "not listed" is not "not
+ * tracked" and asserting `contradicted` here would be exactly the fabrication P3 forbids. Only when
+ * the entry table is the *complete* set of tracked paths does an absence become `contradicted`.
  */
 function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
   const gitDir = resolveGitDir(root);
   if (gitDir === null) {
     return "unverified";
   }
-  const paths = readGitIndexPaths(gitDir);
-  if (paths === null) {
+  const index = readGitIndexPaths(gitDir);
+  if (index === null) {
     return "unverified";
   }
+  const { paths, complete } = index;
   const relPath = relative(root, resolvedPath).split(sep).join("/");
   if (paths.has(relPath)) {
     return "affirmed";
@@ -715,7 +822,7 @@ function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
   if (FS_CASE_INSENSITIVE && foldedGitIndexPaths(gitDir, paths).has(relPath.toLowerCase())) {
     return "affirmed";
   }
-  return "contradicted";
+  return complete ? "contradicted" : "unverified";
 }
 
 function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): ReadonlySet<string> {
@@ -773,7 +880,10 @@ function evaluateTokens(
       if (a === null) {
         return "unverified";
       }
-      return existsFile(resolvedRoot, a) ? "affirmed" : "contradicted";
+      if (containsSymlink(resolvedRoot, a)) {
+        return "unverified";
+      }
+      return existsFile(a) ? "affirmed" : "contradicted";
     }
     case "file-absent": {
       const [rawA] = args;
@@ -784,7 +894,10 @@ function evaluateTokens(
       if (a === null) {
         return "unverified";
       }
-      return existsFile(resolvedRoot, a) ? "contradicted" : "affirmed";
+      if (containsSymlink(resolvedRoot, a)) {
+        return "unverified";
+      }
+      return existsFile(a) ? "contradicted" : "affirmed";
     }
     case "newest-of": {
       if (args.length < 2) {
@@ -911,14 +1024,27 @@ function evaluateFileContainsRaw(
  * absolute `Date.now()`-based deadline; once passed, evaluation stops attempting further work and
  * returns `unverified` — the safe direction (never fabricate `affirmed`, never falsely claim
  * `contradicted`) rather than risk an unbounded directory walk or index parse in the recall hot path.
+ *
+ * `budgetHit`, if given, is an out-parameter: set to `true` when the returned `"unverified"` is a
+ * "ran out of time this call" bailout rather than a genuine predicate outcome (mirrors the internal
+ * `BudgetState` this function already threads through `evaluateFileContainsRaw`/`evaluateTokens`,
+ * surfaced here so a caller iterating many facts under one shared deadline -- `retrieve`'s
+ * `anchorTimeBudgetMs` -- can count how many verdicts are budget artifacts rather than real ones,
+ * instead of every caller having to duplicate the "already expired on entry" / cache-hit reasoning
+ * needed to infer it from the outside. Left untouched (`false` is never written back) when the
+ * verdict is genuine, including a memo hit -- a budget-limited verdict is never memoized (see below),
+ * so a cache hit can only ever be a real one.
  */
-export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?: number): AnchorVerdict {
+export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?: number, budgetHit?: { hit: boolean }): AnchorVerdict {
   if (anchor === null || anchor.trim().length === 0) {
     return "unverified";
   }
   if (budgetExceeded(deadlineMs)) {
     // Already-expired deadline on entry: never a genuine predicate outcome, so never memoized —
     // there is nothing to cache under `key` since we return before ever reading/writing `memo`.
+    if (budgetHit) {
+      budgetHit.hit = true;
+    }
     return "unverified";
   }
 
@@ -940,6 +1066,8 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
   // that stems from the predicate itself rather than the time budget) are cached as before.
   if (!budgetState.hit) {
     memo.set(key, verdict);
+  } else if (budgetHit) {
+    budgetHit.hit = true;
   }
   return verdict;
 }

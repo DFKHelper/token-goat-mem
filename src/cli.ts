@@ -1126,7 +1126,7 @@ export function buildProgram(): Command {
         };
         // No embeddingBackend is wired: retrieval is BM25-only in v1 (see the
         // TODO(deferred, spec'd) note on retrieval.ts's EmbeddingBackend).
-        const { results, totalNonWithheld, shownNonWithheld } = await retrieve(facts, retrievalOptions);
+        const { results, totalNonWithheld, shownNonWithheld, anchorBudgetHits } = await retrieve(facts, retrievalOptions);
         if (results.length === 0) {
           process.stdout.write("no matching facts\n");
           return;
@@ -1157,6 +1157,13 @@ export function buildProgram(): Command {
         }
         if (shownNonWithheld < totalNonWithheld) {
           process.stdout.write(`showing ${shownNonWithheld} of ${totalNonWithheld} -- use --limit to see more\n`);
+        }
+        // Silent otherwise: a budget-limited "unverified" looks identical on the line above to a
+        // genuine one, and without this an affirmed fact that silently degraded to a hint (or a
+        // contradicted one withheld only by luck of the clock) gives no clue the verdict is a
+        // time-budget artifact rather than a real re-check of its anchor.
+        if (anchorBudgetHits > 0) {
+          process.stdout.write(`note: anchor budget exhausted; ${anchorBudgetHits} freshness verdict${anchorBudgetHits === 1 ? "" : "s"} reported as unverified\n`);
         }
       })
     );
@@ -1406,7 +1413,7 @@ export function buildProgram(): Command {
 
   program
     .command("epoch")
-    .description("Print the current write epoch (monotonic, bumped on every write; token-goat's fallback-cache invalidation key)")
+    .description("Print the current write epoch (monotonic, bumped on every store write; covers store state only for efficient polling)")
     .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log, report preference decay")
     .action(
       guard(async (options: EpochCliOptions) => {
@@ -1458,7 +1465,11 @@ export function buildProgram(): Command {
     .command("init <tool>")
     .description(
       `Wire mem into a coding tool's config (one of ${TOOL_NAMES.join(", ")}) -- automates what docs/integrations/*.md ` +
-        "otherwise asks you to hand-copy. Idempotent: re-running upgrades mem's own entries in place, never duplicates them."
+        "otherwise asks you to hand-copy. Idempotent: re-running upgrades mem's own entries in place, never duplicates them. " +
+        "A tool with more than one managed file computes every file's next content before writing any of them, so a " +
+        "hand-written entry that conflicts with mem's aborts the whole install before a single file is touched -- never a " +
+        "partial write. Add `*.token-goat-mem.bak` to this project's .gitignore: install takes a one-time snapshot of any " +
+        "pre-existing file before its first write."
     )
     .option("--root <path>", "Project root to write project-level config into (default: current directory)")
     .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")
@@ -1496,15 +1507,30 @@ export function buildProgram(): Command {
         const names: readonly ToolName[] = options.all === true ? TOOL_NAMES : [parseToolName(tool as string)];
         const wiringOpts = toWiringOpts(options);
         const lines: string[] = [];
+        let hadFailure = false;
         for (const name of names) {
           const wiring = getToolWiring(name);
-          if (options.dryRun === true) {
-            lines.push(`${name}:`, formatWiringPlanForUninstall(wiring.describe(wiringOpts)));
-          } else {
-            lines.push(`${name}:`, formatWiringResult(wiring.uninstall(wiringOpts)));
+          try {
+            if (options.dryRun === true) {
+              lines.push(`${name}:`, formatWiringPlanForUninstall(wiring.describe(wiringOpts)));
+            } else {
+              lines.push(`${name}:`, formatWiringResult(wiring.uninstall(wiringOpts)));
+            }
+          } catch (error) {
+            // Only --all catches and continues: a single named tool's uninstall keeps throwing so
+            // guard() reports its real exit code (1 user error, 2 internal). With --all, one tool's
+            // conflict must not hide that every tool before it already finished uninstalling.
+            if (options.all !== true) {
+              throw error;
+            }
+            hadFailure = true;
+            lines.push(`${name}: failed -- ${extractErrorMessage(error)}`);
           }
         }
         process.stdout.write(`${lines.join("\n")}\n`);
+        if (hadFailure) {
+          process.exitCode = EXIT_USER_ERROR;
+        }
       })
     );
 

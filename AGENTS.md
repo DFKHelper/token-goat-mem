@@ -56,12 +56,18 @@ Returns `TGMEM/2` header + one line per fact (`pref  fresh=affirmed|unverified|c
 
 If `mem` is missing, the binary times out, or parsing fails, token-goat treats it as "no hints" — fail-open to no memory (safe).
 
-**Cheap polling:** `mem epoch` prints a monotonic integer bumped on every write and left alone otherwise — the recommended cache-invalidation key for a host tool that wants to avoid re-running `mem recall` (which re-opens the DB and re-does retrieval) on every turn. Pattern: poll `mem epoch`, only call `mem recall --hint-format` when the value changed since the last poll.
+**Cheap polling:** `mem epoch` prints a monotonic integer bumped on every store write and left alone otherwise. It covers store state only — not anchor verdicts (filesystem and git, re-evaluated live on each recall) or preference decay (time-dependent). A polling consumer can use epoch to avoid redundant recalls when the store is unchanged, but should also re-run `mem recall` on a time interval or working-tree events (branch switches, installs) to refresh anchors and decay.
 
+Store-only pattern:
 ```bash
 last_epoch=$(mem epoch)
 current_epoch=$(mem epoch)
 [ "$current_epoch" != "$last_epoch" ] && mem recall --hint-format --root <project-root>
+```
+
+To refresh all state including anchors and decay, also use a time interval (e.g., every 5 minutes):
+```bash
+[ $(($(date +%s) - last_recall)) -gt 300 ] && mem recall --hint-format --root <project-root>
 ```
 
 <!-- token-goat-mem:start tools=copilot-cli,copilot-vscode -->
