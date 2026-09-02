@@ -7,7 +7,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -358,15 +358,15 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
     expect(agentsMd).toContain("mem recall --hint-format --root .");
   });
 
-  it("uninstalling the last remaining tool removes the whole block", () => {
+  it("uninstalling the last remaining tool removes the whole block, and deletes the file it created", () => {
     codex.install({ root, homeDir: home });
     copilotCli.install({ root, homeDir: home });
     codex.uninstall({ root, homeDir: home });
     copilotCli.uninstall({ root, homeDir: home });
 
-    const agentsMd = read(join(root, "AGENTS.md"));
-    expect(agentsMd).not.toContain("token-goat-mem");
-    expect(agentsMd).not.toContain("## Memory");
+    // AGENTS.md never existed before codex's install created it, so once the shared block it holds
+    // is the only content left, uninstall removes the file entirely rather than leaving it empty.
+    expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
   });
 
   it("codex install/uninstall round-trips a pre-existing AGENTS.md byte-for-byte", () => {
@@ -414,9 +414,9 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
     expect(agentsMd).toContain("## Memory");
 
     codex.uninstall({ root, homeDir: home });
-    agentsMd = read(join(root, "AGENTS.md"));
-    expect(agentsMd).not.toContain("token-goat-mem");
-    expect(agentsMd).not.toContain("## Memory");
+    // AGENTS.md never existed before the first of these three installs created it, so once the
+    // last tool's uninstall empties the shared block, the file itself is removed.
+    expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
   });
 
   it("copilot-vscode installing third joins the existing two-tool block without touching tasks.json/keybindings.json semantics", () => {
@@ -515,6 +515,22 @@ describe("copilotVscode wiring", () => {
     expect(read(tasksPath)).toBe(originalText);
   });
 
+  it("a conflict on a later managed file (keybindings.json) aborts the whole install before an earlier file (tasks.json) is written", () => {
+    // Managed files install in the order tasks.json, keybindings.json, AGENTS.md. Before this fix,
+    // install wrote each file's transform result to disk immediately as it walked the list, so a
+    // conflict thrown while processing keybindings.json (the second file) still left tasks.json (the
+    // first) created on disk -- a partial install the caller has no way to tell apart from "nothing
+    // happened".
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    seed(keybindingsPath, JSON.stringify([{ key: "ctrl+k m", command: "workbench.action.terminal.new" }]));
+
+    expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(
+      /a keybinding with key="ctrl\+k m" already exists in .* and was not created by mem/u,
+    );
+    expect(existsSync(join(root, ".vscode", "tasks.json"))).toBe(false);
+    expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
+  });
+
   it("install is idempotent for tasks.json and keybindings.json", () => {
     copilotVscode.install({ root, homeDir: home });
     const second = copilotVscode.install({ root, homeDir: home });
@@ -599,8 +615,11 @@ describe("copilotVscode wiring", () => {
     // The `inputs` key was mem's own -- uninstall prunes the array it emptied rather than leave `[]`.
     expect(tasks.inputs).toBeUndefined();
 
+    // keybindings.json never existed before this install created it (unlike tasks.json, which had a
+    // pre-existing "Build" task), so once uninstall empties it back to `[]`, the file is removed
+    // rather than left behind as an empty array.
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
-    expect(JSON.parse(read(keybindingsPath))).toEqual([]);
+    expect(existsSync(keybindingsPath)).toBe(false);
   });
 });
 
@@ -682,7 +701,46 @@ describe("writeManagedFile", () => {
     writeManagedFile({ path: filePath, transform: () => "new\n" });
     expect(() => read(`${filePath}.token-goat-mem.bak`)).toThrow();
   });
+});
 
+// ─────────────────────────────────────────────────────────────────────────── regression: install/uninstall round-trip leaves zero artifacts on a fresh root ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: a single tool's install then uninstall on a fresh root leaves no file and no .bak behind", () => {
+  /**
+   * Before this fix, `mem uninstall` on a file mem itself created (never touched by the user before
+   * install) left an empty husk on disk (`""`, `"{\n}\n"`, or `"[]\n"` depending on the file) plus a
+   * `.bak` snapshot of that mem-authored content -- artifacts where there were zero before `init` was
+   * ever run. This asserts the full round trip is truly a no-op on disk for every managed file of
+   * every tool, not just that the *content* mem cares about is gone.
+   */
+  function assertNoArtifacts(path: string): void {
+    expect(existsSync(path)).toBe(false);
+    expect(existsSync(`${path}.token-goat-mem.bak`)).toBe(false);
+  }
+
+  it("claude-code: settings.json and CLAUDE.md are both absent, with no .bak, after install then uninstall", () => {
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+    assertNoArtifacts(join(root, ".claude", "settings.json"));
+    assertNoArtifacts(join(root, "CLAUDE.md"));
+  });
+
+  it("codex: AGENTS.md is absent, with no .bak, after install then uninstall", () => {
+    codex.install({ root, homeDir: home });
+    codex.uninstall({ root, homeDir: home });
+    assertNoArtifacts(join(root, "AGENTS.md"));
+  });
+
+  it("copilot-vscode: tasks.json, keybindings.json, and AGENTS.md are all absent, with no .bak, after install then uninstall", () => {
+    copilotVscode.install({ root, homeDir: home });
+    copilotVscode.uninstall({ root, homeDir: home });
+    assertNoArtifacts(join(root, ".vscode", "tasks.json"));
+    assertNoArtifacts(join(vscodeUserDir(home), "keybindings.json"));
+    assertNoArtifacts(join(root, "AGENTS.md"));
+  });
+});
+
+describe("writeManagedFile retry", () => {
   it("retries the transform once against fresh content if the file changed between the initial read and the pre-write check", () => {
     const filePath = join(root, "concurrent.txt");
     writeFileSync(filePath, "v1\n", "utf8");

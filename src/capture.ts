@@ -39,6 +39,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
+import { anchorPathWithinRoot } from "./anchors.js";
 import { insertAuditLog } from "./db.js";
 import { insertFact as storageInsertFact } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES } from "./types.js";
@@ -352,6 +353,44 @@ const ANCHOR_ARITY: Readonly<Record<string, number | { readonly min: number }>> 
 
 const DISALLOWED_ANCHOR_ARG_LITERALS = ";&|`$<>";
 
+/**
+ * Placeholder root used only to run {@link anchorPathWithinRoot}'s containment math at syntax-check
+ * time, before the real `--root` for a `mem remember`/`mem edit` invocation is even known (this
+ * validation runs on the raw CLI string). The actual value is irrelevant to the check: a `..`
+ * segment escapes *any* root, and an absolute argument resolves to itself regardless of root, so
+ * either always fails containment against this (or any) placeholder. The evaluator (`src/anchors.ts`)
+ * re-derives and re-checks containment against the real root on every evaluation regardless -- this
+ * is purely an early, capture-time rejection so a doomed-to-`unverified`-forever anchor is refused
+ * with an error instead of silently rotting.
+ */
+const ANCHOR_SYNTAX_CHECK_ROOT = resolve("/mem-anchor-syntax-check-placeholder");
+
+/**
+ * Argument indices, for a given predicate, that are filesystem paths and must therefore stay within
+ * whatever root the anchor is later evaluated against -- no `..` traversal, no absolute path. Indices
+ * outside a predicate's own arity are simply never reached by the caller's loop.
+ */
+function pathArgIndices(predicate: string, argCount: number): readonly number[] {
+  switch (predicate) {
+    case "file-newer-than":
+      return [0, 1];
+    case "file-exists":
+    case "file-absent":
+    case "file-contains":
+    case "file-not-contains":
+    case "glob-exists":
+    case "git-tracked":
+    case "package-version":
+      return [0];
+    case "newest-of":
+      return Array.from({ length: argCount }, (_unused, index) => index);
+    case "git-branch-is":
+      return [];
+    default:
+      return [];
+  }
+}
+
 /** True if `arg` contains a control character or one of the shell-metacharacter literals above. Defense-in-depth only -- anchors.ts never shells out at all (it reads `.git/HEAD`/`.git/index` directly, per its own header comment), so this is not load-bearing for injection safety, but a stray control byte or shell metacharacter in an anchor argument is never legitimate for a plain fs path. */
 function hasDisallowedAnchorChar(arg: string): boolean {
   for (const ch of arg) {
@@ -389,6 +428,23 @@ function validateAnchorSyntax(anchor: string): void {
   for (const arg of args) {
     if (hasDisallowedAnchorChar(arg)) {
       throw new InvalidAnchorError(anchor, `argument "${arg}" contains disallowed characters`);
+    }
+  }
+  // Reject a path argument that can never affirm: one that escapes whatever root it will later be
+  // evaluated against (`../x`) or names an absolute location (`/etc/passwd`, `C:\Windows\...`).
+  // `resolveWithinRoot`/`anchorPathWithinRoot` would return `null` for these at every future
+  // evaluation, forever `unverified` -- tell the user now, at capture time, instead of letting the
+  // fact rot silently.
+  for (const index of pathArgIndices(predicate, args.length)) {
+    const arg = args[index];
+    if (arg === undefined) {
+      continue;
+    }
+    if (anchorPathWithinRoot(ANCHOR_SYNTAX_CHECK_ROOT, arg) === null) {
+      throw new InvalidAnchorError(
+        anchor,
+        `argument "${arg}" must be a path within the anchor root (no ".." traversal, no absolute path)`
+      );
     }
   }
 }

@@ -81,4 +81,87 @@ describe("documentation consistency guards", () => {
       expect(content.length).toBeGreaterThan(0);
     });
   });
+
+  describe("epoch polling and state-mutation docs (Item 1 & 2)", () => {
+    it("README epoch section mentions anchors as something not covered by epoch", () => {
+      const content = readDocFile("README.md");
+      const cheapPollingSection = content.match(
+        /### Cheap polling with `mem epoch`[\s\S]*?(?=## )/
+      )?.[0];
+      expect(cheapPollingSection).toBeDefined();
+      expect(
+        cheapPollingSection,
+        "README epoch section must mention 'anchor' to clarify epoch does not cover them"
+      ).toMatch(/anchor/i);
+    });
+
+    it("README epoch section mentions decay or time as not covered by epoch", () => {
+      const content = readDocFile("README.md");
+      const cheapPollingSection = content.match(
+        /### Cheap polling with `mem epoch`[\s\S]*?(?=## )/
+      )?.[0];
+      expect(cheapPollingSection).toBeDefined();
+      expect(
+        cheapPollingSection,
+        "README epoch section must mention decay or time to clarify epoch does not cover them"
+      ).toMatch(/decay|time/i);
+    });
+
+    it("AGENTS.md seam section mentions anchors as not covered by epoch", () => {
+      const content = readDocFile("AGENTS.md");
+      const seamSection = content.match(
+        /## Token-Goat integration seam[\s\S]*?(?=## )/
+      )?.[0];
+      expect(seamSection).toBeDefined();
+      expect(
+        seamSection,
+        "AGENTS.md seam section must mention 'anchor' to clarify epoch does not cover them"
+      ).toMatch(/anchor/i);
+    });
+
+    it("AGENTS.md seam section mentions decay or time as not covered by epoch", () => {
+      const content = readDocFile("AGENTS.md");
+      const seamSection = content.match(
+        /## Token-Goat integration seam[\s\S]*?(?=## )/
+      )?.[0];
+      expect(seamSection).toBeDefined();
+      expect(
+        seamSection,
+        "AGENTS.md seam section must mention decay or time to clarify epoch does not cover them"
+      ).toMatch(/decay|time/i);
+    });
+
+    it("cli.ts epoch description does not use bare 'cache invalidation key' phrase", () => {
+      const content = readDocFile("src/cli.ts");
+      const epochDescriptionMatch = content.match(
+        /\.description\("Print the current write epoch[^"]*"\)/
+      );
+      expect(epochDescriptionMatch).toBeDefined();
+      const description = epochDescriptionMatch?.[0] ?? "";
+      expect(
+        description,
+        "cli.ts epoch description must not use bare 'cache invalidation key' without qualifying it as store-only"
+      ).not.toMatch(/cache\s+invalidation\s+key[^a-z]/i);
+    });
+
+    it("README does not contain bare 'never mutates state' phrase without qualifying 'facts'", () => {
+      const content = readDocFile("README.md");
+      expect(
+        content,
+        "README must not claim epoch 'never mutates state' without clarifying it means 'facts' (schema migrations are allowed)"
+      ).not.toMatch(/never mutates state/i);
+    });
+
+    it("README epoch section clarifies that it covers 'store writes only' or similar", () => {
+      const content = readDocFile("README.md");
+      const cheapPollingSection = content.match(
+        /### Cheap polling with `mem epoch`[\s\S]*?(?=## )/
+      )?.[0];
+      expect(cheapPollingSection).toBeDefined();
+      expect(
+        cheapPollingSection,
+        "README must clarify that epoch covers store writes only"
+      ).toMatch(/store.*write|store.*only|write.*only/i);
+    });
+  });
 });

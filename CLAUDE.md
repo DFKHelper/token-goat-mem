@@ -39,7 +39,7 @@ Test setup via `tests/setup/` points to an isolated temp `TOKEN_GOAT_MEM_HOME` s
 
 ### Tool wiring (`mem init` / `mem uninstall`)
 
-`src/wiring.ts` installs/removes mem's integration block in a coding tool's own config (CLAUDE.md, AGENTS.md, `~/.claude/settings.json`, etc.) for a supported tool name. Writes are atomic (temp file + rename) and take a one-time `<file>.token-goat-mem.bak` snapshot before the first write; that backup pattern is gitignored. `mem uninstall` reverses only what `mem init` wrote, via reference-counted markers, so it does not clobber unrelated edits to the same file.
+`src/wiring.ts` installs/removes mem's integration block in a coding tool's own config (CLAUDE.md, AGENTS.md, `~/.claude/settings.json`, etc.) for a supported tool name. Install is atomic (temp file + rename) and takes a one-time `<file>.token-goat-mem.bak` snapshot of any pre-existing file before its first write; `*.token-goat-mem.bak` is gitignored in this repository only -- a target project has no reason of its own to ignore it, so `mem init --help` tells the user to add the pattern there. `mem uninstall` never takes a backup (there is nothing pre-existing to snapshot on the way out) and deletes a file whose entire content was mem's rather than leaving it empty; otherwise it reverses only what `mem init` wrote, via reference-counted markers, so it does not clobber unrelated edits to the same file.
 
 ### Token-goat integration
 

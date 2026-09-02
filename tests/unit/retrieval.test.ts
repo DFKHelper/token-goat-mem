@@ -105,6 +105,38 @@ describe("retrieve", () => {
     expect(result?.display).toBe("decision: chose Postgres over Mongo — mem show 1");
   });
 
+  it("anchorTimeBudgetMs: 0 forces every anchor to unverified and reports one anchorBudgetHits per fact", async () => {
+    // A zero (or already-passed) budget means `evaluateAnchor` bails out on entry for every
+    // candidate before it ever reads a file -- exercising `budgetExceeded`'s "already-expired
+    // deadline on entry" branch for the whole batch, not just a slow individual anchor.
+    writeFileSync(join(root, "present.txt"), "x");
+    const facts = [
+      makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
+      makeFact({ id: "2", text: "uses pnpm not npm", kind: "preference", anchor: "file-absent npm-only.txt" }),
+    ];
+    const outcome = await retrieve(facts, { query: "", root, anchorTimeBudgetMs: 0 });
+    expect(outcome.results.every((result) => result.freshness === "unverified")).toBe(true);
+    expect(outcome.anchorBudgetHits).toBe(facts.length);
+  });
+
+  it("a fact with no anchor at all is unverified without counting as an anchorBudgetHits, even under a zero budget", async () => {
+    // `anchor === null` short-circuits `evaluateAnchor` before the budget check ever runs, so this
+    // fact's "unverified" is the ordinary "no predicate to evaluate" outcome, not a budget artifact.
+    const facts = [makeFact({ id: "1", text: "no anchor at all", kind: "fact" })];
+    const outcome = await retrieve(facts, { query: "", root, anchorTimeBudgetMs: 0 });
+    expect(outcome.results[0]?.freshness).toBe("unverified");
+    expect(outcome.anchorBudgetHits).toBe(0);
+  });
+
+  it("a generous anchorTimeBudgetMs reports zero anchorBudgetHits, matching the default small-store case", async () => {
+    writeFileSync(join(root, "present.txt"), "x");
+    const facts = [
+      makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
+    ];
+    const outcome = await retrieve(facts, { query: "postgres", root });
+    expect(outcome.anchorBudgetHits).toBe(0);
+  });
+
   it("omits the trailing CTA from display when includeDisplayCta is false (integration-seam.ts TGMEM/2)", async () => {
     writeFileSync(join(root, "present.txt"), "x");
     const facts = [

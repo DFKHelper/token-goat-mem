@@ -140,6 +140,33 @@ describe("captureExplicit", () => {
     ).toThrow(/"file-newer-than" expects 2 argument\(s\), got 1/u);
   });
 
+  it("rejects a file-exists anchor whose path traverses above the root", () => {
+    expect(() =>
+      captureExplicit(db, { text: "escapes via traversal", kind: "fact", anchor: "file-exists ../x", root })
+    ).toThrow(InvalidAnchorError);
+    expect(() =>
+      captureExplicit(db, { text: "escapes via traversal", kind: "fact", anchor: "file-exists ../x", root })
+    ).toThrow(/argument "\.\.\/x" must be a path within the anchor root/u);
+  });
+
+  it("rejects a glob-exists anchor whose pattern traverses above the root", () => {
+    expect(() =>
+      captureExplicit(db, { text: "escapes via traversal", kind: "fact", anchor: "glob-exists ../*.ts", root })
+    ).toThrow(InvalidAnchorError);
+    expect(() =>
+      captureExplicit(db, { text: "escapes via traversal", kind: "fact", anchor: "glob-exists ../*.ts", root })
+    ).toThrow(/argument "\.\.\/\*\.ts" must be a path within the anchor root/u);
+  });
+
+  it("rejects a file-exists anchor naming an absolute path", () => {
+    expect(() =>
+      captureExplicit(db, { text: "escapes via absolute path", kind: "fact", anchor: "file-exists /etc/passwd", root })
+    ).toThrow(InvalidAnchorError);
+    expect(() =>
+      captureExplicit(db, { text: "escapes via absolute path", kind: "fact", anchor: "file-exists /etc/passwd", root })
+    ).toThrow(/argument "\/etc\/passwd" must be a path within the anchor root/u);
+  });
+
   it("blocks a fact containing a known secret pattern and persists nothing", () => {
     const before = (db.prepare("SELECT COUNT(*) AS n FROM facts").get() as { n: number }).n;
     expect(() =>

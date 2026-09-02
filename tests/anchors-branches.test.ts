@@ -140,12 +140,35 @@ function indexHeader(entryCount: number, version = 2, magic = "DIRC"): Buffer {
   return header;
 }
 
-function writeIndex(opts: { magic?: string; version?: number; entryCount?: number; entries?: readonly Buffer[]; truncateTo?: number }): void {
+/** One synthetic `.git/index` extension: a 4-byte signature, its 4-byte big-endian size, then `data`. */
+function indexExtension(sig: string, data: Buffer): Buffer {
+  const sigBuf = Buffer.from(sig, "ascii");
+  const sizeBuf = Buffer.alloc(4);
+  sizeBuf.writeUInt32BE(data.length, 0);
+  return Buffer.concat([sigBuf, sizeBuf, data]);
+}
+
+function writeIndex(opts: {
+  magic?: string;
+  version?: number;
+  entryCount?: number;
+  entries?: readonly Buffer[];
+  truncateTo?: number;
+  extensions?: ReadonlyArray<{ sig: string; data: Buffer }>;
+  trailerLength?: number;
+}): void {
   const gitDir = join(root, ".git");
   mkdirSync(gitDir, { recursive: true });
   const entries = opts.entries ?? [];
   const header = indexHeader(opts.entryCount ?? entries.length, opts.version ?? 2, opts.magic ?? "DIRC");
-  let buf = Buffer.concat([header, ...entries]);
+  const extensions = (opts.extensions ?? []).map(({ sig, data }) => indexExtension(sig, data));
+  // A real `.git/index` always ends in a SHA-1 (20-byte) or SHA-256 (32-byte) checksum trailer, which
+  // the extension walk must land on exactly. Every synthetic index below gets a zeroed 20-byte
+  // trailer by default so "well-formed" fixtures stay well-formed under the new extension-walking
+  // parser -- individual corrupt-index tests that need to fail before ever reaching the trailer are
+  // unaffected, since they abort earlier (bad magic/version/entry count/entry bounds).
+  const trailer = Buffer.alloc(opts.trailerLength ?? 20);
+  let buf = Buffer.concat([header, ...entries, ...extensions, trailer]);
   if (opts.truncateTo !== undefined) {
     buf = buf.subarray(0, opts.truncateTo);
   }
@@ -239,6 +262,61 @@ describe("a well-formed .git/index is parsed, in each of the three entry shapes"
   });
 });
 
+/**
+ * A mandatory (lowercase-signature) extension means the entry table alone is not the complete set of
+ * tracked paths -- `link` (split index) and `sdir` (sparse index) are the two real-world cases. A hit
+ * against the entry table is still trustworthy (a listed path is genuinely tracked even in a delta
+ * index), but a miss must become `unverified`, not `contradicted`: git 2.53 confirmed real repos
+ * under `core.splitIndex`/`sparse-index` return a path via `git ls-files` that this parser's entry
+ * table alone does not list.
+ */
+describe("mandatory index extensions make a miss unverified rather than a fabricated contradicted", () => {
+  it("affirms a path present in the entry table, and is unverified (not contradicted) for one that is not, under a link extension", () => {
+    // Mirrors the real split-index shape: the main index's entry table holds only the path that
+    // differs from the shared index (here, src/a.ts); src/b.ts lives only in the shared index this
+    // parser deliberately never opens.
+    writeIndex({
+      entries: [indexEntry("src/a.ts")],
+      extensions: [{ sig: "link", data: Buffer.alloc(8) }],
+    });
+    expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("affirmed");
+    expect(evaluateAnchor("git-tracked src/b.ts", root)).toBe("unverified");
+  });
+
+  it("is unverified for a path collapsed into a sparse directory entry under an sdir extension", () => {
+    // The sparse-index shape: "packages/b/" itself is the one entry table row, standing in for
+    // every file under it -- "packages/b/y.ts" never appears as its own entry.
+    writeIndex({
+      entries: [indexEntry("packages/b/")],
+      extensions: [{ sig: "sdir", data: Buffer.alloc(4) }],
+    });
+    expect(evaluateAnchor("git-tracked packages/b/y.ts", root)).toBe("unverified");
+  });
+
+  it("stays contradicted for a miss when the only extension present is optional (uppercase signature)", () => {
+    // TREE (cache-tree) is optional -- a reader that does not understand it is free to skip it and
+    // trust that the entry table it already parsed is complete. A miss here is a genuine absence.
+    writeIndex({
+      entries: [indexEntry("src/a.ts")],
+      extensions: [{ sig: "TREE", data: Buffer.alloc(16) }],
+    });
+    expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("affirmed");
+    expect(evaluateAnchor("git-tracked src/b.ts", root)).toBe("contradicted");
+  });
+
+  it("is unverified when an extension's declared size overruns the buffer", () => {
+    // A `size` field claiming more bytes than the file actually has means the walk can never land
+    // exactly on the trailer boundary with either candidate trailer length -- this is exactly the
+    // "cannot confidently parse" case every other anomaly in this parser already aborts on.
+    writeIndex({
+      entries: [indexEntry("src/a.ts")],
+      extensions: [{ sig: "TREE", data: Buffer.alloc(16) }],
+      truncateTo: 95, // header (12) + entry (72) + extension header (8) + 3 of the promised 16 data bytes
+    });
+    expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("unverified");
+  });
+});
+
 // ───────────────────────────────────────────────────────────── the .git pointer file ─────
 
 /**
@@ -254,7 +332,10 @@ describe("a .git pointer file is followed, and its failure modes are unverified"
   it("follows a relative gitdir pointer", () => {
     const real = join(root, "real-git");
     mkdirSync(real, { recursive: true });
-    writeFileSync(join(real, "index"), Buffer.concat([indexHeader(1), indexEntry("src/a.ts")]));
+    writeFileSync(
+      join(real, "index"),
+      Buffer.concat([indexHeader(1), indexEntry("src/a.ts"), Buffer.alloc(20)])
+    );
     writePointer("gitdir: real-git\n");
     expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("affirmed");
   });
@@ -369,19 +450,42 @@ describe("glob-exists does not descend into .git or node_modules", () => {
     expect(evaluateAnchor("glob-exists */objects/target.txt", root)).toBe("contradicted");
   });
 
-  it("skips them during a ** walk too, while still finding everything else", () => {
+  it("skips them during a ** wildcard walk, but a literal node_modules segment before ** still descends", () => {
     mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
     writeFileSync(join(root, "node_modules", "pkg", "hit.txt"), "x", "utf8");
     mkdirSync(join(root, "src", "deep"), { recursive: true });
     writeFileSync(join(root, "src", "deep", "hit.txt"), "x", "utf8");
     expect(evaluateAnchor("glob-exists src/**/hit.txt", root)).toBe("affirmed");
-    expect(evaluateAnchor("glob-exists node_modules/**/hit.txt", root)).toBe("contradicted");
+    // `node_modules` here is a literal leading segment, not the wildcard that reached it -- the
+    // pattern explicitly named the directory it wants searched, so the S4 cost guard does not apply
+    // and this affirms (was "contradicted" before the fix: a wildcard-only skip masqueraded as a
+    // blanket ban on ever entering node_modules, contradicting a pattern that plainly named it).
+    expect(evaluateAnchor("glob-exists node_modules/**/hit.txt", root)).toBe("affirmed");
   });
 
   it("supports the single-character wildcard", () => {
     writeFileSync(join(root, "a1.ts"), "x", "utf8");
     expect(evaluateAnchor("glob-exists a?.ts", root)).toBe("affirmed");
     expect(evaluateAnchor("glob-exists a??.ts", root)).toBe("contradicted");
+  });
+
+  it("affirms a pattern that literally names node_modules, at any depth of literal segments", () => {
+    mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(root, "node_modules", "pkg", "index.js"), "x", "utf8");
+    expect(evaluateAnchor("glob-exists node_modules/**", root)).toBe("affirmed");
+    expect(evaluateAnchor("glob-exists node_modules/pkg/index.js", root)).toBe("affirmed");
+  });
+
+  it("drops a leading './' segment rather than rejecting the pattern", () => {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "x", "utf8");
+    expect(evaluateAnchor("glob-exists ./src/*.ts", root)).toBe("affirmed");
+  });
+
+  it.skipIf(!isWindows)("splits a Windows-style backslash pattern into segments", () => {
+    mkdirSync(join(root, "src"), { recursive: true });
+    writeFileSync(join(root, "src", "a.ts"), "x", "utf8");
+    expect(evaluateAnchor("glob-exists src\\*.ts", root)).toBe("affirmed");
   });
 });
 

@@ -203,8 +203,11 @@ TGMEM/2 moved the per-fact follow-up hint (`mem show <id>`, `resolve via mem rev
 
 ### Cheap polling with `mem epoch`
 
-Re-running `mem recall --hint-format` on every host-tool turn works, but it re-opens the DB and re-runs retrieval every time even when nothing changed. `mem epoch` is the cheap alternative: it prints a single monotonic integer that is bumped by every write (`remember`, `edit`, `forget`, `pin`, `review --promote`/`--reject`, the `epoch --gc` retention pass) and left untouched otherwise. A host tool can poll it and only pay for a full `mem recall` when the value actually moved:
+Re-running `mem recall --hint-format` on every host-tool turn works, but it re-opens the DB and re-runs retrieval every time even when nothing changed. `mem epoch` is the cheap alternative: it prints a single monotonic integer that is bumped by every write (`remember`, `edit`, `forget`, `pin`, `review --promote`/`--reject`, the `epoch --gc` retention pass) and left untouched otherwise.
 
+A host tool can use `mem epoch` to detect store changes and only re-run `mem recall` when the store actually changed. However, **the epoch covers store writes only** — it does not cover anchor verdicts (filesystem and git state, re-evaluated live on every recall) or preference decay (a function of time). A polling consumer should therefore either call `mem recall` on a time interval to refresh anchors and decay, or monitor for working-tree events (branch switches, dependency installs) that may invalidate anchors.
+
+**Store-only polling pattern** (refreshes store state only):
 ```bash
 last_epoch=$(mem epoch)
 # ... later, on each turn ...
@@ -215,7 +218,18 @@ if [ "$current_epoch" != "$last_epoch" ]; then
 fi
 ```
 
-`mem epoch` with no flags never mutates state (no GC pass, no writes) — it is safe to call as often as you like as a cache-invalidation key.
+**Time-interval pattern** (refreshes all state including anchors and decay):
+```bash
+last_recall=$(date +%s)
+# ... on each turn ...
+now=$(date +%s)
+if [ $((now - last_recall)) -gt 300 ]; then  # 5 minutes
+  mem recall --hint-format --root "$project_root"
+  last_recall=$now
+fi
+```
+
+`mem epoch` with no flags never mutates facts (no GC pass, no writes) — it is safe to call as often as you like as a cheap store-state check.
 
 ## Works with
 

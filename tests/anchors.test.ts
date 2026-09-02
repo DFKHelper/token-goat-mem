@@ -88,6 +88,13 @@ describe("evaluateAnchor", () => {
       utimesSync(join(root, "d.txt"), same, same);
       expect(evaluateAnchor("file-newer-than c.txt d.txt", root)).toBe("unverified");
     });
+
+    it("is unverified when b is missing even though a exists -- cannot compare against a nonexistent file", () => {
+      // The concrete failure this prevents: "generated.ts is current with schema.prisma" must stop
+      // being ground truth the moment schema.prisma is deleted or moved, not stay affirmed forever.
+      writeFileSync(join(root, "a.txt"), "a");
+      expect(evaluateAnchor("file-newer-than a.txt missing-b.txt", root)).toBe("unverified");
+    });
   });
 
   describe("file-contains / file-not-contains (happy path)", () => {
@@ -342,20 +349,24 @@ describe("evaluateAnchor", () => {
       rmSync(outside, { recursive: true, force: true });
     });
 
-    it("file-exists contradicts (does not follow) a symlink to a file outside root", () => {
+    it("file-exists refuses (does not follow) a symlink to a file outside root", () => {
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
-      expect(evaluateAnchor("file-exists link.txt", root)).toBe("contradicted");
+      // The symlink target is refused rather than followed, so the predicate cannot confirm presence
+      // through it -- "contradicted" would wrongly assert the file definitely does not exist.
+      expect(evaluateAnchor("file-exists link.txt", root)).toBe("unverified");
     });
 
-    it("file-absent affirms (does not follow) a symlink to a file outside root", () => {
+    it("file-absent refuses (does not follow) a symlink to a file outside root", () => {
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
       // The symlink itself exists, but its target is refused rather than followed, so the predicate
-      // must not report the (unreachable, unconfirmed) target's existence as "file-absent contradicted".
-      expect(evaluateAnchor("file-absent link.txt", root)).toBe("affirmed");
+      // cannot safely assert absence either -- "affirmed" here would fabricate ground truth (this was
+      // the actual bug: it let a genuinely-present file, reached only through a symlink, be certified
+      // as removed).
+      expect(evaluateAnchor("file-absent link.txt", root)).toBe("unverified");
     });
 
     it("file-contains contradicts (does not read through) a symlink to a file outside root", () => {
@@ -378,7 +389,23 @@ describe("evaluateAnchor", () => {
       writeFileSync(join(targetDir, "config.json"), '{"packageManager": "pnpm"}');
       symlinkSync(targetDir, join(root, "linked-dir"), "junction");
       expect(evaluateAnchor("file-contains linked-dir/config.json pnpm", root)).toBe("contradicted");
-      expect(evaluateAnchor("file-exists linked-dir/config.json", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-exists linked-dir/config.json", root)).toBe("unverified");
+    });
+
+    it("refuses a symlinked intermediate directory for file-absent (inside-root junction)", () => {
+      const junctionSource = join(root, "node_modules", "foo");
+      const junctionTarget = join(root, "node_modules", ".pnpm", "foo");
+      mkdirSync(junctionTarget, { recursive: true });
+      writeFileSync(join(junctionTarget, "package.json"), '{"name":"foo"}');
+      symlinkSync(junctionTarget, junctionSource, "junction");
+      // This is the pnpm shape: node_modules/foo -> node_modules/.pnpm/foo, both inside root, with the
+      // real package.json reachable only through the symlink. Refusing to resolve through it must
+      // yield "unverified" for file-absent -- not "affirmed", which would certify a present dependency
+      // as removed.
+      expect(evaluateAnchor("file-absent node_modules/foo", root)).toBe("unverified");
+      expect(evaluateAnchor("file-absent node_modules/foo/package.json", root)).toBe("unverified");
+      // A genuinely-missing sibling, with no symlink involved, is still honestly affirmed.
+      expect(evaluateAnchor("file-absent node_modules/bar", root)).toBe("affirmed");
     });
 
     it("file-newer-than contradicts (does not follow) when the first path is a symlink to a file outside root", () => {

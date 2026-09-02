@@ -548,6 +548,15 @@ export interface RetrieveOutcome {
   readonly totalNonWithheld: number;
   /** Count of non-withheld results actually included in `results` (i.e. `min(totalNonWithheld, effectiveLimit)`). */
   readonly shownNonWithheld: number;
+  /**
+   * How many facts' freshness verdict is a budget artifact -- `evaluateAnchor`'s shared
+   * `anchorTimeBudgetMs` deadline was already exhausted by the time that fact's anchor was
+   * evaluated, so it was forced to `"unverified"` regardless of what the predicate would otherwise
+   * have found -- rather than a genuine `affirmed`/`contradicted`/`unverified` outcome. Zero in the
+   * common case where the store is small enough (or the deadline generous enough) that every anchor
+   * finishes in time.
+   */
+  readonly anchorBudgetHits: number;
 }
 
 /**
@@ -568,7 +577,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
 
   const filtered = pool.filter((fact) => matchesFilters(fact, options, now));
   if (filtered.length === 0) {
-    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0 };
+    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0 };
   }
 
   const bm25Scores = computeBm25Scores(filtered, options.query);
@@ -598,8 +607,13 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       ? reciprocalRankFusion([bm25RankIds, embeddingRankIds])
       : new Map<string, number>(bm25RankIds.map((id) => [id, bm25Scores.get(id) ?? 0]));
 
+  let anchorBudgetHits = 0;
   const results: RetrievedFact[] = filtered.map((fact) => {
-    const freshness = evaluateAnchor(fact.anchor, anchorRootFor(fact, options.root), anchorDeadline);
+    const budgetHit = { hit: false };
+    const freshness = evaluateAnchor(fact.anchor, anchorRootFor(fact, options.root), anchorDeadline, budgetHit);
+    if (budgetHit.hit) {
+      anchorBudgetHits += 1;
+    }
     const contradiction = contradictionFromStatus(fact.status);
     const trust = classifyTrust(fact, freshness, contradiction, now);
     return {
@@ -634,5 +648,5 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const shownIds = new Set(shownNonWithheldResults.map((result) => result.fact.id));
   const final = visible.filter((result) => result.trust === "withheld" || shownIds.has(result.fact.id));
 
-  return { results: final, totalNonWithheld: nonWithheld.length, shownNonWithheld: shownNonWithheldResults.length };
+  return { results: final, totalNonWithheld: nonWithheld.length, shownNonWithheld: shownNonWithheldResults.length, anchorBudgetHits };
 }

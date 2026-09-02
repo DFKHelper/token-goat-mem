@@ -51,9 +51,13 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("file-newer-than a.txt b.txt", root)).toBe("contradicted");
     });
 
-    it("affirms when only a exists", () => {
+    it("is unverified when b is missing, even though a exists", () => {
+      // You cannot compare two files when one of them does not exist -- affirming here would let
+      // "generated.ts is current with schema.prisma" stay ground truth forever after schema.prisma
+      // is deleted or moved, exactly the moment the fact stops being true (P3: never fabricate a
+      // verdict; unverified, not affirmed, is the honest answer for a missing comparison target).
       writeFileSync(join(root, "a.txt"), "a");
-      expect(evaluateAnchor("file-newer-than a.txt missing-b.txt", root)).toBe("affirmed");
+      expect(evaluateAnchor("file-newer-than a.txt missing-b.txt", root)).toBe("unverified");
     });
 
     it("contradicts when only b exists", () => {
@@ -88,14 +92,16 @@ describe("evaluateAnchor", () => {
   });
 
   describe("a symlink inside root pointing outside root is refused, not followed", () => {
-    it("file-exists contradicts, file-absent affirms, for a symlink to a file outside root", () => {
+    it("file-exists and file-absent both refuse (unverified) for a symlink to a file outside root", () => {
       const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
       try {
         const target = join(outside, "secret.txt");
         writeFileSync(target, "outside content");
         symlinkSync(target, join(root, "link.txt"), "file");
-        expect(evaluateAnchor("file-exists link.txt", root)).toBe("contradicted");
-        expect(evaluateAnchor("file-absent link.txt", root)).toBe("affirmed");
+        // Neither predicate can safely resolve through the symlink, so neither can assert presence
+        // or absence -- "contradicted"/"affirmed" here would fabricate a verdict mem cannot back up.
+        expect(evaluateAnchor("file-exists link.txt", root)).toBe("unverified");
+        expect(evaluateAnchor("file-absent link.txt", root)).toBe("unverified");
       } finally {
         rmSync(outside, { recursive: true, force: true });
       }
