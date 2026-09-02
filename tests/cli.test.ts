@@ -1118,6 +1118,26 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(listed.stdout.trim()).toBe("no facts stored");
   });
 
+  it("--from-md --scope path --path <file> binds every imported bullet to that file", async () => {
+    const path = writeFixture(["- auth.ts owns migrations."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home, "--scope", "path", "--path", "src/auth.ts"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+    const listed = await runCli(["list", "--status", "pending", "--json"]);
+    const envelope = JSON.parse(listed.stdout) as { facts: readonly { scopeRoot: string | null }[] };
+    expect(envelope.facts[0]?.scopeRoot).toBe(join(home, "src", "auth.ts"));
+  });
+
+  it("--from-md --scope path without --path exits 1 with a pinned message", async () => {
+    const path = writeFixture(["- auth.ts owns migrations."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home, "--scope", "path"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--scope path requires --path <file-or-dir>");
+  });
+
   it("--dry-run reports candidates without writing any facts", async () => {
     const path = writeFixture(["- Always use pnpm, never npm."].join("\n"));
 
@@ -2299,6 +2319,54 @@ describe("regression: recall does not surface another project's facts", () => {
     }
   });
 
+  it("a JSON-imported project-scoped fact is recallable from its bound root and not from another", async () => {
+    const projA = mkdtempSync(join(tmpdir(), "mem-import-recall-a-"));
+    const projB = mkdtempSync(join(tmpdir(), "mem-import-recall-b-"));
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-import-recall-export-"));
+    try {
+      const envelope = {
+        schemaVersion: 1,
+        exportedAt: new Date().toISOString(),
+        facts: [
+          {
+            id: "11111111-1111-1111-1111-111111111111",
+            text: "this repo deploys via a manual runbook",
+            kind: "decision",
+            subject: null,
+            value: null,
+            scope: "project",
+            scopeRoot: projA,
+            source_type: "user",
+            source_ref: null,
+            captured_at: "2026-01-01T00:00:00.000Z",
+            anchor: null,
+            status: "active",
+            confidence: 1,
+            embedding: null,
+          },
+        ],
+      };
+      const jsonPath = join(exportDir, "export.json");
+      writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
+
+      const imported = await runCli(["import", "--from-json", jsonPath]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+      const fromA = await runCli(["recall", "manual runbook", "--root", projA]);
+      expect(fromA.exitCode).toBe(0);
+      expect(fromA.stdout).toContain("this repo deploys via a manual runbook");
+
+      const fromB = await runCli(["recall", "manual runbook", "--root", projB]);
+      expect(fromB.exitCode).toBe(0);
+      expect(fromB.stdout).not.toContain("this repo deploys via a manual runbook");
+    } finally {
+      rmSync(projA, { recursive: true, force: true });
+      rmSync(projB, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
   it("surfaces a path-scoped fact bound to a file inside the querying root", async () => {
     const proj = mkdtempSync(join(tmpdir(), "mem-recall-path-"));
     const outside = mkdtempSync(join(tmpdir(), "mem-recall-out-"));
@@ -2327,6 +2395,158 @@ describe("regression: recall does not surface another project's facts", () => {
     } finally {
       rmSync(proj, { recursive: true, force: true });
       rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- regression: `--scope path` is reachable and binds to a file, not the project root ---
+
+describe("regression: --scope path binds to --path, not --root (previously unreachable)", () => {
+  it("mem remember --scope path --path <file> binds scopeRoot to the file, and `show` prints it", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-scope-path-remember-"));
+    try {
+      const remembered = await runCli([
+        "remember",
+        "auth.ts owns migrations",
+        "--kind",
+        "fact",
+        "--scope",
+        "path",
+        "--path",
+        "src/auth.ts",
+        "--root",
+        proj,
+      ]);
+      expect(remembered.exitCode).toBe(0);
+      const id = extractRememberedId(remembered);
+
+      const shown = await runCli(["show", id]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toContain(`scope: path (${join(proj, "src", "auth.ts")})`);
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
+  it("a path-scoped fact recalls only for a matching --context-files entry, not for an unrelated file in the same project", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-scope-path-recall-"));
+    try {
+      const remembered = await runCli([
+        "remember",
+        "auth.ts owns migrations",
+        "--kind",
+        "fact",
+        "--scope",
+        "path",
+        "--path",
+        "src/auth.ts",
+        "--root",
+        proj,
+      ]);
+      expect(remembered.exitCode).toBe(0);
+
+      const matching = await runCli([
+        "recall",
+        "--hint-format",
+        "--root",
+        proj,
+        "--context-files",
+        "src/auth.ts",
+      ]);
+      expect(matching.exitCode).toBe(0);
+      expect(matching.stdout).toContain("auth.ts owns migrations");
+
+      const nonMatching = await runCli([
+        "recall",
+        "--hint-format",
+        "--root",
+        proj,
+        "--context-files",
+        "src/other.ts",
+      ]);
+      expect(nonMatching.exitCode).toBe(0);
+      expect(nonMatching.stdout).not.toContain("auth.ts owns migrations");
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects --scope path without --path", async () => {
+    const result = await runCli(["remember", "some fact", "--kind", "fact", "--scope", "path"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--scope path requires --path <file-or-dir>");
+  });
+
+  it("rejects --path without --scope path", async () => {
+    const result = await runCli(["remember", "some fact", "--kind", "fact", "--path", "src/auth.ts"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--path requires --scope path");
+  });
+
+  it("mem edit --scope path --path <file> rebinds scopeRoot to the new file", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-scope-path-edit-"));
+    try {
+      const remembered = await runCli([
+        "remember",
+        "b.ts owns retries",
+        "--kind",
+        "fact",
+        "--scope",
+        "path",
+        "--path",
+        "src/a.ts",
+        "--root",
+        proj,
+      ]);
+      const id = extractRememberedId(remembered);
+
+      const edited = await runCli(["edit", id, "--scope", "path", "--path", "src/b.ts", "--root", proj]);
+      expect(edited.exitCode).toBe(0);
+
+      const shown = await runCli(["show", id]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toContain(`scope: path (${join(proj, "src", "b.ts")})`);
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+});
+
+// --- regression: `mem list` cannot tell projects apart ---
+
+describe("regression: mem list distinguishes facts bound to different projects", () => {
+  it("shows the project binding on a project-scoped fact's summary line, and no binding on a global fact's", async () => {
+    const projA = mkdtempSync(join(tmpdir(), "mem-list-scope-a-"));
+    try {
+      const db = openStorage(resolveDbPath());
+      insertFact(db, {
+        text: "deploys go out on Tuesdays",
+        kind: "decision",
+        scope: "project",
+        scopeRoot: projA,
+        source_type: "user",
+      });
+      insertFact(db, {
+        text: "deploys always need a changelog entry",
+        kind: "decision",
+        scope: "global",
+        scopeRoot: null,
+        source_type: "user",
+      });
+      db.close();
+
+      const listed = await runCli(["list"]);
+      expect(listed.exitCode).toBe(0);
+
+      const projectLine = listed.stdout.split("\n").find((line) => line.includes("deploys go out on Tuesdays"));
+      expect(projectLine).toBeDefined();
+      expect(projectLine).toContain(`@${projA}`);
+
+      const globalLine = listed.stdout.split("\n").find((line) => line.includes("deploys always need a changelog entry"));
+      expect(globalLine).toBeDefined();
+      expect(globalLine).not.toContain("@");
+    } finally {
+      rmSync(projA, { recursive: true, force: true });
     }
   });
 });

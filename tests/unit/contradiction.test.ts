@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+
+const isWindows = process.platform === "win32";
 import {
   detectContradictions,
   applyContradictionUpdates,
@@ -15,6 +17,7 @@ function makeFact(overrides: Partial<Fact> & Pick<Fact, "id">): Fact {
     subject: overrides.subject ?? null,
     value: overrides.value ?? null,
     scope: overrides.scope ?? "project",
+    scopeRoot: overrides.scopeRoot,
     source_type: overrides.source_type ?? "user",
     source_ref: overrides.source_ref ?? null,
     captured_at: overrides.captured_at ?? "2026-01-01T00:00:00.000Z",
@@ -121,6 +124,56 @@ describe("detectContradictions", () => {
     expect(result.groups).toHaveLength(0);
     expect(result.updates).toHaveLength(0);
   });
+
+  it.skipIf(!isWindows)(
+    "merges the same project into one bucket even when its scope_root differs only by case (win32)",
+    () => {
+      const facts = [
+        makeFact({
+          id: "pnpm",
+          subject: "package-manager",
+          value: "pnpm",
+          scopeRoot: "C:\\Projects\\token-goat-mem",
+          captured_at: "2026-01-01T00:00:00.000Z",
+        }),
+        makeFact({
+          id: "npm",
+          subject: "package-manager",
+          value: "npm",
+          scopeRoot: "c:\\projects\\token-goat-mem",
+          captured_at: "2026-06-01T00:00:00.000Z",
+        }),
+      ];
+      const result = detectContradictions(facts);
+      expect(result.groups).toHaveLength(1);
+      expect(result.groups[0]?.resolution).toBe("resolved");
+      expect(result.groups[0]?.winnerId).toBe("npm");
+      expect(result.updates).toEqual([expect.objectContaining({ factId: "pnpm", nextStatus: "superseded" })]);
+    },
+  );
+
+  it.skipIf(isWindows)(
+    "keeps two differently-cased scope_roots in separate buckets on a case-sensitive platform",
+    () => {
+      const facts = [
+        makeFact({
+          id: "pnpm",
+          subject: "package-manager",
+          value: "pnpm",
+          scopeRoot: "/Projects/token-goat-mem",
+        }),
+        makeFact({
+          id: "npm",
+          subject: "package-manager",
+          value: "npm",
+          scopeRoot: "/projects/token-goat-mem",
+        }),
+      ];
+      const result = detectContradictions(facts);
+      expect(result.groups).toHaveLength(0);
+      expect(result.updates).toHaveLength(0);
+    },
+  );
 });
 
 describe("applyContradictionUpdates", () => {

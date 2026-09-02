@@ -26,6 +26,13 @@ mem --version   # verify installation
 mem epoch       # confirms the CLI and SQLite store are wired (prints a number)
 ```
 
+**Which mode to pick.** `--root` writes `.claude/settings.json` inside the project, which most repos
+commit -- so the hook is shared with everyone who clones. That is safe (the hook is guarded and exits
+0 for anyone without mem on PATH, see below), and it is what you want when the whole team uses mem.
+`--user` writes `~/.claude/settings.json`, which never leaves your machine: pick it when mem is your
+personal tool rather than a project convention. Either way each user reads their own store at
+`~/.mem/mem.db` -- installing the hook does not share facts.
+
 ## Direct invocation from Bash
 
 Use `mem` as a regular CLI in Bash tool calls. `--kind` is required on every `remember`:
@@ -67,7 +74,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "mem recall --hint-format --root \"$CLAUDE_PROJECT_DIR\""
+            "command": "command -v mem >/dev/null 2>&1 && mem recall --hint-format --root \"$CLAUDE_PROJECT_DIR\" || true"
           }
         ]
       }
@@ -77,6 +84,8 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
 ```
 
 Every new session then opens with the `TGMEM/2` hint block (or just the bare `TGMEM/2` header line on an empty store), which Claude simply ignores when there are no fact lines.
+
+`.claude/settings.json` is typically committed and shared, so this hook also has to work for a collaborator who has never installed mem. The `command -v mem >/dev/null 2>&1 &&` guard skips the call entirely when `mem` isn't on PATH, and the trailing `|| true` forces exit 0 either way -- a bare `&&` guard would still exit 1 (and could be surfaced as a failed hook) when mem is missing. This is the same fail-open contract described above, just enforced at the shell level instead of inside `mem` itself.
 
 ## Instruction wiring via CLAUDE.md
 
@@ -93,11 +102,13 @@ preference, decision, or correction, persist it yourself, right then:
 Use --subject/--value for anything that can be contradicted later.
 ```
 
-## Embedding memory into token-goat
+## Embedding memory into Claude Code
 
-When both Mem and token-goat are installed, token-goat calls `mem recall --hint-format --root <project-root>` internally to embed memory hints into its manifest. No wiring needed.
+Memory hints reach Claude Code through the `SessionStart` hook that `mem init claude-code` writes to your `.claude/settings.json`. This hook reads facts from the local store at session start and surfaces them at the top of context, each annotated with a freshness verdict. No separate wiring or setup is needed beyond `mem init`.
 
-To verify the seam is live:
+When token-goat is also installed, it reads `mem epoch` (a monotonic integer) and folds the value into its compaction manifest as a cache-invalidation key, but does not consume hints from `mem recall`. Token-goat *can* call `--hint-format` to request `TGMEM/2` formatted output; the format is documented and published so a future host tool can adopt it, but no tool consumes it today.
+
+To verify the wire format is understood:
 ```bash
 mem recall --hint-format --root .
 ```

@@ -121,6 +121,13 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   if (!FACT_SCOPES.includes(obj["scope"] as FactScope)) {
     return fail(`facts[${index}] has invalid "scope" ${JSON.stringify(obj["scope"])}`);
   }
+  const scopeForBindingCheck = obj["scope"] as FactScope;
+  const hasBoundScopeRoot = typeof obj["scopeRoot"] === "string" && obj["scopeRoot"].trim().length > 0;
+  if (scopeForBindingCheck !== "global" && !hasBoundScopeRoot) {
+    return fail(
+      `facts[${index}] has scope ${JSON.stringify(scopeForBindingCheck)} but no "scopeRoot" binding (expected an absolute path)`
+    );
+  }
   if (!FACT_SOURCE_TYPES.includes(obj["source_type"] as FactSourceType)) {
     return fail(`facts[${index}] has invalid "source_type" ${JSON.stringify(obj["source_type"])}`);
   }
@@ -186,7 +193,12 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   } else if (obj["value"] === null) {
     newFact.value = null;
   }
-  if (typeof obj["scopeRoot"] === "string") {
+  if (newFact.scope === "global") {
+    // Global ignores scopeRoot everywhere it is read (isBoundToRoot, isInScope both short-circuit
+    // on scope before ever looking at it) -- normalize rather than fail so a stray binding on a
+    // global fact round-trips cleanly instead of becoming a per-item error.
+    newFact.scopeRoot = null;
+  } else if (typeof obj["scopeRoot"] === "string") {
     newFact.scopeRoot = obj["scopeRoot"];
   } else if (obj["scopeRoot"] === null) {
     newFact.scopeRoot = null;

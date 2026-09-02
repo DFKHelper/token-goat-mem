@@ -383,10 +383,14 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
     return true;
   }
   const scopeRootRaw = fact.scopeRoot ?? null;
-  if (scopeRootRaw === null) {
+  if (scopeRootRaw === null || scopeRootRaw.trim().length === 0) {
     // A project/path-scoped fact with no binding can never be resolved
     // against a caller's root -- exclude rather than guess (fails toward
-    // under-recall, the safe direction).
+    // under-recall, the safe direction). An empty/whitespace-only string is
+    // treated the same as null here to match isBoundToRoot's rule
+    // (retrieval.ts) -- otherwise resolvePath("") resolves to process.cwd(),
+    // which put a scope="project" fact with scopeRoot: "" in scope for every
+    // project whose --root happened to equal the caller's cwd.
     return false;
   }
   const scopeRoot = normalizePath(resolvePath(scopeRootRaw));

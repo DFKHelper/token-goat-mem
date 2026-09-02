@@ -715,7 +715,13 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
 
 // ─────────────────────────────────────────────────────────────────────────── Claude Code: settings.json hook ───────────────────────────────────────────────────────────────────────────
 
-const CLAUDE_HOOK_COMMAND = 'mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"';
+// This hook lands in `<root>/.claude/settings.json`, which is typically committed and shared with
+// collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call, and the
+// trailing `|| true` forces exit 0 either way (a bare `&&` guard would exit 1 when mem is absent,
+// which a host could still surface as a failed hook), matching the fail-open contract the README
+// documents for this seam: a missing or broken mem must never block a session.
+const CLAUDE_HOOK_COMMAND =
+  'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true';
 
 interface ClaudeHook {
   readonly type: string;

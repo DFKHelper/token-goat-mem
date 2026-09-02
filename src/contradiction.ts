@@ -14,6 +14,7 @@
  * `pinned` facts are live enough to contradict one another (pins are not exempt from this — S8).
  */
 
+import { normalizePath } from "./pathUtils.js";
 import type { Fact, FactScope, FactStatus } from "./types.js";
 
 /** Statuses eligible to be surfaced as ground truth. Everything else (pending/superseded/contested) is withheld. */
@@ -128,7 +129,12 @@ interface SubjectScopeBucket {
  * pre-filters to a single root before calling in, so this only corrects the whole-store callers.)
  */
 function bucketKey(subject: string, scope: FactScope, scopeRoot: string | null | undefined): string {
-  const rootComponent = scope === "global" ? "" : (scopeRoot ?? "");
+  // Case-fold the root component the same way retrieval.ts folds paths for comparison (see
+  // pathUtils.ts): `scopeRoot` is `path.resolve(root)` at capture time (src/capture.ts), which on
+  // Windows preserves whatever drive-letter/segment case the shell happened to report, so the same
+  // directory captured from a differently-cased cwd would otherwise split into two buckets and
+  // never be detected as a contradiction.
+  const rootComponent = scope === "global" ? "" : normalizePath(scopeRoot ?? "");
   return JSON.stringify([subject, scope, rootComponent]);
 }
 

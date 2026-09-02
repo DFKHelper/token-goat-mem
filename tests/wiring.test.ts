@@ -6,6 +6,7 @@
  * project files.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { spawnSync } from "node:child_process";
 import { chmodSync, closeSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -63,6 +64,55 @@ describe("claudeCode wiring", () => {
     expect(claudeMd).toContain("<!-- token-goat-mem:claude-code:end -->");
   });
 
+  it("installs a hook command that cannot exit nonzero when mem is missing from PATH", () => {
+    claudeCode.install({ root, homeDir: home });
+    const settingsPath = join(root, ".claude", "settings.json");
+    const settings = JSON.parse(read(settingsPath));
+    const command: string = settings.hooks.SessionStart[0].hooks[0].command;
+
+    // Pin the exact guarded string: a `command -v mem` gate short-circuits the call when mem isn't
+    // on PATH, and the trailing `|| true` forces exit 0 even then -- a bare `&&` guard would still
+    // exit 1 in that case, which a host could surface as a failed hook.
+    expect(command).toBe(
+      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+    );
+  });
+
+  {
+    // Verifies the guarded command's actual runtime behavior (not just its text) by running it
+    // through bash with a PATH that has no `mem` on it. Resolves bash's own absolute path first
+    // using the inherited PATH, then spawns it with a deliberately mem-less PATH -- restricting
+    // `env` also restricts what the OS uses to resolve the `bash` executable itself, so bash must be
+    // given as an absolute path rather than found again under the restricted PATH. On Windows,
+    // `command -v bash` reports bash's own MSYS-internal path (e.g. `/usr/bin/bash`), which Node's
+    // spawnSync cannot resolve directly, so `cygpath -w` converts it to a real Windows path first
+    // when available; elsewhere `command -v bash` already returns a directly usable absolute path.
+    const bashProbe = spawnSync(
+      "bash",
+      ["-c", 'command -v cygpath >/dev/null 2>&1 && cygpath -w "$(command -v bash)" || command -v bash'],
+      { encoding: "utf8" },
+    );
+    const bashPath = bashProbe.status === 0 ? bashProbe.stdout.trim() : null;
+
+    it.skipIf(bashPath === null)(
+      "the guarded hook command exits 0 with no stderr when run through a shell lacking mem",
+      () => {
+        claudeCode.install({ root, homeDir: home });
+        const settingsPath = join(root, ".claude", "settings.json");
+        const settings = JSON.parse(read(settingsPath));
+        const command: string = settings.hooks.SessionStart[0].hooks[0].command;
+
+        const result = spawnSync(bashPath as string, ["-c", command], {
+          encoding: "utf8",
+          env: { PATH: mkdtempSync(join(tmpdir(), "mem-less-path-")) },
+        });
+
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+      },
+    );
+  }
+
   it("install is idempotent: re-running does not duplicate the hook or the CLAUDE.md block", () => {
     claudeCode.install({ root, homeDir: home });
     const second = claudeCode.install({ root, homeDir: home });
@@ -116,7 +166,16 @@ describe("claudeCode wiring", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     const original = {
       hooks: {
-        SessionStart: [{ hooks: [{ type: "command", command: 'mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"' }] }],
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+              },
+            ],
+          },
+        ],
       },
     };
     seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
@@ -1203,4 +1262,38 @@ describe("regression: integration docs match the markdown mem init actually writ
     expect(walkthrough).not.toContain("Ctrl+Shift+M");
     expect(walkthrough).not.toContain("Ctrl+Shift+N");
   });
+
+
+  it("claude-code.md shows the settings.json hook the installer writes", () => {
+    claudeCode.install({ root, homeDir: home });
+    const written = JSON.parse(read(join(root, ".claude", "settings.json"))) as Record<string, unknown>;
+
+    // Extract the hook structure from what was written
+    const writtenHooks = written.hooks as Record<string, unknown>;
+    const writtenSessionStart = writtenHooks.SessionStart as Record<string, unknown>[];
+    const writtenHook = (writtenSessionStart[0] as Record<string, unknown>).hooks?.[0] as Record<string, unknown>;
+
+    // Strip the STAMP_KEY from the written hook for comparison
+    const { "__token_goat_mem": _, ...writtenHookWithoutStamp } = writtenHook;
+
+    // Generalized helper to extract JSON fences from docs
+    function docJsonBlock(docName: string, heading?: string): unknown {
+      const doc = readFileSync(new URL(`../docs/integrations/${docName}.md`, import.meta.url), "utf8");
+      const searchStart = heading ? doc.indexOf(heading) : 0;
+      expect(searchStart).not.toBe(-1);
+      const afterHeading = doc.slice(heading ? searchStart : 0);
+      expect(afterHeading).not.toBe("");
+      const fence = /```json\r?\n([\s\S]*?)\r?\n```/u.exec(afterHeading);
+      expect(fence?.[1]).toBeDefined();
+      return JSON.parse(fence?.[1] ?? "");
+    }
+
+    const docJson = docJsonBlock("claude-code") as Record<string, unknown>;
+    const docHooks = docJson.hooks as Record<string, unknown>;
+    const docSessionStart = docHooks.SessionStart as Record<string, unknown>[];
+    const docHook = (docSessionStart[0] as Record<string, unknown>).hooks?.[0] as Record<string, unknown>;
+
+    expect(docHook).toEqual(writtenHookWithoutStamp);
+  });
+
 });

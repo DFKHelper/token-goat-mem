@@ -326,6 +326,28 @@ describe("buildHintFormat", () => {
     expect(factLines(resultForOtherRoot)).toHaveLength(1);
   });
 
+  it("excludes a project-scoped fact with an empty-string scopeRoot from every root, including one equal to cwd", async () => {
+    // Regression: isInScope only excluded `null`, so `scopeRoot: ""` fell through to
+    // resolvePath(""), which resolves to process.cwd() -- putting an unbound project fact in scope
+    // for any caller whose --root happens to equal the cwd, which is the normal case. Must exclude
+    // it the same way isBoundToRoot (retrieval.ts) already does.
+    seedFacts(dbPath, [
+      {
+        id: "proj-empty-scoperoot",
+        text: "an unbound project fact from a hand-edited export",
+        kind: "fact",
+        scope: "project",
+        scopeRoot: "",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    const result = await buildHint({ root: process.cwd(), dbPath });
+    expect(factLines(result)).toHaveLength(0);
+  });
+
   it("includes a path-scoped fact only when a matching --context-files entry is passed", async () => {
     const filePath = join(root, "src", "auth.ts");
     seedFacts(dbPath, [

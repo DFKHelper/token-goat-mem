@@ -30,6 +30,7 @@ import { resolve as resolvePath, sep } from "node:path";
 
 import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
 import { resolveContradictions } from "./contradiction.js";
+import { normalizePath } from "./pathUtils.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
 
 const MS_PER_DAY = 86_400_000;
@@ -155,9 +156,12 @@ export const GROUND_TRUTH_CONFIDENCE_FLOOR = 0.5;
 
 /**
  * Default cap on non-withheld results returned by `retrieve()` when the caller does not pass an
- * explicit `options.limit`. Withheld results (`trust === "withheld"` -- pending/contested/superseded/
+ * explicit `options.limit`. Withheld results (`trust === "withheld"` -- pending/contested/
  * contradicted) are never subject to this cap: a fact needing human attention must never be pushed
- * off the end of the default result set just because 20 clean facts outrank it. Lives here rather
+ * off the end of the default result set just because 20 clean facts outrank it. `superseded` is
+ * absent from that list on purpose: it classifies as withheld (see the precedence spec on
+ * `classifyTrust`), but `retrieve()` drops superseded facts from the candidate pool before ranking,
+ * so one never reaches this cap to be exempted from it. Lives here rather
  * than in cli.ts because the withheld-exempt slicing it bounds happens inside `retrieve()` itself.
  */
 export const DEFAULT_RECALL_LIMIT = 20;
@@ -479,17 +483,6 @@ export function anchorRootFor(fact: Fact, queryRoot: string): string {
 }
 
 /**
- * Case-folds a path for comparison on filesystems that ignore case.
- *
- * win32 only, matching anchors.ts's `FS_CASE_INSENSITIVE` and for the same reason: macOS is
- * case-insensitive by default but supports case-sensitive APFS volumes, so folding there would
- * trade a missed match for a false one.
- */
-function normalizePath(path: string): string {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
-/**
  * Whether `fact`'s scope binding resolves to `root` -- the predicate behind
  * {@link RetrievalOptions.restrictToRoot}.
  *
@@ -632,8 +625,9 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   });
 
   // Non-withheld results are capped at the effective limit; withheld results (pending/contested/
-  // superseded/contradicted) are never subject to it -- a fact needing human attention must never be
-  // silently pushed off the end of the default result set by 20 unrelated clean facts outranking it.
+  // contradicted) are never subject to it -- a fact needing human attention must never be silently
+  // pushed off the end of the default result set by 20 unrelated clean facts outranking it.
+  // `superseded` is not listed: those facts were filtered out of the pool above and never get here.
   const effectiveLimit = options.limit ?? DEFAULT_RECALL_LIMIT;
   const nonWithheld = visible.filter((result) => result.trust !== "withheld");
   const shownNonWithheldResults = nonWithheld.slice(0, effectiveLimit);

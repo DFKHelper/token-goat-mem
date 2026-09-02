@@ -329,6 +329,63 @@ describe("importFromJson", () => {
     expect(count).toBe(1);
   });
 
+  it("an imported project-scoped fact with no scopeRoot key is skipped with a per-item error", () => {
+    const unboundProject = {
+      ...VALID_FACT,
+      id: "bbbbbbbb-cccc-bbbb-bbbb-bbbbbbbbbbbb",
+      scope: "project",
+    };
+    delete (unboundProject as Record<string, unknown>)["scopeRoot"];
+    writeFileSync(jsonPath, envelope([VALID_FACT, unboundProject]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    expect(result.outcomes[1]?.reason).toContain('has scope "project" but no "scopeRoot" binding');
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an imported path-scoped fact with an empty-string scopeRoot is skipped with a per-item error", () => {
+    const emptyStringScopeRoot = {
+      ...VALID_FACT,
+      id: "cccccccc-dddd-cccc-cccc-cccccccccccc",
+      scope: "path",
+      scopeRoot: "",
+    };
+    writeFileSync(jsonPath, envelope([VALID_FACT, emptyStringScopeRoot]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    expect(result.outcomes[1]?.reason).toContain('has scope "path" but no "scopeRoot" binding');
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("normalizes a global fact's non-empty scopeRoot to null instead of failing", () => {
+    const globalWithScopeRoot = {
+      ...VALID_FACT,
+      id: "dddddddd-eeee-dddd-dddd-dddddddddddd",
+      scope: "global",
+      scopeRoot: "/x",
+    };
+    writeFileSync(jsonPath, envelope([globalWithScopeRoot]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(1);
+    const outcome = result.outcomes[0];
+    expect(outcome?.status).toBe("imported");
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.scopeRoot ?? null).toBeNull();
+  });
+
   it("a normal import of active and pinned facts still succeeds with status preserved verbatim", () => {
     const pinnedFact = {
       ...VALID_FACT,

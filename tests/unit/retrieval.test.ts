@@ -520,3 +520,31 @@ describe("regression: restrictToRoot excludes facts bound to a different root", 
     expect(results.map((result) => result.fact.id).sort()).toEqual(["here", "there"]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── regression: superseded facts are excluded entirely, not exempt from limit ───────────────────────────────────────────────────────────────────────────
+
+describe("regression: superseded facts are excluded entirely from results, not exempt from limit", () => {
+  it("never returns a superseded fact even when limit is very low (e.g., 1)", async () => {
+    const facts = [
+      makeFact({
+        id: "superseded-id",
+        text: "chose Redis for caching",
+        kind: "decision",
+        status: "superseded",
+      }),
+      makeFact({
+        id: "active-id",
+        text: "chose Postgres for persistence",
+        kind: "decision",
+        status: "active",
+      }),
+    ];
+
+    const { results } = await retrieve(facts, { query: "chose", limit: 1 });
+    // With limit 1, only one result should come back, and it must be the active one
+    expect(results).toHaveLength(1);
+    expect(results[0].fact.id).toBe("active-id");
+    // Verify the superseded fact is definitely not in the results
+    expect(results.map((r) => r.fact.id)).not.toContain("superseded-id");
+  });
+});
