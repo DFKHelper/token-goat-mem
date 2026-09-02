@@ -131,6 +131,8 @@ export interface ImportFromMarkdownOptions {
   readonly root: string;
   readonly scope?: FactScope;
   readonly kind?: FactKind;
+  /** File or directory each imported fact is bound to when `scope === "path"`, forwarded verbatim to `captureSuggested`'s `path` field (resolved against `root`, never against ambient `process.cwd()`). Named distinctly from `path` (the markdown file being imported) to avoid confusing the two. */
+  readonly boundPath?: string;
   /** When true, extracts and reports candidates but writes nothing (`captureSuggested` is never called). */
   readonly dryRun?: boolean;
 }
@@ -231,6 +233,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       sourceRef: candidate.sourceRef,
       sourceType: "derived",
       root: options.root,
+      ...(options.boundPath !== undefined ? { path: options.boundPath } : {}),
     };
     try {
       const { fact } = captureSuggested(db, input);

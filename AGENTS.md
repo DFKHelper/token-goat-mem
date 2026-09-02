@@ -17,7 +17,7 @@ npm run lint        # ESLint
 npm run build       # bundle to dist/token-goat-mem.mjs
 ```
 
-Tests run in two tiers (no hook manager is wired yet — run these manually):
+Tests run in two tiers (`npm install` points `core.hooksPath` at `.githooks/`, so the fast tier runs on every commit; `git commit --no-verify` skips it once):
 
 - **Before committing (fast, ~2s)** — lint + typecheck + `npm run test:guards`. The guards are pure-introspection invariants that catch the structural bug class (unregistered command, broken fact schema) *before the commit lands*.
 - **Before pushing (full)** — the entire suite (`npm test`), including end-to-end tests that exercise the full CLI and the shipped `dist/token-goat-mem.mjs` binary.

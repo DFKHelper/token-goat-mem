@@ -259,7 +259,9 @@ function guard(fn: (...args: never[]) => void | Promise<void>): (...args: unknow
 
 function formatFactSummary(fact: Fact): string {
   const kv = fact.subject !== null ? ` ${fact.subject}=${fact.value ?? ""}` : "";
-  return `${fact.id}  [${fact.kind}/${fact.status}]${kv}  ${fact.text}`;
+  const scopeRoot = fact.scope !== "global" ? (fact.scopeRoot ?? null) : null;
+  const binding = scopeRoot !== null ? ` @${scopeRoot}` : "";
+  return `${fact.id}  [${fact.kind}/${fact.status}${binding}]${kv}  ${fact.text}`;
 }
 
 function formatFactDetail(fact: Fact, freshness: AnchorVerdict, sources: readonly Source[]): string {
@@ -745,6 +747,7 @@ interface RememberCliOptions {
   readonly scope: string;
   readonly sourceRef?: string;
   readonly root?: string;
+  readonly path?: string;
 }
 
 interface ImportCliOptions {
@@ -754,6 +757,22 @@ interface ImportCliOptions {
   readonly scope?: string;
   readonly kind?: string;
   readonly dryRun?: boolean;
+  readonly path?: string;
+}
+
+/**
+ * `--scope path` and `--path` are required together: a `scope="path"` fact with no `--path` binds
+ * to `root` itself (the exact bug this pairing exists to close -- a "path" fact behaving as a
+ * "project" fact), and a bare `--path` with no `--scope path` is a flag the caller almost certainly
+ * meant to pair but did not, so it is rejected rather than silently ignored.
+ */
+function validateScopePathPairing(rawScope: string | undefined, rawPath: string | undefined): void {
+  if (rawScope === "path" && rawPath === undefined) {
+    throw new UsageError("--scope path requires --path <file-or-dir>");
+  }
+  if (rawScope !== "path" && rawPath !== undefined) {
+    throw new UsageError("--path requires --scope path");
+  }
 }
 
 interface RecallCliOptions {
@@ -798,6 +817,7 @@ interface EditCliOptions {
   readonly anchor?: string;
   readonly scope?: string;
   readonly root?: string;
+  readonly path?: string;
 }
 
 interface ReviewCliOptions {
@@ -857,8 +877,10 @@ export function buildProgram(): Command {
     .option("--scope <scope>", "global, project, or path", "global")
     .option("--source-ref <ref>", "Reference to the originating conversation/message")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
+    .option("--path <file>", "File or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
     .action(
       guard(async (text: string, options: RememberCliOptions) => {
+        validateScopePathPairing(options.scope, options.path);
         const kind = parseFactKind(options.kind);
         const scope = parseFactScope(options.scope);
         const root = resolveRoot(options.root);
@@ -871,6 +893,7 @@ export function buildProgram(): Command {
           ...(options.value !== undefined ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+          ...(options.path !== undefined ? { path: options.path } : {}),
         };
         const { fact } = await withDb((db) => captureExplicit(db, input));
         process.stdout.write(`remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`);
@@ -890,8 +913,10 @@ export function buildProgram(): Command {
     .option("--scope <scope>", "global, project, or path", "global")
     .option("--source-ref <ref>", "Reference to the originating conversation/message")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
+    .option("--path <file>", "File or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
     .action(
       guard(async (text: string, options: RememberCliOptions) => {
+        validateScopePathPairing(options.scope, options.path);
         const kind = parseFactKind(options.kind);
         const scope = parseFactScope(options.scope);
         const root = resolveRoot(options.root);
@@ -904,6 +929,7 @@ export function buildProgram(): Command {
           ...(options.value !== undefined ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+          ...(options.path !== undefined ? { path: options.path } : {}),
         };
         const { fact } = await withDb((db) => captureSuggested(db, input));
         process.stdout.write(`suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`);
@@ -947,6 +973,7 @@ export function buildProgram(): Command {
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
     .option("--scope <scope>", "--from-md only: global, project, or path", "project")
     .option("--kind <kind>", "--from-md only: preference, decision, fact, or correction", "preference")
+    .option("--path <file>", "--from-md only: file or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
     .option("--dry-run", "Report what would be imported without writing anything")
     .action(
       guard(async (options: ImportCliOptions) => {
@@ -955,6 +982,7 @@ export function buildProgram(): Command {
         if (hasFromMd === hasFromJson) {
           throw new UsageError("import requires exactly one of --from-md or --from-json");
         }
+        validateScopePathPairing(options.scope, options.path);
         const dryRun = options.dryRun === true;
 
         // --dry-run opens no database on purpose in either mode: openDb() would mkdirSync + create
@@ -981,6 +1009,7 @@ export function buildProgram(): Command {
                 root,
                 ...(scope !== undefined ? { scope } : {}),
                 ...(kind !== undefined ? { kind } : {}),
+                ...(options.path !== undefined ? { boundPath: options.path } : {}),
               })
             );
         process.stdout.write(`${formatImportResult(result, dryRun)}\n`);
@@ -996,7 +1025,7 @@ export function buildProgram(): Command {
     .option("--hint-format", "Emit the TGMEM/2 wire format for the token-goat seam")
     .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
-    .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/superseded/contradicted facts are never subject to this cap)", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/contradicted facts are never subject to this cap)", (v) => parseInt(v, 10))
     .option("--root <path>", "Project root for anchor evaluation")
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
     .option("--hint-style <full|terse>", "Display verbosity: full (default, unchanged) or terse (no CTA, short kind labels)", "full")
@@ -1275,6 +1304,7 @@ export function buildProgram(): Command {
     .option("--anchor <predicate>", "New anchor predicate")
     .option("--scope <scope>", "New scope: global, project, or path")
     .option("--root <path>", "Project root for .mem/allowlist and (if --scope is given) scope binding (default: current directory)")
+    .option("--path <file>", "File or directory to bind to, resolved against --root (required when --scope path, rejected otherwise)")
     .action(
       guard(async (id: string, options: EditCliOptions) => {
         const hasSubject = options.subject !== undefined;
@@ -1282,6 +1312,7 @@ export function buildProgram(): Command {
         if (hasSubject !== hasValue) {
           throw new UsageError("--subject and --value must be provided together");
         }
+        validateScopePathPairing(options.scope, options.path);
         const root = resolveRoot(options.root);
         const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
         const patch: FactUpdate = {
@@ -1290,7 +1321,9 @@ export function buildProgram(): Command {
           ...(hasValue ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(scope !== undefined ? { scope } : {}),
-          ...(scope !== undefined ? { scopeRoot: scope === "global" ? null : root } : {}),
+          ...(scope !== undefined
+            ? { scopeRoot: scope === "global" ? null : scope === "path" ? resolvePath(root, options.path as string) : root }
+            : {}),
         };
         if (Object.keys(patch).length === 0) {
           throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");

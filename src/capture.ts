@@ -495,6 +495,14 @@ export interface CaptureExplicitInput {
   readonly sourceRef?: string;
   /** Project root, used to resolve `.mem/allowlist` and (for project/path scope) recorded as the fact's `scopeRoot`. Required, never defaulted to ambient `process.cwd()` (matches src/anchors.ts's explicit-root discipline). */
   readonly root: string;
+  /**
+   * File (or directory) this fact is bound to, required when `scope === "path"` and rejected
+   * otherwise. Resolved against `root` -- never against ambient `process.cwd()` -- and stored as
+   * `scopeRoot`. Without this, `scope: "path"` had no way to bind to anything narrower than `root`
+   * itself, which made a "path" fact behave exactly like a "project" fact (isInScope/isBoundToRoot
+   * both resolve `scope="path"`'s binding the same way `scope="project"` resolves its own).
+   */
+  readonly path?: string;
 }
 
 export interface CaptureSuggestedInput extends CaptureExplicitInput {
@@ -622,7 +630,11 @@ function applyOptionalFields(
     target.source_ref = input.sourceRef.trim();
   }
   if (scope !== "global") {
-    target.scopeRoot = resolve(root);
+    const trimmedPath = input.path?.trim();
+    target.scopeRoot =
+      scope === "path" && trimmedPath !== undefined && trimmedPath.length > 0
+        ? resolve(root, trimmedPath)
+        : resolve(root);
   }
 }
 

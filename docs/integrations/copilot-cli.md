@@ -86,9 +86,11 @@ The recall output lands in your terminal scrollback where you (or the agent, on 
 
 ## Embedding memory into token-goat
 
-When both Mem and token-goat are installed, token-goat calls `mem recall --hint-format --root <project-root>` internally to embed memory hints into its manifest. No wiring needed.
+In Copilot CLI, memory hints are integrated through AGENTS.md. Consult `AGENTS.md` at your project root; if it contains a `token-goat-mem` hook block, running `mem recall --hint-format --root .` will emit facts in `TGMEM/2` format, which Copilot CLI can surface in its own agent prompt.
 
-To verify the seam is live:
+When token-goat itself is also installed, it reads `mem epoch` (a monotonic integer) and folds the value into its compaction manifest as a cache-invalidation key, but does not consume hints from `mem recall`. Token-goat *can* call `--hint-format` to request `TGMEM/2` formatted output; the format is documented and published so a future host tool can adopt it, but no tool consumes it today.
+
+To verify the wire format is understood:
 ```bash
 mem recall --hint-format --root .
 ```
