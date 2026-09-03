@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -624,6 +624,43 @@ describe("buildHintFormat", () => {
     // the moment someone reintroduces a reduced cap, which is the bug.
     expect(exhausted.lines).toEqual([]);
     expect(factLines(exhausted)).toEqual([]);
+  });
+
+  /**
+   * The test above forces exhaustion by passing a zero budget, and that only worked by accident:
+   * `truncated` was `elapsed > budgetMs`, so a zero budget reported *not* exhausted whenever the
+   * whole retrieval landed inside one millisecond. A 10-fact anchor-free store on a fast runner
+   * does exactly that, which made the assertion a coin flip decided by the clock -- it passed on
+   * Windows, failed on ubuntu-latest, then passed again on the next commit with the test code
+   * untouched.
+   *
+   * Freezing `Date.now` pins `elapsed` to exactly 0 on every platform, so this is the boundary
+   * case itself rather than a race that happens to land on it: with a zero budget, consuming zero
+   * time must still count as exhausted, because zero time is all there was.
+   */
+  it("treats a fully-consumed budget as exhausted, not as headroom", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "pref-boundary",
+        text: "preference at the budget boundary",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    const frozen = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(frozen);
+    try {
+      const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
+      // elapsed === 0 and budget === 0: the strict `>` reported this as a healthy response.
+      expect(exhausted.truncated).toBe(true);
+      expect(factLines(exhausted)).toEqual([]);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   /**
