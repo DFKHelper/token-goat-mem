@@ -138,6 +138,11 @@ token-goat-mem is installed (`mem` on PATH).
   `mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .`. Use --subject/--value for anything that can be
   contradicted later.
+- Add `--anchor "<predicate> <args>"` when a fact can be re-verified later
+  instead of staying caveated forever, e.g.
+  `--anchor "file-exists pnpm-lock.yaml"`. Predicates: file-exists,
+  file-absent, file-newer-than, glob-exists, git-tracked, newest-of. The
+  anchor path must stay inside --root (no "..", no absolute path).
 ```
 
 No extension needed. The CLI is a standard tool like `npm` or `git`. If Codex or Copilot CLI have already run `mem init` against the same `AGENTS.md`, `mem init copilot-vscode` joins their same shared "## Memory" block instead of adding a duplicate one — all three tools' installs are tracked by one reference-counted marker, so the file never ends up with more than one "## Memory" section. `mem uninstall copilot-vscode` drops copilot-vscode from that tracking list; the block stays in place until the last tracked tool uninstalls.
