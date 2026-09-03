@@ -12,7 +12,7 @@ mem init claude-code --user            # writes ~/.claude/settings.json instead 
 mem init claude-code --dry-run         # preview what would be written, without touching disk
 ```
 
-This writes exactly the `SessionStart` hook and `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
+This writes exactly the `SessionStart` and `UserPromptSubmit` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
 
 The rest of this doc is the manual version -- what `mem init claude-code` does under the hood, and useful if you want to wire it by hand or understand exactly what changed.
 
@@ -64,7 +64,7 @@ If `mem` is missing, times out, or returns unparseable output, Claude Code conti
 
 ## Hook integration via settings.json
 
-Claude Code's `SessionStart` hook runs a command when a session starts, and its stdout is added to Claude's context — exactly the injection point memory hints need. Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (user):
+Claude Code's `SessionStart` hook runs a command when a session starts, and its `UserPromptSubmit` hook runs one before each prompt is processed; both add their stdout to Claude's context — exactly the injection points memory hints need. Every hook receives a JSON envelope on stdin carrying a `session_id` (and, for `UserPromptSubmit`, the submitted text in `prompt`); `mem recall --hook-stdin` parses that envelope itself, so no `jq` or other helper is needed on PATH. Add to `.claude/settings.json` (project) or `~/.claude/settings.json` (user):
 
 ```json
 {
@@ -74,7 +74,17 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "command -v mem >/dev/null 2>&1 && mem recall --hint-format --root \"$CLAUDE_PROJECT_DIR\" || true"
+            "command": "command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || true"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root \"$CLAUDE_PROJECT_DIR\" || true"
           }
         ]
       }
@@ -83,9 +93,11 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
 }
 ```
 
-Every new session then opens with the `TGMEM/2` hint block (or just the bare `TGMEM/2` header line on an empty store), which Claude simply ignores when there are no fact lines.
+Every new session then opens with the `TGMEM/2` hint block (or just the bare `TGMEM/2` header line on an empty store), which Claude simply ignores when there are no fact lines. The `SessionStart` envelope carries no prompt, so that recall is ordered by recency as before; what it surfaced is logged under the session's id.
 
-`.claude/settings.json` is typically committed and shared, so this hook also has to work for a collaborator who has never installed mem. The `command -v mem >/dev/null 2>&1 &&` guard skips the call entirely when `mem` isn't on PATH, and the trailing `|| true` forces exit 0 either way -- a bare `&&` guard would still exit 1 (and could be surfaced as a failed hook) when mem is missing. This is the same fail-open contract described above, just enforced at the shell level instead of inside `mem` itself.
+Each prompt then gets a `TGMEM/2  delta=1` block ranked by what was just asked: `--hook-stdin` takes the envelope's `prompt` as the recall query, and `--delta` leaves out every fact already surfaced to this `session_id` (by `SessionStart` or an earlier prompt) that does not match the current prompt, so repeated recalls in one session never re-send filler Claude already has. A fact that does match the prompt is re-sent even if it was surfaced before: Claude Code compacts context over a long session, and a fact that was sent as filler early on must still arrive when it becomes the answer. A prompt whose relevant facts have all been sent gets just the `TGMEM/2  delta=1` header line. `--delta` is opt-in per call: a plain `mem recall --hint-format` in the same session still returns the full set, and the `delta=1` header marks the partial one so no consumer can mistake it for a complete block. The log is kept in the store's `recall_log` table and pruned by `mem epoch --gc` after 30 days; `mem recall --stable` never writes to it. If the envelope is missing, malformed, or has no `session_id`, the recall falls back to an unranked full response and still exits 0 — a hook that fails is worse than a hook that returns unranked facts.
+
+`.claude/settings.json` is typically committed and shared, so these hooks also have to work for a collaborator who has never installed mem. The `command -v mem >/dev/null 2>&1 &&` guard skips the call entirely when `mem` isn't on PATH, and the trailing `|| true` forces exit 0 either way -- a bare `&&` guard would still exit 1 (and could be surfaced as a failed hook) when mem is missing. This is the same fail-open contract described above, just enforced at the shell level instead of inside `mem` itself.
 
 ## Instruction wiring via CLAUDE.md
 
@@ -108,7 +120,7 @@ newest-of. The anchor path must stay inside --root (no "..", no absolute path).
 
 ## Embedding memory into Claude Code
 
-Memory hints reach Claude Code through the `SessionStart` hook that `mem init claude-code` writes to your `.claude/settings.json`. This hook reads facts from the local store at session start and surfaces them at the top of context, each annotated with a freshness verdict. No separate wiring or setup is needed beyond `mem init`.
+Memory hints reach Claude Code through the `SessionStart` and `UserPromptSubmit` hooks that `mem init claude-code` writes to your `.claude/settings.json`. The first reads facts from the local store at session start and surfaces them at the top of context, each annotated with a freshness verdict; the second surfaces, before each prompt, only the facts relevant to that prompt that the session has not seen yet. No separate wiring or setup is needed beyond `mem init`.
 
 When token-goat is also installed, it reads `mem epoch` (a monotonic integer) and folds the value into its compaction manifest as a cache-invalidation key, but does not consume hints from `mem recall`. Token-goat *can* call `--hint-format` to request `TGMEM/2` formatted output; the format is documented and published so a future host tool can adopt it, but no tool consumes it today.
 
@@ -122,9 +134,10 @@ Returns a `TGMEM/2` header, one line per fact plus a shared `footer` line when a
 ## Typical workflow
 
 1. **Start of session:** the `SessionStart` hook surfaces prior facts at the top of context, each with a freshness verdict.
-2. **During work:** Claude writes facts as decisions land: `mem remember "chose Postgres for JOIN semantics" --kind decision --scope project`.
-3. **End of session:** optional `mem review --root .` to audit what's stored and resolve pending or anchor-contradicted facts.
-4. **Next session:** the same facts re-surface, with verdicts telling Claude which ones to re-verify.
+2. **Each prompt:** the `UserPromptSubmit` hook adds a `delta=1` block of facts ranked against the prompt text -- those matching it plus any not yet surfaced this session -- or just its header line when there is nothing new.
+3. **During work:** Claude writes facts as decisions land: `mem remember "chose Postgres for JOIN semantics" --kind decision --scope project`.
+4. **End of session:** optional `mem review --root .` to audit what's stored and resolve pending or anchor-contradicted facts.
+5. **Next session:** the same facts re-surface, with verdicts telling Claude which ones to re-verify.
 
 ## Shell quoting
 

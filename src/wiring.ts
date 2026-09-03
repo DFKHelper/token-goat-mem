@@ -787,15 +787,30 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
   return content.slice(0, start) + content.slice(end);
 }
 
-// ─────────────────────────────────────────────────────────────────────────── Claude Code: settings.json hook ───────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────── Claude Code: settings.json hooks ───────────────────────────────────────────────────────────────────────────
 
-// This hook lands in `<root>/.claude/settings.json`, which is typically committed and shared with
+// These hooks land in `<root>/.claude/settings.json`, which is typically committed and shared with
 // collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call, and the
 // trailing `|| true` forces exit 0 either way (a bare `&&` guard would exit 1 when mem is absent,
 // which a host could still surface as a failed hook), matching the fail-open contract the README
 // documents for this seam: a missing or broken mem must never block a session.
-const CLAUDE_HOOK_COMMAND =
-  'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true';
+//
+// Both read the hook's JSON envelope from stdin (`--hook-stdin`) rather than depending on `jq` or
+// any other tool being on PATH: `mem` parses it itself. `session_id` is a common field on every
+// Claude Code hook event, so the SessionStart recall is logged under the same session the later
+// UserPromptSubmit deltas subtract from -- otherwise the first prompt would re-send everything the
+// session opener already surfaced. A SessionStart envelope carries no prompt, so that recall stays
+// query-less (recency order) exactly as before; UserPromptSubmit's `prompt` field becomes the query.
+const CLAUDE_SESSION_START_COMMAND =
+  'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true';
+const CLAUDE_USER_PROMPT_SUBMIT_COMMAND =
+  'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || true';
+
+/** The hook events mem installs, in the order they are written, each with the one command mem stamps under it. */
+const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
+  { event: "SessionStart", command: CLAUDE_SESSION_START_COMMAND },
+  { event: "UserPromptSubmit", command: CLAUDE_USER_PROMPT_SUBMIT_COMMAND },
+];
 
 interface ClaudeHook {
   readonly type: string;
@@ -809,7 +824,7 @@ interface ClaudeHookGroup {
 }
 
 interface ClaudeSettings {
-  hooks?: { SessionStart?: unknown; [key: string]: unknown };
+  hooks?: { [key: string]: unknown };
   [key: string]: unknown;
 }
 
@@ -822,43 +837,59 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   if (parsed.hooks !== undefined && !isPlainObject(parsed.hooks)) {
     throw new WiringConflictError(`hooks in ${path} is not an object; refusing to modify a hand-edited config`);
   }
-  // Which containers the file actually had decides where the single surgical insert lands below; the
-  // defaulting on the next lines exists only so the analysis can run over a uniform shape.
-  const hadHooks = parsed.hooks !== undefined;
-  const hadSessionStart = hadHooks && parsed.hooks?.SessionStart !== undefined;
-  if (parsed.hooks === undefined) {
-    parsed.hooks = {};
-  }
-  if (parsed.hooks.SessionStart === undefined) {
-    parsed.hooks.SessionStart = [];
-  }
-  if (!Array.isArray(parsed.hooks.SessionStart)) {
-    throw new WiringConflictError(`hooks.SessionStart in ${path} is not an array; refusing to modify a hand-edited config`);
-  }
-  const sessionStart = parsed.hooks.SessionStart as unknown[];
 
-  // Guard every element before touching `.hooks`: a hand-edited SessionStart can legally hold a
+  // Edit the text, never a reserialize of the parsed object. `JSON.stringify(parsed, null, 2)` threw
+  // away everything the user's file expressed and mem has no opinion about -- indentation width, key
+  // layout, the blank lines between sections -- on every install of a one-line hook.
+  let text = isBlank(current) ? "{}\n" : (current as string);
+  let changed = false;
+  for (const { event, command } of CLAUDE_HOOK_EVENTS) {
+    // Re-read after each event's edit so the JSON paths the next one computes address the text as it
+    // now stands (the first event may have created the `hooks` container the second one inserts into).
+    const settingsNow: unknown = changed ? parseJsonc(text, [], JSONC_PARSE) : parsed;
+    const next = installClaudeHookEvent(text, settingsNow as ClaudeSettings, event, command, path);
+    if (next !== text) {
+      text = next;
+      changed = true;
+    }
+  }
+  return changed ? text : current;
+}
+
+/** Installs mem's stamped `command` under `hooks.<event>` in `text`, returning `text` unchanged when it is already there verbatim. */
+function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: string, command: string, path: string): string {
+  // Which containers the file actually has decides where the single surgical insert lands below.
+  const hadHooks = isPlainObject(parsed.hooks);
+  const hooks = hadHooks ? (parsed.hooks as { [key: string]: unknown }) : {};
+  const hadEvent = hadHooks && hooks[event] !== undefined;
+  const eventValue: unknown = hadEvent ? hooks[event] : [];
+  if (!Array.isArray(eventValue)) {
+    throw new WiringConflictError(`hooks.${event} in ${path} is not an array; refusing to modify a hand-edited config`);
+  }
+  const entries = eventValue as unknown[];
+
+  // Guard every element before touching `.hooks`: a hand-edited event array can legally hold a
   // `null`, a primitive, or a group whose `hooks` isn't an array. Unguarded access below would throw
   // a raw TypeError instead of the documented WiringConflictError contract (same failure class the
-  // root/hooks/SessionStart-array checks above already cover, one level deeper).
-  for (const group of sessionStart) {
+  // root/hooks/array checks above already cover, one level deeper).
+  for (const group of entries) {
     if (!isPlainObject(group)) {
-      throw new WiringConflictError(`hooks.SessionStart in ${path} contains a non-object entry; refusing to modify a hand-edited config`);
+      throw new WiringConflictError(`hooks.${event} in ${path} contains a non-object entry; refusing to modify a hand-edited config`);
     }
     if (group["hooks"] !== undefined && !Array.isArray(group["hooks"])) {
-      throw new WiringConflictError(`a hooks.SessionStart entry in ${path} has a non-array "hooks"; refusing to modify a hand-edited config`);
+      throw new WiringConflictError(`a hooks.${event} entry in ${path} has a non-array "hooks"; refusing to modify a hand-edited config`);
     }
     // Also guard individual hook elements: a hand-edited hooks array may contain null, primitives, or
     // other non-objects. Validate them upfront so later code doesn't crash when accessing .command.
     if (Array.isArray(group["hooks"])) {
       for (const hook of group["hooks"]) {
         if (!isPlainObject(hook)) {
-          throw new WiringConflictError(`a hooks.SessionStart entry in ${path} contains a non-object hook element; refusing to modify a hand-edited config`);
+          throw new WiringConflictError(`a hooks.${event} entry in ${path} contains a non-object hook element; refusing to modify a hand-edited config`);
         }
       }
     }
   }
-  const groups = sessionStart as ClaudeHookGroup[];
+  const groups = entries as ClaudeHookGroup[];
 
   // Indices, not just the object: the write below is a surgical edit addressed by JSON path.
   let stampedGroupIdx = -1;
@@ -873,36 +904,31 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   const stampedHook: ClaudeHook | undefined = stampedGroupIdx === -1 ? undefined : groups[stampedGroupIdx]?.hooks?.[stampedHookIdx];
 
   const hasUnstampedConflict = groups.some((group) =>
-    (group.hooks ?? []).some((hook) => isPlainObject(hook) && !isStamped(hook) && hook.command === CLAUDE_HOOK_COMMAND)
+    (group.hooks ?? []).some((hook) => isPlainObject(hook) && !isStamped(hook) && hook.command === command)
   );
   if (hasUnstampedConflict && stampedHook === undefined) {
-    throw new WiringConflictError(`a SessionStart hook with command "${CLAUDE_HOOK_COMMAND}" already exists in ${path} and was not created by mem; refusing to duplicate it`);
+    throw new WiringConflictError(`a ${event} hook with command "${command}" already exists in ${path} and was not created by mem; refusing to duplicate it`);
   }
 
-  // Edit the text, never a reserialize of the parsed object. `JSON.stringify(parsed, null, 2)` threw
-  // away everything the user's file expressed and mem has no opinion about -- indentation width, key
-  // layout, the blank lines between sections -- on every install of a one-line hook.
-  const text = isBlank(current) ? "{}\n" : (current as string);
-
   if (stampedHook !== undefined) {
-    if (stampedHook.type === "command" && stampedHook.command === CLAUDE_HOOK_COMMAND) {
-      return current;
+    if (stampedHook.type === "command" && stampedHook.command === command) {
+      return text;
     }
-    const hookPath: JSONPath = ["hooks", "SessionStart", stampedGroupIdx, "hooks", stampedHookIdx];
+    const hookPath: JSONPath = ["hooks", event, stampedGroupIdx, "hooks", stampedHookIdx];
     const retyped = surgicalJsoncEdit(text, [...hookPath, "type"], "command");
-    return surgicalJsoncEdit(retyped, [...hookPath, "command"], CLAUDE_HOOK_COMMAND);
+    return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
   }
 
   // Insert at the deepest container the file already has, so `modify` never has to synthesise
   // intermediates -- that is the one case surgicalJsoncEdit has to fall back to a reformat.
-  const group = { hooks: [{ type: "command", command: CLAUDE_HOOK_COMMAND, [STAMP_KEY]: true }] };
+  const group = { hooks: [{ type: "command", command, [STAMP_KEY]: true }] };
   if (!hadHooks) {
-    return surgicalJsoncEdit(text, ["hooks"], { SessionStart: [group] });
+    return surgicalJsoncEdit(text, ["hooks"], { [event]: [group] });
   }
-  if (!hadSessionStart) {
-    return surgicalJsoncEdit(text, ["hooks", "SessionStart"], [group]);
+  if (!hadEvent) {
+    return surgicalJsoncEdit(text, ["hooks", event], [group]);
   }
-  return surgicalJsoncEdit(text, ["hooks", "SessionStart", -1], group);
+  return surgicalJsoncEdit(text, ["hooks", event, -1], group);
 }
 
 function uninstallClaudeSettings(current: string | undefined, path: string): string | undefined {
@@ -915,33 +941,40 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
     return current;
   }
   const parsed = rawParsed as ClaudeSettings;
-  const sessionStart = parsed.hooks?.SessionStart;
-  if (!Array.isArray(sessionStart)) {
+  if (!isPlainObject(parsed.hooks)) {
     return current;
   }
+  const hooks = parsed.hooks;
 
   // Plan the removals as JSON paths, then apply them to the text. Rebuilding the object and
   // reserializing it would hand the user back a file reindented to mem's taste.
   // Built in descending index order -- groups first, then hooks within a group -- so applying them in
   // sequence never shifts the index of one still to come.
   const removals: JSONPath[] = [];
-  for (let index = (sessionStart as unknown[]).length - 1; index >= 0; index -= 1) {
-    // Access `.hooks` only through an isPlainObject guard: a hand-edited SessionStart may hold a
-    // `null`/primitive element, and `null.hooks` would throw a raw TypeError. Uninstall stays lenient
-    // (leave anything mem didn't stamp untouched) rather than crashing on such an entry.
-    const group: unknown = (sessionStart as unknown[])[index];
-    const hooks = isPlainObject(group) ? group["hooks"] : undefined;
-    if (!Array.isArray(hooks) || !hooks.some((hook) => isStamped(hook))) {
+  for (const { event } of CLAUDE_HOOK_EVENTS) {
+    const entries: unknown = hooks[event];
+    if (!Array.isArray(entries)) {
       continue;
     }
-    if (hooks.every((hook) => isStamped(hook))) {
-      // The whole group was mem's addition -- drop it rather than leave an empty `hooks: []` behind.
-      removals.push(["hooks", "SessionStart", index]);
-      continue;
-    }
-    for (let hookIdx = hooks.length - 1; hookIdx >= 0; hookIdx -= 1) {
-      if (isStamped(hooks[hookIdx])) {
-        removals.push(["hooks", "SessionStart", index, "hooks", hookIdx]);
+    const groupsOfEvent = entries as unknown[];
+    for (let index = groupsOfEvent.length - 1; index >= 0; index -= 1) {
+      // Access `.hooks` only through an isPlainObject guard: a hand-edited event array may hold a
+      // `null`/primitive element, and `null.hooks` would throw a raw TypeError. Uninstall stays lenient
+      // (leave anything mem didn't stamp untouched) rather than crashing on such an entry.
+      const group: unknown = groupsOfEvent[index];
+      const groupHooks = isPlainObject(group) ? group["hooks"] : undefined;
+      if (!Array.isArray(groupHooks) || !groupHooks.some((hook) => isStamped(hook))) {
+        continue;
+      }
+      if (groupHooks.every((hook) => isStamped(hook))) {
+        // The whole group was mem's addition -- drop it rather than leave an empty `hooks: []` behind.
+        removals.push(["hooks", event, index]);
+        continue;
+      }
+      for (let hookIdx = groupHooks.length - 1; hookIdx >= 0; hookIdx -= 1) {
+        if (isStamped(groupHooks[hookIdx])) {
+          removals.push(["hooks", event, index, "hooks", hookIdx]);
+        }
       }
     }
   }
@@ -960,19 +993,22 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
   }
 
   // Prune the containers mem's own removals just emptied. Install creates `hooks` and
-  // `hooks.SessionStart` when a settings.json has neither -- the common case -- so stopping at the
+  // `hooks.<event>` when a settings.json has neither -- the common case -- so stopping at the
   // group removal left a `"hooks": { "SessionStart": [] }` husk behind and broke the "uninstall
-  // reverses exactly what init wrote" promise. An empty SessionStart array, or a hooks object with
-  // nothing but one, is inert, so pruning one a user happened to have written costs them nothing.
-  const settingsAfter: unknown = parseJsonc(text, [], JSONC_PARSE);
-  const hooksAfter: unknown = isPlainObject(settingsAfter) ? settingsAfter["hooks"] : undefined;
-  if (isPlainObject(hooksAfter)) {
-    const sessionStartAfter = hooksAfter["SessionStart"];
-    if (Array.isArray(sessionStartAfter) && sessionStartAfter.length === 0) {
+  // reverses exactly what init wrote" promise. An empty event array, or a hooks object with
+  // nothing but empty ones, is inert, so pruning one a user happened to have written costs them nothing.
+  for (const { event } of CLAUDE_HOOK_EVENTS) {
+    const settingsAfter: unknown = parseJsonc(text, [], JSONC_PARSE);
+    const hooksAfter: unknown = isPlainObject(settingsAfter) ? settingsAfter["hooks"] : undefined;
+    if (!isPlainObject(hooksAfter)) {
+      break;
+    }
+    const eventAfter = hooksAfter[event];
+    if (Array.isArray(eventAfter) && eventAfter.length === 0) {
       text =
         Object.keys(hooksAfter).length === 1
           ? surgicalJsoncEdit(text, ["hooks"], undefined)
-          : surgicalJsoncEdit(text, ["hooks", "SessionStart"], undefined);
+          : surgicalJsoncEdit(text, ["hooks", event], undefined);
     }
   }
   return text;

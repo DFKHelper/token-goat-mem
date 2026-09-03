@@ -56,7 +56,15 @@ describe("claudeCode wiring", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
     const hook = settings.hooks.SessionStart[0].hooks[0];
     expect(hook.__token_goat_mem).toBe(true);
-    expect(hook.command).toContain("mem recall --hint-format --root");
+    expect(hook.command).toContain("mem recall --hint-format --hook-stdin --root");
+
+    // The per-prompt companion: same guard, reads the same envelope, but opts into a delta so a
+    // prompt never re-sends what SessionStart (or an earlier prompt) already surfaced this session.
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+    const promptHook = settings.hooks.UserPromptSubmit[0].hooks[0];
+    expect(promptHook.__token_goat_mem).toBe(true);
+    expect(promptHook.command).toContain("mem recall --hint-format --hook-stdin --delta --root");
+    expect(Object.keys(settings.hooks).sort()).toEqual(["SessionStart", "UserPromptSubmit"]);
 
     const claudeMd = read(join(root, "CLAUDE.md"));
     expect(claudeMd).toContain("<!-- token-goat-mem:claude-code:start -->");
@@ -84,7 +92,12 @@ describe("claudeCode wiring", () => {
     // on PATH, and the trailing `|| true` forces exit 0 even then -- a bare `&&` guard would still
     // exit 1 in that case, which a host could surface as a failed hook.
     expect(command).toBe(
-      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true',
+    );
+    // The UserPromptSubmit hook carries the identical guard; only the recall flags differ.
+    const promptCommand: string = settings.hooks.UserPromptSubmit[0].hooks[0].command;
+    expect(promptCommand).toBe(
+      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || true',
     );
   });
 
@@ -105,20 +118,27 @@ describe("claudeCode wiring", () => {
     const bashPath = bashProbe.status === 0 ? bashProbe.stdout.trim() : null;
 
     it.skipIf(bashPath === null)(
-      "the guarded hook command exits 0 with no stderr when run through a shell lacking mem",
+      "every guarded hook command exits 0 with no stderr when run through a shell lacking mem",
       () => {
         claudeCode.install({ root, homeDir: home });
         const settingsPath = join(root, ".claude", "settings.json");
         const settings = JSON.parse(read(settingsPath));
-        const command: string = settings.hooks.SessionStart[0].hooks[0].command;
+        const commands: string[] = ["SessionStart", "UserPromptSubmit"].map(
+          (event) => settings.hooks[event][0].hooks[0].command,
+        );
+        expect(commands).toHaveLength(2);
 
-        const result = spawnSync(bashPath as string, ["-c", command], {
-          encoding: "utf8",
-          env: { PATH: mkdtempSync(join(tmpdir(), "mem-less-path-")) },
-        });
+        for (const command of commands) {
+          // stdin is a closed pipe, as it would be for a hook host that wrote nothing.
+          const result = spawnSync(bashPath as string, ["-c", command], {
+            encoding: "utf8",
+            input: "",
+            env: { PATH: mkdtempSync(join(tmpdir(), "mem-less-path-")) },
+          });
 
-        expect(result.status).toBe(0);
-        expect(result.stderr).toBe("");
+          expect(result.status, command).toBe(0);
+          expect(result.stderr, command).toBe("");
+        }
       },
     );
   }
@@ -181,7 +201,7 @@ describe("claudeCode wiring", () => {
             hooks: [
               {
                 type: "command",
-                command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+                command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true',
               },
             ],
           },
@@ -1345,13 +1365,17 @@ describe("regression: integration docs match the markdown mem init actually writ
     claudeCode.install({ root, homeDir: home });
     const written = JSON.parse(read(join(root, ".claude", "settings.json"))) as Record<string, unknown>;
 
-    // Extract the hook structure from what was written
+    // Extract the hook structure from what was written, per event, with the STAMP_KEY stripped
     const writtenHooks = written.hooks as Record<string, unknown>;
-    const writtenSessionStart = writtenHooks.SessionStart as Record<string, unknown>[];
-    const writtenHook = (writtenSessionStart[0] as Record<string, unknown>).hooks?.[0] as Record<string, unknown>;
-
-    // Strip the STAMP_KEY from the written hook for comparison
-    const { "__token_goat_mem": _, ...writtenHookWithoutStamp } = writtenHook;
+    const events = Object.keys(writtenHooks).sort();
+    expect(events).toEqual(["SessionStart", "UserPromptSubmit"]);
+    function hookWithoutStamp(container: Record<string, unknown>, event: string): Record<string, unknown> {
+      const groups = container[event] as Record<string, unknown>[];
+      expect(groups, `${event} groups`).toHaveLength(1);
+      const hook = (groups[0] as Record<string, unknown>).hooks?.[0] as Record<string, unknown>;
+      const { "__token_goat_mem": _, ...rest } = hook;
+      return rest;
+    }
 
     // Generalized helper to extract JSON fences from docs
     function docJsonBlock(docName: string, heading?: string): unknown {
@@ -1367,10 +1391,11 @@ describe("regression: integration docs match the markdown mem init actually writ
 
     const docJson = docJsonBlock("claude-code") as Record<string, unknown>;
     const docHooks = docJson.hooks as Record<string, unknown>;
-    const docSessionStart = docHooks.SessionStart as Record<string, unknown>[];
-    const docHook = (docSessionStart[0] as Record<string, unknown>).hooks?.[0] as Record<string, unknown>;
+    expect(Object.keys(docHooks).sort()).toEqual(events);
 
-    expect(docHook).toEqual(writtenHookWithoutStamp);
+    for (const event of events) {
+      expect(hookWithoutStamp(docHooks, event), event).toEqual(hookWithoutStamp(writtenHooks, event));
+    }
   });
 
 });

@@ -178,7 +178,7 @@ describe("buildHintFormat (integration seam)", () => {
     await expect(buildHint({ root, dbPath: brokenDbPath })).resolves.not.toThrow();
     const result = await buildHint({ root, dbPath: brokenDbPath });
 
-    expect(result).toEqual({ header: TGMEM_HEADER, lines: [], truncated: false });
+    expect(result).toEqual({ header: TGMEM_HEADER, lines: [], truncated: false, delta: false });
   });
 
   it("fails open when the resolved db path's parent cannot be created (permission/invalid-path style failure)", async () => {

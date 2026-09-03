@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
-import { insertFact, openStorage } from "../src/storage.js";
+import { deleteFact, insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
 
 interface CliResult {
@@ -607,19 +607,74 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     // We already test the basic case above, and the next test should cover this working case.
   });
 
-  it("--hint-format rejects a positional query instead of silently discarding it", async () => {
-    // The query is a positional (`recall [query]`), not a `--flag`, so it was never added to the
-    // incompatibleFlags guard: `mem recall "some query" --hint-format` used to succeed and return
-    // results identical to a bare `mem recall --hint-format`, silently ignoring the query.
-    const withQuery = await runCli(["recall", "some query", "--hint-format", "--root", home]);
-    expect(withQuery.exitCode).toBe(1);
-    expect(withQuery.stderr).toContain("--hint-format cannot be combined with");
-    expect(withQuery.stderr).toContain("query");
+  it("--hint-format honors a positional query, reordering the emitted lines by relevance instead of pure recency", async () => {
+    // Explicit captured_at timestamps (not two back-to-back `remember` calls) so the recency
+    // ordering this test pins is deterministic rather than a race against millisecond clock
+    // resolution. Older fact mentions "giraffe" nowhere; newer fact is the only one containing
+    // "oranges". Bare (query-less) --hint-format has no ranking signal and falls through to
+    // recency, so the newer "oranges" fact already leads -- to prove the query is what reorders
+    // (not recency doing it by coincidence), query for a term only the *older* fact contains, and
+    // assert the older fact now leads despite being less recent.
+    const db = openStorage(resolveDbPath());
+    insertFact(db, {
+      text: "older fact about a distinctive giraffe topic",
+      kind: "fact",
+      scope: "global",
+      source_type: "user",
+      captured_at: "2020-01-01T00:00:00.000Z",
+    });
+    insertFact(db, {
+      text: "unrelated newer fact about oranges",
+      kind: "fact",
+      scope: "global",
+      source_type: "user",
+      captured_at: "2020-01-02T00:00:00.000Z",
+    });
+    db.close();
 
-    // Bare --hint-format (no positional) is unaffected and still emits the TGMEM/2 header.
     const bare = await runCli(["recall", "--hint-format", "--root", home]);
     expect(bare.exitCode).toBe(0);
-    expect(bare.stdout).toMatch(/^TGMEM\/2\n/);
+    const bareOranges = bare.stdout.indexOf("oranges");
+    const bareGiraffe = bare.stdout.indexOf("giraffe");
+    expect(bareOranges).toBeGreaterThanOrEqual(0);
+    expect(bareGiraffe).toBeGreaterThanOrEqual(0);
+    // Recency-only: the newer "oranges" fact leads the older "giraffe" fact.
+    expect(bareOranges).toBeLessThan(bareGiraffe);
+
+    const queried = await runCli(["recall", "giraffe", "--hint-format", "--root", home]);
+    expect(queried.exitCode).toBe(0);
+    const queriedOranges = queried.stdout.indexOf("oranges");
+    const queriedGiraffe = queried.stdout.indexOf("giraffe");
+    expect(queriedOranges).toBeGreaterThanOrEqual(0);
+    expect(queriedGiraffe).toBeGreaterThanOrEqual(0);
+    // Querying "giraffe" reorders: the matching (older) fact now leads the non-matching newer one.
+    expect(queriedGiraffe).toBeLessThan(queriedOranges);
+  });
+
+  it("--hint-format with an absent or empty query is byte-identical to today's recency-only output", async () => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { text: "unrelated newer fact about oranges", kind: "fact", scope: "global", source_type: "user" });
+    insertFact(db, { text: "older fact about a distinctive giraffe topic", kind: "fact", scope: "global", source_type: "user" });
+    db.close();
+
+    const absent = await runCli(["recall", "--hint-format", "--root", home]);
+    const empty = await runCli(["recall", "", "--hint-format", "--root", home]);
+    expect(absent.exitCode).toBe(0);
+    expect(empty.exitCode).toBe(0);
+    expect(empty.stdout).toBe(absent.stdout);
+  });
+
+  it("--hint-format query matching no fact text ranks (ties at 0), never filters", async () => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { text: "fact about apples", kind: "fact", scope: "global", source_type: "user" });
+    insertFact(db, { text: "fact about bananas", kind: "fact", scope: "global", source_type: "user" });
+    db.close();
+
+    const bare = await runCli(["recall", "--hint-format", "--root", home]);
+    const noMatch = await runCli(["recall", "zzzz nonexistent xyzzy", "--hint-format", "--root", home]);
+    expect(noMatch.exitCode).toBe(0);
+    // Same set of lines either way -- a query that matches nothing reorders, it never removes.
+    expect([...noMatch.stdout.split("\n")].sort()).toEqual([...bare.stdout.split("\n")].sort());
   });
 
   it("--hint-format with allowed options (--context-files, --stable, --hint-style) still works", async () => {
@@ -2619,5 +2674,126 @@ describe("regression: mem list distinguishes facts bound to different projects",
     } finally {
       rmSync(projA, { recursive: true, force: true });
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── recall --session-id / --delta / recall_log ───────────────────────────────────────────────────────────────────────────
+
+describe("mem recall --hint-format session log and --delta (in-process)", () => {
+  /** `recall_log` rows as `[fact_id, session_id, surfaced_at]`, oldest first. */
+  function recallLogRows(): Array<[string, string, string]> {
+    const db = openStorage(resolveDbPath());
+    try {
+      return db
+        .prepare<[], { fact_id: string; session_id: string; surfaced_at: string }>("SELECT fact_id, session_id, surfaced_at FROM recall_log ORDER BY rowid")
+        .all()
+        .map((row) => [row.fact_id, row.session_id, row.surfaced_at]);
+    } finally {
+      db.close();
+    }
+  }
+
+  it.each([
+    [["recall", "--hook-stdin", "--root", "."], "--hook-stdin requires --hint-format"],
+    [["recall", "--session-id", "s1", "--root", "."], "--session-id requires --hint-format"],
+    [["recall", "--delta", "--root", "."], "--delta requires --hint-format"],
+    [["recall", "--hint-format", "--delta", "--root", "."], "--delta requires a session id"],
+    [["recall", "--hint-format", "--session-id", "  ", "--root", "."], "--session-id must not be empty"],
+  ])("rejects %j as a usage error: %s", async (args, message) => {
+    const result = await runCli(args);
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain(message);
+  });
+
+  it("--session-id logs the emitted ids; --delta then omits them and marks the header; a plain call still returns all", async () => {
+    const a = extractRememberedId(await runCli(["remember", "alpha fact about apples", "--kind", "fact", "--scope", "global"]));
+    const b = extractRememberedId(await runCli(["remember", "beta fact about bananas", "--kind", "fact", "--scope", "global"]));
+
+    const first = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--root", home]);
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout.startsWith("TGMEM/2\n")).toBe(true);
+    expect(first.stdout).toContain(`id=${a}`);
+    expect(first.stdout).toContain(`id=${b}`);
+    expect(recallLogRows().map(([factId, sessionId]) => [factId, sessionId]).sort()).toEqual([[a, "sess-1"], [b, "sess-1"]].sort());
+
+    const delta = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--delta", "--root", home]);
+    expect(delta.exitCode).toBe(0);
+    expect(delta.stdout).toBe("TGMEM/2  delta=1\n");
+
+    // Non-firing guard: the same session without --delta gets the complete block again.
+    const full = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--root", home]);
+    expect(full.exitCode).toBe(0);
+    const factLines = full.stdout.split("\n").filter((line) => /^(pref|dec|fact|corr) {2}/u.test(line));
+    expect(factLines.length).toBe(2);
+    for (const line of factLines) {
+      expect(line).toMatch(new RegExp(`id=(${a}|${b})`, "u"));
+    }
+    expect(full.stdout.startsWith("TGMEM/2\n")).toBe(true);
+  });
+
+  it("--stable writes nothing to recall_log even with a session id", async () => {
+    await runCli(["remember", "a stable fact", "--kind", "fact", "--scope", "global"]);
+    const result = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--stable", "--root", home]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("a stable fact");
+    expect(recallLogRows()).toEqual([]);
+  });
+
+  it("mem epoch --gc prunes recall_log rows older than 30 days and reports the count, leaving recent rows alone", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a fact", "--kind", "fact", "--scope", "global"]));
+    const db = openStorage(resolveDbPath());
+    const insert = db.prepare("INSERT INTO recall_log (fact_id, session_id, surfaced_at) VALUES (?, ?, ?)");
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    insert.run(id, "old-a", new Date(now - 31 * day).toISOString());
+    insert.run(id, "old-b", new Date(now - 400 * day).toISOString());
+    insert.run(id, "recent", new Date(now - 29 * day).toISOString());
+    db.close();
+
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode).toBe(0);
+    expect(gc.stdout).toMatch(/pruned_audit_log_rows=\d+ {2}pruned_recall_log_rows=2\b/u);
+    expect(recallLogRows().map(([, sessionId]) => sessionId)).toEqual(["recent"]);
+  });
+
+  it("a hard-deleted fact takes its recall_log rows with it (ON DELETE CASCADE); a soft `forget` keeps them until gc", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a fact to forget", "--kind", "fact", "--scope", "global"]));
+    await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--root", home]);
+    expect(recallLogRows().map(([factId]) => factId)).toEqual([id]);
+
+    // `forget` is a soft delete (status -> superseded): the row still exists, so its log survives.
+    const forgotten = await runCli(["forget", id]);
+    expect(forgotten.exitCode).toBe(0);
+    expect(recallLogRows().map(([factId]) => factId)).toEqual([id]);
+
+    // The GC path's hard delete is what actually removes the fact -- and, via the cascade, its log.
+    const db = openStorage(resolveDbPath());
+    try {
+      expect(deleteFact(db, id)).toBe(true);
+    } finally {
+      db.close();
+    }
+    expect(recallLogRows()).toEqual([]);
+  });
+
+  it("migration: a store from before recall_log existed keeps working, and the table is created on first open", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a pre-migration fact", "--kind", "fact", "--scope", "global"]));
+    // Reproduce a v0.3.2 store: everything else in place, no recall_log table at all.
+    const raw = openDb(resolveDbPath());
+    raw.exec("DROP TABLE recall_log");
+    const before = raw.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'recall_log'").get()?.n;
+    raw.close();
+    expect(before).toBe(0);
+
+    const result = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--root", home]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(`id=${id}`);
+    expect(recallLogRows().map(([factId, sessionId]) => [factId, sessionId])).toEqual([[id, "sess-1"]]);
+
+    // The migrated store's pre-existing data is untouched.
+    const listed = await runCli(["list"]);
+    expect(listed.stdout).toContain("a pre-migration fact");
   });
 });

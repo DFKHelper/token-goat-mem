@@ -173,8 +173,314 @@ const BM25_K1 = 1.5;
 const BM25_B = 0.75;
 const RRF_K = 60;
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Porter stemmer (M.F. Porter, "An algorithm for suffix stripping", 1980).
+//
+// Applied inside `tokenize` itself, so it runs identically at index time (`computeBm25Scores`
+// building document term frequencies) and query time (the same function scoring the query) --
+// there is no separate index to go stale, since BM25 here recomputes term statistics fresh over
+// the candidate pool on every `retrieve()` call. Without stemming, "commits" and "commit", or
+// "test" and "testing", shared no token and could not match each other at all.
+//
+// Written inline rather than taken as a dependency: the algorithm is fully specified by Porter's
+// paper and is small (five steps), and this project deliberately removed `zod` and `sqlite-vec`
+// for being unreachable weight -- a dependency for ~150 lines of well-specified, testable logic
+// isn't a good trade. Only ASCII-lowercase alphabetic tokens are stemmed; a token containing a
+// digit (already produced by `tokenize`'s split, e.g. "es6") passes through unchanged, since the
+// algorithm's vowel/consonant rules are meaningless applied to digits.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const VOWEL_LETTERS = new Set(["a", "e", "i", "o", "u"]);
+
+/**
+ * Whether the letter at `i` counts as a consonant under Porter's definition: any letter other
+ * than a, e, i, o, u, and other than "y" preceded by a consonant (so "y" at word start, or "y"
+ * preceded by a vowel, counts as a consonant -- e.g. the two consonants in "toy" are t and y,
+ * while both y's in "syzygy" count as vowels).
+ */
+function isConsonant(word: string, i: number): boolean {
+  const ch = word[i];
+  if (ch === undefined) {
+    return false;
+  }
+  if (VOWEL_LETTERS.has(ch)) {
+    return false;
+  }
+  if (ch !== "y") {
+    return true;
+  }
+  return i === 0 ? true : !isConsonant(word, i - 1);
+}
+
+/** The word reduced to its consonant/vowel pattern, e.g. "tree" -> "cvv", "trouble" -> "cvcvcv". */
+function cvPattern(word: string): string {
+  let pattern = "";
+  for (let i = 0; i < word.length; i++) {
+    pattern += isConsonant(word, i) ? "c" : "v";
+  }
+  return pattern;
+}
+
+/** Porter's `m`: the number of consonant-vowel-sequence repetitions in `stem` (VC pairs after any leading C and before any trailing V). */
+function measure(stem: string): number {
+  const pattern = cvPattern(stem).replace(/^c+/u, "").replace(/v+$/u, "");
+  if (pattern.length === 0) {
+    return 0;
+  }
+  return pattern.split("vc").length - 1;
+}
+
+/** Whether `stem` contains at least one vowel (Porter's "*v*" condition). */
+function hasVowel(stem: string): boolean {
+  for (let i = 0; i < stem.length; i++) {
+    if (!isConsonant(stem, i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Whether `stem` ends in a double consonant, e.g. "hop", "-tt" (Porter's "*d" condition). */
+function endsWithDoubleConsonant(stem: string): boolean {
+  const n = stem.length;
+  if (n < 2) {
+    return false;
+  }
+  return stem[n - 1] === stem[n - 2] && isConsonant(stem, n - 1);
+}
+
+/** Whether `stem` ends consonant-vowel-consonant, where the final consonant is not w, x, or y (Porter's "*o" condition). */
+function endsCvc(stem: string): boolean {
+  const n = stem.length;
+  if (n < 3) {
+    return false;
+  }
+  if (!isConsonant(stem, n - 3) || isConsonant(stem, n - 2) || !isConsonant(stem, n - 1)) {
+    return false;
+  }
+  const last = stem[n - 1];
+  return last !== "w" && last !== "x" && last !== "y";
+}
+
+/** Strips `suffix` from `word` if present, returning `[stem, matched]`. */
+function withoutSuffix(word: string, suffix: string): [string, boolean] {
+  if (suffix.length > 0 && word.endsWith(suffix)) {
+    return [word.slice(0, word.length - suffix.length), true];
+  }
+  return [word, false];
+}
+
+/**
+ * Applies the first rule in `rules` whose suffix matches `word` and whose stem satisfies its
+ * condition, replacing the suffix with the rule's replacement. Rules are checked longest-suffix
+ * first within each Porter step, matching the paper's "longest matching suffix wins" convention.
+ */
+function applyStep(word: string, rules: ReadonlyArray<readonly [string, string, ((stem: string) => boolean)?]>): string {
+  const bySuffixLengthDesc = [...rules].sort((a, b) => b[0].length - a[0].length);
+  for (const [suffix, replacement, condition] of bySuffixLengthDesc) {
+    const [stem, matched] = withoutSuffix(word, suffix);
+    if (matched && (condition === undefined || condition(stem))) {
+      return stem + replacement;
+    }
+  }
+  return word;
+}
+
+/** Reduces `word` to its Porter stem. Only ever called on lowercase ASCII-alphabetic tokens. */
+function porterStem(word: string): string {
+  if (word.length <= 2) {
+    return word;
+  }
+
+  let w = word;
+
+  // Step 1a
+  w = applyStep(w, [
+    ["sses", "ss"],
+    ["ies", "i"],
+    ["ss", "ss"],
+    ["s", ""],
+  ]);
+
+  // Step 1b
+  let step1bRemovedSuffix = false;
+  if (w.endsWith("eed")) {
+    const stem = w.slice(0, -3);
+    if (measure(stem) > 0) {
+      w = `${stem}ee`;
+    }
+  } else {
+    const [edStem, edMatched] = withoutSuffix(w, "ed");
+    const [ingStem, ingMatched] = withoutSuffix(w, "ing");
+    if (edMatched && hasVowel(edStem)) {
+      w = edStem;
+      step1bRemovedSuffix = true;
+    } else if (ingMatched && hasVowel(ingStem)) {
+      w = ingStem;
+      step1bRemovedSuffix = true;
+    }
+  }
+  if (step1bRemovedSuffix) {
+    if (w.endsWith("at") || w.endsWith("bl") || w.endsWith("iz")) {
+      w = `${w}e`;
+    } else if (endsWithDoubleConsonant(w) && !/[lsz]$/u.test(w)) {
+      w = w.slice(0, -1);
+    } else if (measure(w) === 1 && endsCvc(w)) {
+      w = `${w}e`;
+    }
+  }
+
+  // Step 1c
+  if (w.endsWith("y")) {
+    const stem = w.slice(0, -1);
+    if (hasVowel(stem)) {
+      w = `${stem}i`;
+    }
+  }
+
+  // Step 2 (m > 0)
+  w = applyStep(w, [
+    ["ational", "ate", (s) => measure(s) > 0],
+    ["tional", "tion", (s) => measure(s) > 0],
+    ["enci", "ence", (s) => measure(s) > 0],
+    ["anci", "ance", (s) => measure(s) > 0],
+    ["izer", "ize", (s) => measure(s) > 0],
+    ["abli", "able", (s) => measure(s) > 0],
+    ["alli", "al", (s) => measure(s) > 0],
+    ["entli", "ent", (s) => measure(s) > 0],
+    ["eli", "e", (s) => measure(s) > 0],
+    ["ousli", "ous", (s) => measure(s) > 0],
+    ["ization", "ize", (s) => measure(s) > 0],
+    ["ation", "ate", (s) => measure(s) > 0],
+    ["ator", "ate", (s) => measure(s) > 0],
+    ["alism", "al", (s) => measure(s) > 0],
+    ["iveness", "ive", (s) => measure(s) > 0],
+    ["fulness", "ful", (s) => measure(s) > 0],
+    ["ousness", "ous", (s) => measure(s) > 0],
+    ["aliti", "al", (s) => measure(s) > 0],
+    ["iviti", "ive", (s) => measure(s) > 0],
+    ["biliti", "ble", (s) => measure(s) > 0],
+  ]);
+
+  // Step 3 (m > 0)
+  w = applyStep(w, [
+    ["icate", "ic", (s) => measure(s) > 0],
+    ["ative", "", (s) => measure(s) > 0],
+    ["alize", "al", (s) => measure(s) > 0],
+    ["iciti", "ic", (s) => measure(s) > 0],
+    ["ical", "ic", (s) => measure(s) > 0],
+    ["ful", "", (s) => measure(s) > 0],
+    ["ness", "", (s) => measure(s) > 0],
+  ]);
+
+  // Step 4 (m > 1)
+  w = applyStep(w, [
+    ["al", "", (s) => measure(s) > 1],
+    ["ance", "", (s) => measure(s) > 1],
+    ["ence", "", (s) => measure(s) > 1],
+    ["er", "", (s) => measure(s) > 1],
+    ["ic", "", (s) => measure(s) > 1],
+    ["able", "", (s) => measure(s) > 1],
+    ["ible", "", (s) => measure(s) > 1],
+    ["ant", "", (s) => measure(s) > 1],
+    ["ement", "", (s) => measure(s) > 1],
+    ["ment", "", (s) => measure(s) > 1],
+    ["ent", "", (s) => measure(s) > 1],
+    ["ion", "", (s) => measure(s) > 1 && (s.endsWith("s") || s.endsWith("t"))],
+    ["ou", "", (s) => measure(s) > 1],
+    ["ism", "", (s) => measure(s) > 1],
+    ["ate", "", (s) => measure(s) > 1],
+    ["iti", "", (s) => measure(s) > 1],
+    ["ous", "", (s) => measure(s) > 1],
+    ["ive", "", (s) => measure(s) > 1],
+    ["ize", "", (s) => measure(s) > 1],
+  ]);
+
+  // Step 5a
+  if (w.endsWith("e")) {
+    const stem = w.slice(0, -1);
+    const m = measure(stem);
+    if (m > 1 || (m === 1 && !endsCvc(stem))) {
+      w = stem;
+    }
+  }
+
+  // Step 5b
+  if (measure(w) > 1 && endsWithDoubleConsonant(w) && w.endsWith("l")) {
+    w = w.slice(0, -1);
+  }
+
+  return w;
+}
+
+/** Stems a single lowercase token if it is purely alphabetic; digits and mixed tokens pass through unchanged. */
+function stemToken(token: string): string {
+  return /^[a-z]+$/u.test(token) ? porterStem(token) : token;
+}
+
+/** Test-only direct access to the Porter stemmer, for pinning it against known input/output vectors independent of BM25 scoring. */
+export function _stemForTests(word: string): string {
+  return porterStem(word.toLowerCase());
+}
+
+/**
+ * Standard English function words dropped from both documents and queries before stemming: the
+ * articles, prepositions, auxiliaries, pronouns, conjunctions, and interrogatives a prompt is made
+ * of regardless of topic. Kept deliberately small -- the long tails of published stopword lists are
+ * where the damage lives, and no domain term belongs here.
+ *
+ * Why it exists: `--delta` re-sends an already-surfaced fact whenever it scores non-zero for the
+ * current prompt, and without this list a prompt like "what is the plan for today" scored against
+ * most of a store on `the`/`is`/`for` alone (measured: 5 of 6 logged facts re-sent), which is the
+ * difference between delta working and not.
+ *
+ * Negations are NOT in this list, on purpose: `no`, `not`, `nor`, `never`, `none`, `neither`,
+ * `nothing`, `without`, `cannot`, `dont`, `cant`, `wont` are content words here. This store holds
+ * preferences and corrections that are frequently negative ("never commit secrets", "don't use
+ * npm"), so negation is meaning, not noise. Do not "complete" the list with them later. `n't`
+ * contractions are expanded to `... not` before tokenizing (see `expandNegatedContractions`) so
+ * "don't"/"can't"/"won't" keep their `not` when the apostrophe split discards the `t`.
+ */
+export const STOPWORDS: ReadonlySet<string> = new Set([
+  // articles
+  "a", "an", "the",
+  // conjunctions
+  "and", "or", "but", "if", "then", "so", "as", "than", "because", "while",
+  // prepositions
+  "of", "in", "on", "at", "to", "for", "from", "by", "with", "about", "into", "onto", "over", "under",
+  "between", "through", "during", "before", "after", "above", "below", "up", "down", "out", "off",
+  // auxiliaries and copulas
+  "is", "am", "are", "was", "were", "be", "been", "being",
+  "do", "does", "did", "doing",
+  "have", "has", "had", "having",
+  "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+  // pronouns and determiners
+  "i", "me", "my", "mine", "we", "us", "our", "ours", "you", "your", "yours",
+  "he", "him", "his", "she", "her", "hers", "it", "its", "they", "them", "their", "theirs",
+  "this", "that", "these", "those", "there", "here", "some", "any", "each", "every", "all",
+  // interrogatives
+  "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+  // discourse filler
+  "please", "just", "also", "very", "too", "s", "t",
+]);
+
+/**
+ * `can't` -> `can not`, `won't` -> `will not`, and any other `xn't` -> `x not`, so the negation
+ * survives the apostrophe split in {@link tokenize} as the content word `not` (never a stopword)
+ * instead of the orphaned single letter `t`.
+ */
+function expandNegatedContractions(text: string): string {
+  return text
+    .replace(/\bcan't\b/gu, "can not")
+    .replace(/\bwon't\b/gu, "will not")
+    .replace(/n't\b/gu, " not");
+}
+
 function tokenize(text: string): string[] {
-  return text.toLowerCase().split(/[^a-z0-9]+/u).filter((token) => token.length > 0);
+  return expandNegatedContractions(text.toLowerCase())
+    .split(/[^a-z0-9]+/u)
+    .filter((token) => token.length > 0 && !STOPWORDS.has(token))
+    .map(stemToken);
 }
 
 /**
