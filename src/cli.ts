@@ -1052,6 +1052,9 @@ export function buildProgram(): Command {
 
         if (options.hintFormat === true) {
           const incompatibleFlags = [];
+          if (query !== undefined && query !== "") {
+            incompatibleFlags.push("a query");
+          }
           if (options.kind !== undefined) {
             incompatibleFlags.push("--kind");
           }

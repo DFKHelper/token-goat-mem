@@ -607,6 +607,21 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     // We already test the basic case above, and the next test should cover this working case.
   });
 
+  it("--hint-format rejects a positional query instead of silently discarding it", async () => {
+    // The query is a positional (`recall [query]`), not a `--flag`, so it was never added to the
+    // incompatibleFlags guard: `mem recall "some query" --hint-format` used to succeed and return
+    // results identical to a bare `mem recall --hint-format`, silently ignoring the query.
+    const withQuery = await runCli(["recall", "some query", "--hint-format", "--root", home]);
+    expect(withQuery.exitCode).toBe(1);
+    expect(withQuery.stderr).toContain("--hint-format cannot be combined with");
+    expect(withQuery.stderr).toContain("query");
+
+    // Bare --hint-format (no positional) is unaffected and still emits the TGMEM/2 header.
+    const bare = await runCli(["recall", "--hint-format", "--root", home]);
+    expect(bare.exitCode).toBe(0);
+    expect(bare.stdout).toMatch(/^TGMEM\/2\n/);
+  });
+
   it("--hint-format with allowed options (--context-files, --stable, --hint-style) still works", async () => {
     // This should not fail; we're testing that the allowed options don't trigger the incompatibility error
     // In this test home is already set from the outer describe block, and the DB is populated from prior tests

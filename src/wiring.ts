@@ -1223,7 +1223,11 @@ This machine has token-goat-mem installed. Do not wait to be asked to run
 "from now on...", "never...", "don't...", or otherwise state a durable
 preference, decision, or correction, persist it yourself, right then:
 \`mem remember "<short fact>" --kind preference|decision|fact|correction --scope project --root .\`
-Use --subject/--value for anything that can be contradicted later.`;
+Use --subject/--value for anything that can be contradicted later.
+Add \`--anchor "<predicate> <args>"\` when a fact can be re-verified later instead
+of staying caveated forever, e.g. \`--anchor "file-exists pnpm-lock.yaml"\`.
+Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
+newest-of. The anchor path must stay inside --root (no "..", no absolute path).`;
 
 /**
  * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
@@ -1242,7 +1246,12 @@ token-goat-mem is installed (\`mem\` on PATH).
   correction, persist it yourself, right then:
   \`mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .\`. Use --subject/--value for anything that can be
-  contradicted later.`;
+  contradicted later.
+- Add \`--anchor "<predicate> <args>"\` when a fact can be re-verified later
+  instead of staying caveated forever, e.g.
+  \`--anchor "file-exists pnpm-lock.yaml"\`. Predicates: file-exists,
+  file-absent, file-newer-than, glob-exists, git-tracked, newest-of. The
+  anchor path must stay inside --root (no "..", no absolute path).`;
 
 /** VS Code's per-user config directory. Derived purely from the (dependency-injected) `homeDir`, never the real `%APPDATA%`/`$HOME` env vars, so tests stay fully isolated regardless of platform. Exported so tests can compute the same platform-dependent path rather than hardcoding one OS's layout. */
 export function vscodeUserDir(homeDir: string): string {

@@ -114,14 +114,16 @@ describe("recall reports a query that ranked nothing", () => {
     expect(result.stdout).not.toContain("query matched no fact text");
   });
 
-  it("never lets the note reach the TGMEM/2 wire, whose grammar is closed", async () => {
+  it("never lets a query reach the TGMEM/2 wire at all, whose grammar is closed", async () => {
     await seed();
     const result = await runCli(["recall", "xyzzyplughquux", "--hint-format", "--root", root]);
 
-    // An off-grammar line is dropped by a conforming consumer rather than guessed at, so a stray
-    // human-facing note here would be silently discarded at best and version-breaking at worst.
-    expect(result.stdout).not.toContain("query matched no fact text");
-    expect(result.stdout.split("\n")[0]).toBe("TGMEM/2");
+    // `--hint-format` never honors a query (see cli.test.ts's incompatible-flags coverage), so
+    // there is no ranking step here to produce a silent no-op or an off-grammar human-facing note
+    // in the first place -- the combination is rejected outright, before anything reaches stdout.
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("--hint-format cannot be combined with");
   });
 });
 

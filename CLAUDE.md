@@ -58,4 +58,8 @@ This machine has token-goat-mem installed. Do not wait to be asked to run
 preference, decision, or correction, persist it yourself, right then:
 `mem remember "<short fact>" --kind preference|decision|fact|correction --scope project --root .`
 Use --subject/--value for anything that can be contradicted later.
+Add `--anchor "<predicate> <args>"` when a fact can be re-verified later instead
+of staying caveated forever, e.g. `--anchor "file-exists pnpm-lock.yaml"`.
+Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
+newest-of. The anchor path must stay inside --root (no "..", no absolute path).
 <!-- token-goat-mem:claude-code:end -->

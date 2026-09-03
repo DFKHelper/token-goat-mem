@@ -64,6 +64,16 @@ describe("claudeCode wiring", () => {
     expect(claudeMd).toContain("<!-- token-goat-mem:claude-code:end -->");
   });
 
+  it("installed CLAUDE.md block tells the agent about --anchor, naming at least one real predicate", () => {
+    // An agent following this file literally is the whole point of installing it. Without a
+    // mention of --anchor, every captured fact stays unanchored forever and freshness can never
+    // move past "unverified" -- see anchors.ts for the predicate set this must draw from.
+    claudeCode.install({ root, homeDir: home });
+    const claudeMd = read(join(root, "CLAUDE.md"));
+    expect(claudeMd).toContain("--anchor");
+    expect(claudeMd).toMatch(/file-exists|file-absent|file-newer-than|glob-exists|git-tracked|newest-of/);
+  });
+
   it("installs a hook command that cannot exit nonzero when mem is missing from PATH", () => {
     claudeCode.install({ root, homeDir: home });
     const settingsPath = join(root, ".claude", "settings.json");
@@ -303,6 +313,15 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
     expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex -->");
     expect(agentsMd).toContain("<!-- token-goat-mem:end -->");
     expect(agentsMd.split("## Memory").length - 1).toBe(1);
+  });
+
+  it("installed shared AGENTS.md block tells the agent about --anchor, naming at least one real predicate", () => {
+    // Same gap as the CLAUDE.md installer: an agent following this block literally never anchors
+    // a fact unless the block itself says how, so freshness can never move past "unverified".
+    codex.install({ root, homeDir: home });
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("--anchor");
+    expect(agentsMd).toMatch(/file-exists|file-absent|file-newer-than|glob-exists|git-tracked|newest-of/);
   });
 
   it("copilot-cli installing second joins the existing block: tools= gets both, sorted, and there is exactly one \"## Memory\" section", () => {
