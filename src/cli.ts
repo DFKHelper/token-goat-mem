@@ -65,10 +65,12 @@ import {
   type WiringResult,
 } from "./wiring.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
+import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, type RetrievalOptions } from "./retrieval.js";
 import {
   countFacts,
   deleteFact,
+  deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
   getEpoch,
   listFacts,
@@ -181,6 +183,35 @@ function parseToolName(raw: string): ToolName {
     throw new UsageError(`invalid tool "${raw}" (expected one of ${TOOL_NAMES.join(", ")})`);
   }
   return raw as ToolName;
+}
+
+/**
+ * `--hook-stdin`: the hook envelope from stdin, or an empty envelope when stdin is a TTY, unreadable,
+ * not JSON, or simply slow to close. Never throws -- see hook-envelope.ts for why a hook that
+ * errors is worse than one that returns unranked facts.
+ */
+async function readHookEnvelope(): Promise<HookEnvelope> {
+  try {
+    return parseHookEnvelope(await readStreamWithTimeout(process.stdin));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS`: test/advanced override for the hint-format soft time budget
+ * (`RETRIEVAL_BUDGET_MS` in integration-seam.ts). Subprocess-level tests drive the built bundle
+ * under a fully loaded runner, where the 150ms default blows and turns a selection assertion into a
+ * timing one; the in-process seam tests already override it the same way through `HintFormatOptions`.
+ * Ignored unless it parses as a positive integer.
+ */
+function retrievalBudgetOverride(): number | undefined {
+  const raw = process.env["TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS"];
+  if (raw === undefined) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 && String(parsed) === raw.trim() ? parsed : undefined;
 }
 
 function parseContextFiles(raw: string | undefined): string[] | undefined {
@@ -683,6 +714,13 @@ const GC_SOURCES_MAX_AGE_DAYS = 90;
  * (design principle 5: "No black box"); only age rotates them, never a fact-side GC decision.
  */
 const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
+/**
+ * The recall log (`recall_log`: which facts were surfaced to which hook session) is session
+ * bookkeeping, not history: its only reader is a `--delta` recall for the *same* session id, and a
+ * coding-tool session does not live for weeks. Same age-only shape as the audit-log window above,
+ * with a shorter horizon because nothing consults these rows once their session is over.
+ */
+const GC_RECALL_LOG_MAX_AGE_DAYS = 30;
 
 /**
  * Runs the retention/GC pass (design plan Section 6): persists deterministic contradiction
@@ -730,10 +768,14 @@ function runRetentionPass(db: Database.Database): string {
   const auditCutoff = new Date(now.getTime() - GC_AUDIT_LOG_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
   const prunedAuditRows = db.prepare("DELETE FROM audit_log WHERE created_at < ?").run(auditCutoff).changes;
 
+  const recallLogCutoff = new Date(now.getTime() - GC_RECALL_LOG_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const prunedRecallLogRows = deleteRecallLogOlderThan(db, recallLogCutoff);
+
   const epoch = getEpoch(db);
   return (
     `epoch=${epoch}  contradictions_resolved=${updates.length}  preferences_decayed_below_floor=${decayedCount}  ` +
-    `pruned_superseded_facts=${prunedFacts}  pruned_sources=${prunedSources}  pruned_audit_log_rows=${prunedAuditRows}`
+    `pruned_superseded_facts=${prunedFacts}  pruned_sources=${prunedSources}  pruned_audit_log_rows=${prunedAuditRows}  ` +
+    `pruned_recall_log_rows=${prunedRecallLogRows}`
   );
 }
 
@@ -787,6 +829,9 @@ interface RecallCliOptions {
   readonly stable?: boolean;
   readonly hintStyle?: string;
   readonly sinceEpoch?: number;
+  readonly hookStdin?: boolean;
+  readonly delta?: boolean;
+  readonly sessionId?: string;
 }
 
 interface ExportCliOptions {
@@ -1030,6 +1075,9 @@ export function buildProgram(): Command {
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
     .option("--hint-style <full|terse>", "Display verbosity: full (default, unchanged) or terse (no CTA, short kind labels)", "full")
     .option("--since-epoch <n>", "Only include facts with epoch greater than n (see `mem epoch`)", (v) => parseInt(v, 10))
+    .option("--hook-stdin", "Read a coding-tool hook's JSON envelope from stdin: its session_id becomes the session id and its prompt the query (--hint-format only; fails open to no query)")
+    .option("--session-id <id>", "Session id to log surfaced facts under, and for --delta to filter against (--hint-format only; overrides the envelope's session_id)")
+    .option("--delta", "Emit only facts not already surfaced to this session id; header becomes `TGMEM/2  delta=1` (--hint-format only; requires --hook-stdin or --session-id)")
     .action(
       guard(async (query: string | undefined, options: RecallCliOptions) => {
         const hintStyle = options.hintStyle !== undefined ? parseHintStyle(options.hintStyle) : "full";
@@ -1049,12 +1097,29 @@ export function buildProgram(): Command {
         if (options.contextFiles !== undefined && options.hintFormat !== true) {
           throw new UsageError("--context-files requires --hint-format");
         }
+        if (options.hintFormat !== true) {
+          if (options.hookStdin === true) {
+            throw new UsageError("--hook-stdin requires --hint-format");
+          }
+          if (options.sessionId !== undefined) {
+            throw new UsageError("--session-id requires --hint-format");
+          }
+          if (options.delta === true) {
+            throw new UsageError("--delta requires --hint-format");
+          }
+        }
+        if (options.sessionId !== undefined && options.sessionId.trim().length === 0) {
+          throw new UsageError("--session-id must not be empty");
+        }
+        // Delta is opt-in per call and needs a session to be relative to. Without one there is nothing
+        // to subtract, and silently answering with a full block would hand the caller a response whose
+        // header says what it is -- but not what it was asked for.
+        if (options.delta === true && options.sessionId === undefined && options.hookStdin !== true) {
+          throw new UsageError("--delta requires a session id: pass --hook-stdin (session_id from the hook envelope) or --session-id <id>");
+        }
 
         if (options.hintFormat === true) {
           const incompatibleFlags = [];
-          if (query !== undefined && query !== "") {
-            incompatibleFlags.push("a query");
-          }
           if (options.kind !== undefined) {
             incompatibleFlags.push("--kind");
           }
@@ -1076,7 +1141,7 @@ export function buildProgram(): Command {
 
           if (incompatibleFlags.length > 0) {
             throw new UsageError(
-              `--hint-format cannot be combined with ${incompatibleFlags.join("/")}; pass only --hint-format, --root, --context-files, --stable, and --hint-style`
+              `--hint-format cannot be combined with ${incompatibleFlags.join("/")}; pass only --hint-format, an optional query, --root, --context-files, --stable, and --hint-style`
             );
           }
 
@@ -1084,11 +1149,26 @@ export function buildProgram(): Command {
             throw new UsageError("recall --hint-format requires --root <path>");
           }
           const contextFiles = parseContextFiles(options.contextFiles);
+          const envelope: HookEnvelope = options.hookStdin === true ? await readHookEnvelope() : {};
+          // The envelope's prompt is what the user just asked, so it outranks a positional query the
+          // hook command may have baked in; an explicit --session-id likewise outranks the envelope.
+          const effectiveQuery = envelope.prompt ?? (query !== undefined && query !== "" ? query : undefined);
+          const sessionId = options.sessionId ?? envelope.sessionId;
+          if (options.delta === true && sessionId === undefined) {
+            // Only reachable via --hook-stdin (the usage check above covers the rest): the envelope
+            // arrived without a session_id. A hook must not exit non-zero over that, and a full
+            // block is a superset of the delta the caller asked for, so degrade to it -- but say so.
+            err("mem: --delta ignored: the hook envelope on stdin carried no session_id; returning the full hint set");
+          }
           const hintOptions: HintFormatOptions = {
             root: options.root,
+            ...(retrievalBudgetOverride() !== undefined ? { retrievalBudgetMs: retrievalBudgetOverride() } : {}),
+            ...(effectiveQuery !== undefined ? { query: effectiveQuery } : {}),
             ...(contextFiles !== undefined ? { contextFiles } : {}),
             ...(options.stable === true ? { stable: true } : {}),
             ...(hintStyle !== "full" ? { hintStyle } : {}),
+            ...(sessionId !== undefined ? { sessionId } : {}),
+            ...(options.delta === true && sessionId !== undefined ? { delta: true } : {}),
           };
           const result = await buildHintFormat(hintOptions);
           process.stdout.write(`${result.header}\n`);

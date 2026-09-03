@@ -145,7 +145,7 @@ Both facts share the subject `package-manager` with different values — a contr
 
 ```bash
 mem epoch --gc
-# epoch=3  contradictions_resolved=1  preferences_decayed_below_floor=0  pruned_superseded_facts=0  pruned_sources=0  pruned_audit_log_rows=0
+# epoch=3  contradictions_resolved=1  preferences_decayed_below_floor=0  pruned_superseded_facts=0  pruned_sources=0  pruned_audit_log_rows=0  pruned_recall_log_rows=0
 
 mem list
 # 21a1330e-...  [preference/active] package-manager=bun  switched to bun

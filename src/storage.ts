@@ -51,6 +51,14 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS recall_log (
+  fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL,
+  surfaced_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recall_log_session_fact ON recall_log(session_id, fact_id);
+CREATE INDEX IF NOT EXISTS idx_recall_log_surfaced_at ON recall_log(surfaced_at);
 `;
 
 /**
@@ -569,6 +577,34 @@ export function deleteSourcesForFact(db: Db, factId: string): number {
 /** GC primitive (design plan Section 6): deletes source rows stored before `beforeIso` (ISO 8601). Returns the number of rows deleted. Retention policy (which threshold to pass) is a future GC module's decision, not this function's. */
 export function deleteSourcesOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM sources WHERE stored_at < ?").run(beforeIso).changes;
+}
+
+/**
+ * Records that `factIds` were surfaced to the consumer identified by `sessionId` at `atIso` -- the
+ * ledger `--delta` recalls read to avoid re-sending facts a session already has. One transaction,
+ * so a partial write cannot leave a session believing it saw half a response.
+ */
+export function insertRecallLog(db: Db, sessionId: string, factIds: readonly string[], atIso: string): void {
+  if (factIds.length === 0) {
+    return;
+  }
+  const insert = db.prepare("INSERT INTO recall_log (fact_id, session_id, surfaced_at) VALUES (?, ?, ?)");
+  db.transaction(() => {
+    for (const factId of factIds) {
+      insert.run(factId, sessionId, atIso);
+    }
+  })();
+}
+
+/** The set of fact ids already logged as surfaced in `sessionId`. */
+export function listSurfacedFactIds(db: Db, sessionId: string): Set<string> {
+  const rows = db.prepare<[string], { fact_id: string }>("SELECT DISTINCT fact_id FROM recall_log WHERE session_id = ?").all(sessionId);
+  return new Set(rows.map((row) => row.fact_id));
+}
+
+/** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
+export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
+  return db.prepare("DELETE FROM recall_log WHERE surfaced_at < ?").run(beforeIso).changes;
 }
 
 /** Reads the current write epoch (design plan Section 4), defaulting to `0` on a freshly-initialized database. */

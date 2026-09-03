@@ -3,6 +3,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/db.js";
+import { openStorage } from "../../src/storage.js";
+import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
 import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
 import type { HintFormatOptions, HintFormatResult } from "../../src/integration-seam.js";
@@ -578,6 +580,93 @@ describe("buildHintFormat", () => {
     expect(factLines(stableOrder).map((line) => line.split("  ")[2])).toEqual(["id=a-oldest", "id=m-middle", "id=z-newest"]);
   });
 
+  // ── HintFormatOptions.query (item 1) ─────────────────────────────────────────────────────────
+
+  it("a query reorders fact-lines by BM25 relevance instead of falling through to recency", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "newer-oranges",
+        text: "unrelated newer fact about oranges",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "older-giraffe",
+        text: "older fact about a distinctive giraffe topic",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    // No query: BM25 ties both at 0, so the sort falls through to captured_at descending -- newer first.
+    const noQuery = await buildHint({ root, dbPath });
+    expect(factLines(noQuery).map((line) => line.split("  ")[2])).toEqual(["id=newer-oranges", "id=older-giraffe"]);
+
+    // Querying "giraffe" (only in the older fact) reorders: the matching, older fact now leads.
+    const withQuery = await buildHint({ root, dbPath, query: "giraffe" });
+    expect(factLines(withQuery).map((line) => line.split("  ")[2])).toEqual(["id=older-giraffe", "id=newer-oranges"]);
+  });
+
+  it("an absent query and an empty-string query produce byte-identical results (today's recency-only path is unchanged)", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "newer-oranges",
+        text: "unrelated newer fact about oranges",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "older-giraffe",
+        text: "older fact about a distinctive giraffe topic",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    const absent = await buildHint({ root, dbPath });
+    const empty = await buildHint({ root, dbPath, query: "" });
+    expect(empty).toEqual(absent);
+  });
+
+  it("a query matching no fact text ranks (ties at 0), never filters out a candidate", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "apples",
+        text: "fact about apples",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+      },
+      {
+        id: "bananas",
+        text: "fact about bananas",
+        kind: "fact",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    const noQuery = await buildHint({ root, dbPath });
+    const noMatch = await buildHint({ root, dbPath, query: "zzzz nonexistent xyzzy" });
+    expect([...factLines(noMatch)].sort()).toEqual([...factLines(noQuery)].sort());
+  });
+
   /**
    * The truncated path had no deterministic coverage at all: it was only ever reached by a machine
    * slow enough to blow the 150ms soft budget, which is how it turned up -- as two unrelated tests
@@ -693,5 +782,331 @@ describe("buildHintFormat", () => {
     expect(exhausted.lines).not.toContain(TGMEM_FOOTER_LINE);
     expect(exhausted.header).toBe(TGMEM_HEADER);
     expect(exhausted.lines).toEqual([]);
+  });
+
+  // ── Session recall log and --delta ───────────────────────────────────────────────────────────
+
+  /** Ids on the fact-lines of `result`, in emitted order. */
+  function emittedIds(result: HintFormatResult): string[] {
+    return factLines(result).map((line) => line.split("  ")[2]?.replace(/^id=/u, "") ?? "");
+  }
+
+  /** `recall_log` rows for `sessionId`, as `fact_id`s, in insertion order. */
+  function loggedIds(sessionId: string): string[] {
+    const db = openStorage(dbPath);
+    try {
+      return db
+        .prepare<[string], { fact_id: string }>("SELECT fact_id FROM recall_log WHERE session_id = ? ORDER BY rowid")
+        .all(sessionId)
+        .map((row) => row.fact_id);
+    } finally {
+      db.close();
+    }
+  }
+
+  function threeGlobalFacts(): void {
+    seedFacts(dbPath, [
+      { id: "fact-a", text: "alpha fact about apples", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "active" },
+      { id: "fact-b", text: "beta fact about bananas", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-02T00:00:00.000Z", status: "active" },
+      { id: "fact-c", text: "gamma fact about cherries", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+    ]);
+  }
+
+  it("records the emitted fact ids in recall_log under the session id, and nothing without one", async () => {
+    threeGlobalFacts();
+
+    const anonymous = await buildHint({ root, dbPath });
+    expect(emittedIds(anonymous)).toEqual(["fact-a", "fact-b", "fact-c"]);
+    const db = openStorage(dbPath);
+    const total = db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM recall_log").get()?.n;
+    db.close();
+    expect(total).toBe(0);
+
+    const first = await buildHint({ root, dbPath, sessionId: "sess-1" });
+    expect(first.delta).toBe(false);
+    expect(first.header).toBe(TGMEM_HEADER);
+    expect(loggedIds("sess-1")).toEqual(["fact-a", "fact-b", "fact-c"]);
+  });
+
+  it("--delta omits every fact already logged for the session and marks the header delta=1", async () => {
+    threeGlobalFacts();
+    await buildHint({ root, dbPath, sessionId: "sess-1" });
+
+    // A fact captured after the first recall is the only thing the session has not seen.
+    seedFacts(dbPath, [
+      { id: "fact-d", text: "delta fact about dates", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-04T00:00:00.000Z", status: "active" },
+    ]);
+
+    const second = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });
+    expect(second.delta).toBe(true);
+    expect(second.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(emittedIds(second)).toEqual(["fact-d"]);
+    expect(second.lines[second.lines.length - 1]).toBe(TGMEM_FOOTER_LINE);
+
+    // The delta itself is logged, so a third delta call has nothing left: header only, no footer.
+    const third = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });
+    expect(third.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(third.lines).toEqual([]);
+  });
+
+  it("non-firing: a call without --delta in the same session still returns every fact, byte-identical to a fresh session", async () => {
+    threeGlobalFacts();
+    await buildHint({ root, dbPath, sessionId: "sess-1" });
+    await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });
+
+    const fullAgain = await buildHint({ root, dbPath, sessionId: "sess-1" });
+    const freshSession = await buildHint({ root, dbPath, sessionId: "sess-2" });
+    expect(fullAgain.lines.length).toBeGreaterThan(0);
+    expect(fullAgain.delta).toBe(false);
+    expect(fullAgain.header).toBe(TGMEM_HEADER);
+    expect(fullAgain.lines).toEqual(freshSession.lines);
+    expect(emittedIds(fullAgain)).toEqual(["fact-a", "fact-b", "fact-c"]);
+  });
+
+  it("recall logs are per session: a second session's delta starts from the full set", async () => {
+    threeGlobalFacts();
+    await buildHint({ root, dbPath, sessionId: "sess-1" });
+
+    const otherSession = await buildHint({ root, dbPath, sessionId: "sess-2", delta: true });
+    expect(emittedIds(otherSession)).toEqual(["fact-a", "fact-b", "fact-c"]);
+  });
+
+  it("delta filters before the per-kind caps, so a repeat call surfaces the next-best unseen facts rather than nothing", async () => {
+    // 6 decisions, cap is 4 (PRECISION_CAP): a full call sends the 4 newest; the delta then sends the remaining 2.
+    seedFacts(
+      dbPath,
+      Array.from({ length: 6 }, (_, index) => ({
+        id: `dec-${index}`,
+        text: `decision number ${index}`,
+        kind: "decision" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: `2026-01-0${index + 1}T00:00:00.000Z`,
+        status: "active" as const,
+      }))
+    );
+    const first = await buildHint({ root, dbPath, sessionId: "sess-1" });
+    expect(emittedIds(first)).toEqual(["dec-5", "dec-4", "dec-3", "dec-2"]);
+
+    const second = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });
+    expect(emittedIds(second)).toEqual(["dec-1", "dec-0"]);
+  });
+
+  it("regression: a fact sent as filler on a non-matching prompt is re-sent by --delta once a later prompt matches it (compaction makes 'already sent' != 'still in context')", async () => {
+    seedFacts(dbPath, [
+      { id: "deploy-key", text: "the deploy key lives in the vault at ops/deploy-key", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-02T00:00:00.000Z", status: "active" },
+      { id: "lunch", text: "team lunch happens fridays", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+    ]);
+
+    // Prompt 1 matches nothing: both facts go out as filler (score 0, recency order) and get logged.
+    const filler = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
+    expect(emittedIds(filler)).toEqual(["deploy-key", "lunch"]);
+    expect(loggedIds("sess-1")).toEqual(["deploy-key", "lunch"]);
+
+    // Prompt 2 is exactly the deploy-key question. Before the fix this returned the bare header.
+    const exact = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "where is the deploy key vault path" });
+    expect(exact.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(emittedIds(exact)).toEqual(["deploy-key"]);
+
+    // And a third time: a genuine hit re-sends every time it is asked for.
+    const again = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "deploy key" });
+    expect(emittedIds(again)).toEqual(["deploy-key"]);
+  });
+
+  it("non-firing: a zero-scoring fact already surfaced in the session stays suppressed by --delta (delta is not a no-op)", async () => {
+    threeGlobalFacts();
+    const baseline = await buildHint({ root, dbPath, sessionId: "sess-1", query: "what is the lint setup" });
+    expect(emittedIds(baseline)).toEqual(["fact-a", "fact-b", "fact-c"]);
+    expect(loggedIds("sess-1")).toHaveLength(3);
+
+    // Same non-matching query: everything scores 0 and everything was sent -> header only.
+    const repeat = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
+    expect(repeat.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(repeat.lines).toEqual([]);
+
+    // A query matching only one of them re-sends exactly that one.
+    const partial = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "bananas" });
+    expect(emittedIds(partial)).toEqual(["fact-b"]);
+  });
+
+  it("the SessionStart recency dump (no query) is still fully suppressible: every score is zero", async () => {
+    seedFacts(dbPath, [
+      { id: "pref-1", text: "prefers pnpm", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-01-04T00:00:00.000Z", status: "active" },
+      { id: "corr-1", text: "never use npm here", kind: "correction", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "active" },
+      { id: "dec-1", text: "chose sqlite", kind: "decision", scope: "global", source_type: "user", captured_at: "2026-01-02T00:00:00.000Z", status: "active" },
+      { id: "fact-1", text: "the build is esbuild", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+    ]);
+    const opener = await buildHint({ root, dbPath, sessionId: "sess-1" });
+    expect(factLines(opener)).toHaveLength(4);
+
+    const promptless = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });
+    expect(promptless.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(promptless.lines).toEqual([]);
+  });
+
+  it("no kind boost can lift a zero score past the delta predicate: boosted kinds on a non-matching query score exactly 0", async () => {
+    expect(AGGRESSIVE_RECALL_BOOST).toBeGreaterThan(1);
+    const facts: Fact[] = (["preference", "correction", "decision", "fact"] as const).map((kind, index) => ({
+      id: `${kind}-1`,
+      text: `${kind} about something unrelated`,
+      kind,
+      subject: null,
+      value: null,
+      scope: "global",
+      scopeRoot: null,
+      source_type: "user",
+      source_ref: null,
+      captured_at: `2026-01-0${index + 1}T00:00:00.000Z`,
+      anchor: null,
+      status: "active",
+      confidence: 1,
+    }));
+    for (const query of ["", "what is the lint setup"]) {
+      const { results } = await retrieve(facts, { query, root, hintFormat: true, limit: 100 });
+      expect(results).toHaveLength(4);
+      for (const result of results) {
+        expect(result.score, `${result.fact.kind} query=${JSON.stringify(query)}`).toBe(0);
+      }
+    }
+  });
+
+  // ── Stopwords: function words must not make an unrelated prompt re-send the whole store ─────────
+
+  /** Six realistic facts, none topically about any of the seven prompts below; kinds split so every one fits under the caps. */
+  function sixRealisticFacts(): void {
+    seedFacts(dbPath, [
+      { id: "pnpm", text: "prefers pnpm over npm", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-01-06T00:00:00.000Z", status: "active" },
+      { id: "secrets", text: "never commit secrets", kind: "correction", scope: "global", source_type: "user", captured_at: "2026-01-05T00:00:00.000Z", status: "active" },
+      { id: "lint", text: "lint runs eslint with zero warnings", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-01-04T00:00:00.000Z", status: "active" },
+      { id: "deploy-key", text: "the deploy key lives in the vault at ops/deploy-key", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "active" },
+      { id: "lunch", text: "team lunch happens on fridays", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-02T00:00:00.000Z", status: "active" },
+      { id: "sqlite", text: "chose sqlite for the storage layer", kind: "decision", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+    ]);
+  }
+
+  const UNRELATED_PROMPTS = [
+    "what is the plan for today",
+    "add a test for the parser",
+    "rename the variable to foo",
+    "why did the release fail",
+    "is there anything new here",
+    "can you refactor this function",
+    "explain this error message",
+  ] as const;
+
+  it("regression: realistic prompts unrelated to every stored fact re-send zero facts under --delta (function words are not matches)", async () => {
+    sixRealisticFacts();
+    const opener = await buildHint({ root, dbPath, sessionId: "sess-1" });
+    expect(emittedIds(opener).sort()).toEqual(["deploy-key", "lint", "lunch", "pnpm", "secrets", "sqlite"]);
+    expect(loggedIds("sess-1")).toHaveLength(6);
+
+    // Before stopwords: "what is the plan for today" re-sent 5/6 and "add a test for the parser" 5/6
+    // on `the`/`is`/`for`/`a` alone.
+    for (const prompt of UNRELATED_PROMPTS) {
+      const delta = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: prompt });
+      expect(delta.header, prompt).toBe(`${TGMEM_HEADER}  delta=1`);
+      expect(emittedIds(delta), prompt).toEqual([]);
+    }
+  });
+
+  it("non-firing: a prompt matching on a content word still re-sends that fact under --delta after the stopword filter", async () => {
+    sixRealisticFacts();
+    const opener = await buildHint({ root, dbPath, sessionId: "sess-1" });
+    expect(emittedIds(opener)).toHaveLength(6);
+
+    const deployKey = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "where is the deploy key vault path" });
+    expect(emittedIds(deployKey)).toEqual(["deploy-key"]);
+
+    const lunch = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "when is lunch" });
+    expect(emittedIds(lunch)).toEqual(["lunch"]);
+  });
+
+  it("a prompt made entirely of stopwords falls through to the no-query behaviour: recency order, and fully suppressible under --delta", async () => {
+    threeGlobalFacts();
+    const allStop = await buildHint({ root, dbPath, sessionId: "sess-1", query: "is it the one for me" });
+    const noQuery = await buildHint({ root, dbPath, sessionId: "sess-2" });
+    expect(emittedIds(noQuery)).toEqual(["fact-a", "fact-b", "fact-c"]);
+    expect(allStop.lines).toEqual(noQuery.lines);
+
+    const suppressed = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "is it the one for me" });
+    expect(suppressed.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(suppressed.lines).toEqual([]);
+  });
+
+  it("a fact whose text is mostly stopwords is still indexed and retrievable by its content words", async () => {
+    seedFacts(dbPath, [
+      { id: "mostly-stop", text: "it is what it is with the one about kubernetes", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-02T00:00:00.000Z", status: "active" },
+      { id: "other", text: "team lunch happens on fridays", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "active" },
+    ]);
+    const result = await buildHint({ root, dbPath, query: "kubernetes" });
+    expect(emittedIds(result)).toEqual(["mostly-stop", "other"]);
+  });
+
+  function bareFact(id: string, text: string, kind: Fact["kind"] = "fact"): Fact {
+    return { id, text, kind, subject: null, value: null, scope: "global", scopeRoot: null, source_type: "user", source_ref: null, captured_at: "2026-01-01T00:00:00.000Z", anchor: null, status: "active", confidence: 1 };
+  }
+
+  it("negations are never stripped: a fact and a query that share only a negation word still score on it", async () => {
+    for (const negation of ["no", "not", "nor", "never", "none", "neither", "nothing", "without", "cannot", "dont", "cant", "wont"]) {
+      expect(STOPWORDS.has(negation), negation).toBe(false);
+    }
+    const facts = [bareFact("negated", "do not use npm", "correction"), bareFact("plain", "use yarn", "preference")];
+    const { results } = await retrieve(facts, { query: "not", root, hintFormat: true, limit: 10 });
+    const byId = new Map(results.map((result) => [result.fact.id, result.score]));
+    expect(byId.get("plain")).toBe(0);
+    expect(byId.get("negated") ?? 0).toBeGreaterThan(0);
+
+    // `n't` contractions keep their negation through the apostrophe split, on both sides.
+    const contracted = [bareFact("dont", "don't use npm", "correction"), bareFact("cant", "can't push to main", "correction"), bareFact("wont", "won't merge without review", "correction")];
+    for (const [query, expected] of [["never do not", "dont"], ["cannot not", "cant"], ["do not merge", "wont"]] as const) {
+      const scored = await retrieve(contracted, { query, root, hintFormat: true, limit: 10 });
+      const hit = scored.results.find((result) => result.fact.id === expected);
+      expect(hit?.score ?? 0, `${query} -> ${expected}`).toBeGreaterThan(0);
+    }
+    const stopOnly = await retrieve(contracted, { query: "do", root, hintFormat: true, limit: 10 });
+    for (const result of stopOnly.results) {
+      expect(result.score, `stopword-only query vs ${result.fact.id}`).toBe(0);
+    }
+  });
+
+  it("--stable never writes to recall_log (it exists to make output deterministic for tests)", async () => {
+    threeGlobalFacts();
+    const stable = await buildHint({ root, dbPath, sessionId: "sess-1", stable: true });
+    expect(factLines(stable)).toHaveLength(3);
+    expect(loggedIds("sess-1")).toEqual([]);
+  });
+
+  it("delta without a session id is a plain full response (the CLI rejects the pairing; the seam cannot subtract from an unknown session)", async () => {
+    threeGlobalFacts();
+    const result = await buildHint({ root, dbPath, delta: true });
+    expect(result.delta).toBe(false);
+    expect(result.header).toBe(TGMEM_HEADER);
+    expect(emittedIds(result)).toEqual(["fact-a", "fact-b", "fact-c"]);
+  });
+
+  it("a failure to write recall_log never fails the recall: the facts are still emitted and a warning goes to stderr", async () => {
+    threeGlobalFacts();
+    // Make every insert into recall_log abort at the SQLite level, the closest stand-in for a
+    // locked or read-only store that does not also break the read path.
+    const db = openStorage(dbPath);
+    db.exec("CREATE TRIGGER block_recall_log BEFORE INSERT ON recall_log BEGIN SELECT RAISE(ABORT, 'recall_log is read-only in this test'); END;");
+    db.close();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    const result = await buildHint({ root, dbPath, sessionId: "sess-1" });
+
+    const warnings = warnSpy.mock.calls.map((call) => String(call[0]));
+    warnSpy.mockRestore();
+    expect(emittedIds(result)).toEqual(["fact-a", "fact-b", "fact-c"]);
+    expect(loggedIds("sess-1")).toEqual([]);
+    expect(warnings.some((line) => line.includes("could not record surfaced facts") && line.includes("recall_log is read-only in this test"))).toBe(true);
+  });
+
+  it("an empty (budget-exhausted) response logs nothing, so the session is not marked as having seen facts it never received", async () => {
+    threeGlobalFacts();
+    const exhausted = await buildHintFormat({ root, dbPath, sessionId: "sess-1", retrievalBudgetMs: 0 });
+    expect(exhausted.truncated).toBe(true);
+    expect(exhausted.lines).toEqual([]);
+    expect(loggedIds("sess-1")).toEqual([]);
   });
 });

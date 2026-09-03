@@ -114,16 +114,18 @@ describe("recall reports a query that ranked nothing", () => {
     expect(result.stdout).not.toContain("query matched no fact text");
   });
 
-  it("never lets a query reach the TGMEM/2 wire at all, whose grammar is closed", async () => {
+  it("a query that ranks nothing on the TGMEM/2 wire reorders (ties at 0) rather than erroring or emptying the response", async () => {
     await seed();
     const result = await runCli(["recall", "xyzzyplughquux", "--hint-format", "--root", root]);
 
-    // `--hint-format` never honors a query (see cli.test.ts's incompatible-flags coverage), so
-    // there is no ranking step here to produce a silent no-op or an off-grammar human-facing note
-    // in the first place -- the combination is rejected outright, before anything reaches stdout.
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("--hint-format cannot be combined with");
+    // `--hint-format` now honors a query the same way plain `recall` does (see cli.test.ts's
+    // hint-format query coverage): BM25 orders the candidate set and never removes from it, and
+    // TGMEM/2's grammar has no room for a human-facing "matched nothing" note (its lines are
+    // machine-parsed, not prose) -- so a query that matches no fact text still surfaces every
+    // fact, tied at score 0, exactly as a bare `--hint-format` would.
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.startsWith("TGMEM/2\n")).toBe(true);
+    expect(result.stdout).toContain("uses vitest for tests");
   });
 });
 

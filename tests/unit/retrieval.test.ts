@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { _clearAnchorMemoForTests } from "../../src/anchors.js";
 import {
+  _stemForTests,
   computeBm25Scores,
   cosineSimilarity,
   reciprocalRankFusion,
@@ -55,6 +56,162 @@ describe("computeBm25Scores", () => {
     const docs = [makeFact({ id: "a", text: "uses pnpm", kind: "preference" })];
     const scores = computeBm25Scores(docs, "");
     expect(scores.get("a")).toBe(0);
+  });
+
+  // ── Porter stemming (item 2) ─────────────────────────────────────────────────────────────────
+  // Applied identically at index and query time inside `tokenize`, so a plural/inflected query
+  // term matches a differently-inflected document term it previously missed entirely.
+
+  it("a plural query matches a singular document term ('commits' query -> 'commit' text)", () => {
+    const docs = [
+      makeFact({ id: "a", text: "the commit message must be imperative mood", kind: "fact" }),
+      makeFact({ id: "b", text: "unrelated fact about bananas", kind: "fact" }),
+    ];
+    const scores = computeBm25Scores(docs, "commits");
+    expect(scores.get("a")).toBeGreaterThan(0);
+    expect(scores.get("b")).toBe(0);
+  });
+
+  it("a gerund document term matches a bare-verb query ('testing' text <- 'test' query)", () => {
+    const docs = [
+      makeFact({ id: "a", text: "prefers vitest for testing over jest", kind: "preference" }),
+      makeFact({ id: "b", text: "unrelated fact about bananas", kind: "fact" }),
+    ];
+    const scores = computeBm25Scores(docs, "test");
+    expect(scores.get("a")).toBeGreaterThan(0);
+    expect(scores.get("b")).toBe(0);
+  });
+
+  it("stems query and document terms to the same root regardless of inflection direction", () => {
+    // "running"/"runner"/"runs" all reduce to the same Porter stem as "run".
+    const docs = [
+      makeFact({ id: "a", text: "the test runner runs quickly", kind: "fact" }),
+      makeFact({ id: "b", text: "unrelated fact about bananas", kind: "fact" }),
+    ];
+    const scores = computeBm25Scores(docs, "running");
+    expect(scores.get("a")).toBeGreaterThan(0);
+    expect(scores.get("b")).toBe(0);
+  });
+
+  it("does not stem a token containing a digit -- 'es6' stays 'es6', not truncated to 'es'", () => {
+    const docs = [makeFact({ id: "a", text: "targets es6 output", kind: "fact" })];
+    // If "es6" were fed through the stemmer it is not purely alphabetic so nothing would change --
+    // this pins that a *query* of the bare prefix "es" does not match the mixed alnum token "es6",
+    // i.e. tokenize's digit guard actually took effect rather than the stemmer being a no-op here
+    // for an unrelated reason.
+    expect(computeBm25Scores(docs, "es6").get("a")).toBeGreaterThan(0);
+    expect(computeBm25Scores(docs, "es").get("a")).toBe(0);
+  });
+});
+
+describe("porterStem (item 2)", () => {
+  // A representative slice of the word/stem pairs from Porter's own reference vocabulary
+  // (M.F. Porter, "An algorithm for suffix stripping", 1980) covering all five steps of the
+  // algorithm, not just the two words this project's own docs happen to mention.
+  const vectors: ReadonlyArray<readonly [string, string]> = [
+    ["caresses", "caress"],
+    ["ponies", "poni"],
+    ["ties", "ti"],
+    ["caress", "caress"],
+    ["cats", "cat"],
+    ["feed", "feed"],
+    ["agreed", "agre"],
+    ["plastered", "plaster"],
+    ["bled", "bled"],
+    ["motoring", "motor"],
+    ["sing", "sing"],
+    ["conflated", "conflat"],
+    ["troubled", "troubl"],
+    ["sized", "size"],
+    ["hopping", "hop"],
+    ["tanned", "tan"],
+    ["falling", "fall"],
+    ["hissing", "hiss"],
+    ["fizzed", "fizz"],
+    ["failing", "fail"],
+    ["filing", "file"],
+    ["happy", "happi"],
+    ["sky", "sky"],
+    ["relational", "relat"],
+    ["conditional", "condit"],
+    ["rational", "ration"],
+    ["valenci", "valenc"],
+    ["hesitanci", "hesit"],
+    ["digitizer", "digit"],
+    ["conformabli", "conform"],
+    ["radicalli", "radic"],
+    ["differentli", "differ"],
+    ["vileli", "vile"],
+    ["analogousli", "analog"],
+    ["vietnamization", "vietnam"],
+    ["predication", "predic"],
+    ["operator", "oper"],
+    ["feudalism", "feudal"],
+    ["decisiveness", "decis"],
+    ["hopefulness", "hope"],
+    ["callousness", "callous"],
+    ["formaliti", "formal"],
+    ["sensitiviti", "sensit"],
+    ["sensibiliti", "sensibl"],
+    ["triplicate", "triplic"],
+    ["formative", "form"],
+    ["formalize", "formal"],
+    ["electriciti", "electr"],
+    ["electrical", "electr"],
+    ["hopeful", "hope"],
+    ["goodness", "good"],
+    ["revival", "reviv"],
+    ["allowance", "allow"],
+    ["inference", "infer"],
+    ["airliner", "airlin"],
+    ["gyroscopic", "gyroscop"],
+    ["adjustable", "adjust"],
+    ["defensible", "defens"],
+    ["irritant", "irrit"],
+    ["replacement", "replac"],
+    ["adjustment", "adjust"],
+    ["dependent", "depend"],
+    ["adoption", "adopt"],
+    ["homologou", "homolog"],
+    ["communism", "commun"],
+    ["activate", "activ"],
+    ["angulariti", "angular"],
+    ["homologous", "homolog"],
+    ["effective", "effect"],
+    ["bowdlerize", "bowdler"],
+    ["probate", "probat"],
+    ["rate", "rate"],
+    ["cease", "ceas"],
+    ["controll", "control"],
+    ["roll", "roll"],
+  ];
+
+  // Cross-checked against the `porter-stemmer` npm package (jedp/porter-stemmer, MIT), a
+  // long-established independent implementation of the same algorithm -- every pair above and
+  // below matched it exactly when verified during development. Not a runtime dependency of this
+  // project; used only to validate these fixed expected values, which are what the suite actually
+  // pins.
+  it.each([
+    ["running", "run"],
+    ["commits", "commit"],
+    ["commit", "commit"],
+    ["testing", "test"],
+    ["test", "test"],
+  ] as const)("stems %s to %s", (word, expected) => {
+    expect(_stemForTests(word)).toBe(expected);
+  });
+
+  it.each(vectors)("stems %s to %s", (word, expected) => {
+    expect(_stemForTests(word)).toBe(expected);
+  });
+
+  it("stems consistently regardless of input case", () => {
+    expect(_stemForTests("RUNNING")).toBe(_stemForTests("running"));
+  });
+
+  it("is idempotent: stemming an already-stemmed word is a no-op", () => {
+    const once = _stemForTests("nationalization");
+    expect(_stemForTests(once)).toBe(once);
   });
 });
 

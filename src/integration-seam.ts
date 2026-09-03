@@ -43,7 +43,7 @@
 
 import { resolve as resolvePath, sep } from "node:path";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
-import { openStorage } from "./storage.js";
+import { insertRecallLog, listSurfacedFactIds, openStorage } from "./storage.js";
 import { resolveDbPath } from "./db.js";
 import { retrieve, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
@@ -55,7 +55,9 @@ import type { Fact, FactKind } from "./types.js";
  * lines (ABNF, RFC 5234 core rules):
  *
  *   response      = header LF *( fact-line LF ) [ footer-line LF ]   ; footer-line is TGMEM/2+ only
- *   header        = "TGMEM/" version        ; version = 1*DIGIT
+ *   header        = "TGMEM/" version [ SEP delta-flag ]   ; version = 1*DIGIT
+ *   delta-flag    = "delta=1"               ; present only on a response the caller
+ *                                           ; explicitly requested with `--delta`
  *   fact-line     = tag SEP fresh-field SEP id-field SEP display-field
  *   tag           = "pref" / "dec" / "fact" / "corr"
  *   SEP           = 2%x20                   ; exactly two ASCII spaces
@@ -77,6 +79,13 @@ import type { Fact, FactKind } from "./types.js";
  *   and `JSON.parse` the final capture group to recover `display`.
  * - The decoded `display` string MUST be surfaced verbatim: the trust caveat is
  *   part of the payload, not something the consumer reconstructs (review S3).
+ * - `delta=1` on the header marks a response that deliberately omits facts the
+ *   same session id was already sent *and* that do not match the current query
+ *   (a fact matching the query is re-sent regardless). It appears only when the caller passed
+ *   `--delta` with a session id: a consumer that did not ask for a delta never
+ *   receives one, because a partial block is otherwise byte-indistinguishable
+ *   from a complete one. Consumers parsing the header MAY match it with
+ *   `^TGMEM\/(\d+)(?: {2}delta=1)?$`.
  *
  * Version policy: any change to line shape, field order, the separator, or the
  * escaping of `display` -- and any addition to the closed `tag`/`verdict` sets,
@@ -110,8 +119,8 @@ export const TGMEM_HEADER = `TGMEM/${TGMEM_PROTOCOL_VERSION}`;
 /** The one fixed footer line TGMEM/2+ appends after fact-lines, when there is at least one. */
 export const TGMEM_FOOTER_LINE = "footer  mem show <id> for detail; mem review to resolve contested/pending";
 
-function tgmemHeaderFor(protocolVersion: number): string {
-  return `TGMEM/${protocolVersion}`;
+function tgmemHeaderFor(protocolVersion: number, delta = false): string {
+  return delta ? `TGMEM/${protocolVersion}  delta=1` : `TGMEM/${protocolVersion}`;
 }
 
 /**
@@ -176,6 +185,13 @@ const PROTOCOL_KIND_TAG: Record<FactKind, string> = {
 export interface HintFormatOptions {
   /** Explicit project root anchors are evaluated against (design plan Section 3: never ambient cwd). */
   readonly root: string;
+  /**
+   * Free-text query threaded straight through to `retrieve()`'s `RetrievalOptions.query`. An
+   * absent or empty query preserves the original recency-only behaviour exactly (all candidates
+   * tie at BM25 score 0, so the final sort falls through to `captured_at` descending) -- this is
+   * the path `SessionStart` uses and it must not change.
+   */
+  readonly query?: string | undefined;
   /** File paths (absolute, or relative to `root`) the caller is currently working with; matches `scope="path"` facts. */
   readonly contextFiles?: readonly string[] | undefined;
   /** Test/advanced override: explicit sqlite file path instead of the resolved mem home. */
@@ -197,6 +213,27 @@ export interface HintFormatOptions {
   readonly stable?: boolean | undefined;
   /** Threaded straight through to `retrieve()`'s `RetrievalOptions.hintStyle` -- see retrieval.ts's doc comment. Defaults to `"full"`. */
   readonly hintStyle?: "full" | "terse" | undefined;
+  /**
+   * Identifier of the consumer session this response is for (a hook's `session_id`). When set, the
+   * ids of the facts actually emitted are recorded in `recall_log` best-effort -- a failure to log
+   * never fails the recall -- so a later `delta` call for the same session can leave them out.
+   * Nothing is logged under `stable`, which exists to make output deterministic for tests, or when
+   * the budget blew (an empty response surfaced nothing).
+   */
+  readonly sessionId?: string | undefined;
+  /**
+   * When `true`, omits every fact already logged as surfaced to `sessionId` *that does not match the
+   * current query* (retrieval score of exactly zero), and marks the header `delta=1`. A fact that
+   * scores non-zero is always sent, however many times this session has seen it: the host may have
+   * compacted it out of context since, and a genuine hit belongs in context every time it is asked
+   * for. Requires `sessionId`; the CLI enforces that pairing, and this function treats `delta`
+   * without a session id as a plain full response (it cannot know what was already sent). Applied
+   * before the per-kind caps, so a session drains the next-best unseen facts rather than receiving
+   * an empty block as soon as the top-ranked ones have all been sent once. The recall log itself
+   * still records every emitted fact: it is an audit of what was sent, and the decision to re-send
+   * lives here, not there.
+   */
+  readonly delta?: boolean | undefined;
   /**
    * Test override for the soft time budget in {@link RETRIEVAL_BUDGET_MS}, in milliseconds.
    *
@@ -224,6 +261,8 @@ export interface HintFormatResult {
    * which the consumer's fail-open path already reads correctly.
    */
   readonly truncated: boolean;
+  /** True when this response was filtered against the session's recall log (header carries `delta=1`). */
+  readonly delta: boolean;
 }
 
 /** Resolves the effective protocol version for a call: exactly `1` selects TGMEM/1; anything else (including `undefined`) is the current default. Never throws on a bad value -- fail-open. */
@@ -241,7 +280,8 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
     return await buildHintFormatUnsafe(options);
   } catch (error) {
     logWarning(`hint-format failed internally, returning empty hint set: ${errorMessage(error)}`);
-    return { header: tgmemHeaderFor(resolveProtocolVersion(options.protocolVersion)), lines: [], truncated: false };
+    const delta = options.delta === true && typeof options.sessionId === "string" && options.sessionId.length > 0;
+    return { header: tgmemHeaderFor(resolveProtocolVersion(options.protocolVersion), delta), lines: [], truncated: false, delta };
   }
 }
 
@@ -257,6 +297,8 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const now = options.now ?? new Date();
   const protocolVersion = resolveProtocolVersion(options.protocolVersion);
   const stable = options.stable === true;
+  const sessionId = typeof options.sessionId === "string" && options.sessionId.length > 0 ? options.sessionId : undefined;
+  const delta = options.delta === true && sessionId !== undefined;
 
   // `openStorage`, not the bare `openDb`: this is a library seam an embedder can call against a
   // database mem's CLI has never opened, and `openDb` alone does not guarantee the storage-owned
@@ -266,8 +308,12 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const budgetMs = options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS;
   const db = openStorage(options.dbPath ?? resolveDbPath());
   let allFacts: Fact[];
+  let alreadySurfaced: ReadonlySet<string> = new Set();
   try {
     allFacts = queryAllFacts(db);
+    if (delta) {
+      alreadySurfaced = listSurfacedFactIds(db, sessionId);
+    }
   } finally {
     db.close();
   }
@@ -276,7 +322,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
   const { results } = await retrieve(scoped, {
-    query: "",
+    query: options.query ?? "",
     root,
     hintFormat: true,
     limit: HINT_FORMAT_RECALL_LIMIT,
@@ -303,11 +349,25 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // byte-indistinguishable from a complete one in TGMEM/2, so emitting one would
     // hand the consumer a subset while its own contract says it received everything.
     logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning an empty hint set`);
-    return { header: tgmemHeaderFor(protocolVersion), lines: [], truncated: true };
+    return { header: tgmemHeaderFor(protocolVersion, delta), lines: [], truncated: true, delta };
   }
 
-  const aggressive = results.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
-  const precision = results.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
+  // Delta filtering happens before the caps (see `HintFormatOptions.delta`): the caps then select
+  // from what the session has not seen, so a repeat call surfaces the next-best facts instead of
+  // an empty block as soon as the top-ranked ones have all been sent once.
+  //
+  // "Already sent" suppresses a fact only while it scores zero for the current query. "Sent" and
+  // "still in the agent's context" part ways over a long session -- the host compacts, and a fact
+  // surfaced as filler on prompt 1 (swept in by the caps because nothing matched) and evicted since
+  // would otherwise never be re-sent when it becomes the exact answer on prompt 9. Zero-vs-nonzero
+  // is the one scale-free predicate available: BM25 scores are unbounded and corpus-dependent, so
+  // any absolute cutoff would be tied to one store's size, and the kind boost multiplies, so it can
+  // never lift a zero. A genuine hit therefore always re-sends, however often it was sent before;
+  // filler -- exactly the set that scored zero -- stays suppressed, and a query-less call (the
+  // SessionStart recency dump) scores everything zero, so it remains fully suppressible.
+  const unseen = delta ? results.filter((result) => result.score !== 0 || !alreadySurfaced.has(result.fact.id)) : results;
+  const aggressive = unseen.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
+  const precision = unseen.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
 
   const ordered = [...aggressive, ...precision];
   if (stable) {
@@ -327,7 +387,32 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     lines.push(TGMEM_FOOTER_LINE);
   }
 
-  return { header: tgmemHeaderFor(protocolVersion), lines, truncated };
+  if (sessionId !== undefined && !stable) {
+    recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittable.map((result) => result.fact.id), now);
+  }
+
+  return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta };
+}
+
+/**
+ * Best-effort write of the emitted fact ids to `recall_log`. Any failure -- a read-only store, a
+ * locked database, a schema this build does not expect -- is logged to stderr and otherwise
+ * ignored: the recall already succeeded, and a bookkeeping failure must not turn it into a failure.
+ */
+function recordSurfaced(dbPath: string, sessionId: string, factIds: readonly string[], now: Date): void {
+  if (factIds.length === 0) {
+    return;
+  }
+  try {
+    const db = openStorage(dbPath);
+    try {
+      insertRecallLog(db, sessionId, factIds, now.toISOString());
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    logWarning(`could not record surfaced facts for session ${JSON.stringify(sessionId)}: ${errorMessage(error)}`);
+  }
 }
 
 interface RawFactRow {
