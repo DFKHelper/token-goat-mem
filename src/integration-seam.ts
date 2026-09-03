@@ -289,7 +289,15 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   });
 
   const elapsed = Date.now() - start;
-  const truncated = elapsed > budgetMs;
+  // `>=`, not `>`: a budget of N milliseconds is the time available, so having consumed all of it
+  // is already an overrun. The strict `>` made a zero budget mean "no budget, unless the work
+  // happened to finish inside a single millisecond" -- on a fast machine a 10-fact anchor-free
+  // retrieval does exactly that, `elapsed` reads 0, and `0 > 0` reported a healthy response from a
+  // caller that had allotted no time at all. That is not a rounding detail: it made the one
+  // deterministic handle callers have on this path (pass 0, get the exhausted contract) depend on
+  // the runner's clock, which is how it surfaced -- as an intermittent Linux-only CI failure of the
+  // very test written to pin the degradation contract "rather than inferred from a flake".
+  const truncated = elapsed >= budgetMs;
   if (truncated) {
     // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is
     // byte-indistinguishable from a complete one in TGMEM/2, so emitting one would

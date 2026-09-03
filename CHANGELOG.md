@@ -2,6 +2,16 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **A fully-consumed retrieval budget was reported as headroom, making the seam's one deterministic degradation handle depend on the clock** -- `buildHintFormat` (`src/integration-seam.ts`) computed `truncated = elapsed > budgetMs`, so a budget of N milliseconds counted as exceeded only *after* N had passed, never on reaching it. At the real 150ms budget that distinction is invisible, but `retrievalBudgetMs: 0` is the handle callers and tests use to force the budget-exhausted contract on purpose, and under a strict `>` a zero budget reported a healthy response whenever the work finished inside a single millisecond. A ten-fact, anchor-free retrieval on a fast runner does exactly that: `elapsed` reads `0`, `0 > 0` is false, and the caller that allotted no time at all was handed a full hint set as though the budget had been honored.
+
+  This surfaced as an intermittent Linux-only CI failure of `tests/unit/integration-seam.test.ts`'s own budget test -- the one whose comment says forcing the budget to 0 exercises the degradation path "so the degradation contract is pinned rather than inferred from a flake". It failed on `ubuntu-latest` for commit `9fd6f2e` and passed on the next commit with the test code byte-identical, which is what identified it as a boundary condition rather than a regression: the assertion was a coin flip decided by how fast the runner completed the retrieval.
+
+  `truncated` is now `elapsed >= budgetMs`: the budget is the time available, so having consumed all of it is already an overrun, and a zero budget is unconditionally exhausted regardless of platform or load. Nothing in production passes `0` (`options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS` only substitutes for nullish, and the suite's non-truncating constant is an hour), so the change is confined to the boundary itself. The new regression test freezes `Date.now` so `elapsed` is pinned to exactly `0` on every platform, making this the boundary case rather than a race that happens to land on it -- it fails against the old `>` on Windows, where the original flake never reproduced.
+
 ## [0.3.2] - 2026-09-02
 
 ### Fixed
