@@ -21,6 +21,9 @@ import {
   deleteSourcesForFact,
   deleteSourcesOlderThan,
   getEpoch,
+  getUsefulnessCounts,
+  insertRecallLog,
+  markRecallUsed,
   resolveFactIdOrPrefix,
 } from "../src/storage.js";
 import { openDb } from "../src/db.js";
@@ -522,5 +525,119 @@ describe("regression: updateFact trims the same fields insertFact trims", () => 
     // detector, and an edit that should have superseded a rival silently failed to match it.
     expect(updated?.text).toBe("uses yarn now");
     expect(updated?.value).toBe("yarn");
+  });
+});
+
+describe("recall_log.used_at migration (ensureStorageSchema, pre-column database)", () => {
+  it("adds used_at to a recall_log written before the column existed, without disturbing its rows", () => {
+    // Simulate a database written by a build that had `recall_log` but not `used_at`. STORAGE_SCHEMA's
+    // `CREATE TABLE IF NOT EXISTS` is a no-op against such a database, so the ALTER is the only thing
+    // that can migrate it -- which is exactly what this pins.
+    const preColumnPath = join(root, "pre-used-at.db");
+    const preColumnDb = openDb(preColumnPath);
+    preColumnDb.exec(
+      `CREATE TABLE recall_log (
+         fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+         session_id TEXT NOT NULL,
+         surfaced_at TEXT NOT NULL
+       )`
+    );
+    preColumnDb
+      .prepare(
+        `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)
+         VALUES ('old-fact', 'uses npm not pnpm', 'preference', NULL, NULL, 'global', NULL, 'user', NULL, '2025-01-01T00:00:00.000Z', NULL, 'active', 1)`
+      )
+      .run();
+    preColumnDb.prepare("INSERT INTO recall_log (fact_id, session_id, surfaced_at) VALUES (?, ?, ?)").run("old-fact", "old-session", "2025-01-02T00:00:00.000Z");
+    expect((preColumnDb.prepare("PRAGMA table_info(recall_log)").all() as { name: string }[]).map((c) => c.name)).not.toContain("used_at");
+    preColumnDb.close();
+
+    const migrated = openStorage(preColumnPath);
+    try {
+      const columns = (migrated.prepare("PRAGMA table_info(recall_log)").all() as { name: string }[]).map((c) => c.name);
+      expect(columns).toContain("used_at");
+
+      // The pre-existing row survives intact, with NULL -- "nobody ever said", not a backfilled claim
+      // that an unreviewed recall was useful.
+      const row = migrated
+        .prepare<[], { fact_id: string; surfaced_at: string; used_at: string | null }>("SELECT fact_id, surfaced_at, used_at FROM recall_log")
+        .get();
+      expect(row?.fact_id).toBe("old-fact");
+      expect(row?.surfaced_at).toBe("2025-01-02T00:00:00.000Z");
+      expect(row?.used_at).toBeNull();
+      expect(getUsefulnessCounts(migrated).get("old-fact")).toEqual({ surfaced: 1, used: 0 });
+
+      // Re-running the migration is a no-op, not a "duplicate column" crash.
+      expect(() => ensureStorageSchema(migrated)).not.toThrow();
+      expect(markRecallUsed(migrated, ["old-fact"], "old-session", "2025-01-03T00:00:00.000Z")).toBe(1);
+    } finally {
+      migrated.close();
+    }
+  });
+});
+
+describe("markRecallUsed / getUsefulnessCounts", () => {
+  it("marks only the named session's rows and is idempotent, so a repeat cannot inflate the used count", () => {
+    const fact = insertFact(db, baseFact());
+    insertRecallLog(db, "session-1", [fact.id], "2026-01-01T00:00:00.000Z");
+    insertRecallLog(db, "session-2", [fact.id], "2026-01-02T00:00:00.000Z");
+
+    expect(markRecallUsed(db, [fact.id], "session-1", "2026-01-03T00:00:00.000Z")).toBe(1);
+    expect(getUsefulnessCounts(db).get(fact.id)).toEqual({ surfaced: 2, used: 1 });
+
+    // Second call updates nothing: `used_at IS NULL` guards it. Without that guard the used count
+    // would climb past the surfaced count and rank this fact above one genuinely used every time.
+    expect(markRecallUsed(db, [fact.id], "session-1", "2026-01-04T00:00:00.000Z")).toBe(0);
+    expect(getUsefulnessCounts(db).get(fact.id)).toEqual({ surfaced: 2, used: 1 });
+
+    // And the first confirmation's timestamp is what is kept.
+    const stamps = db
+      .prepare<[], { session_id: string; used_at: string | null }>("SELECT session_id, used_at FROM recall_log ORDER BY session_id")
+      .all();
+    expect(stamps).toEqual([
+      { session_id: "session-1", used_at: "2026-01-03T00:00:00.000Z" },
+      { session_id: "session-2", used_at: null },
+    ]);
+  });
+
+  it("returns 0 for a fact never surfaced in the given session, rather than inventing a row", () => {
+    const fact = insertFact(db, baseFact());
+    insertRecallLog(db, "session-1", [fact.id], "2026-01-01T00:00:00.000Z");
+
+    expect(markRecallUsed(db, [fact.id], "some-other-session", "2026-01-03T00:00:00.000Z")).toBe(0);
+    expect(getUsefulnessCounts(db).get(fact.id)).toEqual({ surfaced: 1, used: 0 });
+  });
+
+  it("does not bump the write epoch: a usefulness stamp changes no fact a cached recall could go stale on", () => {
+    const fact = insertFact(db, baseFact());
+    insertRecallLog(db, "session-1", [fact.id], "2026-01-01T00:00:00.000Z");
+    const before = getEpoch(db);
+
+    markRecallUsed(db, [fact.id], "session-1", "2026-01-03T00:00:00.000Z");
+
+    expect(getEpoch(db)).toBe(before);
+  });
+
+  it("groups per fact across sessions in one pass, and omits facts with no recall_log row entirely", () => {
+    const used = insertFact(db, baseFact({ text: "the useful one" }));
+    const surfacedOnly = insertFact(db, baseFact({ text: "surfaced but never confirmed" }));
+    const neverSurfaced = insertFact(db, baseFact({ text: "never surfaced at all" }));
+
+    insertRecallLog(db, "s1", [used.id, surfacedOnly.id], "2026-01-01T00:00:00.000Z");
+    insertRecallLog(db, "s2", [used.id, surfacedOnly.id], "2026-01-02T00:00:00.000Z");
+    insertRecallLog(db, "s3", [used.id], "2026-01-03T00:00:00.000Z");
+    markRecallUsed(db, [used.id], "s1", "2026-01-04T00:00:00.000Z");
+    markRecallUsed(db, [used.id], "s3", "2026-01-05T00:00:00.000Z");
+
+    const counts = getUsefulnessCounts(db);
+    expect(counts.get(used.id)).toEqual({ surfaced: 3, used: 2 });
+    expect(counts.get(surfacedOnly.id)).toEqual({ surfaced: 2, used: 0 });
+    // Absent, not `{ surfaced: 0, used: 0 }` -- "never shown to anyone" and "shown and never
+    // confirmed" are different claims, and only the second belongs in a usefulness ranking.
+    expect(counts.has(neverSurfaced.id)).toBe(false);
+  });
+
+  it("no-ops on an empty id list rather than issuing a statement", () => {
+    expect(markRecallUsed(db, [], "session-1", "2026-01-03T00:00:00.000Z")).toBe(0);
   });
 });

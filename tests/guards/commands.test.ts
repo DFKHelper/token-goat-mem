@@ -25,6 +25,7 @@ const EXPECTED_COMMANDS = [
   "show",
   "suggest",
   "uninstall",
+  "used",
 ] as const;
 
 describe("Command guards", () => {

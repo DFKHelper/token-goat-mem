@@ -31,6 +31,7 @@ All memory operations are explicit and auditable:
 - `mem review` — view pending, contested, anchor-contradicted, or unanchored-but-checkable facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts; the `unanchored` bucket is an advisory nudge to add an anchor, not a pending decision)
 - `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
+- `mem used <id...> --session-id <id>` — record that facts recalled in that session were actually useful; feeds recall ranking as a third RRF rank list
 - `mem edit <id>` — modify fact text, subject/value, anchor, or scope
 - `mem show <id>` — view a fact and its full provenance
 - `mem list` — all facts, filtered by status/kind/subject/scope

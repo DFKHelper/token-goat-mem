@@ -2797,3 +2797,105 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     expect(listed.stdout).toContain("a pre-migration fact");
   });
 });
+
+describe("mem used (usefulness feedback)", () => {
+  /** Surfaces every stored global fact to `sessionId` via the real hint-format path, so `recall_log` is populated the way production populates it. */
+  async function surfaceAll(sessionId: string): Promise<void> {
+    const result = await runCli(["recall", "--hint-format", "--session-id", sessionId, "--root", "."]);
+    expect(result.exitCode).toBe(0);
+  }
+
+  function usedAtRows(): Array<{ fact_id: string; session_id: string; used_at: string | null }> {
+    const db = openStorage(resolveDbPath());
+    try {
+      return db
+        .prepare<[], { fact_id: string; session_id: string; used_at: string | null }>("SELECT fact_id, session_id, used_at FROM recall_log ORDER BY rowid")
+        .all();
+    } finally {
+      db.close();
+    }
+  }
+
+  it("marks a surfaced fact useful by short id prefix, reports the row count, and audit-logs it", async () => {
+    const id = extractRememberedId(await runCli(["remember", "deploys happen on tuesdays", "--kind", "fact", "--scope", "global"]));
+    await surfaceAll("session-alpha");
+
+    // A prefix, not the full id: `mem used` has to resolve ids exactly like every other id-accepting
+    // command, since the id a user has to hand is the truncated one `mem recall` prints.
+    const marked = await runCli(["used", id.slice(0, 8), "--session-id", "session-alpha"]);
+
+    expect(marked.exitCode).toBe(0);
+    expect(marked.stdout).toBe("marked 1 recall row useful in session session-alpha\n");
+    expect(marked.stderr).toBe("");
+    expect(usedAtRows()).toEqual([{ fact_id: id, session_id: "session-alpha", used_at: expect.any(String) }]);
+
+    const db = openStorage(resolveDbPath());
+    const events = (db.prepare("SELECT event FROM audit_log WHERE fact_id = ? ORDER BY rowid").all(id) as { event: string }[]).map((row) => row.event);
+    db.close();
+    expect(events).toContain("used");
+  });
+
+  it("says so and exits 0 when the fact was never surfaced in that session, instead of crashing or silently marking nothing", async () => {
+    const id = extractRememberedId(await runCli(["remember", "deploys happen on tuesdays", "--kind", "fact", "--scope", "global"]));
+    await surfaceAll("session-alpha");
+
+    const marked = await runCli(["used", id, "--session-id", "session-beta"]);
+
+    expect(marked.exitCode).toBe(0);
+    expect(marked.stdout).toContain(`note: ${id} was never surfaced in session session-beta`);
+    expect(marked.stdout).toContain("marked 0 recall rows useful");
+    // session-alpha's row is untouched: a wrong session id must not mark the right fact anyway.
+    expect(usedAtRows()).toEqual([{ fact_id: id, session_id: "session-alpha", used_at: null }]);
+  });
+
+  it("distinguishes 'already marked' from 'never surfaced', since both update zero rows", async () => {
+    const id = extractRememberedId(await runCli(["remember", "deploys happen on tuesdays", "--kind", "fact", "--scope", "global"]));
+    await surfaceAll("session-alpha");
+    await runCli(["used", id, "--session-id", "session-alpha"]);
+
+    const again = await runCli(["used", id, "--session-id", "session-alpha"]);
+
+    expect(again.exitCode).toBe(0);
+    expect(again.stdout).toContain("already marked useful in this session");
+    expect(again.stdout).not.toContain("never surfaced");
+  });
+
+  it("requires --session-id and names it, since mem holds no notion of a current session to default to", async () => {
+    const id = extractRememberedId(await runCli(["remember", "deploys happen on tuesdays", "--kind", "fact", "--scope", "global"]));
+
+    const missing = await runCli(["used", id]);
+
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain("--session-id <id> is required");
+    expect(missing.stdout).toBe("");
+  });
+
+  it("resolves every id before writing, so a bad id in a batch leaves none of the batch marked", async () => {
+    const good = extractRememberedId(await runCli(["remember", "deploys happen on tuesdays", "--kind", "fact", "--scope", "global"]));
+    await surfaceAll("session-alpha");
+
+    const partial = await runCli(["used", good, "00000000-0000-4000-8000-000000000000", "--session-id", "session-alpha"]);
+
+    expect(partial.exitCode).toBe(1);
+    expect(partial.stderr).toContain("no such fact");
+    expect(usedAtRows().every((row) => row.used_at === null)).toBe(true);
+  });
+
+  it("feeds the ranking: a confirmed-useful fact outranks one that merely ties it on BM25", async () => {
+    // Both facts contain "deploy" exactly once in the same-length text, so BM25 ties them and the
+    // default recency ordering puts the newer (`second`) first. Confirming the older one useful is
+    // the only thing that can flip that, which is what makes this a test of the wiring rather than
+    // of the ordering that was already there.
+    const first = extractRememberedId(await runCli(["remember", "deploy runbook alpha", "--kind", "fact", "--scope", "global"]));
+    const second = extractRememberedId(await runCli(["remember", "deploy runbook bravo", "--kind", "fact", "--scope", "global"]));
+
+    const before = await runCli(["recall", "deploy", "--root", "."]);
+    expect(before.stdout.indexOf(second.slice(0, 8))).toBeLessThan(before.stdout.indexOf(first.slice(0, 8)));
+
+    await surfaceAll("session-alpha");
+    await runCli(["used", first, "--session-id", "session-alpha"]);
+
+    const after = await runCli(["recall", "deploy", "--root", "."]);
+    expect(after.stdout.indexOf(first.slice(0, 8))).toBeLessThan(after.stdout.indexOf(second.slice(0, 8)));
+  });
+});
