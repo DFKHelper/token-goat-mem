@@ -1971,6 +1971,13 @@ export function buildProgram(): Command {
     .option("--limit <n>", "Stop after this many facts", (value: string) => Number.parseInt(value, 10))
     .action(
       guard(async (options: EmbedCliOptions) => {
+        // Before the config read on purpose: a malformed flag is a mistake in the invocation itself,
+        // and reporting the environment problem first hides it behind an error the user cannot act
+        // on until they have already fixed this one.
+        if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) {
+          throw new UsageError("--limit must be a positive integer");
+        }
+
         const config = readEmbeddingConfigForCommand();
         const backend = resolveConfiguredEmbeddingBackend(process.env);
         if (backend === null) {
@@ -1993,7 +2000,7 @@ export function buildProgram(): Command {
           }
           const pending = listFactsNeedingEmbedding(db, {
             ...(options.all === true ? { all: true } : {}),
-            ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
+            ...(options.limit !== undefined ? { limit: options.limit } : {}),
           });
           if (pending.length === 0) {
             return { embedded: 0, skipped: 0, failed: 0, dimension: null as number | null, firstFailure: null as string | null, empty: true };

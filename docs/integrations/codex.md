@@ -46,6 +46,10 @@ token-goat-mem is installed (`mem` on PATH).
 - At the start of a task, run `mem recall --hint-format --root .` and treat
   each returned line's `display` string as a prior fact, honoring its
   embedded trust caveat.
+- When a recalled fact actually informed your work, say so:
+  `mem used <id>... --session-id <session>`, passing the same session id you
+  recalled under. Recall ranks partly on this, and nothing else produces
+  the signal -- a fact never marked is a fact recall cannot learn to prefer.
 - Do not wait to be asked to run `mem remember` — when the user says things
   like "remember that...", "always...", "from now on...", "never...",
   "don't...", or otherwise reaches a durable preference, decision, or

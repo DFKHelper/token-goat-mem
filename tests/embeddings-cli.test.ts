@@ -144,6 +144,21 @@ describe("with no embedding configuration, behaviour is what it was before the f
     expect(result.stdout).not.toMatch(/error|fail|misconfigured/iu);
   });
 
+  it("rejects a malformed --limit ahead of the configuration error, so the fixable mistake is the one reported", async () => {
+    // The flag used to be parsed with a bare parseInt and filtered downstream by Number.isFinite, so
+    // `--limit abc` silently embedded everything instead of erroring -- while `mem recall --limit`
+    // rejected the identical input. Unconfigured here on purpose: the usage error has to win, or the
+    // user fixes their environment first and only then discovers the flag never applied.
+    for (const bad of ["abc", "0", "-3"]) {
+      const result = await runCli(["embed", "--limit", bad]);
+
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toMatch(/^mem: \S/u);
+      expect(result.stderr).toContain("--limit must be a positive integer");
+      expect(result.stderr).not.toContain(EMBED_URL_ENV);
+    }
+  });
+
   it("mem embed exits non-zero and names both required variables", async () => {
     const result = await runCli(["embed"]);
 
