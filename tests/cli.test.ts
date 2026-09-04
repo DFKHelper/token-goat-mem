@@ -1513,6 +1513,69 @@ describe("mem show --json", () => {
     expect(Array.isArray(envelope.sources)).toBe(true);
   });
 
+  it("resolves the superseding fact instead of leaving its id buried in audit prose", async () => {
+    // The whole point of the feature: the loser's own `mem show` answers "what replaced this?"
+    // without the reader parsing a sentence out of the audit log or running a second lookup.
+    const first = await runCli([
+      "remember",
+      "node 18 is the floor",
+      "--kind",
+      "decision",
+      "--subject",
+      "node-floor",
+      "--value",
+      "18",
+    ]);
+    const loserId = extractRememberedId(first);
+    const second = await runCli([
+      "remember",
+      "node 20 is the floor",
+      "--kind",
+      "decision",
+      "--subject",
+      "node-floor",
+      "--value",
+      "20",
+    ]);
+    const winnerId = extractRememberedId(second);
+
+    // Contradictions are recomputed at recall and persisted only by the retention pass, so the
+    // loser is still `active` until the retention pass runs. Driving `epoch --gc` here rather than
+    // asserting on an unreconciled store keeps the test honest about when the edge actually exists.
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+
+    const shown = await runCli(["show", loserId]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("status: superseded");
+    expect(shown.stdout).toContain(`superseded_by: ${winnerId} (active): node 20 is the floor`);
+
+    // The winner is not superseded, so it must not claim an edge it does not have.
+    const winnerShown = await runCli(["show", winnerId]);
+    expect(winnerShown.stdout).not.toContain("superseded_by:");
+
+    const asJson = await runCli(["show", loserId, "--json"]);
+    const envelope = JSON.parse(asJson.stdout) as {
+      supersededBy: { id: string; status: string; text: string } | null;
+    };
+    expect(envelope.supersededBy).toEqual({ id: winnerId, status: "active", text: "node 20 is the floor" });
+  });
+
+  it("says so plainly when a superseded fact has no successor", async () => {
+    // `forget` retires a fact without a winner, and so do `review --reject` and consolidate's stale
+    // pass. Silence here would be indistinguishable from the feature not existing, so the absence
+    // is stated rather than omitted.
+    const remembered = await runCli(["remember", "retired outright", "--kind", "fact"]);
+    const id = extractRememberedId(remembered);
+    expect((await runCli(["forget", id])).exitCode).toBe(0);
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("status: superseded");
+    expect(shown.stdout).toContain("superseded_by: (nothing -- retired by forget, reject, or staleness)");
+
+    const envelope = JSON.parse((await runCli(["show", id, "--json"])).stdout) as { supersededBy: unknown };
+    expect(envelope.supersededBy).toBeNull();
+  });
+
   it("still produces the existing formatFactDetail text output when --json is omitted", async () => {
     const remembered = await runCli([
       "remember",

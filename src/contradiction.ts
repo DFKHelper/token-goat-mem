@@ -14,6 +14,7 @@
  * `pinned` facts are live enough to contradict one another (pins are not exempt from this — S8).
  */
 
+import { SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import { normalizePath } from "./pathUtils.js";
 import type { Fact, FactScope, FactStatus } from "./types.js";
 
@@ -226,7 +227,7 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
           previousStatus: fact.status,
           nextStatus: "superseded",
           reason:
-            `Superseded by fact ${best.id} on subject "${bucket.subject}" (scope=${bucket.scope}): ` +
+            `${SUPERSEDED_BY_FACT_PREFIX}${best.id} on subject "${bucket.subject}" (scope=${bucket.scope}): ` +
             `value "${fact.value}" superseded by newer/higher-provenance value "${best.value}".`,
         });
       }
@@ -247,7 +248,7 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
           previousStatus: fact.status,
           nextStatus: "superseded",
           reason:
-            `Superseded by fact ${best.id} on subject "${bucket.subject}" (scope=${bucket.scope}): ` +
+            `${SUPERSEDED_BY_FACT_PREFIX}${best.id} on subject "${bucket.subject}" (scope=${bucket.scope}): ` +
             `value "${fact.value}" superseded by newer/higher-provenance value "${best.value}".`,
         });
       }

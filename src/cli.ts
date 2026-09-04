@@ -60,7 +60,13 @@ import {
   staleCutoff,
   type DuplicateCluster,
 } from "./consolidate.js";
-import { insertAuditLog, resolveDbPath } from "./db.js";
+import {
+  findSupersedingFactId,
+  insertAuditLog,
+  resolveDbPath,
+  SUPERSEDED_AS_DUPLICATE_PREFIX,
+  SUPERSEDED_BY_FACT_PREFIX,
+} from "./db.js";
 import {
   EMBED_API_KEY_ENV,
   EMBED_MODEL_ENV,
@@ -97,6 +103,7 @@ import {
   getEmbeddingMeta,
   getEntityKeysByFact,
   getEpoch,
+  getFactById,
   getUsefulnessCounts,
   listEntityCounts,
   listFacts,
@@ -448,7 +455,42 @@ function formatFactSummary(fact: Fact): string {
   return `${fact.id}  [${fact.kind}/${fact.status}${binding}]${kv}  ${fact.text}`;
 }
 
-function formatFactDetail(fact: Fact, freshness: AnchorVerdict, sources: readonly Source[]): string {
+/**
+ * What `mem show` knows about the fact that replaced this one: the id recovered from the audit log,
+ * and the winner itself when it is still in the store (`mem gc` can prune it, and it may since have
+ * been superseded in turn -- its own `status` is what says so).
+ */
+interface SupersessionEdge {
+  readonly winnerId: string;
+  readonly winner: Fact | undefined;
+}
+
+/**
+ * Renders the supersession edge, or nothing when the fact was not superseded.
+ *
+ * A superseded fact with no named winner is stated rather than omitted: "retired, and nothing
+ * replaced it" is a different and equally useful answer to "what happened to this?" than silence,
+ * which the reader would otherwise have to disambiguate from a missing feature.
+ */
+function formatSupersessionLine(fact: Fact, edge: SupersessionEdge | null): string | null {
+  if (fact.status !== "superseded") {
+    return null;
+  }
+  if (edge === null) {
+    return "superseded_by: (nothing -- retired by forget, reject, or staleness)";
+  }
+  if (edge.winner === undefined) {
+    return `superseded_by: ${edge.winnerId} (no longer in the store -- pruned by mem gc)`;
+  }
+  return `superseded_by: ${edge.winnerId} (${edge.winner.status}): ${edge.winner.text}`;
+}
+
+function formatFactDetail(
+  fact: Fact,
+  freshness: AnchorVerdict,
+  sources: readonly Source[],
+  edge: SupersessionEdge | null
+): string {
   const scopeRoot = fact.scopeRoot ?? null;
   const lines: string[] = [
     `id: ${fact.id}`,
@@ -464,6 +506,10 @@ function formatFactDetail(fact: Fact, freshness: AnchorVerdict, sources: readonl
     `anchor: ${fact.anchor ?? "(none)"}  freshness=${freshness}`,
     `confidence: ${fact.confidence}`,
   ];
+  const supersession = formatSupersessionLine(fact, edge);
+  if (supersession !== null) {
+    lines.push(supersession);
+  }
   if (sources.length > 0) {
     lines.push("sources:");
     for (const source of sources) {
@@ -707,7 +753,7 @@ function promotePending(db: Database.Database, id: string): string {
         rival.id,
         "superseded",
         "review_promote",
-        `Superseded by fact ${fact.id}: contested contradiction resolved in that fact's favor via explicit review.`
+        `${SUPERSEDED_BY_FACT_PREFIX}${fact.id}: contested contradiction resolved in that fact's favor via explicit review.`
       );
     }
     return fact.id;
@@ -1086,7 +1132,7 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
           member.fact.id,
           "superseded",
           CONSOLIDATE_DUPLICATE_EVENT,
-          `superseded as a duplicate of ${cluster.keep.id} (Jaccard ${member.similarity.toFixed(2)} over topic terms)`
+          `${SUPERSEDED_AS_DUPLICATE_PREFIX}${cluster.keep.id} (Jaccard ${member.similarity.toFixed(2)} over topic terms)`
         );
       }
     }
@@ -1702,7 +1748,7 @@ export function buildProgram(): Command {
     .option("--root <path>", "Project root for anchor freshness evaluation (default: a project-scoped fact's own scope root, else the current directory)")
     .option(
       "--json",
-      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none."
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none. Carries supersededBy: the fact that replaced this one, or null when nothing did -- the fact's own status distinguishes 'not superseded' from 'superseded with no successor'."
     )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
@@ -1717,16 +1763,28 @@ export function buildProgram(): Command {
           const root = anchorRootFor(fact, resolveRoot(options.root));
           const freshness = evaluateAnchor(fact.anchor, root);
           const sources = listSourcesForFact(db, fact.id);
+          // Only for a superseded fact: the audit log's most recent row for an active fact says
+          // something else entirely (a promotion, a pin), and reading a winner id out of it would
+          // be reporting an edge that does not exist.
+          const winnerId = fact.status === "superseded" ? findSupersedingFactId(db, fact.id) : null;
+          const edge: SupersessionEdge | null =
+            winnerId === null ? null : { winnerId, winner: getFactById(db, winnerId) };
           if (options.json === true) {
             const envelope = {
               schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
               fact: factToExportJson(fact, { includeEmbedding: false }),
               freshness,
               sources,
+              // null covers both "not superseded" and "superseded with no successor"; the fact's own
+              // status distinguishes them, so this stays one nullable field rather than two.
+              supersededBy:
+                edge === null
+                  ? null
+                  : { id: edge.winnerId, status: edge.winner?.status ?? null, text: edge.winner?.text ?? null },
             };
             return JSON.stringify(envelope, null, 2);
           }
-          return formatFactDetail(fact, freshness, sources);
+          return formatFactDetail(fact, freshness, sources, edge);
         });
         process.stdout.write(`${output}\n`);
       })
