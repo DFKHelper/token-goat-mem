@@ -50,7 +50,7 @@ All memory operations are explicit and auditable:
 
 **sources** table: `fact_id`, `excerpt` (redacted preview, full content never persisted in sources table), `stored_at`. The read/write/gc paths exist and are tested, but no capture path writes to it yet — the table is empty in practice. Keeping it unfed is a decision, not an oversight: deleting it would be a schema migration plus a break of the `insertSource`/`listSourcesForFact`/`deleteSourcesOlderThan` exports in `src/index.ts`, a one-way door bought for no correctness gain. `tests/guards/unfed-sources.test.ts` holds the docs to that state in both directions.
 
-**Contradiction resolution:** deterministic `subject`+`value` keying. Two active facts, same subject + scope, different value = mark loser `superseded`, prefer newer + higher-provenance. If genuinely ambiguous (same recency/provenance), mark `contested` and withhold from ground-truth surfacing.
+**Contradiction resolution:** deterministic `subject`+`value` keying. Two active facts, same subject + scope, different value = mark loser `superseded`, prefer newer + higher-provenance. If genuinely ambiguous (same recency/provenance), mark `contested` and withhold from ground-truth surfacing. A subject holds exactly one value: capturing a second value against the same subject is read as a correction, not as adding to a set, so encode set membership as a distinct subject per member (`supported-node-lts`, not two values under `supported-node`).
 
 ## Token-Goat integration seam
 
