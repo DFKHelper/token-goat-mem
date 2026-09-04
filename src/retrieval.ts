@@ -140,6 +140,29 @@ export interface RetrievalOptions {
    * only honest reading of "no feedback yet".
    */
   readonly usefulness?: ReadonlyMap<string, { surfaced: number; used: number }>;
+  /**
+   * Entity facets a fact must carry to survive, matched case-insensitively against
+   * {@link factEntityKeys}. Repeated values AND together: `["src/cli.ts", "--hint-format"]` keeps
+   * only facts mentioning both. Empty or omitted = no entity filtering.
+   *
+   * A filter here rather than a narrower candidate pool, for the reason spelled out on
+   * {@link epochAfter} and {@link restrictToRoot}: `retrieve` resolves contradictions across its
+   * whole input pool before any filter runs, and `resolveContradictions`'s reinstatement pass reads
+   * the absence of a rival as "nothing is left to contest this fact" and un-contests it. An
+   * entity-narrowed pool is exactly the shape that separates two rivals -- the losing fact often
+   * words the same claim with a different identifier -- so pre-filtering would surface a genuinely
+   * contested fact as clean ground truth.
+   */
+  readonly entities?: readonly string[];
+  /**
+   * Per-fact entity lookup keys (`storage.getEntityKeysByFact`), backing {@link entities}.
+   *
+   * Passed in rather than read here for the same reason as {@link usefulness}: this module ranks and
+   * gates, it does not open databases. A fact absent from the map carries no entities and is
+   * excluded by any non-empty {@link entities} filter -- which is also the honest answer for a fact
+   * captured before facet extraction existed, until `mem facets` backfills it.
+   */
+  readonly factEntityKeys?: ReadonlyMap<string, ReadonlySet<string>>;
 }
 
 export interface RetrievedFact {
@@ -508,7 +531,14 @@ function expandNegatedContractions(text: string): string {
     .replace(/n't\b/gu, " not");
 }
 
-function tokenize(text: string): string[] {
+/**
+ * The lexical index's notion of a term: lowercase, split on non-alphanumerics, stopword-filtered,
+ * Porter-stemmed. Exported for `facets.ts`, whose `topic` facet has to be exactly this and not
+ * merely something like it -- a second tokenizer that must agree with this one would diverge on the
+ * first change to either. The import direction is one-way (facets -> retrieval) on purpose: this
+ * module stays a pure ranking/gating module with no knowledge of storage or facets.
+ */
+export function tokenize(text: string): string[] {
   return expandNegatedContractions(text.toLowerCase())
     .split(/[^a-z0-9]+/u)
     .filter((token) => token.length > 0 && !STOPWORDS.has(token))
@@ -889,6 +919,17 @@ function isBoundToRoot(fact: Fact, root: string): boolean {
   return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot + sep);
 }
 
+/**
+ * Mirrors facets.ts's `normalizeTermKey` (trim + lowercase) exactly, and is duplicated for the same
+ * reason `normalizeSubjectForFilter` above duplicates storage.ts's `normalizeSubject`: every stored
+ * key already passed through the real function at write time, while an `options.entities` value
+ * arrives raw from a caller (the CLI's `--entity` string). Importing facets.ts here would also
+ * reverse this module's one-way dependency -- facets.ts imports `tokenize` from here.
+ */
+function normalizeEntityForFilter(entity: string): string {
+  return entity.trim().toLowerCase();
+}
+
 function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boolean {
   if (options.restrictToRoot === true && !isBoundToRoot(fact, options.root)) {
     return false;
@@ -912,6 +953,16 @@ function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boole
   // treated as 0, so a legacy row is excluded by any positive bound rather than silently included.
   if (options.epochAfter !== undefined && (fact.epoch ?? 0) <= options.epochAfter) {
     return false;
+  }
+  if (options.entities !== undefined && options.entities.length > 0) {
+    // A fact with no entry in the map carries no entities at all, so no non-empty requirement can
+    // be satisfied -- an empty set here and a missing key mean the same thing to this loop.
+    const carried = options.factEntityKeys?.get(fact.id) ?? new Set<string>();
+    for (const required of options.entities) {
+      if (!carried.has(normalizeEntityForFilter(required))) {
+        return false;
+      }
+    }
   }
   return true;
 }

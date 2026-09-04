@@ -16,6 +16,13 @@
  *     (Section 4 / review S2: token-goat's optional fallback cache, if it is
  *     ever added on the caller side, is keyed on this so a `forget`/`edit`
  *     is never masked by a stale TTL);
+ *   - the `fact_terms` table -- the structured facet layer (`src/facets.ts`):
+ *     the identifier-shaped tokens BM25's stemmer would destroy, kept
+ *     verbatim beside a normalized lookup key, so `mem recall --entity
+ *     src/retrieval.ts` can find a fact the lexical index only knows as
+ *     `src`/`retriev`/`ts`. Foreign-keyed with `ON DELETE CASCADE` like
+ *     `sources`: orphaned term rows would silently skew every term statistic
+ *     without ever failing a query;
  *   - typed CRUD for both tables, plus `openStorage`, the recommended
  *     connection entry point (`openDb` + this module's schema, in one call).
  *
@@ -33,6 +40,7 @@
 import { randomUUID } from "node:crypto";
 import { openDb, resolveDbPath } from "./db.js";
 import type { EmbeddingMeta } from "./embeddings.js";
+import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
 import type { Fact, FactFilter, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
 
 /** Connection type, borrowed from db.ts's own return type rather than importing better-sqlite3's types directly -- keeps this module's public surface in lockstep with whatever db.ts actually opens. */
@@ -60,6 +68,15 @@ CREATE TABLE IF NOT EXISTS recall_log (
 );
 CREATE INDEX IF NOT EXISTS idx_recall_log_session_fact ON recall_log(session_id, fact_id);
 CREATE INDEX IF NOT EXISTS idx_recall_log_surfaced_at ON recall_log(surfaced_at);
+
+CREATE TABLE IF NOT EXISTS fact_terms (
+  fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+  term TEXT NOT NULL,
+  term_key TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('entity','topic'))
+);
+CREATE INDEX IF NOT EXISTS idx_fact_terms_fact_id ON fact_terms(fact_id);
+CREATE INDEX IF NOT EXISTS idx_fact_terms_lookup ON fact_terms(term_key, kind);
 `;
 
 /**
@@ -225,6 +242,16 @@ function getFactRow(db: Db, id: string): FactRow | undefined {
  * Inserts a new fact and returns it in full (including the generated `id`
  * and any defaulted fields). Runs inside a transaction with the epoch bump
  * so a crash between the insert and the bump can never happen.
+ *
+ * Facet extraction (`fact_terms`) runs in that same transaction rather than
+ * in a caller. It lives here, and not in `capture.ts`'s `writeFact`, because
+ * `writeFact` is not the only write path: `exportImport.ts` calls this
+ * function directly (deliberately -- see its header), so a facet hook on the
+ * capture path would leave every `mem import --from-json` fact silently
+ * termless and invisible to `--entity` until someone ran a backfill. Unlike
+ * the embedding path, extraction is pure local computation with no network
+ * and no failure mode, so there is nothing here that can turn a fact write
+ * into a rollback.
  */
 export function insertFact(db: Db, fact: NewFact): Fact {
   const id = fact.id ?? randomUUID();
@@ -269,6 +296,7 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // store learned of the status, which is now.
       status === "active" ? capturedAt : new Date().toISOString()
     );
+    replaceFactTerms(db, id, extractFacets(fact.text));
   });
   // BEGIN IMMEDIATE, not the deferred default: this transaction reads (`bumpEpoch` -> `getEpoch`)
   // before it writes, and in WAL mode a deferred transaction that upgrades to a writer after
@@ -493,6 +521,14 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
     const result = db.prepare(`UPDATE facts SET ${finalSets.join(", ")} WHERE id = ?`).run(...finalParams, next, id);
     if (result.changes > 0) {
       performEpochUpsert(db, next);
+      if (patch.text !== undefined) {
+        // Terms describe `facts.text`, so an edit that rewrites the text has to re-extract them in
+        // the same transaction. Skipping this leaves `mem recall --entity` matching a fact on an
+        // identifier its text no longer mentions -- a stale claim rather than a missing one, and
+        // nothing downstream could tell it apart from a correct hit. Trimmed to match what was
+        // actually stored above, not the raw patch.
+        replaceFactTerms(db, id, extractFacets(patch.text.trim()));
+      }
     }
   });
   tx.immediate(); // read-then-write under WAL; see insertFact.
@@ -673,6 +709,126 @@ export function getUsefulnessCounts(db: Db): Map<string, { surfaced: number; use
   return new Map(rows.map((row) => [row.fact_id, { surfaced: row.surfaced, used: row.used }]));
 }
 
+/** One extracted facet row: the verbatim term, its lookup key, and which facet it belongs to. */
+export interface FactTerm {
+  readonly term: string;
+  readonly termKey: string;
+  readonly kind: FactTermKind;
+}
+
+export type FactTermKind = "entity" | "topic";
+
+/**
+ * Replaces every stored term for `factId` with the terms of `facets`.
+ *
+ * Delete-then-insert rather than a merge, so re-running extraction over unchanged text yields
+ * byte-identical rows and re-running it after an extraction-rule change leaves nothing behind from
+ * the old rules -- a term that stopped qualifying has to actually disappear, or `mem facets --all`
+ * would only ever add. Both halves run in one transaction, invoked `.immediate()`: the pair is a
+ * read-modify-write on the same rows and a concurrent writer between them would leave a fact with
+ * no terms at all. See `insertFact` for the full SQLITE_BUSY_SNAPSHOT rationale.
+ *
+ * Does not bump the write epoch, for the reason this module's header gives for `sources`: terms are
+ * derived from `facts.text` and change nothing about a fact's content, status, or freshness -- only
+ * which `--entity` queries reach it.
+ */
+export function replaceFactTerms(db: Db, factId: string, facets: FactFacets): void {
+  const remove = db.prepare("DELETE FROM fact_terms WHERE fact_id = ?");
+  const insert = db.prepare("INSERT INTO fact_terms (fact_id, term, term_key, kind) VALUES (?, ?, ?, ?)");
+  const tx = db.transaction((): void => {
+    remove.run(factId);
+    for (const entity of facets.entities) {
+      insert.run(factId, entity, normalizeTermKey(entity), "entity");
+    }
+    for (const topic of facets.topics) {
+      insert.run(factId, topic, normalizeTermKey(topic), "topic");
+    }
+  });
+  tx.immediate();
+}
+
+/** Every term stored for one fact, entities before topics and in extraction order within each. */
+export function listTermsForFact(db: Db, factId: string): FactTerm[] {
+  const rows = db
+    .prepare<[string], { term: string; term_key: string; kind: FactTermKind }>(
+      "SELECT term, term_key, kind FROM fact_terms WHERE fact_id = ? ORDER BY kind DESC, rowid ASC"
+    )
+    .all(factId);
+  return rows.map((row) => ({ term: row.term, termKey: row.term_key, kind: row.kind }));
+}
+
+/**
+ * Ids of every fact carrying `term` (matched on its normalized key, so the caller may pass the term
+ * however the user typed it), optionally restricted to one facet.
+ */
+export function listFactIdsForTerm(db: Db, term: string, kind?: FactTermKind): string[] {
+  const key = normalizeTermKey(term);
+  const sql =
+    kind === undefined
+      ? "SELECT DISTINCT fact_id FROM fact_terms WHERE term_key = ?"
+      : "SELECT DISTINCT fact_id FROM fact_terms WHERE term_key = ? AND kind = ?";
+  const params = kind === undefined ? [key] : [key, kind];
+  return db.prepare<unknown[], { fact_id: string }>(sql).all(...params).map((row) => row.fact_id);
+}
+
+/**
+ * Every fact's entity lookup keys, for `RetrievalOptions.factEntityKeys`.
+ *
+ * One grouped read rather than a query per candidate, for the reason `getUsefulnessCounts` gives:
+ * recall filters the whole store, so a per-fact round trip would land inside the `--hint-format`
+ * seam's ~150ms budget. Topics are excluded -- `--entity` is an entity filter, and the topic facet
+ * is already what BM25 ranks on.
+ */
+export function getEntityKeysByFact(db: Db): Map<string, Set<string>> {
+  const rows = db
+    .prepare<[], { fact_id: string; term_key: string }>("SELECT fact_id, term_key FROM fact_terms WHERE kind = 'entity'")
+    .all();
+  const byFact = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const keys = byFact.get(row.fact_id) ?? new Set<string>();
+    keys.add(row.term_key);
+    byFact.set(row.fact_id, keys);
+  }
+  return byFact;
+}
+
+/**
+ * The distinct entities in the store with how many facts carry each, most frequent first.
+ *
+ * Grouped on the normalized key but reporting one verbatim spelling (`MIN(term)`, so the answer is
+ * stable rather than whichever row SQLite reached last): `PostgreSQL` and `postgresql` are one
+ * entity to `--entity` and have to be one line here, or the listing would advertise a distinction
+ * lookup does not make.
+ */
+export function listEntityCounts(db: Db): Array<{ term: string; termKey: string; facts: number }> {
+  return db
+    .prepare<[], { term: string; term_key: string; facts: number }>(
+      `SELECT MIN(term) AS term, term_key, COUNT(DISTINCT fact_id) AS facts
+       FROM fact_terms WHERE kind = 'entity'
+       GROUP BY term_key
+       ORDER BY facts DESC, term_key ASC`
+    )
+    .all()
+    .map((row) => ({ term: row.term, termKey: row.term_key, facts: row.facts }));
+}
+
+/**
+ * Ids and texts of facts needing facet extraction, oldest first -- `mem facets`' backfill.
+ *
+ * Oldest first and `all`-gated for the same reasons as `listFactsNeedingEmbedding`: a bounded
+ * re-run should chip away at the arrears deterministically, and `--all` is the path after an
+ * extraction-rule change, when facts that already have terms are exactly the ones that need new
+ * ones. "Needs extraction" is the absence of any row, not the absence of an entity row: a fact
+ * whose text contains no identifier legitimately has zero entities and would otherwise be re-offered
+ * on every run forever.
+ */
+export function listFactsNeedingTerms(db: Db, options: { readonly all?: boolean } = {}): Array<{ id: string; text: string }> {
+  const where = options.all === true ? "" : "WHERE NOT EXISTS (SELECT 1 FROM fact_terms WHERE fact_terms.fact_id = facts.id)";
+  return db
+    .prepare<[], { id: string; text: string }>(`SELECT id, text FROM facts ${where} ORDER BY captured_at ASC, id ASC`)
+    .all();
+}
+
 /** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
 export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM recall_log WHERE surfaced_at < ?").run(beforeIso).changes;
@@ -722,6 +878,11 @@ export function setEmbeddingMeta(db: Db, meta: EmbeddingMeta): void {
 /** Counts facts that currently carry an embedding vector, for `mem doctor`'s coverage line. */
 export function countEmbeddedFacts(db: Db): number {
   return db.prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM facts WHERE embedding IS NOT NULL").get()?.count ?? 0;
+}
+
+/** Counts facts that carry at least one extracted term, for `mem doctor`'s coverage line. Counts distinct facts rather than rows in `fact_terms`, which holds many terms per fact. */
+export function countFactsWithTerms(db: Db): number {
+  return db.prepare<[], { count: number }>("SELECT COUNT(DISTINCT fact_id) AS count FROM fact_terms").get()?.count ?? 0;
 }
 
 /**

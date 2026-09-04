@@ -33,21 +33,38 @@ export {
   deleteSourcesOlderThan,
   ensureStorageSchema,
   getEmbeddingMeta,
+  getEntityKeysByFact,
   getEpoch,
   getFactById,
   insertFact,
   insertSource,
+  listEntityCounts,
+  listFactIdsForTerm,
   listFacts,
   listFactsNeedingEmbedding,
+  listFactsNeedingTerms,
   listSourcesForFact,
+  listTermsForFact,
   normalizeSubject,
   openStorage,
+  countFactsWithTerms,
+  replaceFactTerms,
   setEmbeddingMeta,
   setFactStatus,
   updateFact,
+  type FactTerm,
+  type FactTermKind,
 } from "./storage.js";
 
 export { anchorPathWithinRoot, evaluateAnchor, type AnchorVerdict } from "./anchors.js";
+
+export {
+  MAX_ENTITIES_PER_FACT,
+  MAX_TOPICS_PER_FACT,
+  extractFacets,
+  normalizeTermKey,
+  type FactFacets,
+} from "./facets.js";
 
 export {
   applyContradictionUpdates,
@@ -93,6 +110,7 @@ export {
   cosineSimilarity,
   reciprocalRankFusion,
   retrieve,
+  tokenize,
   type ContradictionOutcome,
   type EmbeddingBackend,
   type EmbeddingBackendLoader,

@@ -170,6 +170,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     ["edit (no such id)", ["edit", MISSING, "--text", "new"]],
     ["used (no such id)", ["used", MISSING, "--session-id", "s1"]],
     ["used (no --session-id)", ["used", MISSING]],
+    ["facets (no such id)", ["facets", "--fact", MISSING]],
   ];
 
   for (const [label, args] of failsLoudly) {
@@ -197,6 +198,10 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     { label: "review (nothing pending)", args: () => ["review"], seeded: true, signal: /nothing needs review/u },
     { label: "recall (filter excludes all)", args: () => ["recall", "--kind", "decision", "--root", root], seeded: true, signal: /no matching facts/u },
     { label: "recall (query ranks nothing)", args: () => ["recall", "xyzzyplughquux", "--root", root], seeded: true, signal: /query matched no fact text/u },
+    // A backfill over a store with nothing left to extract is the command's own "nothing
+    // succeeded" state, and exit 0 in silence would be indistinguishable from a run that worked.
+    { label: "facets (nothing to backfill)", args: () => ["facets"], seeded: false, signal: /no facts need facet extraction/u },
+    { label: "facets (no entities extracted)", args: () => ["facets", "--list-entities"], seeded: false, signal: /no entities extracted yet/u },
   ];
 
   for (const testCase of reportsOnStdout) {

@@ -15,6 +15,7 @@ const EXPECTED_COMMANDS = [
   "embed",
   "epoch",
   "export",
+  "facets",
   "forget",
   "import",
   "init",
