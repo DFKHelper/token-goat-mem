@@ -737,3 +737,75 @@ describe("regression: superseded facts are excluded entirely from results, not e
     expect(results.map((r) => r.fact.id)).not.toContain("superseded-id");
   });
 });
+
+describe("usefulness as a third RRF rank list", () => {
+  const facts = [
+    makeFact({ id: "a", text: "deploy runbook mentions the deploy step", kind: "fact", captured_at: "2026-01-03T00:00:00.000Z" }),
+    makeFact({ id: "b", text: "deploy runbook", kind: "fact", captured_at: "2026-01-02T00:00:00.000Z" }),
+    makeFact({ id: "c", text: "unrelated note about cheese", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
+  ];
+
+  it("reorders results a confirmed-useful fact would otherwise lose on BM25 alone", async () => {
+    const withoutFeedback = await retrieve(facts, { query: "deploy", root });
+    expect(withoutFeedback.results.map((r) => r.fact.id).slice(0, 2)).toEqual(["a", "b"]);
+
+    // `b` is the fact people actually act on; `a` merely says the word "deploy" twice.
+    const withFeedback = await retrieve(facts, {
+      query: "deploy",
+      root,
+      usefulness: new Map([
+        ["a", { surfaced: 4, used: 0 }],
+        ["b", { surfaced: 3, used: 3 }],
+      ]),
+    });
+    expect(withFeedback.results.map((r) => r.fact.id).slice(0, 2)).toEqual(["b", "a"]);
+  });
+
+  it("prefers a fact used 2 of 2 times over one used 2 of 50", async () => {
+    const withFeedback = await retrieve(facts, {
+      query: "",
+      root,
+      usefulness: new Map([
+        ["b", { surfaced: 50, used: 2 }],
+        ["c", { surfaced: 2, used: 2 }],
+      ]),
+    });
+    // An empty query ties every BM25 score at 0, so the usefulness list alone decides the order of
+    // the two ranked facts -- which is what isolates the tie-break rule under test. `c` is also the
+    // *older* of the two, so the final `captured_at` tie-break would order them the other way round:
+    // without the surfaced-count rule this assertion reads ["b", "c"] and the test cannot pass by
+    // accident of the default recency ordering.
+    const ranked = withFeedback.results.map((r) => r.fact.id).filter((id) => id === "b" || id === "c");
+    expect(ranked).toEqual(["c", "b"]);
+  });
+
+  it("ignores a surfaced-but-never-confirmed fact rather than demoting it", async () => {
+    // Zero used counts must leave the rank list empty. If they did not, every store that had ever
+    // logged a recall would switch retrieval into RRF -- and RRF never emits a 0 score, which is the
+    // single predicate integration-seam.ts's `--delta` filter uses to tell a match from filler.
+    const baseline = await retrieve(facts, { query: "deploy", root });
+    const withZeroes = await retrieve(facts, {
+      query: "deploy",
+      root,
+      usefulness: new Map([
+        ["a", { surfaced: 9, used: 0 }],
+        ["b", { surfaced: 9, used: 0 }],
+        ["c", { surfaced: 9, used: 0 }],
+      ]),
+    });
+    expect(withZeroes.results.map((r) => [r.fact.id, r.score])).toEqual(baseline.results.map((r) => [r.fact.id, r.score]));
+  });
+
+  it("scores a non-matching fact exactly 0 when no auxiliary list is fused, preserving the --delta contract", async () => {
+    // Pinned, not assumed: integration-seam.ts's delta filter keeps a fact suppressed only while
+    // `score === 0` ("filler, swept in by the caps"). Switching the single-list path to RRF would
+    // give every filler fact a small positive score and silently disable delta suppression entirely.
+    const outcome = await retrieve(facts, { query: "deploy", root });
+    const scores = new Map(outcome.results.map((r) => [r.fact.id, r.score]));
+    expect(scores.get("c")).toBe(0);
+    expect(scores.get("a")).toBeGreaterThan(0);
+    // And raw BM25, not a fused rank score: the two ranked facts differ by more than RRF's tiny
+    // 1/(k+rank) spacing ever could.
+    expect((scores.get("a") ?? 0) - (scores.get("b") ?? 0)).not.toBe(0);
+  });
+});

@@ -111,6 +111,19 @@ export function ensureStorageSchema(db: Db): void {
   // real, very old status change and drag pre-migration rows into the GC window on first pass.
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN status_changed_at TEXT");
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN prior_status TEXT");
+  // Usefulness feedback (`mem used`). Nullable with no backfill for the same reason as the two
+  // columns above and one of its own: `recall_log` rows written before this column existed record
+  // only that a fact was *surfaced*, and no value invented for them would be honest. A `0`-style
+  // sentinel is not available here either -- the column holds the timestamp a fact was confirmed
+  // useful, so any non-NULL value is itself the claim. NULL is exactly "nobody ever said", which is
+  // what `getUsefulnessCounts` needs to keep a never-confirmed fact out of the usefulness ranking
+  // rather than ranking it as confirmed-unhelpful.
+  //
+  // Deliberately an ALTER rather than a column on STORAGE_SCHEMA's `CREATE TABLE IF NOT EXISTS`:
+  // that statement is a no-op against every database that already has a `recall_log`, so editing it
+  // would leave the column missing on every existing install while looking correct on a fresh one.
+  // The ALTER is the migration; a fresh database gets the column from the very same line.
+  applyIdempotentAlter(db, "ALTER TABLE recall_log ADD COLUMN used_at TEXT");
 }
 
 /**
@@ -600,6 +613,59 @@ export function insertRecallLog(db: Db, sessionId: string, factIds: readonly str
 export function listSurfacedFactIds(db: Db, sessionId: string): Set<string> {
   const rows = db.prepare<[string], { fact_id: string }>("SELECT DISTINCT fact_id FROM recall_log WHERE session_id = ?").all(sessionId);
   return new Set(rows.map((row) => row.fact_id));
+}
+
+/**
+ * Marks the recall of `factIds` in `sessionId` as having actually been *useful*, stamping `used_at`.
+ * Returns the number of rows updated -- which is how the caller learns that an id it named was never
+ * surfaced in that session at all (0 rows for that id), rather than silently accepting the claim.
+ *
+ * `used_at IS NULL` in the WHERE clause makes a repeat `mem used` on the same ids a no-op instead of
+ * a re-stamp. That is not just tidiness: `getUsefulnessCounts` counts rows, so without the guard a
+ * user confirming the same fact twice would inflate its used count above its surfaced count and rank
+ * it ahead of a fact genuinely used on every surfacing. It also keeps the *first* confirmation's
+ * timestamp, which is the one that says how quickly the fact proved out.
+ *
+ * One transaction, invoked `.immediate()`: the statement reads (`used_at IS NULL`) before it writes,
+ * so under WAL a deferred BEGIN could lose its snapshot to a concurrent writer and fail with
+ * SQLITE_BUSY_SNAPSHOT, which `busy_timeout` does not retry. See `insertFact` for the same rationale.
+ *
+ * Does not bump the write epoch, for the reason this module's header gives for `sources`: the epoch
+ * exists so a token-goat-side cache can never mask a `forget`/`edit`, and a usefulness stamp changes
+ * no fact's text, status, or freshness -- only the order recall would rank them in.
+ */
+export function markRecallUsed(db: Db, factIds: readonly string[], sessionId: string, atIso: string): number {
+  if (factIds.length === 0) {
+    return 0;
+  }
+  const mark = db.prepare("UPDATE recall_log SET used_at = ? WHERE session_id = ? AND fact_id = ? AND used_at IS NULL");
+  const tx = db.transaction((): number => {
+    let updated = 0;
+    for (const factId of factIds) {
+      updated += mark.run(atIso, sessionId, factId).changes;
+    }
+    return updated;
+  });
+  return tx.immediate();
+}
+
+/**
+ * How often each fact has been surfaced and how often that surfacing was confirmed useful, across
+ * every session. Feeds `RetrievalOptions.usefulness`.
+ *
+ * One grouped query rather than a lookup per fact: recall ranks the whole candidate pool, so a
+ * per-fact query would put a round trip on every fact in the store inside the `--hint-format` seam's
+ * ~150ms budget. Facts with no recall_log row are absent from the map rather than present with
+ * zeroes -- "never surfaced" and "surfaced and never useful" are different claims, and only the
+ * second one should push a fact down the usefulness ranking.
+ */
+export function getUsefulnessCounts(db: Db): Map<string, { surfaced: number; used: number }> {
+  const rows = db
+    .prepare<[], { fact_id: string; surfaced: number; used: number }>(
+      "SELECT fact_id, COUNT(*) AS surfaced, COUNT(used_at) AS used FROM recall_log GROUP BY fact_id"
+    )
+    .all();
+  return new Map(rows.map((row) => [row.fact_id, { surfaced: row.surfaced, used: row.used }]));
 }
 
 /** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */

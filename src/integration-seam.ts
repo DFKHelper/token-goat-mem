@@ -43,7 +43,7 @@
 
 import { resolve as resolvePath, sep } from "node:path";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
-import { insertRecallLog, listSurfacedFactIds, openStorage } from "./storage.js";
+import { getUsefulnessCounts, insertRecallLog, listSurfacedFactIds, openStorage } from "./storage.js";
 import { resolveDbPath } from "./db.js";
 import { retrieve, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
@@ -309,8 +309,13 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const db = openStorage(options.dbPath ?? resolveDbPath());
   let allFacts: Fact[];
   let alreadySurfaced: ReadonlySet<string> = new Set();
+  let usefulness: ReadonlyMap<string, { surfaced: number; used: number }>;
   try {
     allFacts = queryAllFacts(db);
+    // One grouped query on the connection already open, not a second `openStorage`: this path runs
+    // inside a ~150ms hard budget and a second WAL open plus schema migration is the kind of cost
+    // that turns a healthy response into a truncated one.
+    usefulness = getUsefulnessCounts(db);
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }
@@ -331,6 +336,13 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc
     // comment above); TGMEM/1 keeps its original per-line CTA verbatim.
     includeDisplayCta: protocolVersion === 1,
+    // Past `mem used` confirmations, fused as a third RRF rank list. Note this changes the meaning of
+    // a zero score for the `--delta` filter below only in the direction that filter already tolerates
+    // from the embedding list: once any auxiliary list is non-empty, fusion runs and no ranked fact
+    // scores exactly 0, so a store with usefulness data suppresses less rather than suppressing
+    // something it should have re-sent. On a store nobody has run `mem used` against -- every install
+    // until someone does -- the list is empty and the scores are unchanged.
+    usefulness,
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
@@ -356,16 +368,19 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // from what the session has not seen, so a repeat call surfaces the next-best facts instead of
   // an empty block as soon as the top-ranked ones have all been sent once.
   //
-  // "Already sent" suppresses a fact only while it scores zero for the current query. "Sent" and
+  // "Already sent" suppresses a fact only while it does not match the current query. "Sent" and
   // "still in the agent's context" part ways over a long session -- the host compacts, and a fact
   // surfaced as filler on prompt 1 (swept in by the caps because nothing matched) and evicted since
-  // would otherwise never be re-sent when it becomes the exact answer on prompt 9. Zero-vs-nonzero
-  // is the one scale-free predicate available: BM25 scores are unbounded and corpus-dependent, so
-  // any absolute cutoff would be tied to one store's size, and the kind boost multiplies, so it can
-  // never lift a zero. A genuine hit therefore always re-sends, however often it was sent before;
-  // filler -- exactly the set that scored zero -- stays suppressed, and a query-less call (the
-  // SessionStart recency dump) scores everything zero, so it remains fully suppressible.
-  const unseen = delta ? results.filter((result) => result.score !== 0 || !alreadySurfaced.has(result.fact.id)) : results;
+  // would otherwise never be re-sent when it becomes the exact answer on prompt 9. A genuine hit
+  // therefore always re-sends, however often it was sent before; filler -- exactly the set that
+  // matched nothing -- stays suppressed, and a query-less call (the SessionStart recency dump)
+  // matches nothing at all, so it remains fully suppressible.
+  //
+  // `matchedQuery` rather than `score !== 0`: the two agree only while BM25 is the sole rank list.
+  // Turning on usefulness feedback or an embedding backend makes retrieval fuse via RRF, which
+  // floors every ranked fact above zero -- so the old predicate would have quietly declared every
+  // filler fact a match and disabled delta suppression store-wide, with no test failing to say so.
+  const unseen = delta ? results.filter((result) => result.matchedQuery || !alreadySurfaced.has(result.fact.id)) : results;
   const aggressive = unseen.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
   const precision = unseen.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
 

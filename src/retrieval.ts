@@ -126,11 +126,46 @@ export interface RetrievalOptions {
    * single-line-per-fact recall a human can scan quickly.
    */
   readonly hintStyle?: "full" | "terse";
+  /**
+   * Per-fact recall bookkeeping (`storage.getUsefulnessCounts`): how often each fact was surfaced and
+   * how often someone confirmed that surfacing useful via `mem used`. Omitted = no usefulness signal,
+   * which is exactly today's ranking.
+   *
+   * Fused as a third RRF rank list rather than applied as a score multiplier, and that is the whole
+   * point of carrying counts here instead of a precomputed boost factor. RRF is rank-based and
+   * therefore scale-free; BM25 scores are unbounded and corpus-dependent, so a multiplier or an
+   * absolute "useful enough" threshold tuned against a 40-fact store drifts silently as the store
+   * grows and starts either swamping relevance or vanishing under it. `applyKindBoost` in this file
+   * has exactly that flaw and is not the pattern to copy.
+   *
+   * A fact absent from this map contributes nothing, the same way a missing id already behaves in
+   * `reciprocalRankFusion` -- so a never-surfaced fact is neither rewarded nor punished, which is the
+   * only honest reading of "no feedback yet".
+   */
+  readonly usefulness?: ReadonlyMap<string, { surfaced: number; used: number }>;
 }
 
 export interface RetrievedFact {
   readonly fact: Fact;
   readonly score: number;
+  /**
+   * Whether this fact's own text matched the query lexically -- `true` exactly when BM25 scored it
+   * above zero, before any fusion, boost, or tie-break touched it.
+   *
+   * Carried separately from {@link score} because the two answer different questions and only one
+   * of them is stable. `score` is a *ranking* number whose scale depends on which signals were
+   * available: raw BM25 when it is the only list, an RRF value when an embedding or usefulness list
+   * joins it. A consumer asking "did this fact actually match, or is it filler the caps swept in?"
+   * needs an answer that does not change meaning when a second signal is switched on -- and
+   * `score !== 0` silently stops being that answer the moment fusion runs, because RRF gives every
+   * ranked id at least `1/(k+n)`. integration-seam.ts's `--delta` suppression asks exactly that
+   * question, and read `score` for it until this field existed; enabling either usefulness feedback
+   * or an embedding backend would have disabled delta suppression store-wide with nothing failing.
+   *
+   * A query-less call leaves this `false` for every fact, which is correct: nothing was asked, so
+   * nothing matched.
+   */
+  readonly matchedQuery: boolean;
   readonly freshness: AnchorVerdict;
   readonly contradiction: ContradictionOutcome;
   readonly trust: TrustLevel;
@@ -560,6 +595,47 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 }
 
 /**
+ * Orders candidates by how well their past surfacings paid off, for fusion as a third RRF list.
+ *
+ * Only facts with at least one confirmed-useful recall are ranked. A fact nobody has ever been shown
+ * has no evidence either way, and putting it at the bottom of this list would punish every newly
+ * captured fact for the crime of being new -- a feedback loop where unseen facts stay unseen. Leaving
+ * it out makes it contribute nothing, which is what `reciprocalRankFusion` already does with a
+ * missing id. Surfaced-but-never-confirmed is the same non-claim: `mem used` is opt-in, so a zero
+ * used count means "nobody said either way", not "someone said no".
+ *
+ * Excluding zero-used facts is also what keeps this list *empty* -- and therefore keeps fusion off
+ * entirely -- on every store nobody has run `mem used` against. That is load-bearing rather than
+ * incidental: integration-seam.ts's `--delta` filter distinguishes a query match from filler by
+ * testing `score !== 0`, and RRF never emits 0, so a list that went non-empty the moment any recall
+ * had ever been logged would silently disable delta suppression for every install. See the note on
+ * the `usefulness` option passed from that file for the residual case once feedback does exist.
+ *
+ * Used count descending, then *lower* surfaced count wins: a fact used 2 of 2 times is a stronger
+ * signal than one used 2 of 50, where the other 48 surfacings say the opposite. `captured_at`
+ * descending settles the remainder so the list is a total order and the fused scores are stable
+ * across runs -- without it, two equally-useful facts would swap places on `Array.prototype.sort`'s
+ * implementation-defined ordering and make recall output non-reproducible.
+ */
+function usefulnessRanking(candidates: readonly Fact[], usefulness: RetrievalOptions["usefulness"]): string[] {
+  if (usefulness === undefined) {
+    return [];
+  }
+  const scored = candidates
+    .map((fact) => ({ fact, counts: usefulness.get(fact.id) }))
+    .filter((entry): entry is { fact: Fact; counts: { surfaced: number; used: number } } => entry.counts !== undefined && entry.counts.used > 0);
+  scored.sort((a, b) => {
+    const byUsed = b.counts.used - a.counts.used;
+    if (byUsed !== 0) {
+      return byUsed;
+    }
+    const bySurfaced = a.counts.surfaced - b.counts.surfaced;
+    return bySurfaced !== 0 ? bySurfaced : b.fact.captured_at.localeCompare(a.fact.captured_at);
+  });
+  return scored.map((entry) => entry.fact.id);
+}
+
+/**
  * Fuses multiple rank-ordered id lists via Reciprocal Rank Fusion: `score(d) = sum(1 / (k + rank))`
  * over every list `d` appears in (1-indexed rank). An id missing from a list simply contributes
  * nothing from that list — lists need not cover the same ids.
@@ -908,9 +984,21 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     }
   }
 
+  const usefulnessRankIds = usefulnessRanking(filtered, options.usefulness);
+
+  // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a
+  // fourth signal is one push rather than another doubling of cases.
+  const extraRankLists = [embeddingRankIds, usefulnessRankIds].filter((list) => list.length > 0);
+  // Fusion runs only when there is a second list to fuse *with* -- RRF over a single list is just
+  // that list's ranks relabelled, so it would spend a scale change to buy nothing. The single-list
+  // path therefore keeps raw BM25 scores.
+  //
+  // Note that "is this score zero" is no longer a safe way to ask "did this fact match the query":
+  // it is true of the single-list path and false under RRF, which is precisely why `matchedQuery`
+  // exists as its own field rather than being inferred from `score` downstream.
   const fusedScores =
-    embeddingRankIds.length > 0
-      ? reciprocalRankFusion([bm25RankIds, embeddingRankIds])
+    extraRankLists.length > 0
+      ? reciprocalRankFusion([bm25RankIds, ...extraRankLists])
       : new Map<string, number>(bm25RankIds.map((id) => [id, bm25Scores.get(id) ?? 0]));
 
   let anchorBudgetHits = 0;
@@ -925,6 +1013,9 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     return {
       fact,
       score: applyKindBoost(fact, fusedScores.get(fact.id) ?? 0),
+      // Read off the pre-fusion BM25 map on purpose: this is the lexical-match question, not the
+      // ranking one, and it has to keep the same meaning whether or not a second rank list exists.
+      matchedQuery: (bm25Scores.get(fact.id) ?? 0) > 0,
       freshness,
       contradiction,
       trust,

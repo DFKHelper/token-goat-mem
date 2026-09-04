@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/db.js";
-import { openStorage } from "../../src/storage.js";
+import { markRecallUsed, openStorage } from "../../src/storage.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
 import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
@@ -920,6 +920,35 @@ describe("buildHintFormat", () => {
     // And a third time: a genuine hit re-sends every time it is asked for.
     const again = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "deploy key" });
     expect(emittedIds(again)).toEqual(["deploy-key"]);
+  });
+
+  it("regression: --delta still suppresses non-matching facts once a usefulness signal turns fusion on (the predicate must not be 'score !== 0')", async () => {
+    // The bug this pins: delta suppression asked "did this fact match?" by testing `score !== 0`.
+    // That is only true while BM25 is the sole rank list. The moment a second list joins -- a
+    // usefulness signal here, an embedding backend later -- retrieval fuses via RRF, which floors
+    // every ranked fact above zero. Every filler fact then looked like a match, so nothing was ever
+    // suppressed and `--delta` silently became a no-op store-wide, with no existing test failing.
+    threeGlobalFacts();
+    const baseline = await buildHint({ root, dbPath, sessionId: "sess-1", query: "what is the lint setup" });
+    expect(emittedIds(baseline)).toEqual(["fact-a", "fact-b", "fact-c"]);
+
+    // One usefulness row is enough to make the third rank list non-empty and switch fusion on.
+    const db = openStorage(dbPath);
+    try {
+      markRecallUsed(db, ["fact-a"], "sess-1", "2026-01-05T00:00:00.000Z");
+    } finally {
+      db.close();
+    }
+
+    // Same non-matching query, so the correct answer is unchanged: everything was already sent and
+    // nothing matches, therefore header only. Before the fix this returned all three facts again.
+    const repeat = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
+    expect(repeat.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(repeat.lines).toEqual([]);
+
+    // And the other half of the contract still holds under fusion: a genuine hit re-sends.
+    const hit = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "alpha" });
+    expect(emittedIds(hit)).toEqual(["fact-a"]);
   });
 
   it("non-firing: a zero-scoring fact already surfaced in the session stays suppressed by --delta (delta is not a no-op)", async () => {

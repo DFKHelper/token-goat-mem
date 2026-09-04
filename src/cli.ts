@@ -73,8 +73,10 @@ import {
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
   getEpoch,
+  getUsefulnessCounts,
   listFacts,
   listSourcesForFact,
+  markRecallUsed,
   openStorage,
   resolveFactIdOrPrefix,
   setFactStatus,
@@ -878,6 +880,10 @@ interface EpochCliOptions {
   readonly gc?: boolean;
 }
 
+interface UsedCliOptions {
+  readonly sessionId?: string;
+}
+
 interface InitCliOptions {
   readonly root?: string;
   readonly user?: boolean;
@@ -1185,8 +1191,14 @@ export function buildProgram(): Command {
         // as "nothing left to contest this" and un-contests the survivor. Narrowing in SQL therefore
         // surfaced a genuinely contested fact as clean ground truth. The bound now rides in
         // `RetrievalOptions.epochAfter` with every other filter, applied after resolution.
-        const facts = await withDb((db) => listFacts(db, {}));
+        // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
+        // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
+        const { facts, usefulness } = await withDb((db) => ({ facts: listFacts(db, {}), usefulness: getUsefulnessCounts(db) }));
         const retrievalOptions: RetrievalOptions = {
+          // Past `mem used` confirmations, fused as a third RRF rank list (see
+          // RetrievalOptions.usefulness). Empty on a store nobody has ever run `mem used` against,
+          // in which case the ranking is byte-for-byte today's BM25 ordering.
+          usefulness,
           query: query ?? "",
           root,
           // Facts bind to the project they were captured in. Without this, `--root` reached only
@@ -1382,6 +1394,71 @@ export function buildProgram(): Command {
           return existing.id;
         });
         process.stdout.write(`pinned ${resolved}\n`);
+      })
+    );
+
+  program
+    .command("used <id...>")
+    .description("Record that facts recalled in a session were actually useful, feeding recall ranking")
+    .option("--session-id <id>", "Session whose recall to mark (the same session id the facts were surfaced under)")
+    .action(
+      guard(async (ids: string[], options: UsedCliOptions) => {
+        // Required rather than defaulted. `recall_log` rows are keyed on the session they were
+        // surfaced under and mem holds no notion of a "current" session (it is a short-lived
+        // single-shot process with no daemon and no state between invocations), so any default here
+        // would be an invented session id matching no row -- reporting "0 marked" for every correct
+        // invocation, which reads as a broken command rather than a missing flag.
+        const session = options.sessionId;
+        if (session === undefined || session.trim().length === 0) {
+          throw new UsageError("--session-id <id> is required: usefulness is recorded against the session a fact was surfaced in");
+        }
+        const { updated, resolvedIds, unsurfaced } = await withDb((db) => {
+          // Resolve every id before writing anything: a typo in the third of three ids should not
+          // leave the first two marked, and prefix resolution is exactly where a typo shows up.
+          const facts = ids.map((id) => resolveIdArgOrThrow(db, id));
+          const factIds = [...new Set(facts.map((fact) => fact.id))];
+          const surfacedCount = db.prepare<[string, string], { c: number }>(
+            "SELECT COUNT(*) AS c FROM recall_log WHERE session_id = ? AND fact_id = ?"
+          );
+          const tx = db.transaction(() => {
+            // Counted per id, not inferred from the batch total: "0 rows updated" across a batch is
+            // ambiguous -- it could mean every id was never surfaced, or that all of them were
+            // already marked useful on an earlier run. Only the first needs telling.
+            const neverSurfaced = factIds.filter((factId) => (surfacedCount.get(session, factId)?.c ?? 0) === 0);
+            const marked = markRecallUsed(db, factIds, session, new Date().toISOString());
+            // One row per fact, matching `forget`/`pin`, so the audit log stays queryable by
+            // `fact_id` -- a single batch row keyed to one arbitrary id of several would make the
+            // other facts' usefulness history invisible to exactly the query the column exists for.
+            for (const factId of factIds) {
+              insertAuditLog(db, {
+                event: "used",
+                factId,
+                detail: neverSurfaced.includes(factId)
+                  ? `not surfaced in session ${session}; nothing marked useful`
+                  : `marked useful in session ${session}`,
+              });
+            }
+            return { updated: marked, resolvedIds: factIds, unsurfaced: neverSurfaced };
+          });
+          // BEGIN IMMEDIATE for the same reason as `setStatusWithAudit`: this reads (the surfaced
+          // count, and `markRecallUsed`'s own `used_at IS NULL` predicate) before it writes, and the
+          // outer invocation is what decides the whole nest's locking mode -- `markRecallUsed`'s
+          // transaction degrades to a savepoint once this one is open.
+          return tx.immediate();
+        });
+        process.stdout.write(`marked ${updated} recall row${updated === 1 ? "" : "s"} useful in session ${session}
+`);
+        // Not an error: naming a fact that was never surfaced in this session is a plausible mistake
+        // (wrong session id, or a fact the user read from `mem list` rather than from a recall), and
+        // failing the whole command over it would discard the marks that did land.
+        for (const factId of unsurfaced) {
+          process.stdout.write(`note: ${factId} was never surfaced in session ${session} -- nothing to mark
+`);
+        }
+        if (unsurfaced.length === 0 && updated === 0) {
+          process.stdout.write(`note: ${resolvedIds.length === 1 ? "it was" : "they were"} already marked useful in this session
+`);
+        }
       })
     );
 

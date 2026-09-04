@@ -164,6 +164,8 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     ["forget (no such id)", ["forget", MISSING]],
     ["pin (no such id)", ["pin", MISSING]],
     ["edit (no such id)", ["edit", MISSING, "--text", "new"]],
+    ["used (no such id)", ["used", MISSING, "--session-id", "s1"]],
+    ["used (no --session-id)", ["used", MISSING]],
   ];
 
   for (const [label, args] of failsLoudly) {
