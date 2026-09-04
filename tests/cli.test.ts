@@ -495,6 +495,24 @@ describe("exit-code and stderr/stdout contract (cli.ts module doc)", () => {
     expect(result.stdout).toContain("Usage:");
   });
 
+  it("warns in --subject help that a subject holds one value, on every command that accepts it", async () => {
+    // The invariant is real but silent otherwise: a second --value against the same subject
+    // supersedes the first instead of joining it, and the user finds out by losing the first one.
+    // Asserted on both commands because a reader consults the help of whichever they are running,
+    // and asserted on the behaviour word ("supersedes") rather than the whole sentence so rewording
+    // stays free while deleting the warning does not.
+    for (const command of ["remember", "suggest"]) {
+      const help = await runCli([command, "--help"]);
+      expect(help.exitCode).toBe(0);
+      // Commander hard-wraps option descriptions to the terminal width, so the phrase arrives split
+      // across lines and padded. Collapse whitespace before matching -- asserting on the raw string
+      // would pin the wrap column, which is an artifact of the reader's terminal, not of mem.
+      const flowed = help.stdout.replace(/\s+/g, " ");
+      expect(flowed).toMatch(/holds one value at a time/i);
+      expect(flowed).toMatch(/supersedes/i);
+    }
+  });
+
   it("keeps data on stdout and stderr empty on success", async () => {
     const remembered = await runCli(["remember", "stdout only", "--kind", "fact"]);
     expect(remembered.exitCode).toBe(0);

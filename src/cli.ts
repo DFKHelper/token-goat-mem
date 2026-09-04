@@ -1243,6 +1243,20 @@ declare const __MEM_VERSION__: string | undefined;
 /** The version `mem --version` reports. Never hand-edit: it comes from package.json via the build. The `-dev` fallback only appears when running from source without the bundler. */
 const CLI_VERSION: string = typeof __MEM_VERSION__ === "string" ? __MEM_VERSION__ : "0.0.0-dev";
 
+/**
+ * Shared because `remember` and `suggest` must describe the key identically -- two wordings drift,
+ * and this one carries an invariant the user cannot otherwise discover.
+ *
+ * A subject holds exactly one value at a time. `detectContradictions` treats every keyed subject as
+ * single-valued by design (that determinism is the point), so capturing a second value against the
+ * same subject is read as a correction and supersedes the first rather than adding to a set. A user
+ * recording set membership -- supported versions, enabled flags -- wants a distinct subject per
+ * member, and nothing but this string tells them so before the first value is silently superseded.
+ */
+const SUBJECT_KEY_HELP =
+  "Normalized key for contradiction detection; holds one value at a time, so a later --value " +
+  "supersedes the earlier rather than joining it (requires --value)";
+
 export function buildProgram(): Command {
   const program = new Command();
   program.name("mem").description("Long-term conversational memory for AI coding agents").version(CLI_VERSION);
@@ -1251,7 +1265,7 @@ export function buildProgram(): Command {
     .command("remember <text>")
     .description("Explicit capture: store a user-stated fact into active storage")
     .requiredOption("--kind <kind>", `preference, decision, fact, or correction`)
-    .option("--subject <key>", "Normalized key for contradiction detection (requires --value)")
+    .option("--subject <key>", SUBJECT_KEY_HELP)
     .option("--value <value>", "Value for the subject (requires --subject)")
     .option("--anchor <predicate>", "Read-only anchor predicate (filesystem/git)")
     .option("--scope <scope>", "global, project, or path", "global")
@@ -1288,7 +1302,7 @@ export function buildProgram(): Command {
         "path as any other suggested/derived fact (confirm via `mem review --promote <id>`)"
     )
     .requiredOption("--kind <kind>", `preference, decision, fact, or correction`)
-    .option("--subject <key>", "Normalized key for contradiction detection (requires --value)")
+    .option("--subject <key>", SUBJECT_KEY_HELP)
     .option("--value <value>", "Value for the subject (requires --subject)")
     .option("--anchor <predicate>", "Read-only anchor predicate (filesystem/git)")
     .option("--scope <scope>", "global, project, or path", "global")
