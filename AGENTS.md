@@ -27,7 +27,7 @@ Tests run in two tiers (`npm install` points `core.hooksPath` at `.githooks/`, s
 All memory operations are explicit and auditable:
 
 - `mem remember <text> --kind <kind>` — capture a user-stated fact into active storage (`--kind` is required: preference/decision/fact/correction)
-- `mem recall [query] [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings
+- `mem recall [query] [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings; `--entity <value>` (repeatable, ANDed) filters to facts carrying that extracted entity
 - `mem review` — view pending, contested, anchor-contradicted, or unanchored-but-checkable facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts; the `unanchored` bucket is an advisory nudge to add an anchor, not a pending decision)
 - `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
@@ -35,14 +35,17 @@ All memory operations are explicit and auditable:
 - `mem edit <id>` — modify fact text, subject/value, anchor, or scope
 - `mem show <id>` — view a fact and its full provenance
 - `mem list` — all facts, filtered by status/kind/subject/scope
+- `mem facets` — extract and inspect the structured entity/topic terms behind `mem recall --entity`; no flags backfills facts missing terms, `--all` re-extracts everything after an extraction-rule change, `--fact <id>` shows one fact's terms, `--list-entities` lists the distinct entities with fact counts
 - `mem embed` — compute embedding vectors for facts, enabling semantic recall alongside BM25; `--all` re-embeds everything after a model change, `--limit <n>` bounds the run. Off unless `TOKEN_GOAT_MEM_EMBED_URL` and `TOKEN_GOAT_MEM_EMBED_MODEL` are set
 - `mem epoch` — emit a monotonic version number (for cache invalidation); `--gc` runs the retention pass first
 
 ## Data model
 
+**fact_terms** table: `fact_id`, `term` (verbatim), `term_key` (normalized lookup form), `kind` (entity/topic) — the structured facet layer (`src/facets.ts`). Entities are the identifier-shaped tokens BM25's stemmer destroys (paths, dotted filenames, snake_case, camelCase, CLI flags, versions, `@scope/package`), stored exactly as written; topics are `tokenize`'s own stemmed terms. Written in the same transaction as the fact insert/edit, cascaded on delete, and read by `mem recall --entity`.
+
 **facts** table: `id`, `text`, `kind` (preference/decision/fact/correction), `subject`, `value`, `scope` (global/project/path), `scope_root`, `source_type` (user/derived), `source_ref`, `captured_at`, `anchor`, `status` (active/pending/superseded/contested/pinned), `confidence`, `embedding`.
 
-**Retrieval:** BM25 by default, with no configuration and no network. Setting `TOKEN_GOAT_MEM_EMBED_URL` + `TOKEN_GOAT_MEM_EMBED_MODEL` (optionally `TOKEN_GOAT_MEM_EMBED_API_KEY`) to an OpenAI-compatible embeddings endpoint adds a dense rank list fused with BM25 via RRF. The `meta` table records which model produced the stored vectors; a configured model that disagrees with it disables embedding ranking rather than comparing two vector spaces, and `mem embed --all` migrates.
+**Retrieval:** BM25 by default, with no configuration and no network. `--entity` is a structured filter alongside it, not a ranking input: BM25 reduces `src/retrieval.ts` to `src`/`retriev`/`ts` and cannot tell a fact naming that file from one merely using those three words, which is the gap the facet layer closes. Setting `TOKEN_GOAT_MEM_EMBED_URL` + `TOKEN_GOAT_MEM_EMBED_MODEL` (optionally `TOKEN_GOAT_MEM_EMBED_API_KEY`) to an OpenAI-compatible embeddings endpoint adds a dense rank list fused with BM25 via RRF. The `meta` table records which model produced the stored vectors; a configured model that disagrees with it disables embedding ranking rather than comparing two vector spaces, and `mem embed --all` migrates.
 
 **sources** table: `fact_id`, `excerpt` (redacted preview, full content never persisted in sources table), `stored_at`. The read/write/gc paths exist and are tested, but no capture path writes to it yet — the table is empty in practice. Keeping it unfed is a decision, not an oversight: deleting it would be a schema migration plus a break of the `insertSource`/`listSourcesForFact`/`deleteSourcesOlderThan` exports in `src/index.ts`, a one-way door bought for no correctness gain. `tests/guards/unfed-sources.test.ts` holds the docs to that state in both directions.
 

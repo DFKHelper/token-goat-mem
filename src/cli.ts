@@ -81,23 +81,30 @@ import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_T
 import {
   clearAllEmbeddings,
   countEmbeddedFacts,
+  countFactsWithTerms,
   countFacts,
   deleteFact,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
   getEmbeddingMeta,
+  getEntityKeysByFact,
   getEpoch,
   getUsefulnessCounts,
+  listEntityCounts,
   listFacts,
   listFactsNeedingEmbedding,
+  listFactsNeedingTerms,
   listSourcesForFact,
+  listTermsForFact,
   markRecallUsed,
   openStorage,
+  replaceFactTerms,
   resolveFactIdOrPrefix,
   setEmbeddingMeta,
   setFactStatus,
   updateFact,
 } from "./storage.js";
+import { extractFacets } from "./facets.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
 
@@ -274,6 +281,18 @@ const EMBED_BATCH_SIZE = 32;
  * length. So is the endpoint: only its host reaches stdout, so a URL carrying userinfo cannot leak
  * through a health check someone pastes into an issue.
  */
+/**
+ * `mem doctor`'s term-coverage line. Worth a line of its own because a store captured before terms
+ * existed carries none, and the only symptom is `mem recall --entity` quietly matching nothing --
+ * indistinguishable, from the outside, from a store that genuinely has no fact mentioning that
+ * entity. Naming the shortfall here points at `mem facets --backfill` instead of leaving the user to
+ * conclude the filter is broken.
+ */
+function describeFacets(factsWithTerms: number, totalFacts: number): string {
+  const line = `term coverage: ${factsWithTerms}/${totalFacts} facts`;
+  return factsWithTerms < totalFacts ? `${line} (run \`mem facets --backfill\` -- \`mem recall --entity\` cannot match the rest)` : line;
+}
+
 function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: number, totalFacts: number): string[] {
   const coverage = `embedding coverage: ${embeddedFacts}/${totalFacts} facts`;
   const stored = recorded === null ? "embedding store: nothing embedded yet" : `embedding store: model ${recorded.model}, dim ${recorded.dimension}`;
@@ -958,6 +977,19 @@ interface RecallCliOptions {
   readonly hookStdin?: boolean;
   readonly delta?: boolean;
   readonly sessionId?: string;
+  readonly entity?: readonly string[];
+}
+
+interface FacetsCliOptions {
+  readonly backfill?: boolean;
+  readonly all?: boolean;
+  readonly fact?: string;
+  readonly listEntities?: boolean;
+}
+
+/** Commander's collector for a repeatable option: appends each occurrence instead of keeping only the last. */
+function collectRepeated(value: string, previous: readonly string[]): string[] {
+  return [...previous, value];
 }
 
 interface ExportCliOptions {
@@ -1204,6 +1236,12 @@ export function buildProgram(): Command {
     .option("--kind <kind>", "Filter by kind")
     .option("--subject <key>", "Filter by subject")
     .option("--scope <scope>", "Filter by scope")
+    .option(
+      "--entity <value>",
+      "Only facts carrying this extracted entity (file path, flag, constant, version, identifier), matched case-insensitively. Repeatable, and repeats AND together: --entity src/cli.ts --entity --hint-format keeps only facts mentioning both. See `mem facets --list-entities`",
+      collectRepeated,
+      [] as readonly string[]
+    )
     .option("--hint-format", "Emit the TGMEM/2 wire format for the token-goat seam")
     .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
@@ -1275,6 +1313,9 @@ export function buildProgram(): Command {
           if (options.sinceEpoch !== undefined) {
             incompatibleFlags.push("--since-epoch");
           }
+          if (options.entity !== undefined && options.entity.length > 0) {
+            incompatibleFlags.push("--entity");
+          }
 
           if (incompatibleFlags.length > 0) {
             throw new UsageError(
@@ -1324,10 +1365,14 @@ export function buildProgram(): Command {
         // `RetrievalOptions.epochAfter` with every other filter, applied after resolution.
         // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
         // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
-        const { facts, usefulness, embeddingMeta } = await withDb((db) => ({
+        const wantedEntities = options.entity ?? [];
+        const { facts, usefulness, embeddingMeta, entityKeys } = await withDb((db) => ({
           facts: listFacts(db, {}),
           usefulness: getUsefulnessCounts(db),
           embeddingMeta: getEmbeddingMeta(db) ?? null,
+          // Read only when something asks for it: this is a full scan of `fact_terms`, and every
+          // recall that passes no `--entity` would pay for a map nothing reads.
+          entityKeys: wantedEntities.length > 0 ? getEntityKeysByFact(db) : null,
         }));
         // `null` unless the user configured an embeddings endpoint, in which case ranking fuses a
         // dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's
@@ -1353,6 +1398,11 @@ export function buildProgram(): Command {
           ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
           ...(options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { epochAfter: options.sinceEpoch } : {}),
+          // Both halves ride into `retrieve` rather than narrowing `listFacts` above, for the reason
+          // `RetrievalOptions.entities` documents: an entity-narrowed pool hides a contested fact's
+          // rival from `resolveContradictions`, which then reinstates the survivor and surfaces it
+          // as clean ground truth.
+          ...(wantedEntities.length > 0 && entityKeys !== null ? { entities: wantedEntities, factEntityKeys: entityKeys } : {}),
           ...(hintStyle !== "full" ? { hintStyle } : {}),
           // Default (full) output drops the per-line CTA in favor of one shared trailing footer
           // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
@@ -1832,6 +1882,77 @@ export function buildProgram(): Command {
     );
 
   program
+    .command("facets")
+    .description("Extract, inspect, and list the structured entity/topic terms behind `mem recall --entity`")
+    .option("--backfill", "Extract terms for facts that have none yet (the default when no other mode is given)")
+    .option("--all", "Re-extract terms for every fact -- the path to take after an extraction-rule change")
+    .option("--fact <id>", "Show the terms stored for one fact (full id or short prefix)")
+    .option("--list-entities", "List the distinct entities in the store with fact counts, most frequent first")
+    .action(
+      guard(async (options: FacetsCliOptions) => {
+        // Each mode answers a different question and they do not compose: `--fact` inspects one
+        // fact, `--list-entities` reads the whole index, `--all` writes. Silently letting one win
+        // would make the ignored flag look honoured.
+        const modes = [options.all === true, options.fact !== undefined, options.listEntities === true].filter(Boolean).length;
+        if (modes > 1) {
+          throw new UsageError("--all, --fact, and --list-entities are mutually exclusive");
+        }
+
+        if (options.fact !== undefined) {
+          const id = options.fact;
+          const output = await withDb((db) => {
+            const existing = resolveIdArgOrThrow(db, id);
+            const terms = listTermsForFact(db, existing.id);
+            const entities = terms.filter((term) => term.kind === "entity").map((term) => term.term);
+            const topics = terms.filter((term) => term.kind === "topic").map((term) => term.term);
+            return [
+              `fact: ${existing.id}`,
+              // "none" rather than an empty line: a fact whose text names no identifier legitimately
+              // has no entities, and a blank value reads as a failed lookup instead of an answer.
+              `entities: ${entities.length > 0 ? entities.join(", ") : "none"}`,
+              `topics: ${topics.length > 0 ? topics.join(", ") : "none"}`,
+              ...(terms.length === 0 ? ["note: no terms stored yet -- run `mem facets` to backfill"] : []),
+            ].join("\n");
+          });
+          process.stdout.write(`${output}\n`);
+          return;
+        }
+
+        if (options.listEntities === true) {
+          const entities = await withDb((db) => listEntityCounts(db));
+          if (entities.length === 0) {
+            process.stdout.write("no entities extracted yet\n");
+            return;
+          }
+          for (const entity of entities) {
+            process.stdout.write(`${String(entity.facts).padStart(5, " ")}  ${entity.term}\n`);
+          }
+          return;
+        }
+
+        const summary = await withDb((db) => {
+          const pending = listFactsNeedingTerms(db, { ...(options.all === true ? { all: true } : {}) });
+          let entities = 0;
+          let topics = 0;
+          for (const row of pending) {
+            const facets = extractFacets(row.text);
+            replaceFactTerms(db, row.id, facets);
+            entities += facets.entities.length;
+            topics += facets.topics.length;
+          }
+          return { facts: pending.length, entities, topics };
+        });
+        if (summary.facts === 0) {
+          // A backfill that found nothing is a success, so the exit code carries no signal and this
+          // line is the whole of it -- silence here is indistinguishable from a run that worked.
+          process.stdout.write("no facts need facet extraction\n");
+          return;
+        }
+        process.stdout.write(`extracted facets for ${summary.facts} fact${summary.facts === 1 ? "" : "s"}: ${summary.entities} entities, ${summary.topics} topics\n`);
+      })
+    );
+
+  program
     .command("doctor")
     .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage")
     .action(
@@ -1860,6 +1981,7 @@ export function buildProgram(): Command {
             `sources: ${sourceRows}`,
             `audit_log rows: ${auditRows}`,
             ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db), totalFacts),
+            describeFacets(countFactsWithTerms(db), totalFacts),
           ].join("\n");
         });
         process.stdout.write(`${output}\n`);
