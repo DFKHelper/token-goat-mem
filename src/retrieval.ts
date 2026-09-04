@@ -7,12 +7,12 @@
  * times out, embedding search is skipped entirely and the BM25 ranking stands alone. When both
  * signals are available they are fused via Reciprocal Rank Fusion (RRF).
  *
- * This module never imports or dynamically loads any concrete embedding package itself — the design
- * doc names no specific model/package/local-cache path for the "local ONNX/transformers.js-class
- * backend", and mem is local-only, zero-network by design (P7, Section 3). Owning that discovery here
- * would mean either inventing unspecified architecture or risking a network-capable dependency being
- * pulled in implicitly. Instead, `EmbeddingBackend` is a narrow interface a caller plugs in; this
- * module only ever calls into an already-resolved (or explicitly lazy) backend under a hard timeout.
+ * This module never imports or dynamically loads any concrete embedding package itself — mem is
+ * local-only and zero-network by default (P7, Section 3), so owning backend discovery here would
+ * risk a network-capable dependency being pulled in implicitly. Instead, `EmbeddingBackend` is a
+ * narrow interface a caller plugs in; this module only ever calls into an already-resolved (or
+ * explicitly lazy) backend under a hard timeout. src/embeddings.ts supplies mem's own backend, and
+ * builds one only when the user has explicitly configured an endpoint.
  *
  * After ranking, every candidate goes through a correctness gate (P1/P3/P4/P8) before it can be
  * surfaced:
@@ -36,19 +36,16 @@ import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
 const MS_PER_DAY = 86_400_000;
 
 /**
- * A local embedding backend, injected by the caller. `embed` may be sync or async; implementations
- * are expected to run fully offline (no network) — mem's zero-network guarantee is a property of
- * what the caller chooses to inject, not something this module can enforce, so callers building a
- * concrete backend must honor it themselves.
+ * An embedding backend, injected by the caller. `embed` may be sync or async. Whether a given
+ * backend honors mem's zero-network default is a property of what the caller chooses to inject, not
+ * something this module can enforce.
  *
- * TODO(deferred, spec'd): no concrete embedding backend ships in v1 — the CLI never wires one, so
- * retrieval runs BM25-only in practice. This is deliberate, per the locked "BM25-first, embeddings
- * optional" decision: a real local ONNX/transformers.js-class provider is a heavyweight
- * native/model dependency the design plan names no spec for (model, cache path, license), and a
- * half-wired one risks pulling a network-capable package into a zero-network tool (P7) or blocking
- * `remember`/`recall` when the model is unavailable. When one is added, it must be injected
- * through this interface (lazy, optional, timeout-bounded — the fail-open behavior is already
- * enforced by tests/unit/retrieval.test.ts), never imported eagerly by this module.
+ * src/embeddings.ts is the one implementation mem ships: an OpenAI-compatible HTTP backend that
+ * exists only when the user points `TOKEN_GOAT_MEM_EMBED_URL` at an endpoint (a localhost model
+ * server keeps the zero-network property intact). It is still injected through this interface --
+ * lazy, optional, timeout-bounded, and never imported by this module, so an unconfigured install
+ * ranks on BM25 alone with no code path that could open a socket. That fail-open behavior is
+ * enforced by tests/unit/retrieval.test.ts.
  */
 export interface EmbeddingBackend {
   embed(text: string): Promise<Float32Array> | Float32Array;
@@ -977,8 +974,15 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       if (embeddable.length > 0) {
         const queryVector = await embedQuery(backend, options.query, options.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
         if (queryVector !== null) {
-          const similarity = new Map<string, number>(embeddable.map((fact) => [fact.id, cosineSimilarity(queryVector, fact.embedding)]));
-          embeddingRankIds = [...embeddable].sort((a, b) => (similarity.get(b.id) ?? -1) - (similarity.get(a.id) ?? -1)).map((fact) => fact.id);
+          // Vectors of a different length than the query's are dropped rather than compared.
+          // `cosineSimilarity` would happily compare them over `Math.min` of the two lengths and
+          // return a confident number about two vector spaces that share no axes -- a wrong ranking
+          // with no error and no log. The store-wide version of this (a model swap) is caught
+          // earlier by `planEmbeddingRanking` in embeddings.ts; this is the per-fact backstop for a
+          // store that is mid-migration or was written by more than one backend.
+          const comparable = embeddable.filter((fact) => fact.embedding.length === queryVector.length);
+          const similarity = new Map<string, number>(comparable.map((fact) => [fact.id, cosineSimilarity(queryVector, fact.embedding)]));
+          embeddingRankIds = [...comparable].sort((a, b) => (similarity.get(b.id) ?? -1) - (similarity.get(a.id) ?? -1)).map((fact) => fact.id);
         }
       }
     }
@@ -989,17 +993,37 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a
   // fourth signal is one push rather than another doubling of cases.
   const extraRankLists = [embeddingRankIds, usefulnessRankIds].filter((list) => list.length > 0);
-  // Fusion runs only when there is a second list to fuse *with* -- RRF over a single list is just
-  // that list's ranks relabelled, so it would spend a scale change to buy nothing. The single-list
-  // path therefore keeps raw BM25 scores.
+
+  // A BM25 list where every score is zero is a *ranking* but not a *signal*: nothing matched, so
+  // `bm25Ranked`'s sort fell through to its `captured_at` tie-break and the list is now pure recency
+  // order. Handing that to RRF lets recency vote on relevance with exactly the same weight as a real
+  // signal -- and it does the most damage on the queries embeddings exist to answer, the ones with no
+  // lexical overlap at all. Found by dogfooding, not by the suite: against a real 768-dim endpoint,
+  // "how do we roll out new versions to production" over a 4-fact store ranked
+  // `deployments use blue-green` *third*, because the recency list outvoted the embedding list
+  // everywhere except the bottom pair. Every ranking test until then used a query that did match
+  // lexically, so the zero case never reached fusion.
+  const bm25IsInformative = bm25RankIds.some((id) => (bm25Scores.get(id) ?? 0) > 0);
+  const rankLists = bm25IsInformative ? [bm25RankIds, ...extraRankLists] : extraRankLists;
+
+  // Fusion runs only when there is something to fuse *with*: RRF over a single list is that list's
+  // own ranks relabelled, so for BM25 alone it would spend a scale change to buy nothing, and the
+  // raw scores are kept instead. An embedding-only list is the one exception -- it is already the
+  // sole signal, and RRF is simply how its ranks become scores.
   //
   // Note that "is this score zero" is no longer a safe way to ask "did this fact match the query":
-  // it is true of the single-list path and false under RRF, which is precisely why `matchedQuery`
+  // it is true of the raw-BM25 path and false under RRF, which is precisely why `matchedQuery`
   // exists as its own field rather than being inferred from `score` downstream.
-  const fusedScores =
-    extraRankLists.length > 0
-      ? reciprocalRankFusion([bm25RankIds, ...extraRankLists])
-      : new Map<string, number>(bm25RankIds.map((id) => [id, bm25Scores.get(id) ?? 0]));
+  let fusedScores: Map<string, number>;
+  if (rankLists.length === 0) {
+    // Nothing matched and no auxiliary signal exists: every fact ties at zero and the caller's own
+    // recency tie-break orders them, exactly as it did before any of this existed.
+    fusedScores = new Map<string, number>(bm25RankIds.map((id) => [id, 0]));
+  } else if (rankLists.length === 1 && bm25IsInformative) {
+    fusedScores = new Map<string, number>(bm25RankIds.map((id) => [id, bm25Scores.get(id) ?? 0]));
+  } else {
+    fusedScores = reciprocalRankFusion(rankLists);
+  }
 
   let anchorBudgetHits = 0;
   const results: RetrievedFact[] = filtered.map((fact) => {

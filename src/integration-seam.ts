@@ -43,9 +43,10 @@
 
 import { resolve as resolvePath, sep } from "node:path";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
-import { getUsefulnessCounts, insertRecallLog, listSurfacedFactIds, openStorage } from "./storage.js";
+import { getEmbeddingMeta, getUsefulnessCounts, insertRecallLog, listSurfacedFactIds, openStorage, unpackEmbedding } from "./storage.js";
 import { resolveDbPath } from "./db.js";
-import { retrieve, type RetrievedFact } from "./retrieval.js";
+import { planEmbeddingRanking } from "./embeddings.js";
+import { retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
 /**
@@ -146,6 +147,20 @@ const RETRIEVAL_BUDGET_MS = 150;
 
 /** Minimum budget handed to `retrieve()`'s own anchor-evaluation deadline, even if most of the soft budget is already spent. */
 const MIN_ANCHOR_BUDGET_MS = 20;
+
+/**
+ * Fraction of the *remaining* soft budget an embedding round trip may spend, and the floor below
+ * which it is not attempted at all.
+ *
+ * The soft budget is a promise to token-goat, and blowing it returns an empty hint set -- so a slow
+ * endpoint must degrade this path to BM25 well before it costs the whole response, not after. A
+ * share of what is left (rather than the flat `DEFAULT_EMBEDDING_TIMEOUT_MS` the CLI uses) is what
+ * makes that automatic: the later in the budget the request would start, the less of it the request
+ * is allowed to take, and under `MIN_EMBEDDING_BUDGET_MS` there is no longer enough time for a round
+ * trip to be worth attempting. Anchors, gating, and formatting all still have to happen afterwards.
+ */
+const EMBEDDING_BUDGET_SHARE = 0.4;
+const MIN_EMBEDDING_BUDGET_MS = 20;
 
 /**
  * Kinds recalled aggressively (design plan P6): a miss lets the agent
@@ -310,8 +325,22 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   let allFacts: Fact[];
   let alreadySurfaced: ReadonlySet<string> = new Set();
   let usefulness: ReadonlyMap<string, { surfaced: number; used: number }>;
+  // Decided before the fact query, not after, because it decides the query's row shape: an
+  // embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget
+  // for a signal that is switched off on every install without a configured endpoint is exactly the
+  // kind of cost that turns a healthy response into a truncated one. The share-of-remaining-budget
+  // rule is EMBEDDING_BUDGET_SHARE's; below MIN_EMBEDDING_BUDGET_MS there is no longer enough time
+  // for a round trip and the backend is not wired at all.
+  const embeddingBudgetMs = Math.min(DEFAULT_EMBEDDING_TIMEOUT_MS, Math.floor((budgetMs - (Date.now() - start)) * EMBEDDING_BUDGET_SHARE));
+  let embeddingBackend: EmbeddingBackend | null;
   try {
-    allFacts = queryAllFacts(db);
+    // Silent either way: a stale-model store or an unreachable endpoint is a ranking-quality
+    // matter, and this seam's contract is to fail open rather than editorialize on a wire protocol.
+    embeddingBackend =
+      embeddingBudgetMs >= MIN_EMBEDDING_BUDGET_MS
+        ? planEmbeddingRanking(getEmbeddingMeta(db) ?? null, process.env, { timeoutMs: embeddingBudgetMs }).backend
+        : null;
+    allFacts = queryAllFacts(db, embeddingBackend !== null);
     // One grouped query on the connection already open, not a second `openStorage`: this path runs
     // inside a ~150ms hard budget and a second WAL open plus schema migration is the kind of cost
     // that turns a healthy response into a truncated one.
@@ -343,6 +372,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // something it should have re-sent. On a store nobody has run `mem used` against -- every install
     // until someone does -- the list is empty and the scores are unchanged.
     usefulness,
+    ...(embeddingBackend !== null ? { embeddingBackend, embeddingTimeoutMs: embeddingBudgetMs } : {}),
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
@@ -445,9 +475,19 @@ interface RawFactRow {
   readonly status: Fact["status"];
   readonly confidence: number;
   readonly prior_status: Fact["status"] | null;
+  readonly embedding?: Buffer | null;
 }
 
-function queryAllFacts(db: ReturnType<typeof openStorage>): Fact[] {
+/**
+ * Every fact in the store, as `Fact`s.
+ *
+ * `withEmbeddings` is off unless an embedding backend was actually resolved: the BLOB column is
+ * kilobytes per row and this path reads the whole table under a ~150ms budget, so it is selected
+ * only when something is going to compare it. With it off, every fact carries `embedding: null` and
+ * retrieval's embedding list stays empty -- which is the behaviour that shipped before a backend
+ * existed at all.
+ */
+function queryAllFacts(db: ReturnType<typeof openStorage>, withEmbeddings = false): Fact[] {
   const rows = db
     .prepare<
       [],
@@ -459,7 +499,7 @@ function queryAllFacts(db: ReturnType<typeof openStorage>): Fact[] {
       // quietly stripping a pinned fact of its decay exemption on the one surface another tool
       // consumes programmatically.
       `SELECT id, text, kind, subject, value, scope, scope_root as scopeRoot, source_type, source_ref,
-              captured_at, anchor, status, confidence, prior_status
+              captured_at, anchor, status, confidence, prior_status${withEmbeddings ? ", embedding" : ""}
        FROM facts`
     )
     .all();
@@ -482,7 +522,7 @@ function toFact(row: RawFactRow): Fact {
     status: row.status,
     confidence: row.confidence,
     prior_status: row.prior_status,
-    embedding: null,
+    embedding: row.embedding === undefined || row.embedding === null ? null : unpackEmbedding(row.embedding),
   };
 }
 

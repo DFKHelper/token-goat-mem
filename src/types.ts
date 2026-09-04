@@ -72,7 +72,7 @@ export interface Fact {
   readonly status: FactStatus;
   /** Confidence in [0, 1]. */
   readonly confidence: number;
-  /** Embedding vector for hybrid retrieval, or null when embeddings are unavailable (BM25-only mode). */
+  /** Embedding vector for hybrid retrieval, or null when this fact has not been embedded -- which is every fact until an embeddings endpoint is configured (src/embeddings.ts), and ranking is BM25-only. */
   readonly embedding: Float32Array | null;
   /**
    * The write epoch (src/storage.ts's monotonic `getEpoch`/`bumpEpoch`) this fact was last inserted

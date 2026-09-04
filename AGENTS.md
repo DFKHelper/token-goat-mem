@@ -35,11 +35,14 @@ All memory operations are explicit and auditable:
 - `mem edit <id>` — modify fact text, subject/value, anchor, or scope
 - `mem show <id>` — view a fact and its full provenance
 - `mem list` — all facts, filtered by status/kind/subject/scope
+- `mem embed` — compute embedding vectors for facts, enabling semantic recall alongside BM25; `--all` re-embeds everything after a model change, `--limit <n>` bounds the run. Off unless `TOKEN_GOAT_MEM_EMBED_URL` and `TOKEN_GOAT_MEM_EMBED_MODEL` are set
 - `mem epoch` — emit a monotonic version number (for cache invalidation); `--gc` runs the retention pass first
 
 ## Data model
 
 **facts** table: `id`, `text`, `kind` (preference/decision/fact/correction), `subject`, `value`, `scope` (global/project/path), `scope_root`, `source_type` (user/derived), `source_ref`, `captured_at`, `anchor`, `status` (active/pending/superseded/contested/pinned), `confidence`, `embedding`.
+
+**Retrieval:** BM25 by default, with no configuration and no network. Setting `TOKEN_GOAT_MEM_EMBED_URL` + `TOKEN_GOAT_MEM_EMBED_MODEL` (optionally `TOKEN_GOAT_MEM_EMBED_API_KEY`) to an OpenAI-compatible embeddings endpoint adds a dense rank list fused with BM25 via RRF. The `meta` table records which model produced the stored vectors; a configured model that disagrees with it disables embedding ranking rather than comparing two vector spaces, and `mem embed --all` migrates.
 
 **sources** table: `fact_id`, `excerpt` (redacted preview, full content never persisted in sources table), `stored_at`. The read/write/gc paths exist and are tested, but no capture path writes to it yet — the table is empty in practice. Keeping it unfed is a decision, not an oversight: deleting it would be a schema migration plus a break of the `insertSource`/`listSourcesForFact`/`deleteSourcesOlderThan` exports in `src/index.ts`, a one-way door bought for no correctness gain. `tests/guards/unfed-sources.test.ts` holds the docs to that state in both directions.
 
