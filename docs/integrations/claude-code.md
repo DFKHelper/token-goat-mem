@@ -116,6 +116,10 @@ Add `--anchor "<predicate> <args>"` when a fact can be re-verified later instead
 of staying caveated forever, e.g. `--anchor "file-exists pnpm-lock.yaml"`.
 Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
 newest-of. The anchor path must stay inside --root (no "..", no absolute path).
+
+When a fact you recalled actually informed the work, mark it:
+`mem used <id>... --session-id <session>`, using the session id you recalled
+under. Recall ranks partly on this, and nothing else produces the signal.
 ```
 
 ## Embedding memory into Claude Code

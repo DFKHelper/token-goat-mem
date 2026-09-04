@@ -1263,7 +1263,11 @@ Use --subject/--value for anything that can be contradicted later.
 Add \`--anchor "<predicate> <args>"\` when a fact can be re-verified later instead
 of staying caveated forever, e.g. \`--anchor "file-exists pnpm-lock.yaml"\`.
 Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
-newest-of. The anchor path must stay inside --root (no "..", no absolute path).`;
+newest-of. The anchor path must stay inside --root (no "..", no absolute path).
+
+When a fact you recalled actually informed the work, mark it:
+\`mem used <id>... --session-id <session>\`, using the session id you recalled
+under. Recall ranks partly on this, and nothing else produces the signal.`;
 
 /**
  * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
@@ -1276,6 +1280,10 @@ token-goat-mem is installed (\`mem\` on PATH).
 - At the start of a task, run \`mem recall --hint-format --root .\` and treat
   each returned line's \`display\` string as a prior fact, honoring its
   embedded trust caveat.
+- When a recalled fact actually informed your work, say so:
+  \`mem used <id>... --session-id <session>\`, passing the same session id you
+  recalled under. Recall ranks partly on this, and nothing else produces
+  the signal -- a fact never marked is a fact recall cannot learn to prefer.
 - Do not wait to be asked to run \`mem remember\` — when the user says things
   like "remember that...", "always...", "from now on...", "never...",
   "don't...", or otherwise reaches a durable preference, decision, or
