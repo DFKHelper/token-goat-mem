@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import { buildProgram } from "../../src/cli.js";
 
 const EXPECTED_COMMANDS = [
+  "consolidate",
   "doctor",
   "edit",
   "embed",

@@ -142,6 +142,20 @@ export function ensureStorageSchema(db: Db): void {
   // would leave the column missing on every existing install while looking correct on a fresh one.
   // The ALTER is the migration; a fresh database gets the column from the very same line.
   applyIdempotentAlter(db, "ALTER TABLE recall_log ADD COLUMN used_at TEXT");
+  // Durable "this fact has been surfaced at least once" mark, for `mem consolidate --stale`.
+  //
+  // `recall_log` alone cannot answer that question: `mem epoch --gc` rotates its rows after
+  // GC_RECALL_LOG_MAX_AGE_DAYS (30), so a fact surfaced two months ago has no row left and reads as
+  // never-surfaced -- exactly the fact the stale pass would then propose superseding. Rotating the
+  // log is correct (its only reader is a same-session `--delta` recall); losing the one bit that
+  // outlives the session is not. This column is that bit, written alongside every `recall_log`
+  // insert and never rotated.
+  //
+  // Nullable with no backfill, same reasoning as the three columns above: for a fact captured
+  // before this column existed there is no honest value to invent. `listStaleUnsurfacedFacts`
+  // covers that window by *also* requiring no surviving `recall_log` row, so a pre-migration fact
+  // surfaced inside the rotation window is still excluded.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN last_surfaced_at TEXT");
 }
 
 /**
@@ -643,9 +657,16 @@ export function insertRecallLog(db: Db, sessionId: string, factIds: readonly str
     return;
   }
   const insert = db.prepare("INSERT INTO recall_log (fact_id, session_id, surfaced_at) VALUES (?, ?, ?)");
+  // The `facts.last_surfaced_at` mirror is written in the same transaction as the log row it
+  // summarizes, so the two can never disagree about whether a fact was ever surfaced. Monotonic
+  // (`MAX`) rather than last-write-wins: a backdated replay must not walk the mark backwards.
+  const mark = db.prepare(
+    "UPDATE facts SET last_surfaced_at = MAX(COALESCE(last_surfaced_at, ''), ?) WHERE id = ?"
+  );
   db.transaction(() => {
     for (const factId of factIds) {
       insert.run(factId, sessionId, atIso);
+      mark.run(atIso, factId);
     }
   })();
 }
@@ -830,6 +851,36 @@ export function listFactsNeedingTerms(db: Db, options: { readonly all?: boolean 
 }
 
 /** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
+/**
+ * The population `mem consolidate --stale` proposes: `active` facts captured before `beforeIso`
+ * that recall has never surfaced and nobody has ever marked useful, oldest first.
+ *
+ * `pinned` facts are excluded by construction, not by a caller-side filter -- a pin is a standing
+ * instruction that this fact matters regardless of whether it has been read yet. So are `pending`,
+ * `contested`, and `superseded` facts: none of them is live ground truth, and each already has its
+ * own resolution path (`mem review`, the retention pass).
+ *
+ * Three conditions, not one, because no single one is sufficient. `last_surfaced_at` is the durable
+ * mark but is NULL for every fact captured before that column existed; the `recall_log` NOT EXISTS
+ * covers those, up to the rotation window; and `used_at` lives on `recall_log` rows, so a fact
+ * marked useful is already excluded by the row that carries the mark. Keying on `captured_at`
+ * (never edited) rather than `status_changed_at` is deliberate: this pass asks how long a fact has
+ * gone unread, and a fact that has never changed status has no `status_changed_at` at all.
+ */
+export function listStaleUnsurfacedFacts(db: Db, beforeIso: string): Fact[] {
+  const rows = db
+    .prepare<[string], FactRow>(
+      `SELECT * FROM facts AS f
+       WHERE f.status = 'active'
+         AND f.captured_at < ?
+         AND f.last_surfaced_at IS NULL
+         AND NOT EXISTS (SELECT 1 FROM recall_log AS r WHERE r.fact_id = f.id)
+       ORDER BY f.captured_at ASC, f.id ASC`
+    )
+    .all(beforeIso);
+  return rows.map(rowToFact);
+}
+
 export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM recall_log WHERE surfaced_at < ?").run(beforeIso).changes;
 }

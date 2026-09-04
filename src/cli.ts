@@ -52,6 +52,14 @@ import {
   type CaptureSuggestedInput,
 } from "./capture.js";
 import { detectContradictions, sameContradictionBucket } from "./contradiction.js";
+import {
+  DEFAULT_DUPLICATE_THRESHOLD,
+  DEFAULT_STALE_AGE_DAYS,
+  findDuplicateClusters,
+  findStaleFacts,
+  staleCutoff,
+  type DuplicateCluster,
+} from "./consolidate.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
 import {
   EMBED_API_KEY_ENV,
@@ -926,6 +934,166 @@ function runRetentionPass(db: Database.Database): string {
 
 // ─────────────────────────────────────────────────────────────────────────── Program assembly ───────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────── consolidate ───────────────────────────────────────────────────────────────────
+
+/**
+ * Audit events for the two `mem consolidate` passes. Separate strings, not one shared
+ * `"consolidate"`: the audit log is the only record of *why* a fact was superseded, and "it
+ * restated fact X" and "nothing ever read it" are different reasons that a later reader must be
+ * able to tell apart without re-deriving them.
+ */
+const CONSOLIDATE_DUPLICATE_EVENT = "consolidate_duplicate";
+const CONSOLIDATE_STALE_EVENT = "consolidate_stale";
+
+function parseThreshold(raw: string): number {
+  const value = Number.parseFloat(raw);
+  // `0` is rejected along with the out-of-range values: every pair of facts with any topics at all
+  // clears a threshold of 0, so it would not mean "loosest" -- it would mean "collapse the store".
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new UsageError(`--threshold must be a number greater than 0 and at most 1 (got "${raw}")`);
+  }
+  return value;
+}
+
+function parseStaleDays(raw: string): number {
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isFinite(value) || value < 1) {
+    throw new UsageError(`--stale-days must be a whole number of days, at least 1 (got "${raw}")`);
+  }
+  return value;
+}
+
+/**
+ * The one line every applied pass ends on. Says where the superseded facts went in commands the
+ * user can actually run, because "reversible" is a claim, and an unbacked claim about a destructive
+ * operation is worse than no claim.
+ */
+const CONSOLIDATE_REVERSIBLE_NOTE =
+  "superseded facts stay in the store -- `mem list --status superseded`, `mem show <id>`, " +
+  "`mem export --status superseded` -- and every change is in the audit log";
+
+function formatDuplicateClusters(clusters: readonly DuplicateCluster[], threshold: number, applied: boolean): string {
+  const floor = threshold.toFixed(2);
+  if (clusters.length === 0) {
+    return `no duplicate clusters at Jaccard >= ${floor} over topic terms`;
+  }
+  const lines: string[] = [];
+  const total = clusters.reduce((sum, cluster) => sum + cluster.duplicates.length, 0);
+  lines.push(
+    `${clusters.length} duplicate cluster${clusters.length === 1 ? "" : "s"} at Jaccard >= ${floor} over topic terms` +
+      (applied ? "" : " (dry run, nothing changed)")
+  );
+  clusters.forEach((cluster, index) => {
+    lines.push("");
+    lines.push(`cluster ${index + 1}`);
+    lines.push(`  keep    ${formatFactSummary(cluster.keep)}`);
+    for (const member of cluster.duplicates) {
+      lines.push(`  ${member.similarity.toFixed(2)}    ${formatFactSummary(member.fact)}`);
+    }
+    for (const pinned of cluster.retainedPinned) {
+      // Listed, but as an explicit non-action: a pinned duplicate is part of the cluster the user
+      // is being shown, and silently dropping it would make the cluster look smaller than it is.
+      lines.push(`  pinned  ${formatFactSummary(pinned)}  (left alone)`);
+    }
+  });
+  lines.push("");
+  lines.push(
+    applied
+      ? `superseded ${total} ${total === 1 ? "fact as a duplicate" : "facts as duplicates"}; ${CONSOLIDATE_REVERSIBLE_NOTE}`
+      : `${total} fact${total === 1 ? "" : "s"} would be superseded -- re-run with --apply to act`
+  );
+  return lines.join("\n");
+}
+
+function formatStaleFacts(facts: readonly Fact[], cutoffIso: string, ageDays: number, applied: boolean): string {
+  const window = `older than ${ageDays} day${ageDays === 1 ? "" : "s"}`;
+  if (facts.length === 0) {
+    return `no stale facts ${window}`;
+  }
+  const lines: string[] = [];
+  lines.push(
+    `${facts.length} stale fact${facts.length === 1 ? "" : "s"}: active, captured before ${cutoffIso}, ` +
+      `never surfaced by recall, never marked used` +
+      (applied ? "" : " (dry run, nothing changed)")
+  );
+  lines.push("");
+  for (const fact of facts) {
+    lines.push(`  captured ${fact.captured_at}  ${formatFactSummary(fact)}`);
+  }
+  lines.push("");
+  lines.push(
+    applied
+      ? `superseded ${facts.length} stale fact${facts.length === 1 ? "" : "s"}; ${CONSOLIDATE_REVERSIBLE_NOTE}`
+      : `re-run with --apply to supersede ${facts.length === 1 ? "it" : "them"}`
+  );
+  return lines.join("\n");
+}
+
+interface ConsolidateCliOptions {
+  readonly apply?: boolean;
+  readonly threshold?: string;
+  readonly stale?: boolean;
+  readonly staleDays?: string;
+}
+
+/**
+ * `mem consolidate` in full: pick the pass, run it read-only, and -- only under `--apply` -- route
+ * every loser through `setStatusWithAudit` so the transition is transactional and audit-logged.
+ *
+ * The two passes deliberately share one command rather than joining `mem epoch --gc`. That pass is
+ * the non-interactive retention job a polling consumer may run unattended; giving it the power to
+ * supersede *active* facts would make an existing, already-wired invocation newly destructive with
+ * no dry run in front of it. `mem consolidate` is the opposite contract: nothing happens until a
+ * human has seen the listing and typed `--apply`.
+ */
+function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, now: Date): string {
+  const stale = options.stale === true;
+  const applied = options.apply === true;
+  // Each flag belongs to exactly one pass and they do not compose (`mem facets` takes the same
+  // line): silently ignoring the one that does not apply would make it look honoured.
+  if (stale && options.threshold !== undefined) {
+    throw new UsageError("--threshold applies to the duplicate pass; --stale is bounded by --stale-days");
+  }
+  if (!stale && options.staleDays !== undefined) {
+    throw new UsageError("--stale-days applies to --stale; the duplicate pass is bounded by --threshold");
+  }
+
+  if (stale) {
+    const ageDays = options.staleDays !== undefined ? parseStaleDays(options.staleDays) : DEFAULT_STALE_AGE_DAYS;
+    const cutoff = staleCutoff(ageDays, now);
+    const facts = findStaleFacts(db, cutoff);
+    if (applied) {
+      for (const fact of facts) {
+        setStatusWithAudit(
+          db,
+          fact.id,
+          "superseded",
+          CONSOLIDATE_STALE_EVENT,
+          `superseded as stale: captured ${fact.captured_at}, never surfaced by recall, never marked used`
+        );
+      }
+    }
+    return formatStaleFacts(facts, cutoff, ageDays, applied);
+  }
+
+  const threshold = options.threshold !== undefined ? parseThreshold(options.threshold) : DEFAULT_DUPLICATE_THRESHOLD;
+  const clusters = findDuplicateClusters(db, threshold);
+  if (applied) {
+    for (const cluster of clusters) {
+      for (const member of cluster.duplicates) {
+        setStatusWithAudit(
+          db,
+          member.fact.id,
+          "superseded",
+          CONSOLIDATE_DUPLICATE_EVENT,
+          `superseded as a duplicate of ${cluster.keep.id} (Jaccard ${member.similarity.toFixed(2)} over topic terms)`
+        );
+      }
+    }
+  }
+  return formatDuplicateClusters(clusters, threshold, applied);
+}
+
 interface RememberCliOptions {
   readonly kind: string;
   readonly subject?: string;
@@ -1762,6 +1930,20 @@ export function buildProgram(): Command {
           ...(options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { sinceEpoch: options.sinceEpoch } : {}),
         };
         const output = await withDb((db) => formatReview(db, root, reviewOptions));
+        process.stdout.write(`${output}\n`);
+      })
+    );
+
+  program
+    .command("consolidate")
+    .description("Report near-duplicate facts (or, with --stale, live facts nothing has ever read); --apply supersedes the losers")
+    .option("--apply", "Act on the report instead of only printing it: mark every loser superseded -- the same audited soft-delete `mem forget` uses, never a hard delete")
+    .option("--threshold <0-1>", `Jaccard floor over topic terms for calling two facts duplicates (default ${DEFAULT_DUPLICATE_THRESHOLD})`)
+    .option("--stale", "Run the stale pass instead: active facts nothing has ever surfaced or marked used")
+    .option("--stale-days <n>", `How old a fact must be to count as stale, in days (default ${DEFAULT_STALE_AGE_DAYS})`)
+    .action(
+      guard(async (options: ConsolidateCliOptions) => {
+        const output = await withDb((db) => runConsolidate(db, options, new Date()));
         process.stdout.write(`${output}\n`);
       })
     );

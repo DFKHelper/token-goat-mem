@@ -44,6 +44,7 @@ export {
   listFactsNeedingEmbedding,
   listFactsNeedingTerms,
   listSourcesForFact,
+  listStaleUnsurfacedFacts,
   listTermsForFact,
   normalizeSubject,
   openStorage,
@@ -57,6 +58,17 @@ export {
 } from "./storage.js";
 
 export { anchorPathWithinRoot, evaluateAnchor, type AnchorVerdict } from "./anchors.js";
+
+export {
+  DEFAULT_DUPLICATE_THRESHOLD,
+  DEFAULT_STALE_AGE_DAYS,
+  findDuplicateClusters,
+  findStaleFacts,
+  jaccard,
+  staleCutoff,
+  type DuplicateCluster,
+  type DuplicateMember,
+} from "./consolidate.js";
 
 export {
   MAX_ENTITIES_PER_FACT,
