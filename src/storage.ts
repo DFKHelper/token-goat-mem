@@ -32,6 +32,7 @@
 
 import { randomUUID } from "node:crypto";
 import { openDb, resolveDbPath } from "./db.js";
+import type { EmbeddingMeta } from "./embeddings.js";
 import type { Fact, FactFilter, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
 
 /** Connection type, borrowed from db.ts's own return type rather than importing better-sqlite3's types directly -- keeps this module's public surface in lockstep with whatever db.ts actually opens. */
@@ -159,8 +160,12 @@ function packEmbedding(vec: Float32Array): Buffer {
  * aligned offset within its underlying `ArrayBuffer`, and `Float32Array`
  * requires alignment. Embedding vectors here are at most a few hundred
  * floats, so the per-element read has no meaningful cost.
+ *
+ * Exported because integration-seam.ts reads the `facts` table through its
+ * own projection (it needs `prior_status`, which `listFacts` does not carry)
+ * and would otherwise have to reimplement this alignment-safe read.
  */
-function unpackEmbedding(blob: Buffer): Float32Array {
+export function unpackEmbedding(blob: Buffer): Float32Array {
   const count = Math.floor(blob.byteLength / Float32Array.BYTES_PER_ELEMENT);
   const view = new Float32Array(count);
   for (let i = 0; i < count; i++) {
@@ -677,6 +682,83 @@ export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
 export function getEpoch(db: Db): number {
   const row = db.prepare<[], { value: string }>("SELECT value FROM meta WHERE key = 'epoch'").get();
   return row === undefined ? 0 : Number(row.value);
+}
+
+/** `meta` keys describing the embedding model the vectors in `facts.embedding` were produced by. */
+const EMBEDDING_MODEL_KEY = "embedding_model";
+const EMBEDDING_DIMENSION_KEY = "embedding_dimension";
+
+function getMetaValue(db: Db, key: string): string | undefined {
+  return db.prepare<[string], { value: string }>("SELECT value FROM meta WHERE key = ?").get(key)?.value;
+}
+
+function setMetaValue(db: Db, key: string, value: string): void {
+  db.prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(key, value);
+}
+
+/**
+ * Reads which embedding model produced the vectors currently stored in `facts.embedding`, or
+ * `undefined` on a store nothing has ever been embedded in.
+ *
+ * Recorded at all because `cosineSimilarity` compares over the shorter of two vectors and therefore
+ * cannot tell a genuine similarity from one computed across two different models' vector spaces --
+ * see `planEmbeddingRanking` in embeddings.ts, which is this value's only consumer.
+ */
+export function getEmbeddingMeta(db: Db): EmbeddingMeta | undefined {
+  const model = getMetaValue(db, EMBEDDING_MODEL_KEY);
+  const dimension = Number(getMetaValue(db, EMBEDDING_DIMENSION_KEY));
+  if (model === undefined || !Number.isInteger(dimension) || dimension <= 0) {
+    return undefined;
+  }
+  return { model, dimension };
+}
+
+/** Records the model and vector dimension the store's embeddings were produced by. Written by whichever path first populates a vector, and rewritten by `mem embed --all`. Not an epoch bump: no fact's content, status, or freshness changes. */
+export function setEmbeddingMeta(db: Db, meta: EmbeddingMeta): void {
+  setMetaValue(db, EMBEDDING_MODEL_KEY, meta.model);
+  setMetaValue(db, EMBEDDING_DIMENSION_KEY, String(meta.dimension));
+}
+
+/** Counts facts that currently carry an embedding vector, for `mem doctor`'s coverage line. */
+export function countEmbeddedFacts(db: Db): number {
+  return db.prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM facts WHERE embedding IS NOT NULL").get()?.count ?? 0;
+}
+
+/**
+ * Drops every stored embedding vector in one statement, returning how many rows were cleared.
+ *
+ * `mem embed --all` calls this before re-embedding under a different model. Without it a migration
+ * interrupted halfway leaves the store holding two models' vectors while `meta` names only one --
+ * and if the two models happen to share a dimension, nothing downstream can tell them apart and
+ * ranking silently mixes vector spaces. Clearing first makes an interrupted migration lose ranking
+ * quality (facts with no vector) instead of correctness.
+ *
+ * One `UPDATE` and one epoch bump, not `updateFact` per row: this is a single logical store change,
+ * and stamping N per-row epochs would say N writes happened when one did.
+ */
+export function clearAllEmbeddings(db: Db): number {
+  const tx = db.transaction((): number => {
+    const next = getEpoch(db) + 1;
+    const result = db.prepare("UPDATE facts SET embedding = NULL, epoch = ? WHERE embedding IS NOT NULL").run(next);
+    if (result.changes > 0) {
+      performEpochUpsert(db, next);
+    }
+    return result.changes;
+  });
+  return tx.immediate(); // read-then-write under WAL (getEpoch reads); see insertFact.
+}
+
+/**
+ * Ids and texts of facts still needing a vector, oldest first, for `mem embed`'s backfill.
+ *
+ * Oldest first, unlike `listFacts`: a `--limit`ed backfill run should chip away at the arrears
+ * deterministically, so re-running it makes progress instead of re-offering the same newest slice.
+ */
+export function listFactsNeedingEmbedding(db: Db, options: { readonly all?: boolean; readonly limit?: number } = {}): Array<{ id: string; text: string }> {
+  const where = options.all === true ? "" : "WHERE embedding IS NULL";
+  const sql = `SELECT id, text FROM facts ${where} ORDER BY captured_at ASC, id ASC${options.limit !== undefined ? " LIMIT ?" : ""}`;
+  const params = options.limit !== undefined ? [options.limit] : [];
+  return db.prepare<unknown[], { id: string; text: string }>(sql).all(...params);
 }
 
 /**

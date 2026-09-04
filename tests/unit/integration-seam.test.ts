@@ -3,7 +3,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/db.js";
-import { markRecallUsed, openStorage } from "../../src/storage.js";
+import { markRecallUsed, openStorage, setEmbeddingMeta, updateFact } from "../../src/storage.js";
+import { EMBED_MODEL_ENV, EMBED_URL_ENV } from "../../src/embeddings.js";
+import { startStubEmbeddingServer, type StubEmbeddingServer } from "../support/embedding-server.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
 import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
@@ -90,15 +92,31 @@ describe("buildHintFormat", () => {
   let workDir: string;
   let root: string;
   let dbPath: string;
+  let priorEmbedEnv: Record<string, string | undefined> = {};
+  const openServers: StubEmbeddingServer[] = [];
 
   beforeEach(() => {
     workDir = mkdtempSync(join(tmpdir(), "mem-seam-test-"));
     root = join(workDir, "project");
     mkdirSync(root, { recursive: true });
     dbPath = join(workDir, "mem.db");
+    priorEmbedEnv = { [EMBED_URL_ENV]: process.env[EMBED_URL_ENV], [EMBED_MODEL_ENV]: process.env[EMBED_MODEL_ENV] };
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Record/set/restore rather than delete, matching tests/setup/isolate-home.ts: an embedding
+    // variable left set here would silently turn ranking on for every later test in this worker.
+    for (const key of [EMBED_URL_ENV, EMBED_MODEL_ENV] as const) {
+      const prior = priorEmbedEnv[key];
+      if (prior === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = prior;
+      }
+    }
+    while (openServers.length > 0) {
+      await openServers.pop()?.close();
+    }
     rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -947,6 +965,45 @@ describe("buildHintFormat", () => {
     expect(repeat.lines).toEqual([]);
 
     // And the other half of the contract still holds under fusion: a genuine hit re-sends.
+    const hit = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "alpha" });
+    expect(emittedIds(hit)).toEqual(["fact-a"]);
+  });
+
+  it("regression: --delta still suppresses non-matching facts once an embedding backend turns fusion on", async () => {
+    // The embedding half of the `matchedQuery` regression above. Fusion is switched on by any
+    // non-empty auxiliary rank list, and an embedding list is the other one -- so the same
+    // `score !== 0` predicate that usefulness feedback broke would be broken by a configured
+    // endpoint, on installs that never run `mem used` at all.
+    threeGlobalFacts();
+    const baseline = await buildHint({ root, dbPath, sessionId: "sess-1", query: "what is the lint setup" });
+    expect(emittedIds(baseline)).toEqual(["fact-a", "fact-b", "fact-c"]);
+
+    // A stored vector per fact plus a recorded model is what makes the embedding rank list
+    // non-empty; the stub endpoint supplies the query vector.
+    const server = await startStubEmbeddingServer();
+    openServers.push(server);
+    const db = openStorage(dbPath);
+    try {
+      for (const id of ["fact-a", "fact-b", "fact-c"]) {
+        updateFact(db, id, { embedding: Float32Array.from([1, 0, 0, 0]) });
+      }
+      setEmbeddingMeta(db, { model: "stub-model", dimension: 4 });
+    } finally {
+      db.close();
+    }
+    process.env[EMBED_URL_ENV] = server.url;
+    process.env[EMBED_MODEL_ENV] = "stub-model";
+
+    // Same non-matching query, so the correct answer is unchanged: everything was already sent and
+    // nothing matches, therefore header only.
+    const repeat = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
+    expect(repeat.header).toBe(`${TGMEM_HEADER}  delta=1`);
+    expect(repeat.lines).toEqual([]);
+    // The endpoint really was consulted -- otherwise this would be the BM25-only path and would
+    // pass for the wrong reason.
+    expect(server.requests.length).toBeGreaterThan(0);
+
+    // And a genuine lexical hit still re-sends under fusion.
     const hit = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "alpha" });
     expect(emittedIds(hit)).toEqual(["fact-a"]);
   });

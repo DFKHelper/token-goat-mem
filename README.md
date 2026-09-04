@@ -114,13 +114,38 @@ On POSIX systems the directory is created `0700` and the database `0600`, so the
 | `mem pin <id>` | Exempt a fact from time-decay (still subject to contradiction/anchor suppression). Only an active (or already-pinned) fact can be pinned: pinning is a promotion to maximal trust, so a `pending`, `contested`, or `superseded` fact must be resolved through `mem review` first rather than pinned around it. |
 | `mem used <id...> --session-id <id>` | Record that facts recalled in a session were actually useful. Feeds recall ranking as a third rank list fused alongside BM25 (rank-based, so the signal cannot drift as the store grows). `--session-id` is required and names the session the recall was surfaced under (`mem recall --hint-format --session-id <id>`, or the hook envelope's `session_id`) -- mem is a short-lived process with no notion of a current session. Naming a fact never surfaced in that session says so and exits 0 rather than failing. Idempotent: marking twice does not double-count. Does not bump epoch (no fact's content, status, or freshness changes). |
 | `mem epoch` | Print the current write epoch (monotonic, bumped on every write). `--gc` runs the retention pass first: persists contradiction resolutions, prunes superseded facts/sources/audit rows, applies preference decay. |
-| `mem doctor` | Read-only environment/DB health check: db path, WAL journal mode, foreign-key setting, schema tables, current epoch, fact counts by status, source/audit-log row counts. No options. |
+| `mem embed` | Compute and store embedding vectors for facts, so recall can rank semantically as well as lexically. Requires `TOKEN_GOAT_MEM_EMBED_URL` and `TOKEN_GOAT_MEM_EMBED_MODEL` (see [Optional: semantic recall](#optional-semantic-recall)) and errors naming them when unset. Default: embeds only facts that have no vector yet, in batches, and reports `embedded / skipped / failed`. `--all` re-embeds every fact and rewrites the recorded model -- the migration path after changing models. `--limit <n>` bounds the work. A failed batch costs only that batch; a run in which nothing was embedded exits non-zero. |
+| `mem doctor` | Read-only environment/DB health check: db path, WAL journal mode, foreign-key setting, schema tables, current epoch, fact counts by status, source/audit-log row counts, embedding configuration (endpoint host and model -- never the API key) and coverage. No options. |
 | `mem init <tool>` | Wires mem into a coding tool's config -- `claude-code`, `codex`, `copilot-cli`, or `copilot-vscode` -- automating what `docs/integrations/*.md` otherwise asks you to hand-copy. Idempotent: re-running upgrades mem's own entries in place, never duplicates them; an unstamped hand-written entry with the same identity aborts with a conflict error instead of being overwritten. `--root <path>` (project root, default current directory), `--user` (write the tool's user-level config instead of project-level, where it has both), `--dry-run` (print what would be written without touching disk). |
 | `mem uninstall <tool\|--all>` | Removes exactly what `mem init` wrote for `tool` -- or every tool with `--all` -- leaving everything else untouched. A no-op (not an error) if there's nothing mem-authored to remove. `--root <path>`, `--user`, `--dry-run`. |
 
 Every `<id>` argument (`show`, `forget`, `pin`, `edit`, `used`, `review --promote`/`--reject`) accepts a git-style short prefix — at least 4 characters — instead of the full id, as long as it uniquely identifies one fact. A prefix matching more than one fact errors and lists every match.
 
 Every command supports `--help` for the authoritative flag list.
+
+### Optional: semantic recall
+
+Retrieval is BM25 (lexical) by default and needs no configuration. Point these at any
+OpenAI-compatible embeddings endpoint -- OpenAI, Ollama, LM Studio, LiteLLM -- and recall additionally
+ranks by meaning, fusing the two lists with Reciprocal Rank Fusion:
+
+| Variable | |
+| --- | --- |
+| `TOKEN_GOAT_MEM_EMBED_URL` | Full endpoint, e.g. `http://localhost:11434/v1/embeddings`. Setting it is what turns the feature on. |
+| `TOKEN_GOAT_MEM_EMBED_MODEL` | Model name. Required whenever the URL is set. |
+| `TOKEN_GOAT_MEM_EMBED_API_KEY` | Optional. Sent as `Authorization: Bearer <key>`; never logged, echoed, or printed by `mem doctor`. |
+
+A localhost endpoint keeps mem's zero-network property; a hosted one does not, and sends your fact
+text to that provider. Nothing is sent until you set the URL.
+
+Once configured, `mem remember` and `mem suggest` embed each new fact in the background of the same
+command -- after secret screening, never before -- and never fail, slow, or change their output if
+the endpoint is down. Run `mem embed` once to backfill facts captured earlier.
+
+Vectors from two different models are not comparable, and cosine similarity cannot detect the
+mismatch: it happily compares them and returns a confident, meaningless number. Mem records which
+model produced the store's vectors and refuses to rank against them when the configured model
+differs, saying so on `mem recall` and `mem doctor`. `mem embed --all` is the migration.
 
 > **`mem import --from-json` and `scope_root`:** a `scope="project"`/`scope="path"` fact's `scopeRoot` is an absolute filesystem path from the machine it was exported on. `mem import --from-json` imports it verbatim (full fidelity), so re-importing an export from a different machine — or a different path on the same machine — leaves `scopeRoot` pointing at a path that may not exist there. This is a known v1 limitation, not something the import command tries to fix up.
 

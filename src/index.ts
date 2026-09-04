@@ -24,20 +24,25 @@ export { insertAuditLog, openDb, resolveDbPath, resolveMemHome, type AuditLogEnt
 
 export {
   applyIdempotentAlter,
+  clearAllEmbeddings,
+  countEmbeddedFacts,
   countFacts,
   deleteFact,
   deleteSource,
   deleteSourcesForFact,
   deleteSourcesOlderThan,
   ensureStorageSchema,
+  getEmbeddingMeta,
   getEpoch,
   getFactById,
   insertFact,
   insertSource,
   listFacts,
+  listFactsNeedingEmbedding,
   listSourcesForFact,
   normalizeSubject,
   openStorage,
+  setEmbeddingMeta,
   setFactStatus,
   updateFact,
 } from "./storage.js";
@@ -95,6 +100,25 @@ export {
   type RetrievedFact,
   type TrustLevel,
 } from "./retrieval.js";
+
+export {
+  DEFAULT_EMBED_REQUEST_TIMEOUT_MS,
+  EMBED_API_KEY_ENV,
+  EMBED_MODEL_ENV,
+  EMBED_URL_ENV,
+  EmbeddingConfigError,
+  EmbeddingRequestError,
+  createHttpEmbeddingBackend,
+  endpointLabelFor,
+  planEmbeddingRanking,
+  readEmbeddingConfig,
+  resolveConfiguredEmbeddingBackend,
+  type EmbeddingBackendOptions,
+  type EmbeddingConfig,
+  type EmbeddingMeta,
+  type EmbeddingRankingPlan,
+  type HttpEmbeddingBackend,
+} from "./embeddings.js";
 
 export {
   TGMEM_HEADER,

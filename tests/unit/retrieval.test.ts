@@ -543,6 +543,41 @@ describe("retrieve", () => {
     expect(results[0]?.fact.id).toBe("1");
   });
 
+  it("regression: an all-zero BM25 list does not vote, so a lexically-unmatched query ranks on embeddings rather than recency", async () => {
+    // The defect this pins, found by dogfooding against a real 768-dim endpoint rather than by the
+    // suite: when nothing matches lexically, every BM25 score is zero and `bm25Ranked`'s sort falls
+    // through to its `captured_at` tie-break -- so the list handed to RRF is pure recency order.
+    // Fusing it let recency vote on relevance at equal weight with the embedding signal, and it did
+    // the most damage on exactly the queries embeddings exist to answer. "deployments use blue-green"
+    // ranked third for "how do we roll out new versions", behind two newer, unrelated facts.
+    //
+    // Every prior ranking test used a query that did match lexically, so the zero case never reached
+    // fusion at all. Here "quantum" matches no fact text, and the semantically-correct fact is also
+    // the OLDEST -- so recency and the embedding signal disagree, and only one of them can be
+    // driving the result.
+    const facts = [
+      makeFact({ id: "semantic-match", text: "alpha", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z", embedding: new Float32Array([1, 0]) }),
+      makeFact({ id: "newer-noise", text: "beta", kind: "fact", captured_at: "2026-06-01T00:00:00.000Z", embedding: new Float32Array([0, 1]) }),
+    ];
+    const backend: EmbeddingBackend = { embed: () => new Float32Array([1, 0]) };
+    const { results } = await retrieve(facts, { query: "quantum", root, embeddingBackend: backend });
+    expect(results.map((r) => r.fact.id)).toEqual(["semantic-match", "newer-noise"]);
+    // And the lexical-match question is still answered honestly: nothing matched "quantum".
+    expect(results.every((r) => r.matchedQuery)).toBe(false);
+  });
+
+  it("non-firing: with no embedding backend, a lexically-unmatched query still falls back to recency order", async () => {
+    // The other half of the rule above -- dropping the uninformative BM25 list must not change the
+    // BM25-only path, where recency is the only ordering available and remains correct.
+    const facts = [
+      makeFact({ id: "older", text: "alpha", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
+      makeFact({ id: "newer", text: "beta", kind: "fact", captured_at: "2026-06-01T00:00:00.000Z" }),
+    ];
+    const { results } = await retrieve(facts, { query: "quantum", root });
+    expect(results.map((r) => r.fact.id)).toEqual(["newer", "older"]);
+    expect(results.every((r) => r.score === 0)).toBe(true);
+  });
+
   it("fuses BM25 and embedding signals when an embedding backend is available", async () => {
     // "a" is a strong BM25 match but far in embedding space; "b" is a weak BM25 match but close in
     // embedding space to the (contrived) query vector. RRF fusion should let "b" compete with "a"

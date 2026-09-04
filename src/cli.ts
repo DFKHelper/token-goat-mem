@@ -53,6 +53,17 @@ import {
 } from "./capture.js";
 import { detectContradictions, sameContradictionBucket } from "./contradiction.js";
 import { insertAuditLog, resolveDbPath } from "./db.js";
+import {
+  EMBED_API_KEY_ENV,
+  EMBED_MODEL_ENV,
+  EMBED_URL_ENV,
+  EmbeddingConfigError,
+  endpointLabelFor,
+  planEmbeddingRanking,
+  readEmbeddingConfig,
+  resolveConfiguredEmbeddingBackend,
+  type EmbeddingMeta,
+} from "./embeddings.js";
 import { importFromJson, JsonImportError, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
 import { importFromMarkdown, MarkdownImportError, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
@@ -66,19 +77,24 @@ import {
 } from "./wiring.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
-import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, type RetrievalOptions } from "./retrieval.js";
+import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
 import {
+  clearAllEmbeddings,
+  countEmbeddedFacts,
   countFacts,
   deleteFact,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
+  getEmbeddingMeta,
   getEpoch,
   getUsefulnessCounts,
   listFacts,
+  listFactsNeedingEmbedding,
   listSourcesForFact,
   markRecallUsed,
   openStorage,
   resolveFactIdOrPrefix,
+  setEmbeddingMeta,
   setFactStatus,
   updateFact,
 } from "./storage.js";
@@ -235,6 +251,114 @@ function resolveRoot(explicit: string | undefined): string {
 // ─────────────────────────────────────────────────────────────────────────── DB lifecycle + error handling ───────────────────────────────────────────────────────────────────────────
 
 /** Opens a fresh connection for one command invocation and always closes it, even on throw (mem is a short-lived, single-shot CLI process -- Section 3). */
+/**
+ * Wall clock for the post-capture embedding round trip.
+ *
+ * Small on purpose: `mem remember` is an interactive command whose real work is already finished by
+ * the time this runs, so the vector is worth waiting a moment for and not worth waiting on. An
+ * endpoint slower than this loses the vector, which `mem embed` picks up later.
+ */
+const CAPTURE_EMBED_TIMEOUT_MS = 2_000;
+
+/** Texts per `mem embed` request. One round trip per batch rather than per fact is the whole reason `embedBatch` exists; 32 keeps a batch small enough that a failure loses little work. */
+const EMBED_BATCH_SIZE = 32;
+
+/**
+ * The embedding lines of `mem doctor`'s report.
+ *
+ * Unconfigured is a healthy state and reads like one -- "off", with the two variables that would
+ * turn it on -- because the overwhelming majority of installs never configure an endpoint and a
+ * health check that flags the default as a problem trains people to ignore it.
+ *
+ * The API key is reported as configured or absent and never printed, echoed, or hinted at by
+ * length. So is the endpoint: only its host reaches stdout, so a URL carrying userinfo cannot leak
+ * through a health check someone pastes into an issue.
+ */
+function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: number, totalFacts: number): string[] {
+  const coverage = `embedding coverage: ${embeddedFacts}/${totalFacts} facts`;
+  const stored = recorded === null ? "embedding store: nothing embedded yet" : `embedding store: model ${recorded.model}, dim ${recorded.dimension}`;
+  let config;
+  try {
+    config = readEmbeddingConfig();
+  } catch (error) {
+    return [`embeddings: misconfigured -- ${extractErrorMessage(error)}`, stored, coverage];
+  }
+  if (config === null) {
+    return [`embeddings: off (set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV} to enable)`, stored, coverage];
+  }
+  const lines = [`embeddings: ${endpointLabelFor(config.url)}, model ${config.model}, api key ${config.apiKey === undefined ? "absent" : "configured"}`, stored];
+  if (recorded !== null && recorded.model !== config.model) {
+    lines.push(`embedding ranking: disabled -- stored vectors are ${recorded.model}'s; run \`mem embed --all\` to re-embed`);
+  }
+  lines.push(coverage);
+  return lines;
+}
+
+/**
+ * Reads the embeddings config for a command that owes the user a diagnosis rather than a shrug.
+ *
+ * The fail-open callers (recall, the seam, post-capture) go through
+ * `resolveConfiguredEmbeddingBackend`, which returns `null` for both "off" and "misconfigured". For
+ * `mem embed` those are different answers and both are user errors worth naming: running it with no
+ * endpoint set is not a silent no-op.
+ */
+function readEmbeddingConfigForCommand(): { readonly url: string; readonly model: string } {
+  let config;
+  try {
+    config = readEmbeddingConfig();
+  } catch (error) {
+    throw new UsageError(error instanceof EmbeddingConfigError ? error.message : extractErrorMessage(error));
+  }
+  if (config === null) {
+    throw new UsageError(
+      `embeddings are not configured; set ${EMBED_URL_ENV} to an OpenAI-compatible endpoint and ${EMBED_MODEL_ENV} to a model name (${EMBED_API_KEY_ENV} is optional)`
+    );
+  }
+  return config;
+}
+
+/**
+ * Best-effort: computes and stores an embedding for a fact that was just captured.
+ *
+ * Lives here rather than in capture.ts deliberately. `writeFact` inserts the fact and its audit row
+ * inside a single synchronous transaction; awaiting a network call there would put an HTTP round
+ * trip inside a write transaction and turn every capture path async to buy nothing -- the vector is
+ * a ranking optimization, not part of the fact.
+ *
+ * Running after capture also means running strictly after capture.ts's secret screening, and that
+ * ordering is a security property rather than an accident: text that fails screening is never
+ * stored, never returned, and so can never be handed to a configured embeddings endpoint.
+ *
+ * Nothing here may fail the capture. The fact is already durable and its id already printed, so
+ * every failure -- unconfigured, unreachable, slow, malformed, or a model that disagrees with the
+ * store's -- is swallowed without touching the exit code or stdout.
+ */
+async function attachEmbeddingBestEffort(fact: Fact): Promise<void> {
+  const backend = resolveConfiguredEmbeddingBackend(process.env, { timeoutMs: CAPTURE_EMBED_TIMEOUT_MS });
+  if (backend === null) {
+    return;
+  }
+  try {
+    const vector = await backend.embed(fact.text);
+    await withDb((db) => {
+      const recorded = getEmbeddingMeta(db);
+      if (recorded === undefined) {
+        updateFact(db, fact.id, { embedding: vector });
+        setEmbeddingMeta(db, { model: backend.model, dimension: vector.length });
+        return;
+      }
+      // A store whose vectors came from another model stays untouched: adding one vector from a
+      // second model is exactly the mixed-vector-space corruption `mem embed --all` exists to
+      // resolve, and it would be permanent and invisible.
+      if (recorded.model === backend.model && recorded.dimension === vector.length) {
+        updateFact(db, fact.id, { embedding: vector });
+      }
+    });
+  } catch {
+    // Intentionally silent: see the doc comment above.
+  }
+}
+
 async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): Promise<T> {
   const db = openStorage();
   try {
@@ -876,6 +1000,11 @@ interface ReviewCliOptions {
   readonly sinceEpoch?: number;
 }
 
+interface EmbedCliOptions {
+  readonly all?: boolean;
+  readonly limit?: number;
+}
+
 interface EpochCliOptions {
   readonly gc?: boolean;
 }
@@ -948,6 +1077,7 @@ export function buildProgram(): Command {
         };
         const { fact } = await withDb((db) => captureExplicit(db, input));
         process.stdout.write(`remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`);
+        await attachEmbeddingBestEffort(fact);
       })
     );
 
@@ -984,6 +1114,7 @@ export function buildProgram(): Command {
         };
         const { fact } = await withDb((db) => captureSuggested(db, input));
         process.stdout.write(`suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`);
+        await attachEmbeddingBestEffort(fact);
       })
     );
 
@@ -1193,7 +1324,16 @@ export function buildProgram(): Command {
         // `RetrievalOptions.epochAfter` with every other filter, applied after resolution.
         // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
         // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
-        const { facts, usefulness } = await withDb((db) => ({ facts: listFacts(db, {}), usefulness: getUsefulnessCounts(db) }));
+        const { facts, usefulness, embeddingMeta } = await withDb((db) => ({
+          facts: listFacts(db, {}),
+          usefulness: getUsefulnessCounts(db),
+          embeddingMeta: getEmbeddingMeta(db) ?? null,
+        }));
+        // `null` unless the user configured an embeddings endpoint, in which case ranking fuses a
+        // dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's
+        // vectors came from a different model, because `cosineSimilarity` would compare the two
+        // vector spaces without complaint and rank on noise.
+        const embeddingPlan = planEmbeddingRanking(embeddingMeta, process.env, { timeoutMs: DEFAULT_EMBEDDING_TIMEOUT_MS });
         const retrievalOptions: RetrievalOptions = {
           // Past `mem used` confirmations, fused as a third RRF rank list (see
           // RetrievalOptions.usefulness). Empty on a store nobody has ever run `mem used` against,
@@ -1218,10 +1358,15 @@ export function buildProgram(): Command {
           // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
           // footer precedent) -- terse already omits the CTA on its own, so nothing to override.
           ...(hintStyle !== "terse" ? { includeDisplayCta: false } : {}),
+          ...(embeddingPlan.backend !== null ? { embeddingBackend: embeddingPlan.backend } : {}),
         };
-        // No embeddingBackend is wired: retrieval is BM25-only in v1 (see the
-        // TODO(deferred, spec'd) note on retrieval.ts's EmbeddingBackend).
         const { results, totalNonWithheld, shownNonWithheld, anchorBudgetHits } = await retrieve(facts, retrievalOptions);
+        // Printed before the results rather than after: it is a caveat on the ranking that produced
+        // them, and it has to appear on the empty listing below too -- silently ranking lexically
+        // while the user believes their configured endpoint is in play is the failure this guards.
+        if (embeddingPlan.incomparable !== null) {
+          process.stdout.write(`note: embedding search skipped -- ${embeddingPlan.incomparable}\n`);
+        }
         if (results.length === 0) {
           process.stdout.write("no matching facts\n");
           return;
@@ -1588,8 +1733,107 @@ export function buildProgram(): Command {
     );
 
   program
+    .command("embed")
+    .description("Compute and store embedding vectors for facts, using the endpoint named by TOKEN_GOAT_MEM_EMBED_URL")
+    .option("--all", "Re-embed every fact, not just the ones missing a vector -- the model-migration path")
+    .option("--limit <n>", "Stop after this many facts", (value: string) => Number.parseInt(value, 10))
+    .action(
+      guard(async (options: EmbedCliOptions) => {
+        const config = readEmbeddingConfigForCommand();
+        const backend = resolveConfiguredEmbeddingBackend(process.env);
+        if (backend === null) {
+          // Unreachable: `readEmbeddingConfigForCommand` already threw for every configuration the
+          // resolver rejects. Kept so the narrowing is real rather than asserted away.
+          throw new UsageError(`embeddings are not configured; set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV}`);
+        }
+        const summary = await withDb(async (db) => {
+          const recorded = getEmbeddingMeta(db);
+          if (recorded !== undefined && recorded.model !== config.model) {
+            if (options.all !== true) {
+              throw new UsageError(
+                `stored vectors were produced by ${recorded.model}, not ${config.model}; run \`mem embed --all\` to re-embed the store under the new model`
+              );
+            }
+            // Cleared before the first new vector is written, not after the last: an interrupted
+            // migration then leaves facts with no vector rather than a store holding two models'
+            // vectors under one recorded model, which nothing downstream could tell apart.
+            clearAllEmbeddings(db);
+          }
+          const pending = listFactsNeedingEmbedding(db, {
+            ...(options.all === true ? { all: true } : {}),
+            ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
+          });
+          if (pending.length === 0) {
+            return { embedded: 0, skipped: 0, failed: 0, dimension: null as number | null, firstFailure: null as string | null, empty: true };
+          }
+          let embedded = 0;
+          let skipped = 0;
+          let failed = 0;
+          let dimension: number | null = recorded !== undefined && recorded.model === config.model ? recorded.dimension : null;
+          let firstFailure: string | null = null;
+          for (let offset = 0; offset < pending.length; offset += EMBED_BATCH_SIZE) {
+            const batch = pending.slice(offset, offset + EMBED_BATCH_SIZE);
+            let vectors: Float32Array[];
+            try {
+              vectors = await backend.embedBatch(batch.map((row) => row.text));
+            } catch (error) {
+              // One bad batch costs that batch only. The batches already written stay written, and
+              // the run reports what it managed rather than throwing away completed work.
+              failed += batch.length;
+              firstFailure ??= extractErrorMessage(error);
+              continue;
+            }
+            for (const [index, row] of batch.entries()) {
+              const vector = vectors[index];
+              if (vector === undefined) {
+                failed += 1;
+                continue;
+              }
+              dimension ??= vector.length;
+              if (vector.length !== dimension) {
+                // An endpoint that changed dimension mid-run. Writing it would put two vector
+                // spaces in one store, which is the corruption this command exists to undo.
+                skipped += 1;
+                continue;
+              }
+              updateFact(db, row.id, { embedding: vector });
+              embedded += 1;
+            }
+          }
+          if (embedded > 0 && dimension !== null) {
+            setEmbeddingMeta(db, { model: config.model, dimension });
+          }
+          return { embedded, skipped, failed, dimension, firstFailure, empty: false };
+        });
+
+        if (summary.empty) {
+          process.stdout.write("no facts need embedding\n");
+          return;
+        }
+        if (summary.embedded === 0) {
+          // Total failure: nothing was written, so this is not a success with a zero count. The
+          // message names the first cause rather than a bare count, which on its own would leave a
+          // user with no idea whether the endpoint was down, wrong, or answering nonsense.
+          //
+          // `UsageError` (exit 1), not a bare `Error` (exit 2): every way this is reached is
+          // something about the user's environment -- an endpoint that is down, wrong, or answering
+          // a shape mem cannot read -- rather than a bug inside mem, and exit 2 is reserved for the
+          // latter.
+          throw new UsageError(`embedded 0 facts; ${summary.failed} failed, ${summary.skipped} skipped -- ${summary.firstFailure ?? "no vector returned"}`);
+        }
+        const dimensionNote = summary.dimension === null ? "" : `, dim ${summary.dimension}`;
+        process.stdout.write(
+          `embedded ${summary.embedded}, skipped ${summary.skipped}, failed ${summary.failed} (model ${config.model}${dimensionNote})\n`
+        );
+        if (summary.firstFailure !== null) {
+          process.stdout.write(`note: some batches failed -- ${summary.firstFailure}; re-run \`mem embed\` to retry them\n`);
+        }
+      })
+    );
+
+  program
     .command("doctor")
-    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status")
+    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage")
     .action(
       guard(async () => {
         const dbPath = resolveDbPath();
@@ -1615,6 +1859,7 @@ export function buildProgram(): Command {
             `facts: ${statusCounts}  (total ${totalFacts})`,
             `sources: ${sourceRows}`,
             `audit_log rows: ${auditRows}`,
+            ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db), totalFacts),
           ].join("\n");
         });
         process.stdout.write(`${output}\n`);

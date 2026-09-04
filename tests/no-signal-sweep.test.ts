@@ -160,6 +160,10 @@ describe("no-signal sweep: every command distinguishes total failure from total 
   const failsLoudly: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["remember (invalid kind)", ["remember", "x", "--kind", "bogus"]],
     ["remember (secret refused)", ["remember", "api_key = sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "--kind", "fact"]],
+    // `mem embed` with no endpoint configured. The sweep's own state -- nothing succeeded -- is the
+    // only state this command has without one, and exiting 0 in silence would look like a backfill
+    // that found nothing to do.
+    ["embed (embeddings not configured)", ["embed"]],
     ["show (no such id)", ["show", MISSING]],
     ["forget (no such id)", ["forget", MISSING]],
     ["pin (no such id)", ["pin", MISSING]],
