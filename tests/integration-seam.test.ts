@@ -62,23 +62,32 @@ function seedFacts(dbPath: string, seeds: readonly FactSeed[]): void {
     `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)
      VALUES (@id, @text, @kind, @subject, @value, @scope, @scopeRoot, @source_type, @source_ref, @captured_at, @anchor, @status, @confidence)`
   );
-  for (const seed of seeds) {
-    insert.run({
-      id: seed.id,
-      text: seed.text,
-      kind: seed.kind,
-      subject: seed.subject ?? null,
-      value: seed.value ?? null,
-      scope: seed.scope,
-      scopeRoot: seed.scopeRoot ?? null,
-      source_type: seed.source_type,
-      source_ref: null,
-      captured_at: seed.captured_at,
-      anchor: seed.anchor ?? null,
-      status: seed.status,
-      confidence: seed.confidence ?? 1,
-    });
-  }
+  // One transaction, not one implicit transaction per row. An unwrapped insert commits on its
+  // own, so seeding 500 facts costs 500 durability syncs -- 73ms on a local NVMe and over the
+  // 5s vitest default on a cold windows-latest runner, which is what turned
+  // `emits exactly the cap-limited set` red on the v0.4.0 release. Retrieval itself was never
+  // the cost: a query-less buildHintFormat over 500 facts returns inside the 150ms budget.
+  // `.immediate()` follows the convention tests/guards/transactions.test.ts pins for src.
+  const insertAll = db.transaction((rows: readonly FactSeed[]) => {
+    for (const seed of rows) {
+      insert.run({
+        id: seed.id,
+        text: seed.text,
+        kind: seed.kind,
+        subject: seed.subject ?? null,
+        value: seed.value ?? null,
+        scope: seed.scope,
+        scopeRoot: seed.scopeRoot ?? null,
+        source_type: seed.source_type,
+        source_ref: null,
+        captured_at: seed.captured_at,
+        anchor: seed.anchor ?? null,
+        status: seed.status,
+        confidence: seed.confidence ?? 1,
+      });
+    }
+  });
+  insertAll.immediate(seeds);
   db.close();
 }
 
