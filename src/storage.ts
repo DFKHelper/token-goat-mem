@@ -167,7 +167,18 @@ export function ensureStorageSchema(db: Db): void {
  */
 export function openStorage(dbPath: string = resolveDbPath()): Db {
   const db = openDb(dbPath);
-  ensureStorageSchema(db);
+  // `openDb` closes its own handle if it fails, but this second phase runs after it has returned
+  // successfully, so the same guarantee has to be repeated here or the handle leaks with no
+  // reference left to close it by. `ensureStorageSchema` is a real throw site, not a formality: it
+  // runs DDL against a table whose shape it did not create, so a store damaged or partially migrated
+  // by an older version fails here rather than in `openDb`. On Windows the leaked handle then locks
+  // the file, and the user cannot replace the store their next command is about to fail on.
+  try {
+    ensureStorageSchema(db);
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return db;
 }
 

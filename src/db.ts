@@ -76,6 +76,22 @@ export function resolveDbPath(home: string = resolveMemHome()): string {
   return join(home, DB_FILE_NAME);
 }
 
+/**
+ * Two rules bind any edit to the CREATE TABLE below, both because
+ * `CREATE TABLE IF NOT EXISTS` does nothing at all to a table that already exists:
+ *
+ *  1. A new column added here reaches new databases only. Every database already on disk needs a
+ *     matching `applyIdempotentAlter` in `storage.ensureStorageSchema`, or it opens without the
+ *     column and the first query naming it fails with `no such column`.
+ *  2. Widening one of the `CHECK (... IN (...))` enums cannot be done here at all. A CHECK is frozen
+ *     into the table at creation and `ALTER TABLE` cannot amend one, so every existing database
+ *     keeps rejecting the new value with `CHECK constraint failed` while a freshly created database
+ *     accepts it -- a break invisible to a test suite that starts from an empty file. Widening an
+ *     enum requires the twelve-step table rebuild (new table, copy, drop, rename), not an ALTER.
+ *
+ * Both rules are enforced by tests/unit/schema-migration.test.ts, which fails loudly rather than
+ * relying on this comment being read.
+ */
 const FACTS_SCHEMA = `
 CREATE TABLE IF NOT EXISTS facts (
   id TEXT PRIMARY KEY,
@@ -131,18 +147,30 @@ export function openDb(dbPath: string = resolveDbPath()): Database.Database {
   mkdirSync(home, { recursive: true, mode: MEM_HOME_MODE });
   restrictPermissions(home, MEM_HOME_MODE);
   const db = new Database(dbPath);
-  // Order matters: SQLite creates the `-wal` and `-shm` sidecars with the database file's own
-  // permissions, so the database has to already be 0600 when the WAL pragma runs or the sidecars --
-  // which hold the same fact rows -- are born world-readable.
-  restrictPermissions(dbPath, MEM_DB_MODE);
-  db.pragma("journal_mode = WAL");
-  // Belt-and-braces: sidecar creation is SQLite-internal, and a confidentiality guarantee should not
-  // rest on an implementation detail of a dependency. Absent sidecars are a no-op here.
-  restrictPermissions(`${dbPath}-wal`, MEM_DB_MODE);
-  restrictPermissions(`${dbPath}-shm`, MEM_DB_MODE);
-  db.exec(FACTS_SCHEMA);
-  db.exec(AUDIT_LOG_SCHEMA);
-  db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+  // Everything past construction is closed on failure. `new Database` connects lazily, so the first
+  // statement is what surfaces a damaged file (`SQLITE_NOTADB` on a truncated or non-sqlite path) --
+  // and an escaping error would otherwise leave this handle open with no reference to close it by,
+  // which on Windows holds an exclusive lock on the file. That turns a recoverable "your store is
+  // corrupt" into an unrecoverable one: the user cannot delete or replace their own database
+  // without killing the process, and `mem doctor` -- whose whole job is diagnosing this -- opens
+  // through the same path and hangs on the same lock.
+  try {
+    // Order matters: SQLite creates the `-wal` and `-shm` sidecars with the database file's own
+    // permissions, so the database has to already be 0600 when the WAL pragma runs or the sidecars --
+    // which hold the same fact rows -- are born world-readable.
+    restrictPermissions(dbPath, MEM_DB_MODE);
+    db.pragma("journal_mode = WAL");
+    // Belt-and-braces: sidecar creation is SQLite-internal, and a confidentiality guarantee should not
+    // rest on an implementation detail of a dependency. Absent sidecars are a no-op here.
+    restrictPermissions(`${dbPath}-wal`, MEM_DB_MODE);
+    restrictPermissions(`${dbPath}-shm`, MEM_DB_MODE);
+    db.exec(FACTS_SCHEMA);
+    db.exec(AUDIT_LOG_SCHEMA);
+    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+  } catch (error) {
+    db.close();
+    throw error;
+  }
   return db;
 }
 
