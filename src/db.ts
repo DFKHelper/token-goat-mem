@@ -174,6 +174,46 @@ export function openDb(dbPath: string = resolveDbPath()): Database.Database {
   return db;
 }
 
+/**
+ * The two audit-detail phrasings that name the fact a supersession went *to*.
+ *
+ * They are constants, and the parser below sits beside them, because the audit log is the only
+ * record of that edge -- there is no `superseded_by` column, deliberately: an edge stored as a
+ * column has to be invalidated whenever either fact changes, a cost mem avoids by recomputing
+ * contradictions at recall. That makes these strings load-bearing rather than cosmetic, so a
+ * reworded producer and a stale reader must not be able to drift apart in separate modules.
+ *
+ * Not every supersession names a winner: `forget`, `review_reject`, and consolidate's stale pass
+ * retire a fact without one. Those legitimately yield `null` below.
+ */
+export const SUPERSEDED_BY_FACT_PREFIX = "Superseded by fact ";
+export const SUPERSEDED_AS_DUPLICATE_PREFIX = "superseded as a duplicate of ";
+
+const SUPERSEDING_ID_PATTERN = new RegExp(
+  `(?:${SUPERSEDED_BY_FACT_PREFIX}|${SUPERSEDED_AS_DUPLICATE_PREFIX})([0-9a-fA-F-]{36})`
+);
+
+/**
+ * The id of the fact that superseded `factId`, or `null` if nothing did or the reason names no
+ * winner.
+ *
+ * Reads the most recent audit row for the fact, not the first: a fact can be superseded, restored,
+ * and superseded again by a different winner, and the current edge is the last one written.
+ * `rowid` breaks ties because `created_at` is an ISO string at millisecond resolution and two
+ * rows written inside one transaction can share it exactly.
+ *
+ * Returns an id, never a fact: the winner may itself have been superseded, or pruned by `mem gc`,
+ * and the caller is the one positioned to decide how to present either case.
+ */
+export function findSupersedingFactId(db: Database.Database, factId: string): string | null {
+  const row = db
+    .prepare<[string], { detail: string }>(
+      "SELECT detail FROM audit_log WHERE fact_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    )
+    .get(factId);
+  return row === undefined ? null : (SUPERSEDING_ID_PATTERN.exec(row.detail)?.[1] ?? null);
+}
+
 export interface AuditLogEntry {
   readonly event: string;
   readonly factId: string | null;
