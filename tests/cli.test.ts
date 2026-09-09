@@ -3280,3 +3280,104 @@ describe("import --from-md --captured-at", () => {
     expect(output.match(/^mem: /gmu)).toHaveLength(1);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── reaffirmation ───────────────────────────────────────────────────────────────────────────
+
+describe("mem remember reaffirms rather than duplicating", () => {
+  async function facts(): Promise<Array<Record<string, unknown>>> {
+    const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: Array<Record<string, unknown>> };
+    return listed.facts;
+  }
+
+  it("refreshes the existing fact instead of writing a second row", async () => {
+    // A user who says the same thing twice means it more, not less. Without this the second
+    // `mem remember` wrote a second row and left the first one's decay clock running, so the facts
+    // a user cared enough to restate were the ones drifting out of ground truth -- and `mem recall`
+    // showed the same sentence twice at two different confidences.
+    const first = await runCli(["remember", "we deploy on fridays", "--kind", "decision", "--scope", "global"]);
+    expect(first.stdout).toContain("remembered");
+    const before = (await facts())[0];
+
+    const second = await runCli(["remember", "We deploy on Fridays.", "--kind", "decision", "--scope", "global"]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("reaffirmed");
+
+    const after = await facts();
+    expect(after).toHaveLength(1);
+    expect(after[0]?.["id"]).toBe(before?.["id"]);
+    // captured_at is what decay measures age against and what contradiction resolution breaks ties
+    // on -- refreshing it is the whole substance of a reaffirmation.
+    expect(String(after[0]?.["captured_at"]) > String(before?.["captured_at"])).toBe(true);
+    expect(after[0]?.["confidence"]).toBe(1);
+  });
+
+  it("does not collapse the same sentence carrying a different value", async () => {
+    // Identical text with a different value is a correction for contradiction resolution to key on,
+    // never a repeat to be swallowed.
+    await runCli(["remember", "node version", "--kind", "fact", "--scope", "global", "--subject", "node", "--value", "20"]);
+    await runCli(["remember", "node version", "--kind", "fact", "--scope", "global", "--subject", "node", "--value", "22"]);
+    expect(await facts()).toHaveLength(2);
+  });
+
+  it("does not collapse the same sentence across different project roots", async () => {
+    // Same text, same kind, same scope *label* -- but two different projects. Comparing the label
+    // alone would let one repository's restatement swallow another repository's fact.
+    const a = mkdtempSync(join(tmpdir(), "mem-bindA-"));
+    const b = mkdtempSync(join(tmpdir(), "mem-bindB-"));
+    try {
+      await runCli(["remember", "we use pnpm", "--kind", "preference", "--scope", "project", "--root", a]);
+      await runCli(["remember", "we use pnpm", "--kind", "preference", "--scope", "project", "--root", b]);
+      expect(await facts()).toHaveLength(2);
+    } finally {
+      rmSync(a, { recursive: true, force: true });
+      rmSync(b, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reaffirm a pending fact, which would promote it without review", async () => {
+    // `mem suggest` files a candidate as pending, and a pending fact never auto-promotes. Reaffirming
+    // one would refresh its clock through a side door the capture module exists to keep shut.
+    await runCli(["suggest", "we cache the build", "--kind", "decision", "--scope", "global"]);
+    const result = await runCli(["remember", "we cache the build", "--kind", "decision", "--scope", "global"]);
+    expect(result.stdout).toContain("remembered");
+    const all = await facts();
+    expect(all).toHaveLength(2);
+    expect(all.filter((fact) => fact["status"] === "pending")).toHaveLength(1);
+  });
+
+  it("does not let a suggested candidate reaffirm a user-stated fact", async () => {
+    // Suggested candidates come from file and transcript content. Letting derived text refresh a
+    // user-stated fact's clock would hand a CLAUDE.md the power to keep a fact alive that the user
+    // never restated.
+    await runCli(["remember", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
+    const before = (await facts())[0];
+    await runCli(["suggest", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
+    const after = await facts();
+    expect(after).toHaveLength(2);
+    const active = after.find((fact) => fact["id"] === before?.["id"]);
+    expect(active?.["captured_at"]).toBe(before?.["captured_at"]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── edit audit detail ───────────────────────────────────────────────────────────────────────────
+
+describe("mem edit records what the fact said before", () => {
+  it("puts the prior value in the audit detail, since the edit overwrites it in place", async () => {
+    // `mem edit` overwrites in place, so without this the prior text is unrecoverable from the store
+    // entirely: the audit log could say the text was edited but never what it used to say.
+    const remembered = await runCli(["remember", "we use yarn", "--kind", "preference", "--scope", "global"]);
+    const id = remembered.stdout.trim().split(/\s+/u).pop() ?? "";
+    await runCli(["edit", id, "--text", "we use pnpm"]);
+
+    const shown = JSON.parse((await runCli(["show", id, "--json"])).stdout) as {
+      history?: Array<{ event: string; detail: string }>;
+    };
+    const edit = shown.history?.find((entry) => entry.event === "edit");
+    expect(edit?.detail).toContain("we use yarn");
+    expect(edit?.detail).toContain("we use pnpm");
+    // The human surface has to answer it too -- `mem show --json` is documented as unstable.
+    const human = (await runCli(["show", id])).stdout;
+    expect(human).toContain("history:");
+    expect(human).toContain("we use yarn");
+  });
+});

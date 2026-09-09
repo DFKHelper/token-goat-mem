@@ -221,6 +221,31 @@ export interface AuditLogEntry {
   readonly detail: string;
 }
 
+/** One audit row as read back, with the timestamp the writer stamped it with. */
+export interface AuditLogRow extends AuditLogEntry {
+  readonly createdAt: string;
+}
+
+/**
+ * Every audit row for one fact, oldest first.
+ *
+ * The audit log has recorded each capture, edit, pin, and status change since the first release,
+ * and until this existed nothing could read it back: the trail a memory tool keeps so its own
+ * output can be trusted was write-only. That is most acute for `mem edit`, which overwrites text in
+ * place -- the prior wording lives nowhere else once the row is updated.
+ *
+ * `rowid` breaks ties because `created_at` is an ISO string at millisecond resolution and two rows
+ * written inside one transaction can share it exactly.
+ */
+export function listAuditLogForFact(db: Database.Database, factId: string): AuditLogRow[] {
+  return db
+    .prepare<[string], { event: string; fact_id: string | null; detail: string; created_at: string }>(
+      "SELECT event, fact_id, detail, created_at FROM audit_log WHERE fact_id = ? ORDER BY created_at ASC, rowid ASC"
+    )
+    .all(factId)
+    .map((row) => ({ event: row.event, factId: row.fact_id, detail: row.detail, createdAt: row.created_at }));
+}
+
 /**
  * Appends one row to the audit log (design principle 5). Any write path
  * (capture, forget, edit, pin, review resolution) can call this.

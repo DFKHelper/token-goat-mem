@@ -6,6 +6,47 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **A pinned fact could fall off the recall it was pinned for.** With no query -- the shape of the
+  `SessionStart` hook `mem init` installs -- every BM25 score ties at zero, the sort falls through to
+  recency, and the default cap of 20 keeps the newest facts. A pinned fact behind 20 newer ones
+  silently vanished from the one call the user pinned it for; only `withheld` results were ever
+  cap-exempt. Pinned facts now sort first, but *only* in that zero-signal case: under a real query
+  relevance still decides, since a pin that also won there would be a ranking cheat code and an
+  irrelevant pinned fact would displace the one that answers the question.
+
+- **Restating a fact reaffirms it instead of duplicating it.** `mem remember` had no dedup, so saying
+  the same thing twice wrote a second row and left the first one's decay clock running -- the facts a
+  user cared enough to repeat were exactly the ones drifting below the ground-truth floor, and recall
+  showed one sentence twice at two confidences. A match now refreshes `captured_at` and confidence
+  and prints `reaffirmed`. Matching is deterministic and conservative: same normalized text (case
+  folded, whitespace collapsed, one trailing period dropped), same kind, same scope *binding* (not
+  just the scope label), same subject and value -- identical text carrying a different value is a
+  correction for contradiction resolution to key on, never a repeat to swallow. Only `active` and
+  `pinned` facts are candidates: reaffirming a `pending` one would promote it without review, and a
+  `superseded` one must not be resurrected by a matching sentence. `mem suggest` never reaffirms at
+  all -- its candidates come from file and transcript content, and letting derived text refresh a
+  user-stated fact's clock would hand a `CLAUDE.md` the power to keep alive a fact nobody restated.
+
+- **`valid-until <ISO date>` anchor predicate**, for a fact that is true until a date rather than
+  until a file changes ("until the v2 migration lands, keep the shim"). Such facts previously had no
+  anchor available and stayed permanently `unverified` -- caveated forever and never surfaced in
+  `mem review` as something to resolve. The only predicate that reads no filesystem or git state. A
+  bare `YYYY-MM-DD` is read as the end of that day rather than its midnight start, so
+  `valid-until 2026-12-31` is still affirmed during the 31st. An unparseable date is `unverified`
+  rather than `contradicted` -- a typo must never read as "this fact expired" and suppress a true
+  fact -- and is rejected outright at capture, since anchors.ts would otherwise accept the typo and
+  caveat the fact forever.
+
+- **`mem show` prints the fact's audit history**, and `mem edit` records what each field said before.
+  The audit log had recorded every capture, edit, pin, and status change since the first release and
+  nothing could read it back: the trail that exists so this tool's output can be trusted was
+  write-only. It matters most for `mem edit`, which overwrites text in place -- the previous wording
+  survived nowhere in the store, and the audit row said only which field names changed. Values are
+  previewed rather than stored whole, so editing a long fact cannot turn one audit row into a second
+  copy of the store. Deliberately not a version chain: that is a schema migration and a retention
+  policy bought for a question the audit log can already answer.
+
+
 - **Capture had no path that did not depend on an agent volunteering it** -- both hooks `mem init claude-code` installed (`SessionStart`, `UserPromptSubmit`) are recall paths, so unless the agent obeyed the `CLAUDE.md` instruction block or the user typed `mem remember` by hand, a session ended with everything it established forgotten. That made capture the weakest link in a tool whose entire purpose is not forgetting.
 
   `mem scan-session` closes it, wired as a third hook on `Stop` -- the only event that fires after the user has actually spoken, and the only one whose envelope carries `transcript_path`. It matches sentences against a fixed table of durable-statement openers (`remember that`, `from now on`, `always`/`never`, `don't`, `we decided`, `decision:`) and files each match as **pending**. No model is involved, so the same transcript always yields the same candidates; nothing it produces can be recalled until `mem review --promote` resolves it, and the dedup matches on fact text so a rejected suggestion is never re-filed by a later scan. Takes `--transcript <path>` as a manual/testing entry point and `--quiet` (the shape `mem init` installs, since a `Stop` hook's stdout lands in the session it just read).

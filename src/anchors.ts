@@ -838,6 +838,32 @@ function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): Readon
   return folded;
 }
 
+/**
+ * `valid-until <ISO date>` — affirmed while the date has not passed, contradicted once it has.
+ *
+ * The only predicate that reads no filesystem and no git state: some facts are true until a date
+ * rather than until a file changes ("until the v2 migration lands, keep the shim"), and without
+ * this they had no anchor at all and stayed permanently `unverified` — caveated forever, and never
+ * surfaced in `mem review` as something to resolve.
+ *
+ * A bare `YYYY-MM-DD` is read as the *end* of that day rather than its midnight start, so an anchor
+ * written `valid-until 2026-12-31` is still affirmed during 2026-12-31 instead of expiring the
+ * instant the day begins — the reading anyone writing that date intends. A timestamp with an
+ * explicit time is taken exactly as written.
+ *
+ * An unparseable date is `unverified`, matching every other malformed-argument path here: a typo
+ * must not silently read as "this fact has expired" and suppress a true fact.
+ */
+function evaluateValidUntil(raw: string): AnchorVerdict {
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/u.test(raw);
+  const parsed = new Date(dateOnly ? `${raw}T23:59:59.999Z` : raw);
+  const deadline = parsed.getTime();
+  if (Number.isNaN(deadline)) {
+    return "unverified";
+  }
+  return Date.now() <= deadline ? "affirmed" : "contradicted";
+}
+
 /** Parses an anchor string into whitespace-separated tokens. No quoting support (not needed for fs/git paths). */
 function tokenize(anchor: string): string[] {
   return anchor.trim().split(/\s+/u).filter((token) => token.length > 0);
@@ -962,6 +988,13 @@ function evaluateTokens(
         return "unverified";
       }
       return evaluatePackageVersion(resolvedRoot, resolved, expected);
+    }
+    case "valid-until": {
+      const [rawDate] = args;
+      if (args.length !== 1 || rawDate === undefined) {
+        return "unverified";
+      }
+      return evaluateValidUntil(rawDate);
     }
     case "git-tracked": {
       const [rawA] = args;

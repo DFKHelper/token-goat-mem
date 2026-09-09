@@ -844,3 +844,44 @@ describe("usefulness as a third RRF rank list", () => {
     expect((scores.get("a") ?? 0) - (scores.get("b") ?? 0)).not.toBe(0);
   });
 });
+
+describe("pinned facts and the recall cap", () => {
+  /** `limit` newer facts, so anything older is pushed off the end of a zero-signal recall. */
+  function newerThan(count: number): Fact[] {
+    return Array.from({ length: count }, (_unused, index) =>
+      makeFact({
+        id: `newer-${index}`,
+        text: `unrelated note number ${index}`,
+        kind: "fact",
+        captured_at: `2026-0${(index % 8) + 1}-01T00:00:00.000Z`,
+      })
+    );
+  }
+
+  it("keeps a pinned fact in a no-query recall that newer facts would otherwise fill", async () => {
+    // The SessionStart hook `mem init` installs recalls with no query: every score ties at zero, the
+    // sort falls through to recency, and the cap keeps the newest `limit`. A pinned fact older than
+    // `limit` other facts silently vanished from the one call it was pinned for.
+    const pinned = makeFact({
+      id: "pinned-old",
+      text: "deployments use blue-green",
+      kind: "decision",
+      status: "pinned",
+      captured_at: "2020-01-01T00:00:00.000Z",
+    });
+    const outcome = await retrieve([pinned, ...newerThan(5)], { query: "", root, limit: 3 });
+    expect(outcome.results.map((result) => result.fact.id)).toContain("pinned-old");
+    expect(outcome.results[0]?.fact.id).toBe("pinned-old");
+    expect(outcome.shownNonWithheld).toBe(3);
+  });
+
+  it("does not let a pin outrank a fact that actually matches the query", async () => {
+    // The privilege is scoped to the zero-signal case on purpose. If a pin also won under a real
+    // query, `mem pin` would be a ranking cheat code and an irrelevant pinned fact would displace
+    // the fact that answers the question.
+    const pinned = makeFact({ id: "pinned-irrelevant", text: "we use tabs for indentation", kind: "preference", status: "pinned" });
+    const match = makeFact({ id: "relevant", text: "deployments use blue-green rollout", kind: "decision" });
+    const outcome = await retrieve([pinned, match], { query: "blue-green rollout", root });
+    expect(outcome.results[0]?.fact.id).toBe("relevant");
+  });
+});

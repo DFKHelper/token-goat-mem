@@ -42,7 +42,7 @@ import type Database from "better-sqlite3";
 import { anchorPathWithinRoot } from "./anchors.js";
 import { insertAuditLog } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
-import { insertFact as storageInsertFact } from "./storage.js";
+import { findReaffirmableFact, insertFact as storageInsertFact, reaffirmFact } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
@@ -72,7 +72,7 @@ export class CaptureValidationError extends Error {
  * src/anchors.ts against real fs/git state at recall time). Must stay in
  * sync with the predicate set src/anchors.ts actually evaluates
  * (file-newer-than, file-exists, file-absent, file-contains, file-not-contains,
- * newest-of, glob-exists, git-branch-is, git-tracked, package-version) — accepting a
+ * newest-of, glob-exists, git-branch-is, git-tracked, package-version, valid-until) — accepting a
  * predicate here that anchors.ts does not recognize would silently downgrade
  * it to permanently "unverified" with no capture-time warning, and no
  * arbitrary-shell anchors are permitted at all (Section 3 / review S4).
@@ -82,7 +82,7 @@ export class InvalidAnchorError extends Error {
     super(
       `invalid anchor "${anchor}": ${reason}. Anchors must be a read-only fs/git predicate ` +
         `(file-newer-than, file-exists, file-absent, file-contains, file-not-contains, ` +
-        `newest-of, glob-exists, git-branch-is, git-tracked, package-version) — ` +
+        `newest-of, glob-exists, git-branch-is, git-tracked, package-version, valid-until) — ` +
         `Section 3: no arbitrary-shell anchors.`
     );
     this.name = "InvalidAnchorError";
@@ -350,6 +350,7 @@ const ANCHOR_ARITY: Readonly<Record<string, number | { readonly min: number }>> 
   "git-branch-is": 1,
   "git-tracked": 1,
   "package-version": 2,
+  "valid-until": 1,
 };
 
 const DISALLOWED_ANCHOR_ARG_LITERALS = ";&|`$<>";
@@ -429,6 +430,16 @@ function validateAnchorSyntax(anchor: string): void {
   for (const arg of args) {
     if (hasDisallowedAnchorChar(arg)) {
       throw new InvalidAnchorError(anchor, `argument "${arg}" contains disallowed characters`);
+    }
+  }
+  // `valid-until` is the one predicate whose argument is neither a path nor a free string, and a
+  // typo in it is silent in the worst direction: anchors.ts reads an unparseable date as
+  // `unverified`, so `valid-untill 2026-12-31` (or `valid-until next friday`) would store cleanly
+  // and then caveat the fact forever, which is the exact rot this whole gate exists to prevent.
+  if (predicate === "valid-until") {
+    const [rawDate] = args;
+    if (rawDate === undefined || Number.isNaN(new Date(rawDate).getTime())) {
+      throw new InvalidAnchorError(anchor, `"${rawDate ?? ""}" is not an ISO 8601 date (e.g. 2026-12-31)`);
     }
   }
   // Reject a path argument that can never affirm: one that escapes whatever root it will later be
@@ -585,6 +596,8 @@ export interface CaptureSuggestedInput extends CaptureExplicitInput {
 
 export interface CaptureResult {
   readonly fact: Fact;
+  /** True when the capture matched a live fact and refreshed it instead of writing a second row. See {@link captureExplicit}. */
+  readonly reaffirmed?: boolean;
 }
 
 function validateCommonInput(input: CaptureExplicitInput): { text: string; root: string } {
@@ -787,6 +800,31 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
     confidence: 1,
   };
   applyOptionalFields(newFact, input, scope, root);
+
+  // Saying the same thing again reaffirms it rather than duplicating it. Without this, a repeated
+  // preference wrote a second row while the first one's decay clock kept running -- so the facts a
+  // user cared enough to restate were precisely the ones drifting below the ground-truth floor,
+  // and `mem recall` showed the same sentence twice with two different confidences.
+  //
+  // Explicit capture only. `captureSuggested` deliberately does not reaffirm: its candidates come
+  // from file and transcript content, and letting derived text refresh a user-stated fact's clock
+  // would hand a `CLAUDE.md` the power to keep a fact alive that the user never restated.
+  const existing = findReaffirmableFact(db, newFact);
+  if (existing !== undefined) {
+    const tx = db.transaction((): Fact => {
+      const refreshed = reaffirmFact(db, existing.id);
+      if (refreshed === undefined) {
+        throw new CaptureValidationError(`fact ${existing.id} vanished while being reaffirmed`);
+      }
+      insertAuditLog(db, {
+        event: "capture_reaffirmed",
+        factId: refreshed.id,
+        detail: `restated ${refreshed.kind} fact (scope=${refreshed.scope}); captured_at and confidence refreshed`,
+      });
+      return refreshed;
+    });
+    return { fact: tx.immediate(), reaffirmed: true };
+  }
 
   const fact = writeFact(db, newFact, "capture_explicit", (f) => `stored active ${f.kind} fact (scope=${f.scope})`);
   return { fact };

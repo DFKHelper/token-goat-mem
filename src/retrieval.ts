@@ -1109,7 +1109,25 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   });
 
   const visible = options.hintFormat === true ? results.filter((result) => result.trust !== "withheld") : results;
+
+  // With no rank list at all -- no query, no embedding signal, no usefulness signal -- every score
+  // ties at zero and this sort falls through to its recency tie-break, so the cap below keeps the
+  // newest `limit` facts and silently drops everything older. That is exactly the shape of the
+  // `SessionStart` recall `mem init` installs, and a pinned fact is precisely the fact the user has
+  // said must not be lost: behind 20 newer facts it vanished from the one call it was pinned for.
+  //
+  // Pinned facts therefore sort ahead of the rest *only in that zero-signal case*. When any real
+  // signal exists, relevance decides and a pin changes nothing -- letting a pin outrank a lexical
+  // match would turn `mem pin` into a ranking cheat code, and a pinned fact irrelevant to the query
+  // would displace the fact that answers it.
+  const zeroSignal = rankLists.length === 0;
   visible.sort((a, b) => {
+    if (zeroSignal) {
+      const pinDelta = Number(b.fact.status === "pinned") - Number(a.fact.status === "pinned");
+      if (pinDelta !== 0) {
+        return pinDelta;
+      }
+    }
     const delta = b.score - a.score;
     return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at);
   });

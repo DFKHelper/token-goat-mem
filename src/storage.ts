@@ -194,6 +194,77 @@ export function normalizeSubject(subject: string): string {
   return subject.trim().toLowerCase();
 }
 
+/**
+ * Matching form for "is this the same statement said again".
+ *
+ * Deliberately conservative and deterministic: case folded, internal whitespace collapsed, and a
+ * single trailing period dropped. Nothing semantic -- no stemming, no synonyms, no model. Two facts
+ * that differ by a word are two facts, and the cost of being wrong here is a user's second, more
+ * precise statement being swallowed as a repeat of their first.
+ */
+export function normalizeFactText(text: string): string {
+  return text.trim().toLowerCase().replace(/\s+/gu, " ").replace(/\.$/u, "");
+}
+
+/**
+ * The live fact that `candidate` is a restatement of, if there is one.
+ *
+ * A user who says the same thing twice means it more, not less -- but with no dedup the second
+ * `mem remember` wrote a second row and left the first one's decay clock running, so the facts a
+ * user cared enough to repeat were the ones drifting out of ground truth. This finds the row to
+ * reaffirm instead.
+ *
+ * Every part of the identity must match, not just the text: same kind, same scope *binding* (a
+ * project fact in one repo is not a restatement of the same sentence in another), and same
+ * subject/value. Subject and value are what contradiction resolution keys on, so identical text
+ * carrying a different value is a correction to be recorded, never a repeat to be collapsed.
+ *
+ * Only `active` and `pinned` facts are candidates. A `pending` match must not be reaffirmed --
+ * that would promote a suggested fact to a refreshed clock without review, the side door the
+ * capture module exists to keep shut -- and a `superseded` one must not be silently resurrected by
+ * a sentence that happens to match.
+ */
+export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefined {
+  const wanted = normalizeFactText(candidate.text);
+  const subject = candidate.subject === undefined || candidate.subject === null ? null : normalizeSubject(candidate.subject);
+  const rows = db
+    .prepare<[string, string], FactRow>(
+      "SELECT * FROM facts WHERE kind = ? AND scope = ? AND status IN ('active', 'pinned')"
+    )
+    .all(candidate.kind, candidate.scope);
+  return rows
+    .map(rowToFact)
+    .find(
+      (fact) =>
+        normalizeFactText(fact.text) === wanted &&
+        (fact.scopeRoot ?? null) === (candidate.scopeRoot ?? null) &&
+        (fact.scopeRepo ?? null) === (candidate.scopeRepo ?? null) &&
+        (fact.subject ?? null) === subject &&
+        (fact.value ?? null) === (candidate.value ?? null)
+    );
+}
+
+/**
+ * Restarts a fact's clock: `captured_at` moves to now and confidence is restored to full.
+ *
+ * `captured_at` is what time-decay measures age against and what contradiction resolution breaks
+ * ties on, so this is the whole substance of a reaffirmation -- the fact was true then and is true
+ * again now, and it should rank and decay as though it had just been stated.
+ *
+ * Narrow on purpose rather than a `captured_at` field on {@link FactUpdate}: that clock decides
+ * decay and precedence, and `mem edit` has no business moving it.
+ */
+export function reaffirmFact(db: Db, id: string, at: Date = new Date()): Fact | undefined {
+  const tx = db.transaction((): Fact | undefined => {
+    const epoch = bumpEpoch(db);
+    const changed = db
+      .prepare("UPDATE facts SET captured_at = ?, confidence = 1.0, epoch = ? WHERE id = ?")
+      .run(at.toISOString(), epoch, id).changes;
+    return changed === 0 ? undefined : getFactById(db, id);
+  });
+  return tx.immediate();
+}
+
 function packEmbedding(vec: Float32Array): Buffer {
   const buf = Buffer.alloc(vec.length * Float32Array.BYTES_PER_ELEMENT);
   for (let i = 0; i < vec.length; i++) {

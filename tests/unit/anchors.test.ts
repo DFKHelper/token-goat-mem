@@ -329,3 +329,37 @@ describe("git anchors: untrusted .git machinery", () => {
     expect(evaluateAnchor("git-tracked tracked.txt", root)).toBe("unverified");
   });
 });
+
+describe("valid-until", () => {
+  /** A date this far out cannot be reached by clock skew or a slow test run. */
+  function yearsFromNow(years: number): string {
+    const when = new Date();
+    when.setFullYear(when.getFullYear() + years);
+    return when.toISOString();
+  }
+
+  it("affirms before the date and contradicts after it", () => {
+    expect(evaluateAnchor(`valid-until ${yearsFromNow(5)}`, root)).toBe("affirmed");
+    expect(evaluateAnchor(`valid-until ${yearsFromNow(-5)}`, root)).toBe("contradicted");
+  });
+
+  it("reads a bare date as the end of that day, not its midnight start", () => {
+    // Anyone writing `valid-until 2026-12-31` means "through the 31st", not "expired the instant
+    // the 31st began". Today's own date must therefore still affirm.
+    const today = new Date().toISOString().slice(0, 10);
+    expect(evaluateAnchor(`valid-until ${today}`, root)).toBe("affirmed");
+  });
+
+  it("is unverified for a date it cannot parse, never contradicted", () => {
+    // A typo must not read as "this fact has expired" and suppress a true fact.
+    expect(evaluateAnchor("valid-until next friday", root)).toBe("unverified");
+    expect(evaluateAnchor("valid-until 2026-13-45", root)).toBe("unverified");
+    expect(evaluateAnchor("valid-until", root)).toBe("unverified");
+  });
+
+  it("reads no filesystem state at all", () => {
+    // The only predicate with no path argument: it must behave identically against a root that does
+    // not exist, since there is nothing for it to look at there or anywhere else.
+    expect(evaluateAnchor(`valid-until ${yearsFromNow(5)}`, join(root, "no", "such", "dir"))).toBe("affirmed");
+  });
+});

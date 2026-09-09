@@ -26,7 +26,7 @@ Tests run in two tiers (`npm install` points `core.hooksPath` at `.githooks/`, s
 
 All memory operations are explicit and auditable:
 
-- `mem remember <text> --kind <kind>` — capture a user-stated fact into active storage (`--kind` is required: preference/decision/fact/correction)
+- `mem remember <text> --kind <kind>` — capture a user-stated fact into active storage (`--kind` is required: preference/decision/fact/correction). Restating a stored fact reaffirms it instead of duplicating it: same normalized text + kind + scope binding + subject/value refreshes `captured_at` and confidence and prints `reaffirmed`. Never matches a `pending` or `superseded` fact, and `mem suggest` never reaffirms — derived text must not refresh a user-stated fact's clock
 - `mem recall [query] [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings; `--entity <value>` (repeatable, ANDed) filters to facts carrying that extracted entity
 - `mem review` — view pending, contested, anchor-contradicted, or unanchored-but-checkable facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts; the `unanchored` bucket is an advisory nudge to add an anchor, not a pending decision)
 - `mem scan-session [--hook-stdin|--transcript <path>]` — scan a session transcript for durable-statement sentences and file each as `pending`; deterministic opener matching, no model, and only the human's own text (tool results, `<system-reminder>` spans, slash-command payloads, relayed subagent reports, and compaction summaries all live under the user role and are all excluded). Installed by `mem init claude-code` as a `Stop` hook with `--quiet`
@@ -34,7 +34,7 @@ All memory operations are explicit and auditable:
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
 - `mem used <id...> --session-id <id>` — record that facts recalled in that session were actually useful; feeds recall ranking as a third RRF rank list
 - `mem edit <id>` — modify fact text, subject/value, anchor, or scope
-- `mem show <id>` — view a fact and its full provenance
+- `mem show <id>` — view a fact and its full provenance, including `history`: every audit row for the fact, oldest first. An edited fact's previous text is recorded there and nowhere else, since `mem edit` overwrites in place
 - `mem list` — all facts, filtered by status/kind/subject/scope
 - `mem facets` — extract and inspect the structured entity/topic terms behind `mem recall --entity`; no flags backfills facts missing terms, `--all` re-extracts everything after an extraction-rule change, `--fact <id>` shows one fact's terms, `--list-entities` lists the distinct entities with fact counts
 - `mem embed` — compute embedding vectors for facts, enabling semantic recall alongside BM25; `--all` re-embeds everything after a model change, `--limit <n>` bounds the run. Off unless `TOKEN_GOAT_MEM_EMBED_URL` and `TOKEN_GOAT_MEM_EMBED_MODEL` are set
