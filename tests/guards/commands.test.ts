@@ -12,6 +12,7 @@ import { buildProgram } from "../../src/cli.js";
 const EXPECTED_COMMANDS = [
   "consolidate",
   "doctor",
+  "dream",
   "edit",
   "embed",
   "epoch",

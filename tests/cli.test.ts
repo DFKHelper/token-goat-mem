@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
@@ -3436,5 +3437,201 @@ describe("mem review --undo", () => {
     const result = await runCli(["review", "--promote", "abc", "--undo", "def"]);
     expect(result.exitCode).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain("cannot be used together");
+  });
+});
+
+describe("mem dream", () => {
+  const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
+  const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";
+  const KEY_ENV = "TOKEN_GOAT_MEM_DREAM_API_KEY";
+
+  afterEach(() => {
+    delete process.env[URL_ENV];
+    delete process.env[MODEL_ENV];
+    delete process.env[KEY_ENV];
+  });
+
+  /**
+   * A real HTTP server on loopback, so these tests go through the CLI's own `fetch` rather than the
+   * `fetchImpl` seam the unit tests inject. That seam is where the request shaping is proven; what
+   * is proven here is the wiring around it -- that the command reads its config from the
+   * environment, reaches the endpoint, and renders what comes back.
+   */
+  async function withFakeEndpoint(
+    reply: (received: unknown) => unknown,
+    body: (url: string) => Promise<void>
+  ): Promise<void> {
+    const received: unknown[] = [];
+    const server = createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => (raw += String(chunk)));
+      req.on("end", () => {
+        const parsed: unknown = JSON.parse(raw);
+        received.push(parsed);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply(parsed)) } }] }));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    const port = typeof address === "object" && address !== null ? address.port : 0;
+    try {
+      await body(`http://127.0.0.1:${port}/v1/chat/completions`);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }
+
+  it("says how to turn it on instead of failing obscurely when it is off", async () => {
+    // Off is the normal state, so the error has to be an instruction rather than a complaint.
+    const result = await runCli(["dream"]);
+    expect(result.exitCode).toBe(1);
+    const output = `${result.stdout}${result.stderr}`;
+    expect(output).toContain("not configured");
+    expect(output).toContain(URL_ENV);
+    expect(output).toContain(MODEL_ENV);
+    // The one property of this command a user must not learn by surprise.
+    expect(output).toContain("off this machine");
+  });
+
+  it("refuses a half-configured endpoint rather than silently doing nothing", async () => {
+    process.env[URL_ENV] = "http://127.0.0.1:1/v1/chat/completions";
+    const result = await runCli(["dream"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain(MODEL_ENV);
+  });
+
+  it("rejects a --timeout that is not a positive number", async () => {
+    process.env[URL_ENV] = "http://127.0.0.1:1/v1/chat/completions";
+    process.env[MODEL_ENV] = "m";
+    for (const bad of ["0", "-5", "abc"]) {
+      const result = await runCli(["dream", "--timeout", bad]);
+      expect(result.exitCode).toBe(1);
+      expect(`${result.stdout}${result.stderr}`).toContain("--timeout must be a positive integer");
+    }
+  });
+
+  it("tells `mem doctor` whether anything is configured to leave this machine", async () => {
+    // The config lives in environment variables, so a URL exported once in a shell profile is
+    // otherwise invisible. `doctor` is where someone checks what the tool is set up to do.
+    const off = await runCli(["doctor"]);
+    expect(off.stdout).toContain("dreaming: off");
+
+    process.env[URL_ENV] = "https://models.example.com/v1/chat/completions";
+    process.env[MODEL_ENV] = "test-model";
+    process.env[KEY_ENV] = "sk-do-not-print-me";
+    const on = await runCli(["doctor"]);
+    expect(on.stdout).toContain("dreaming: models.example.com");
+    expect(on.stdout).toContain("model test-model");
+    expect(on.stdout).toContain("api key configured");
+    expect(on.stdout).toContain("sends fact text to this endpoint");
+    // `mem doctor` output is the thing users paste into an issue.
+    expect(on.stdout).not.toContain("sk-do-not-print-me");
+    // Host only: a full URL can carry a token in its path or query.
+    expect(on.stdout).not.toContain("/v1/chat/completions");
+  });
+
+  it("reports a broken dream config in `mem doctor` rather than crashing the health check", async () => {
+    // doctor's whole job is to run when things are wrong; a misconfiguration must be a line in the
+    // report, not an exception that suppresses every check after it.
+    process.env[URL_ENV] = "not a url";
+    process.env[MODEL_ENV] = "test-model";
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("dreaming: misconfigured");
+    expect(result.stdout).toContain("term coverage:");
+  });
+
+  it("does not offer a --root that would not scope anything", async () => {
+    // A flag a user reads as scoping and that quietly is not is worse than no flag: `mem recall`
+    // already carries that edge, and a new command must not add a second instance of it.
+    const help = await runCli(["dream", "--help"]);
+    expect(`${help.stdout}${help.stderr}`).not.toContain("--root");
+  });
+
+  it("reports candidate inferences and writes nothing", async () => {
+    await withFakeEndpoint(
+      () => ({ candidates: [{ text: "deployment is entirely manual", kind: "fact", supports: [1, 2] }] }),
+      async (url) => {
+        process.env[URL_ENV] = url;
+        process.env[MODEL_ENV] = "test-model";
+        await runCli(["remember", "releases are cut by hand from a laptop", "--kind", "fact"]);
+        await runCli(["remember", "there is no CI workflow in this repository", "--kind", "fact"]);
+
+        const before = await runCli(["list", "--json"]);
+        const result = await runCli(["dream"]);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain("test-model via 127.0.0.1");
+        expect(result.stdout).toContain("deployment is entirely manual");
+        expect(result.stdout).toContain("this is a report");
+        // The whole guarantee of the command: the store is byte-identical afterwards. A dry run
+        // that quietly wrote its own output back would be the one failure a user could not undo.
+        const after = await runCli(["list", "--json"]);
+        expect(after.stdout).toBe(before.stdout);
+      }
+    );
+  });
+
+  it("says plainly when nothing follows, rather than printing a bare header", async () => {
+    await withFakeEndpoint(
+      () => ({ candidates: [] }),
+      async (url) => {
+        process.env[URL_ENV] = url;
+        process.env[MODEL_ENV] = "test-model";
+        await runCli(["remember", "the build runs on node 20", "--kind", "fact"]);
+        await runCli(["remember", "the lockfile is package-lock.json", "--kind", "fact"]);
+        const result = await runCli(["dream"]);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain("no candidate inferences");
+      }
+    );
+  });
+
+  it("sends only live facts, never ones the store has already retracted", async () => {
+    // An inference grounded in a retracted premise is worse than no inference: it carries the
+    // authority of the store behind a claim the store has already decided is wrong.
+    let sentToModel = "";
+    await withFakeEndpoint(
+      (received) => {
+        const messages = (received as { messages: { content: string }[] }).messages;
+        sentToModel = messages.map((message) => message.content).join("\n");
+        return { candidates: [] };
+      },
+      async (url) => {
+        process.env[URL_ENV] = url;
+        process.env[MODEL_ENV] = "test-model";
+        await runCli(["remember", "the deploy target is fly.io", "--kind", "fact"]);
+        const forgotten = extractRememberedId(await runCli(["remember", "the deploy target is heroku", "--kind", "fact"]));
+        await runCli(["forget", forgotten]);
+        await runCli(["remember", "the runtime is node 20", "--kind", "fact"]);
+
+        await runCli(["dream"]);
+        expect(sentToModel).toContain("fly.io");
+        expect(sentToModel).not.toContain("heroku");
+      }
+    );
+  });
+
+  it("emits machine-readable JSON under --json", async () => {
+    await withFakeEndpoint(
+      () => ({ candidates: [{ text: "everything is manual", kind: "fact", supports: [1, 2] }] }),
+      async (url) => {
+        process.env[URL_ENV] = url;
+        process.env[MODEL_ENV] = "test-model";
+        await runCli(["remember", "releases are cut by hand", "--kind", "fact"]);
+        await runCli(["remember", "there is no CI workflow", "--kind", "fact"]);
+        const result = await runCli(["dream", "--json"]);
+        const parsed = JSON.parse(result.stdout) as {
+          model: string;
+          factsSent: number;
+          candidates: { text: string; supports: string[] }[];
+        };
+        expect(parsed.model).toBe("test-model");
+        expect(parsed.factsSent).toBe(2);
+        expect(parsed.candidates[0]?.text).toBe("everything is manual");
+        // Ids the reader can follow with `mem show`, not indices into a list they never saw.
+        expect(parsed.candidates[0]?.supports).toHaveLength(2);
+      }
+    );
   });
 });
