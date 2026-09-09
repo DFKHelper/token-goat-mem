@@ -54,6 +54,15 @@ import {
 } from "./capture.js";
 import { detectContradictions, sameContradictionBucket } from "./contradiction.js";
 import {
+  dream,
+  DreamConfigError,
+  dreamEndpointLabel,
+  DREAM_API_KEY_ENV,
+  DREAM_MODEL_ENV,
+  DREAM_URL_ENV,
+  readDreamConfig,
+} from "./dream.js";
+import {
   DEFAULT_DUPLICATE_THRESHOLD,
   DEFAULT_STALE_AGE_DAYS,
   findDuplicateClusters,
@@ -229,7 +238,12 @@ function exitCodeForError(error: unknown): number {
     error instanceof SecretDetectedError ||
     error instanceof WiringConflictError ||
     error instanceof JsonImportError ||
-    error instanceof MarkdownImportError
+    error instanceof MarkdownImportError ||
+    // A misconfigured dream endpoint is a typo in an environment variable the user set, so it is
+    // theirs to fix and exits 1. `DreamRequestError` deliberately stays at 2: an endpoint that is
+    // down, slow, or answering with nonsense is neither a bad invocation nor a bug in mem, and 2 is
+    // the closer of the two codes this CLI has -- a caller should retry it, not re-read its flags.
+    error instanceof DreamConfigError
     ? EXIT_USER_ERROR
     : EXIT_INTERNAL_ERROR;
 }
@@ -363,6 +377,35 @@ const EMBED_BATCH_SIZE = 32;
 function describeFacets(factsWithTerms: number, totalFacts: number): string {
   const line = `term coverage: ${factsWithTerms}/${totalFacts} facts`;
   return factsWithTerms < totalFacts ? `${line} (run \`mem facets --backfill\` -- \`mem recall --entity\` cannot match the rest)` : line;
+}
+
+/**
+ * One `doctor` line for `mem dream`, mirroring the embeddings line above.
+ *
+ * Reported here because dreaming is the only command that sends fact text off this machine, and its
+ * configuration lives in environment variables -- so a URL exported once in a shell profile is
+ * otherwise invisible to the person whose facts would be sent. `doctor` is where someone checks
+ * what the tool is currently set up to do, and "is anything configured to leave this machine" is
+ * the question that most deserves an answer there.
+ *
+ * Host only, never the URL and never the key: the same rule the request path follows, for the same
+ * reason -- `mem doctor` output is the thing users paste into an issue.
+ */
+function describeDream(): string {
+  let config;
+  try {
+    config = readDreamConfig();
+  } catch (error) {
+    return `dreaming: misconfigured -- ${extractErrorMessage(error)}`;
+  }
+  if (config === null) {
+    return `dreaming: off (set ${DREAM_URL_ENV} and ${DREAM_MODEL_ENV} to enable)`;
+  }
+  return (
+    `dreaming: ${dreamEndpointLabel(config.url)}, model ${config.model}, ` +
+    `api key ${config.apiKey === undefined ? "absent" : "configured"} ` +
+    `-- \`mem dream\` sends fact text to this endpoint`
+  );
 }
 
 function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: number, totalFacts: number): string[] {
@@ -1355,6 +1398,67 @@ interface EditCliOptions {
   readonly path?: string;
 }
 
+interface DreamCliOptions {
+  readonly timeoutMs?: number;
+  readonly json?: boolean;
+}
+
+/**
+ * `mem dream`: print what a configured model thinks follows from the stored facts.
+ *
+ * Read-only by construction -- this function never writes, and there is no flag that makes it. The
+ * question it exists to answer is whether the inferences are worth a review queue, and that is
+ * settled by reading them, not by storing them. If they are, the shape is already decided by the
+ * rest of the system: `captureSuggested`, landing every candidate `pending` and `derived`, promoted
+ * only by an explicit `mem review --promote`.
+ */
+async function runDream(db: Database.Database, options: DreamCliOptions): Promise<string> {
+  const config = readDreamConfig();
+  if (config === null) {
+    throw new UsageError(
+      `dreaming is not configured; set ${DREAM_URL_ENV} to an OpenAI-compatible chat-completions endpoint and ` +
+        `${DREAM_MODEL_ENV} to a model name (${DREAM_API_KEY_ENV} is optional). This is the only command that sends ` +
+        `fact text off this machine -- point it at a local endpoint if the store holds anything you would not paste ` +
+        `into a hosted API.`
+    );
+  }
+  // Live facts only. A superseded fact is a fact the store has already decided is wrong, and
+  // reasoning over it would produce inferences grounded in retracted premises.
+  const facts = listFacts(db, { status: ["active", "pinned"] });
+  const result = await dream(facts, config, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {});
+
+  if (options.json === true) {
+    return JSON.stringify(
+      {
+        model: result.model,
+        endpoint: result.endpointLabel,
+        factsSent: result.sent.length,
+        factsAvailable: result.available,
+        candidates: result.candidates,
+      },
+      null,
+      2
+    );
+  }
+
+  const header =
+    `dream: ${result.model} via ${result.endpointLabel}  facts_sent=${result.sent.length}` +
+    (result.available > result.sent.length ? ` of ${result.available} (newest first)` : "");
+  if (result.candidates.length === 0) {
+    // Said plainly rather than as an empty section: "nothing follows from these facts" is a real and
+    // expected answer, and a bare header reads like a failure.
+    return `${header}\nno candidate inferences -- nothing followed from these facts`;
+  }
+  const lines = [header, `${result.candidates.length} candidate inference(s) -- nothing was written; this is a report`];
+  for (const candidate of result.candidates) {
+    lines.push(`  [${candidate.kind}] ${candidate.text}`);
+    // Ids, not text: the point of a citation is that the reader can go look, and `mem show <id>` is
+    // how they look.
+    lines.push(`    from: ${candidate.supports.join(" ")}`);
+  }
+  return lines.join("\n");
+}
+
 interface ReviewCliOptions {
   readonly promote?: string;
   readonly reject?: string;
@@ -2207,6 +2311,30 @@ export function buildProgram(): Command {
     );
 
   program
+    .command("dream")
+    .description(
+      "Report facts a configured model thinks follow from several stored facts together -- an evaluation " +
+        "surface: it writes nothing, and there is no flag that makes it. Off unless " +
+        `${DREAM_URL_ENV}/${DREAM_MODEL_ENV} are set, and the only command that sends fact text off this machine`
+    )
+    // Deliberately no --root. Dreaming reasons over the whole live store, and a --root that changed
+    // nothing would repeat the sharpest edge on `mem recall`: a flag the user reads as scoping and
+    // that quietly is not. When per-project dreaming is wanted it should filter facts and say so.
+    .option("--timeout <ms>", "Wall clock for the request (default 60000)", (v) => parseInt(v, 10))
+    .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
+    .action(
+      guard(async (options: DreamCliOptions & { readonly timeout?: number }) => {
+        if (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout <= 0)) {
+          throw new UsageError("--timeout must be a positive integer (milliseconds)");
+        }
+        const output = await withDb((db) =>
+          runDream(db, { ...options, ...(options.timeout !== undefined ? { timeoutMs: options.timeout } : {}) })
+        );
+        process.stdout.write(`${output}\n`);
+      })
+    );
+
+  program
     .command("consolidate")
     .description("Report near-duplicate facts (or, with --stale, live facts nothing has ever read); --apply supersedes the losers")
     .option("--apply", "Act on the report instead of only printing it: mark every loser superseded -- the same audited soft-delete `mem forget` uses, never a hard delete")
@@ -2442,6 +2570,7 @@ export function buildProgram(): Command {
             `sources: ${sourceRows}`,
             `audit_log rows: ${auditRows}`,
             ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db), totalFacts),
+            describeDream(),
             describeFacets(countFactsWithTerms(db), totalFacts),
           ].join("\n");
         });

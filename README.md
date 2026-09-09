@@ -116,6 +116,7 @@ On POSIX systems the directory is created `0700` and the database `0600`, so the
 | `mem used <id...> --session-id <id>` | Record that facts recalled in a session were actually useful. Feeds recall ranking as a third rank list fused alongside BM25 (rank-based, so the signal cannot drift as the store grows). `--session-id` is required and names the session the recall was surfaced under (`mem recall --hint-format --session-id <id>`, or the hook envelope's `session_id`) -- mem is a short-lived process with no notion of a current session. Naming a fact never surfaced in that session says so and exits 0 rather than failing. Idempotent: marking twice does not double-count. Does not bump epoch (no fact's content, status, or freshness changes). |
 | `mem epoch` | Print the current write epoch (monotonic, bumped on every write). `--gc` runs the retention pass first: persists contradiction resolutions, prunes superseded facts/sources/audit rows, applies preference decay. |
 | `mem consolidate` | Report facts that restate each other, so a store that has accreted three phrasings of one preference can collapse to one. Deterministic and offline: clusters by Jaccard similarity over the `fact_terms` topic layer (`mem facets`), never a model call. Only facts of the same kind and the same scope binding are ever compared. **Dry run by default** -- bare `mem consolidate` prints the clusters and changes nothing; `--apply` marks every loser `superseded` (soft-delete, audit-logged, kept in the store), keeping the pinned member, else the most confident, else the newest. A pinned fact is never superseded, only listed. `--threshold <0-1>` sets the Jaccard floor (default `0.5`: at that floor two facts must share more of their combined topic vocabulary than they differ on, which separates restatements from facts that merely discuss the same subject; the measure is scale-free, so unlike a BM25 score the same number means the same thing however large the store grows). `--stale` runs the other pass instead: `active` facts older than `--stale-days <n>` (default `90`) that recall has never surfaced and nobody has ever marked useful, same dry-run-then-`--apply` contract. Neither pass ever hard-deletes anything. |
+| `mem dream` | Report what a configured model thinks follows from several stored facts taken together -- the inference `mem consolidate` deliberately cannot do, since Jaccard over topic terms can see that two facts restate each other but never that a third thing follows from both. **An evaluation surface, not a capture path:** it writes nothing, and there is no flag that makes it -- the output is a report to read, and anything worth keeping is kept by typing `mem remember`. Off unless `TOKEN_GOAT_MEM_DREAM_URL` (an OpenAI-compatible chat-completions endpoint) and `TOKEN_GOAT_MEM_DREAM_MODEL` are set; `TOKEN_GOAT_MEM_DREAM_API_KEY` is optional, so a local endpoint that wants no auth is sent no header. **This is the only command that sends fact text off this machine** -- point it at a local model if the store holds anything you would not paste into a hosted API. Sends `active` and `pinned` facts only, newest first, capped at 200 (a superseded fact is one the store has already decided is wrong, and an inference resting on it would carry the store's authority behind a retracted premise). Every returned candidate is checked before it is printed: it must cite at least two of the facts that were actually sent, by an index that resolves, and must not restate a fact already stored -- a candidate failing any of these is dropped rather than shown, so each printed `from:` id is one `mem show` can open. See [Optional: `mem dream`](#optional-mem-dream). `--timeout <ms>` (default 60000), `--json`. Deliberately has no `--root`: dreaming reasons over the whole live store, and a flag that read as scoping while doing nothing would be worse than no flag. |
 | `mem facets` | Extract, inspect, and list the structured entity/topic terms behind `mem recall --entity`. Terms are written automatically on capture and re-written on `mem edit`, so this command is for backfill and inspection, not routine use. No flags (or `--backfill`) extracts terms for facts that have none yet and reports the counts; `--all` re-extracts every fact -- the path after an extraction-rule change; `--fact <id>` shows one fact's entities and topics (short id prefixes work); `--list-entities` prints the distinct entities in the store with fact counts, most frequent first. Entities are stored with the spelling the fact used and matched case-insensitively, so `--entity postgresql` finds a fact that says `PostgreSQL`. The three modes are mutually exclusive. |
 | `mem embed` | Compute and store embedding vectors for facts, so recall can rank semantically as well as lexically. Requires `TOKEN_GOAT_MEM_EMBED_URL` and `TOKEN_GOAT_MEM_EMBED_MODEL` (see [Optional: semantic recall](#optional-semantic-recall)) and errors naming them when unset. Default: embeds only facts that have no vector yet, in batches, and reports `embedded / skipped / failed`. `--all` re-embeds every fact and rewrites the recorded model -- the migration path after changing models. `--limit <n>` bounds the work. A failed batch costs only that batch; a run in which nothing was embedded exits non-zero. |
 | `mem doctor` | Read-only environment/DB health check: db path, WAL journal mode, foreign-key setting, schema tables, current epoch, fact counts by status, source/audit-log row counts, embedding configuration (endpoint host and model -- never the API key) and coverage. No options. |
@@ -149,6 +150,43 @@ Vectors from two different models are not comparable, and cosine similarity cann
 mismatch: it happily compares them and returns a confident, meaningless number. Mem records which
 model produced the store's vectors and refuses to rank against them when the configured model
 differs, saying so on `mem recall` and `mem doctor`. `mem embed --all` is the migration.
+
+### Optional: `mem dream`
+
+`mem consolidate` can tell that two facts restate each other; it structurally cannot tell that a
+third thing follows from both, because Jaccard over topic terms has no notion of entailment.
+`mem dream` asks a model that question and prints the answer. Same shape as semantic recall above --
+off until you set the URL, any OpenAI-compatible chat-completions endpoint:
+
+| Variable | |
+| --- | --- |
+| `TOKEN_GOAT_MEM_DREAM_URL` | Full endpoint, e.g. `http://localhost:11434/v1/chat/completions`. Setting it is what turns the command on. |
+| `TOKEN_GOAT_MEM_DREAM_MODEL` | Model name. Required whenever the URL is set. |
+| `TOKEN_GOAT_MEM_DREAM_API_KEY` | Optional. Sent as `Authorization: Bearer <key>` only when set, so a local endpoint that wants no auth receives no header. Never logged or echoed; errors name the endpoint host, never its URL or key. |
+
+**It writes nothing, and no flag makes it.** The output is a report; anything in it worth keeping is
+kept by typing `mem remember`, which runs the same secret screening, anchoring, and contradiction
+checks every other fact goes through. That is the whole design: a model is allowed to suggest what
+might follow from the store, and is never allowed to add to it.
+
+**It is the only command that sends fact text off this machine.** Semantic recall sends fact text to
+an embeddings endpoint on capture; dreaming sends it to a chat model on demand. Point it at a local
+model if the store holds anything you would not paste into a hosted API.
+
+Only `active` and `pinned` facts are sent, newest first, capped at 200 -- a superseded fact is one
+the store has already decided is wrong, and an inference resting on it would carry the store's
+authority behind a retracted premise. The reply is treated as untrusted input rather than as an
+answer: a candidate must cite at least two of the facts actually sent, by an index that resolves,
+and must not restate a fact already stored. One that fails any check is dropped rather than printed,
+so every `from:` id is one `mem show` opens.
+
+```
+$ mem dream
+dream: qwen3:8b via localhost  facts_sent=34
+2 candidate inference(s) -- nothing was written; this is a report
+  [fact] deployment is entirely manual end to end
+    from: 3f2a... 9c14...
+```
 
 > **`mem import --from-json` and `scope_root`:** a `scope="project"`/`scope="path"` fact's `scopeRoot` is an absolute filesystem path from the machine it was exported on. `mem import --from-json` imports it verbatim (full fidelity), so re-importing an export from a different machine — or a different path on the same machine — leaves `scopeRoot` pointing at a path that may not exist there. For a `scope="project"` fact captured inside a git checkout with a remote, the `scope_repo` identity below covers that case and the fact still surfaces; a `scope="path"` fact, or a project fact from a checkout with no remote, still binds to the path alone.
 

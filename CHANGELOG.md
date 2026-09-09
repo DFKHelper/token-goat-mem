@@ -6,6 +6,28 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **`mem dream`** reports what a configured model thinks follows from several stored facts taken
+  together -- the one kind of consolidation `mem consolidate` structurally cannot do, since Jaccard
+  over topic terms can tell that two facts restate each other but never that a third thing follows
+  from both. It is an evaluation surface and nothing more: it writes nothing, there is no `--apply`,
+  and the output is a report whose worthwhile lines are kept by typing `mem remember`. Off unless
+  `TOKEN_GOAT_MEM_DREAM_URL` and `TOKEN_GOAT_MEM_DREAM_MODEL` are set, matching how `mem embed`
+  already treats an optional model endpoint. It is the only command in the tool that sends fact text
+  off the machine, so it says so in its own `--help`, in the error it prints when unconfigured, and
+  in both docs. Only `active` and `pinned` facts are sent: a superseded fact is one the store has
+  already decided is wrong, and an inference resting on it would carry the store's authority behind
+  a retracted premise. The endpoint's reply is treated as untrusted input rather than an answer --
+  every candidate must cite at least two facts that were actually sent, by an index that resolves,
+  and must not restate a fact already stored; one that fails any check is dropped rather than
+  printed, so every `from:` id is one `mem show` opens. A malformed element is dropped alone rather
+  than failing the run. `mem doctor` gained a `dreaming:` line mirroring its `embeddings:` one,
+  because the configuration lives in environment variables and a URL exported once in a shell
+  profile is otherwise invisible to the person whose facts would be sent; it prints the endpoint
+  host and never the URL or key, since doctor output is what users paste into an issue. Errors name
+  the endpoint host and never its URL or key. No `--root`:
+  dreaming reasons over the whole live store, and a flag that read as scoping while scoping nothing
+  would repeat the sharpest edge on `mem recall`.
+
 - **`mem review --undo <id>`** reverses a `--reject`. Review is a two-key decision made one key at a
   time, and reject was the only irreversible one: it marks the fact `superseded`, and `--promote`
   refuses anything that is not `pending` or `contested`, so a mistyped id could not be walked back
