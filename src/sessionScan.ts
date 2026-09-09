@@ -50,8 +50,23 @@ const TRIGGERS: readonly Trigger[] = [
   { pattern: /^(?:always|never)\b/i, kind: "preference" },
   { pattern: /^(?:don't|do not|dont)\b/i, kind: "preference" },
   { pattern: /^we(?:'ve| have)? decided\b/i, kind: "decision" },
+  { pattern: /^(?:we should|let's|lets) (?:always|never)\b/i, kind: "preference" },
   { pattern: /^decision:\s*/i, kind: "decision" },
+  { pattern: /^rule:\s*/i, kind: "decision" },
 ];
+
+/**
+ * Discourse openers skipped when looking for a trigger, so the anchors stay anchored.
+ *
+ * Measured against seven ordinary phrasings of a durable preference, the `^` anchors matched one.
+ * Every miss was a sentence that opens with a filler word and then says exactly what the anchored
+ * form says ("Please always run the linter"). Relaxing the anchor to a substring search would fix
+ * those and reintroduce the false positives the anchor exists to stop ("I never got that to work"),
+ * so this is a closed list instead: the trigger still has to be the very next thing said, and only
+ * these specific words may precede it. Skipping is for *matching* only -- the stored text is the
+ * whole sentence, because a fact whose text was quietly edited is a fact the user never said.
+ */
+const DISCOURSE_PREFIX = /^(?:(?:please|also|so|ok|okay|note(?: that)?)[,:]?\s+)+/iu;
 
 /**
  * Upper bound on user turns examined, counted from the end of the transcript.
@@ -218,7 +233,8 @@ export function extractCandidates(turns: readonly string[]): Candidate[] {
       return;
     }
     for (const sentence of sentences(turn)) {
-      const trigger = TRIGGERS.find((candidate) => candidate.pattern.test(sentence));
+      const claim = sentence.replace(DISCOURSE_PREFIX, "");
+      const trigger = TRIGGERS.find((candidate) => candidate.pattern.test(claim));
       if (trigger === undefined) {
         continue;
       }
@@ -270,5 +286,11 @@ export function scanTranscript(transcriptPath: string): Candidate[] {
       turns.push(text);
     }
   }
-  return extractCandidates(turns.slice(-MAX_SCANNED_TURNS));
+  // `turnIndex` leaves this module as `<transcript>#turn<n>` in a suggestion's `source_ref`, so it
+  // has to mean a position in the transcript rather than in the window. Numbering from the slice
+  // made the pointer slide: the same sentence reported a different turn on every scan as the
+  // transcript grew past the cap, so provenance neither located the sentence nor stayed put.
+  const window = turns.slice(-MAX_SCANNED_TURNS);
+  const offset = turns.length - window.length;
+  return extractCandidates(window).map((candidate) => ({ ...candidate, turnIndex: offset + candidate.turnIndex }));
 }
