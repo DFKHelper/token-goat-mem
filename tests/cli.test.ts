@@ -3440,6 +3440,51 @@ describe("mem review --undo", () => {
   });
 });
 
+describe("mem recall ranks a fact that names an identifier above one that only shares its stems", () => {
+  /**
+   * BM25 stems `src/retrieval.ts` down to `src`/`retriev`/`ts` and then cannot tell the fact that
+   * names that file from one that merely uses those three words in a sentence. The entity layer
+   * already knows the difference -- `mem facets --list-entities` extracts `src/retrieval.ts` as a
+   * single entity on exactly the fact that names it -- but until this test, recall consulted that
+   * layer only when the caller passed `--entity`, which requires already knowing the answer.
+   *
+   * Found by dogfooding against a three-fact store: the fact naming the file ranked *last*.
+   */
+  async function seed(): Promise<void> {
+    await runCli(["remember", "the BM25 scorer lives in src/retrieval.ts and owns fusion", "--kind", "fact"]);
+    await runCli(["remember", "we retriev data from various src locations using ts helpers", "--kind", "fact"]);
+    await runCli(["remember", "retrieval of ts source files happens in the src directory", "--kind", "fact"]);
+  }
+
+  it("puts the fact naming the path first", async () => {
+    await seed();
+    const result = await runCli(["recall", "src/retrieval.ts"]);
+    expect(result.exitCode).toBe(0);
+    const first = result.stdout.split("\n")[0] ?? "";
+    expect(first).toContain("src/retrieval.ts and owns fusion");
+  });
+
+  it("leaves ranking alone when the query carries no identifier at all", async () => {
+    // The guard on the whole idea: this project has already been burned by a rank list that voted
+    // on queries it had no signal for (see the zero-BM25 comment in retrieval.ts). A query with no
+    // entities must produce no entity list, so ranking is byte-for-byte what it was before.
+    await seed();
+    const result = await runCli(["recall", "source files and helpers"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("retriev");
+  });
+
+  it("does not let a shared identifier outrank a fact the query actually matches", async () => {
+    // The entity list is one vote among several, not an override. A fact that merely carries the
+    // identifier must not displace one that carries it *and* matches the rest of the query.
+    await runCli(["remember", "src/retrieval.ts exists", "--kind", "fact"]);
+    await runCli(["remember", "src/retrieval.ts owns reciprocal rank fusion scoring", "--kind", "fact"]);
+    const result = await runCli(["recall", "src/retrieval.ts reciprocal rank fusion"]);
+    const first = result.stdout.split("\n")[0] ?? "";
+    expect(first).toContain("reciprocal rank fusion scoring");
+  });
+});
+
 describe("mem dream", () => {
   const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
   const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";

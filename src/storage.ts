@@ -913,6 +913,35 @@ export function listFactIdsForTerm(db: Db, term: string, kind?: FactTermKind): s
  * seam's ~150ms budget. Topics are excluded -- `--entity` is an entity filter, and the topic facet
  * is already what BM25 ranks on.
  */
+/**
+ * How many of the query's own entities each fact carries: `fact_id` -> overlap count.
+ *
+ * Backs the entity rank list in `retrieval.ts`. Deliberately *not* built from
+ * {@link getEntityKeysByFact}: that is a full scan of `fact_terms`, and its caller only pays for it
+ * when `--entity` was passed. This runs on every recall, so the cost has to scale with the query
+ * rather than with the store -- one indexed lookup per entity the query actually contains, against
+ * `idx_fact_terms_lookup(term_key, kind)`.
+ *
+ * A query with no identifier in it therefore costs nothing and returns an empty map, which is also
+ * the behaviour the ranking wants: no signal, no vote.
+ */
+export function getEntityOverlapForQuery(db: Db, query: string): Map<string, number> {
+  const overlap = new Map<string, number>();
+  const trimmed = query.trim();
+  if (trimmed.length === 0) {
+    return overlap;
+  }
+  // The same extractor that wrote these rows at capture time, so "does the query name this thing"
+  // is asked in exactly the vocabulary the store answers in -- a second, looser parser here would
+  // match rows the write path never creates.
+  for (const entity of new Set(extractFacets(trimmed).entities.map(normalizeTermKey))) {
+    for (const factId of listFactIdsForTerm(db, entity, "entity")) {
+      overlap.set(factId, (overlap.get(factId) ?? 0) + 1);
+    }
+  }
+  return overlap;
+}
+
 export function getEntityKeysByFact(db: Db): Map<string, Set<string>> {
   const rows = db
     .prepare<[], { fact_id: string; term_key: string }>("SELECT fact_id, term_key FROM fact_terms WHERE kind = 'entity'")

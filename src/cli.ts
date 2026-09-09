@@ -115,6 +115,7 @@ import {
   factWithTextExists,
   getEmbeddingMeta,
   getEntityKeysByFact,
+  getEntityOverlapForQuery,
   getEpoch,
   getFactById,
   getUsefulnessCounts,
@@ -1832,13 +1833,18 @@ export function buildProgram(): Command {
         // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
         // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
         const wantedEntities = options.entity ?? [];
-        const { facts, usefulness, embeddingMeta, entityKeys } = await withDb((db) => ({
+        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap } = await withDb((db) => ({
           facts: listFacts(db, {}),
           usefulness: getUsefulnessCounts(db),
           embeddingMeta: getEmbeddingMeta(db) ?? null,
           // Read only when something asks for it: this is a full scan of `fact_terms`, and every
           // recall that passes no `--entity` would pay for a map nothing reads.
           entityKeys: wantedEntities.length > 0 ? getEntityKeysByFact(db) : null,
+          // Unconditional, unlike `entityKeys` above, because it costs one indexed lookup per
+          // identifier the query actually contains -- nothing at all for a query with none. It is
+          // the signal BM25 cannot carry: stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts`
+          // and then ranks the fact naming that file no higher than one merely using those words.
+          entityOverlap: getEntityOverlapForQuery(db, query ?? ""),
         }));
         // `null` unless the user configured an embeddings endpoint, in which case ranking fuses a
         // dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's
@@ -1869,6 +1875,7 @@ export function buildProgram(): Command {
           // rival from `resolveContradictions`, which then reinstates the survivor and surfaces it
           // as clean ground truth.
           ...(wantedEntities.length > 0 && entityKeys !== null ? { entities: wantedEntities, factEntityKeys: entityKeys } : {}),
+          ...(entityOverlap.size > 0 ? { entityOverlap } : {}),
           ...(hintStyle !== "full" ? { hintStyle } : {}),
           // Default (full) output drops the per-line CTA in favor of one shared trailing footer
           // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
