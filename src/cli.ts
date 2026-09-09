@@ -860,6 +860,45 @@ function rejectPending(db: Database.Database, id: string): string {
   return fact.id;
 }
 
+/** The audit event `rejectPending` writes. An undo is only offered for a rejection, so this is the marker that identifies one. */
+const REVIEW_REJECT_EVENT = "review_reject";
+
+/**
+ * `mem review --undo <id>`: put a fact rejected through review back where it was.
+ *
+ * Review is a two-key decision made one key at a time, and `--reject` was the only irreversible one:
+ * it marks the fact `superseded`, and `--promote` refuses anything that is not `pending` or
+ * `contested`, so a mis-typed id or a rejection the user changed their mind about could not be
+ * walked back through the CLI at all -- only by hand-editing the database or round-tripping a
+ * `mem export`. A review queue whose reject key is unrecoverable is one users are right to hesitate
+ * over, which defeats the queue.
+ *
+ * Restores `prior_status` (`pending` when the column predates this fact), so a rejected `contested`
+ * fact returns to `contested` rather than being quietly upgraded to `pending` by the undo.
+ *
+ * Deliberately scoped to rejections, not a general un-forget: `mem forget` is a considered decision
+ * about a fact the user chose to keep, and reversing that is a different question from correcting a
+ * slip in a review queue. A superseded fact that got there any other way is refused by name, so the
+ * error says which mechanism claimed it rather than silently doing nothing.
+ */
+function undoReject(db: Database.Database, id: string): string {
+  const fact = resolveIdArgOrThrow(db, id);
+  if (fact.status !== "superseded") {
+    throw new UsageError(`fact ${fact.id} is not rejected (status=${fact.status}) -- there is nothing to undo`);
+  }
+  const history = listAuditLogForFact(db, fact.id);
+  const last = history[history.length - 1];
+  if (last?.event !== REVIEW_REJECT_EVENT) {
+    throw new UsageError(
+      `fact ${fact.id} was not rejected through review (last recorded action: ${last?.event ?? "none"}) -- ` +
+        `--undo reverses \`mem review --reject\` only`
+    );
+  }
+  const restored = fact.prior_status ?? "pending";
+  setStatusWithAudit(db, fact.id, restored, "review_undo", `undid review rejection, restored to ${restored}`);
+  return fact.id;
+}
+
 /** `formatReview`'s long, human-facing section titles, keyed by the short bucket names `--section`/`--summary` validate against. */
 const REVIEW_SECTION_TITLES: Record<ReviewSection, string> = {
   pending: "pending (never auto-promoted -- confirm with --promote/--reject)",
@@ -1319,6 +1358,7 @@ interface EditCliOptions {
 interface ReviewCliOptions {
   readonly promote?: string;
   readonly reject?: string;
+  readonly undo?: string;
   readonly root?: string;
   readonly summary?: boolean;
   readonly section?: string;
@@ -2120,14 +2160,16 @@ export function buildProgram(): Command {
     .description("List pending, contested, anchor-contradicted, and unanchored-but-checkable facts for human resolution")
     .option("--promote <id>", "Promote a pending fact to active")
     .option("--reject <id>", "Reject a pending fact (marks superseded)")
+    .option("--undo <id>", "Reverse a `--reject`, restoring the fact to the status it had before")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: current directory)")
     .option("--summary", "Print counts per bucket (pending/contested/contradicted/pins/unanchored) instead of full listings")
     .option("--section <pending|contested|contradicted|pins|unanchored>", "Only show one bucket's full listing")
     .option("--since-epoch <n>", "Only include facts with epoch greater than n (see `mem epoch`)", (v) => parseInt(v, 10))
     .action(
       guard(async (options: ReviewCliOptions) => {
-        if (options.promote !== undefined && options.reject !== undefined) {
-          throw new UsageError("--promote and --reject cannot be used together");
+        const actions = (["promote", "reject", "undo"] as const).filter((name) => options[name] !== undefined);
+        if (actions.length > 1) {
+          throw new UsageError(`--${actions.join(" and --")} cannot be used together`);
         }
 
         if (options.sinceEpoch !== undefined && (!Number.isFinite(options.sinceEpoch) || options.sinceEpoch < 0)) {
@@ -2144,6 +2186,12 @@ export function buildProgram(): Command {
           const id = options.reject;
           const resolved = await withDb((db) => rejectPending(db, id));
           process.stdout.write(`rejected ${resolved}\n`);
+          return;
+        }
+        if (options.undo !== undefined) {
+          const id = options.undo;
+          const resolved = await withDb((db) => undoReject(db, id));
+          process.stdout.write(`restored ${resolved}\n`);
           return;
         }
 

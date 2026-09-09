@@ -3381,3 +3381,60 @@ describe("mem edit records what the fact said before", () => {
     expect(human).toContain("we use yarn");
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────── review --undo ───────────────────────────────────────────────────────────────────────────
+
+describe("mem review --undo", () => {
+  async function pendingId(text: string): Promise<string> {
+    await runCli(["suggest", text, "--kind", "decision", "--scope", "global"]);
+    const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as {
+      facts: Array<{ id: string; text: string }>;
+    };
+    return listed.facts.find((fact) => fact.text === text)?.id ?? "";
+  }
+
+  async function statusOf(id: string): Promise<string> {
+    const shown = JSON.parse((await runCli(["show", id, "--json"])).stdout) as { fact: { status: string } };
+    return shown.fact.status;
+  }
+
+  it("puts a rejected fact back, since --reject was otherwise irreversible", async () => {
+    // `--promote` refuses anything not pending or contested, so before this a mis-typed `--reject`
+    // could not be walked back through the CLI at all -- only by hand-editing the database. A review
+    // queue whose reject key is unrecoverable is one users are right to hesitate over.
+    const id = await pendingId("we cache the build output");
+    await runCli(["review", "--reject", id]);
+    expect(await statusOf(id)).toBe("superseded");
+
+    const undone = await runCli(["review", "--undo", id]);
+    expect(undone.exitCode).toBe(0);
+    expect(undone.stdout).toContain("restored");
+    expect(await statusOf(id)).toBe("pending");
+  });
+
+  it("refuses a fact that reached superseded some other way", async () => {
+    // Scoped to rejections on purpose: `mem forget` is a considered decision about a fact the user
+    // chose to keep, and reversing that is a different question from correcting a review slip.
+    const remembered = await runCli(["remember", "we deploy nightly", "--kind", "decision", "--scope", "global"]);
+    const id = remembered.stdout.trim().split(/\s+/u).pop() ?? "";
+    await runCli(["forget", id]);
+    const result = await runCli(["review", "--undo", id]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("not rejected through review");
+    expect(await statusOf(id)).toBe("superseded");
+  });
+
+  it("refuses a fact that was never rejected at all", async () => {
+    const id = await pendingId("we run the linter in CI");
+    const result = await runCli(["review", "--undo", id]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("nothing to undo");
+    expect(await statusOf(id)).toBe("pending");
+  });
+
+  it("rejects combining --undo with another review action", async () => {
+    const result = await runCli(["review", "--promote", "abc", "--undo", "def"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("cannot be used together");
+  });
+});
