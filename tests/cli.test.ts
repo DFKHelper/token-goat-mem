@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -19,6 +19,7 @@ import { run } from "../src/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
+import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 
 interface CliResult {
   readonly stdout: string;
@@ -3088,5 +3089,194 @@ describe("scan-session", () => {
     const result = await runCli(["scan-session", "--root", "."]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--transcript");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── project identity ───────────────────────────────────────────────────────────────────────────
+
+describe("project identity (scope binding across checkouts)", () => {
+  let work: string;
+
+  function git(cwd: string, ...args: string[]): void {
+    execFileSync("git", args, { cwd, stdio: "pipe" });
+  }
+
+  function makeRepo(name: string, remote: string | null = "https://github.com/acme/widget.git"): string {
+    const repo = join(work, name);
+    mkdirSync(repo, { recursive: true });
+    git(repo, "init", "-q");
+    git(repo, "config", "user.email", "t@example.com");
+    git(repo, "config", "user.name", "t");
+    writeFileSync(join(repo, "file.txt"), "x", "utf8");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-qm", "init");
+    if (remote !== null) {
+      git(repo, "remote", "add", "origin", remote);
+    }
+    return repo;
+  }
+
+  beforeEach(() => {
+    work = mkdtempSync(join(tmpdir(), "mem-identity-cli-"));
+    delete process.env[PROJECT_IDENTITY_ENV];
+    clearProjectIdentityCache();
+  });
+
+  afterEach(() => {
+    delete process.env[PROJECT_IDENTITY_ENV];
+    clearProjectIdentityCache();
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  it("surfaces a project fact in a second checkout of the same repository", async () => {
+    // The gap this closes: `scopeRoot` is an absolute path compared by equality, so cloning a repo
+    // to a second path -- or opening a worktree -- left every fact about that project invisible.
+    const a = makeRepo("a");
+    const b = makeRepo("b");
+    await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", a]);
+
+    expect((await runCli(["recall", "--root", a, "--scope", "project"])).stdout).toContain("esbuild");
+    expect((await runCli(["recall", "--root", b, "--scope", "project"])).stdout).toContain("esbuild");
+  });
+
+  it("does not leak between two packages of one monorepo", async () => {
+    // One remote, many project roots: identity has to carry the subpath or `packages/a`'s decisions
+    // would surface as `packages/b`'s.
+    const repo = makeRepo("mono");
+    const a = join(repo, "packages", "a");
+    const b = join(repo, "packages", "b");
+    mkdirSync(a, { recursive: true });
+    mkdirSync(b, { recursive: true });
+    await runCli(["remember", "package a targets node 18", "--kind", "fact", "--scope", "project", "--root", a]);
+
+    expect((await runCli(["recall", "--root", a, "--scope", "project"])).stdout).toContain("node 18");
+    expect((await runCli(["recall", "--root", b, "--scope", "project"])).stdout).not.toContain("node 18");
+    expect((await runCli(["recall", "--root", repo, "--scope", "project"])).stdout).not.toContain("node 18");
+  });
+
+  it("does not leak between unrelated repositories", async () => {
+    const widget = makeRepo("widget");
+    const gadget = makeRepo("gadget", "https://github.com/acme/gadget.git");
+    await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", widget]);
+    expect((await runCli(["recall", "--root", gadget, "--scope", "project"])).stdout).not.toContain("esbuild");
+  });
+
+  it("still binds by path when no identity is available", async () => {
+    // A directory that is not a repository, or a repository with no remote, behaves exactly as it
+    // did before identities existed -- the path binding is never weakened, only widened.
+    const local = makeRepo("local", null);
+    const other = makeRepo("other", null);
+    await runCli(["remember", "local checkout uses make", "--kind", "fact", "--scope", "project", "--root", local]);
+    expect((await runCli(["recall", "--root", local, "--scope", "project"])).stdout).toContain("make");
+    expect((await runCli(["recall", "--root", other, "--scope", "project"])).stdout).not.toContain("make");
+  });
+
+  it("records no identity, and matches none, under the path-only opt-out", async () => {
+    const a = makeRepo("a");
+    const b = makeRepo("b");
+    process.env[PROJECT_IDENTITY_ENV] = "path";
+    clearProjectIdentityCache();
+    await runCli(["remember", "the widget build uses rollup", "--kind", "fact", "--scope", "project", "--root", a]);
+
+    const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: { scopeRepo: string | null }[] };
+    expect(listed.facts[0]?.scopeRepo).toBeNull();
+    expect((await runCli(["recall", "--root", b, "--scope", "project"])).stdout).not.toContain("rollup");
+    // And the fact stays where it was captured, rather than being lost along with its identity.
+    expect((await runCli(["recall", "--root", a, "--scope", "project"])).stdout).toContain("rollup");
+  });
+
+  it("preserves an imported fact's own identity rather than rebinding it to the importing checkout", async () => {
+    // Re-deriving on import would silently rebind every imported fact to whatever repository the
+    // importer happened to be standing in.
+    const a = makeRepo("a");
+    const gadget = makeRepo("gadget", "https://github.com/acme/gadget.git");
+    await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", a]);
+    const exported = (await runCli(["export"])).stdout;
+    const exportPath = join(work, "export.json");
+    writeFileSync(exportPath, exported, "utf8");
+
+    await runCli(["forget", (JSON.parse(exported) as { facts: { id: string }[] }).facts[0]?.id ?? ""]);
+    await runCli(["import", "--from-json", exportPath, "--root", gadget]);
+
+    const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: { scopeRepo: string | null }[] };
+    expect(listed.facts[0]?.scopeRepo).toBe("github.com/acme/widget#.");
+    expect((await runCli(["recall", "--root", gadget, "--scope", "project"])).stdout).not.toContain("esbuild");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── import --captured-at ───────────────────────────────────────────────────────────────────────────
+
+describe("import --from-md --captured-at", () => {
+  let mdDir: string;
+
+  function writeMarkdown(): string {
+    mdDir = mkdtempSync(join(tmpdir(), "mem-md-"));
+    const path = join(mdDir, "CLAUDE.md");
+    writeFileSync(path, "# Conventions\n\n- Always run the linter before pushing\n- Never commit generated files\n", "utf8");
+    return path;
+  }
+
+  afterEach(() => {
+    if (mdDir !== undefined) {
+      rmSync(mdDir, { recursive: true, force: true });
+    }
+  });
+
+  it("stamps imported facts with the supplied timestamp instead of now", async () => {
+    // A CLAUDE.md's rules are usually older than the store reading them. captured_at drives
+    // time-decay and contradiction precedence, so importing them as "today" states the opposite.
+    const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "2023-04-05T06:07:08Z"]);
+    expect(result.exitCode ?? 0).toBe(0);
+
+    const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as {
+      facts: { captured_at: string }[];
+    };
+    expect(listed.facts.length).toBeGreaterThan(0);
+    for (const fact of listed.facts) {
+      expect(fact.captured_at).toBe("2023-04-05T06:07:08.000Z");
+    }
+  });
+
+  it("defaults to now when the flag is absent", async () => {
+    const before = Date.now();
+    await runCli(["import", "--from-md", writeMarkdown(), "--root", "."]);
+    const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as {
+      facts: { captured_at: string }[];
+    };
+    const stamped = new Date(listed.facts[0]?.captured_at ?? 0).getTime();
+    expect(stamped).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it("normalizes a date-only value to the canonical ISO form captured_at is compared in", async () => {
+    // captured_at is documented as lexically comparable because of its fixed format; accepting a
+    // legal-but-differently-spelled timestamp verbatim would quietly break that ordering.
+    await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "2023-04-05"]);
+    const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as {
+      facts: { captured_at: string }[];
+    };
+    expect(listed.facts[0]?.captured_at).toMatch(/^2023-04-05T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
+  });
+
+  it("refuses an unparseable timestamp rather than silently falling back to now", async () => {
+    // A malformed flag is a usage error, so it must fail once with a nonzero exit -- not once per
+    // candidate with exit 0, which a script reading $? would take for a successful import.
+    const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "last tuesday"]);
+    const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as { facts: unknown[] };
+    expect(listed.facts).toHaveLength(0);
+    expect(result.exitCode).toBe(1);
+    const output = `${result.stdout}${result.stderr}`;
+    expect(output).toContain("capturedAt");
+    expect(output.match(/^mem: /gmu)).toHaveLength(1);
+  });
+
+  it("refuses a future timestamp, which would outrank every real fact", async () => {
+    const future = new Date(Date.now() + 86_400_000).toISOString();
+    const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", future]);
+    const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as { facts: unknown[] };
+    expect(listed.facts).toHaveLength(0);
+    expect(result.exitCode).toBe(1);
+    const output = `${result.stdout}${result.stderr}`;
+    expect(output).toContain("future");
+    expect(output.match(/^mem: /gmu)).toHaveLength(1);
   });
 });

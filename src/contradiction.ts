@@ -128,6 +128,24 @@ interface SubjectScopeBucket {
  * mislabel them. Including scope_root keeps each project's facts in their own bucket. Global facts
  * always share one bucket (scope_root is null by convention). (The `--hint-format` seam already
  * pre-filters to a single root before calling in, so this only corrects the whole-store callers.)
+ *
+ * **Deliberately still `scope_root`, not `scope_repo`.** Recall widened its project binding to
+ * accept a repository identity as well as a path (src/projectIdentity.ts), so two clones of one
+ * repository now surface each other's facts -- but bucketing here did *not* widen with it. The
+ * asymmetry is the conservative choice, taken on purpose:
+ *
+ *  - This key decides what gets marked `superseded`/`contested`, a persisted, destructive
+ *    transition. Recall widening only shows more; widening here would start *rewriting* facts
+ *    across checkouts on the first `mem epoch --gc` after an upgrade, with no user action.
+ *  - There is no honest backfill. Every fact stored before identities existed has `scope_repo`
+ *    NULL, so a repo-keyed bucket would put a pre-migration fact and its own successor in different
+ *    buckets -- turning a previously-detected contradiction into an undetected one. Path keying has
+ *    no such discontinuity.
+ *
+ * The cost is real and worth stating: two facts on the same subject captured in two clones of one
+ * repository are both in scope from either clone and are not detected as rivals, so recall can show
+ * both and `mem review` will not flag them. Capturing the correction in the same checkout as the
+ * fact it corrects -- the normal case -- is unaffected.
  */
 function bucketKey(subject: string, scope: FactScope, scopeRoot: string | null | undefined): string {
   // Case-fold the root component the same way retrieval.ts folds paths for comparison (see

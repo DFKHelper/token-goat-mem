@@ -62,6 +62,17 @@ export interface Fact {
    * `scope="project"`. An absolute file or directory path for `scope="path"`.
    */
   readonly scopeRoot?: string | null;
+  /**
+   * Repository-relative identity of the project this `scope="project"` fact was captured in
+   * (`src/projectIdentity.ts`), or null/absent when none was available -- no repository, no
+   * unambiguous remote, or identity switched off via `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path`.
+   *
+   * Widens the `scopeRoot` binding without replacing it: a project fact is in scope when the paths
+   * match (as before) *or* both sides carry the same identity, so the same repository checked out
+   * at a second path, in a worktree, or on another machine still surfaces its own facts. Never
+   * consulted for `global` (in scope everywhere) or `path` scope (bound to a file, not a project).
+   */
+  readonly scopeRepo?: string | null;
   readonly source_type: FactSourceType;
   /** Reference to the originating conversation/message, or null if unavailable. */
   readonly source_ref: string | null;
@@ -140,6 +151,8 @@ export interface NewFact {
   subject?: string | null;
   value?: string | null;
   scopeRoot?: string | null;
+  /** See `Fact.scopeRepo`. Written by the capture path for project-scoped facts; preserved verbatim by full-fidelity JSON import. */
+  scopeRepo?: string | null;
   source_ref?: string | null;
   /** ISO 8601 timestamp. Defaults to `new Date().toISOString()` when omitted. */
   captured_at?: string;
@@ -166,6 +179,7 @@ export interface FactUpdate {
   value?: string | null;
   scope?: FactScope;
   scopeRoot?: string | null;
+  scopeRepo?: string | null;
   anchor?: string | null;
   status?: FactStatus;
   confidence?: number;

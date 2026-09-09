@@ -46,6 +46,7 @@ import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
 import { getEmbeddingMeta, getUsefulnessCounts, insertRecallLog, listSurfacedFactIds, openStorage, unpackEmbedding } from "./storage.js";
 import { resolveDbPath } from "./db.js";
 import { planEmbeddingRanking } from "./embeddings.js";
+import { identityMatches } from "./projectIdentity.js";
 import { retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
@@ -544,7 +545,8 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
   const scopeRoot = normalizePath(resolvePath(scopeRootRaw));
 
   if (fact.scope === "project") {
-    return normalizePath(root) === scopeRoot;
+    // Mirrors retrieval.ts's isBoundToRoot: path binding first, repo identity as a widening.
+    return normalizePath(root) === scopeRoot || identityMatches(fact.scopeRepo, root);
   }
 
   // scope === "path"

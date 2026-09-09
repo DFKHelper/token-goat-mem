@@ -101,6 +101,7 @@ CREATE TABLE IF NOT EXISTS facts (
   value TEXT,
   scope TEXT NOT NULL CHECK (scope IN ('global','project','path')) DEFAULT 'global',
   scope_root TEXT,
+  scope_repo TEXT,
   source_type TEXT NOT NULL CHECK (source_type IN ('user','derived')),
   source_ref TEXT,
   captured_at TEXT NOT NULL,

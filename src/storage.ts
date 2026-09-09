@@ -127,6 +127,13 @@ export function ensureStorageSchema(db: Db): void {
   // status history predates the columns, and NULL is the honest "unknown" every reader falls back
   // on (`status_changed_at ?? captured_at`) rather than a sentinel that would silently look like a
   // real, very old status change and drag pre-migration rows into the GC window on first pass.
+  // Repository-relative project identity (src/projectIdentity.ts). Nullable with no backfill: the
+  // value is derived from a repository's layout, and inventing one during a migration would mean
+  // touching the filesystem for every stored row -- including roots that have since been deleted or
+  // moved, where any answer would be a fabrication. NULL is exactly "this fact predates identities",
+  // and every reader falls back to the absolute-path binding for it, which is what it was captured
+  // with. A re-capture in the same project fills it in naturally.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN scope_repo TEXT");
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN status_changed_at TEXT");
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN prior_status TEXT");
   // Usefulness feedback (`mem used`). Nullable with no backfill for the same reason as the two
@@ -225,6 +232,7 @@ interface FactRow {
   value: string | null;
   scope: string;
   scope_root: string | null;
+  scope_repo: string | null;
   source_type: string;
   source_ref: string | null;
   captured_at: string;
@@ -246,6 +254,7 @@ function rowToFact(row: FactRow): Fact {
     value: row.value,
     scope: row.scope as Fact["scope"],
     scopeRoot: row.scope_root,
+    scopeRepo: row.scope_repo,
     source_type: row.source_type as Fact["source_type"],
     source_ref: row.source_ref,
     captured_at: row.captured_at,
@@ -287,8 +296,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
   );
 
   const tx = db.transaction((): void => {
@@ -301,6 +310,7 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       fact.value ?? null,
       fact.scope,
       fact.scopeRoot ?? null,
+      fact.scopeRepo ?? null,
       fact.source_type,
       fact.source_ref ?? null,
       capturedAt,
@@ -519,6 +529,10 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
   if (patch.scopeRoot !== undefined) {
     sets.push("scope_root = ?");
     params.push(patch.scopeRoot);
+  }
+  if (patch.scopeRepo !== undefined) {
+    sets.push("scope_repo = ?");
+    params.push(patch.scopeRepo);
   }
   if (patch.anchor !== undefined) {
     sets.push("anchor = ?");

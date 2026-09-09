@@ -31,6 +31,7 @@ import { resolve as resolvePath, sep } from "node:path";
 import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
 import { resolveContradictions } from "./contradiction.js";
 import { normalizePath } from "./pathUtils.js";
+import { identityMatches } from "./projectIdentity.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
 
 const MS_PER_DAY = 86_400_000;
@@ -913,7 +914,10 @@ function isBoundToRoot(fact: Fact, root: string): boolean {
   const scopeRoot = normalizePath(resolvePath(scopeRootRaw));
   const normalizedRoot = normalizePath(resolvePath(root));
   if (fact.scope === "project") {
-    return normalizedRoot === scopeRoot;
+    // Path first: it is the original binding, needs no filesystem read, and answers the common case.
+    // The identity check only widens -- the same repository at another path, in a worktree, or on
+    // another machine -- and can never exclude a fact the path binding already accepted.
+    return normalizedRoot === scopeRoot || identityMatches(fact.scopeRepo, root);
   }
   // scope === "path": bound when the target sits at or beneath the querying root.
   return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot + sep);
