@@ -16,7 +16,11 @@ describe("parseHookEnvelope", () => {
         prompt: "Write a function to calculate the factorial of a number",
       })
     );
-    expect(envelope).toEqual({ sessionId: "abc123", prompt: "Write a function to calculate the factorial of a number" });
+    expect(envelope).toEqual({
+      sessionId: "abc123",
+      prompt: "Write a function to calculate the factorial of a number",
+      transcriptPath: "/home/user/.claude/projects/x/transcript.jsonl",
+    });
   });
 
   it("reads a SessionStart envelope (session_id, no prompt) as session-only", () => {

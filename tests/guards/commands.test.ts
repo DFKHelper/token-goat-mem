@@ -25,6 +25,7 @@ const EXPECTED_COMMANDS = [
   "recall",
   "remember",
   "review",
+  "scan-session",
   "show",
   "suggest",
   "uninstall",

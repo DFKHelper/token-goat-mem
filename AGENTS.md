@@ -29,6 +29,7 @@ All memory operations are explicit and auditable:
 - `mem remember <text> --kind <kind>` — capture a user-stated fact into active storage (`--kind` is required: preference/decision/fact/correction)
 - `mem recall [query] [--hint-format]` — retrieve facts with trust levels and staleness verdicts; `--hint-format` emits token-goat-compatible display strings; `--entity <value>` (repeatable, ANDed) filters to facts carrying that extracted entity
 - `mem review` — view pending, contested, anchor-contradicted, or unanchored-but-checkable facts for human resolution (`--promote <id>` / `--reject <id>` act on pending facts; the `unanchored` bucket is an advisory nudge to add an anchor, not a pending decision)
+- `mem scan-session [--hook-stdin|--transcript <path>]` — scan a session transcript for durable-statement sentences and file each as `pending`; deterministic opener matching, no model, and only the human's own text (tool results, `<system-reminder>` spans, slash-command payloads, relayed subagent reports, and compaction summaries all live under the user role and are all excluded). Installed by `mem init claude-code` as a `Stop` hook with `--quiet`
 - `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
 - `mem used <id...> --session-id <id>` — record that facts recalled in that session were actually useful; feeds recall ranking as a third RRF rank list

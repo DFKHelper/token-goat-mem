@@ -64,7 +64,14 @@ describe("claudeCode wiring", () => {
     const promptHook = settings.hooks.UserPromptSubmit[0].hooks[0];
     expect(promptHook.__token_goat_mem).toBe(true);
     expect(promptHook.command).toContain("mem recall --hint-format --hook-stdin --delta --root");
-    expect(Object.keys(settings.hooks).sort()).toEqual(["SessionStart", "UserPromptSubmit"]);
+    // The capture half of the seam: the only event carrying `transcript_path`, and so the only
+    // place mem can see what was said without the agent volunteering it. `--quiet` keeps a scan
+    // silent, since a Stop hook's stdout would land in the session it just finished reading.
+    expect(settings.hooks.Stop).toHaveLength(1);
+    const stopHook = settings.hooks.Stop[0].hooks[0];
+    expect(stopHook.__token_goat_mem).toBe(true);
+    expect(stopHook.command).toContain("mem scan-session --hook-stdin --quiet --root");
+    expect(Object.keys(settings.hooks).sort()).toEqual(["SessionStart", "Stop", "UserPromptSubmit"]);
 
     const claudeMd = read(join(root, "CLAUDE.md"));
     expect(claudeMd).toContain("<!-- token-goat-mem:claude-code:start -->");
@@ -1368,7 +1375,7 @@ describe("regression: integration docs match the markdown mem init actually writ
     // Extract the hook structure from what was written, per event, with the STAMP_KEY stripped
     const writtenHooks = written.hooks as Record<string, unknown>;
     const events = Object.keys(writtenHooks).sort();
-    expect(events).toEqual(["SessionStart", "UserPromptSubmit"]);
+    expect(events).toEqual(["SessionStart", "Stop", "UserPromptSubmit"]);
     function hookWithoutStamp(container: Record<string, unknown>, event: string): Record<string, unknown> {
       const groups = container[event] as Record<string, unknown>[];
       expect(groups, `${event} groups`).toHaveLength(1);

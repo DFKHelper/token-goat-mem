@@ -806,10 +806,18 @@ const CLAUDE_SESSION_START_COMMAND =
 const CLAUDE_USER_PROMPT_SUBMIT_COMMAND =
   'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || true';
 
+// `Stop` is the only event that carries `transcript_path`, and the only one that fires after the
+// user has actually said something -- the two recall events above run before or instead of that.
+// Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block. Runs
+// `--quiet` so a scan never writes into the session it just scanned.
+const CLAUDE_STOP_COMMAND =
+  'command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || true';
+
 /** The hook events mem installs, in the order they are written, each with the one command mem stamps under it. */
 const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
   { event: "SessionStart", command: CLAUDE_SESSION_START_COMMAND },
   { event: "UserPromptSubmit", command: CLAUDE_USER_PROMPT_SUBMIT_COMMAND },
+  { event: "Stop", command: CLAUDE_STOP_COMMAND },
 ];
 
 interface ClaudeHook {

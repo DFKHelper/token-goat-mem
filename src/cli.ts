@@ -91,6 +91,7 @@ import {
 } from "./wiring.js";
 import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
+import { scanTranscript } from "./sessionScan.js";
 import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
 import {
   clearAllEmbeddings,
@@ -100,6 +101,7 @@ import {
   deleteFact,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
+  factWithTextExists,
   getEmbeddingMeta,
   getEntityKeysByFact,
   getEpoch,
@@ -1151,6 +1153,14 @@ interface RememberCliOptions {
   readonly path?: string;
 }
 
+interface ScanSessionCliOptions {
+  readonly hookStdin?: boolean;
+  readonly transcript?: string;
+  readonly root?: string;
+  readonly scope?: string;
+  readonly quiet?: boolean;
+}
+
 interface ImportCliOptions {
   readonly fromMd?: string;
   readonly fromJson?: string;
@@ -1787,6 +1797,62 @@ export function buildProgram(): Command {
           return formatFactDetail(fact, freshness, sources, edge);
         });
         process.stdout.write(`${output}\n`);
+      })
+    );
+
+  program
+    .command("scan-session")
+    .description(
+      "Scan a session transcript for durable-statement sentences and file them as pending suggestions " +
+        "-- deterministic sentence matching, no model; nothing reaches active without `mem review --promote`"
+    )
+    .option("--hook-stdin", "Read a Stop hook's JSON envelope from stdin and take transcript_path from it")
+    .option("--transcript <path>", "Scan this transcript file instead of one named by a hook envelope")
+    .option("--root <path>", "Project root the captured facts bind to (default: current directory)")
+    .option("--scope <scope>", "global, project, or path", "project")
+    .option("--quiet", "Emit nothing on success -- the hook default, so a scan never writes into the session")
+    .action(
+      guard(async (options: ScanSessionCliOptions) => {
+        const envelope = options.hookStdin === true ? await readHookEnvelope() : {};
+        const transcriptPath = options.transcript ?? envelope.transcriptPath;
+        if (transcriptPath === undefined) {
+          throw new UsageError("scan-session needs a transcript: pass --transcript <path> or --hook-stdin");
+        }
+        const scope = parseFactScope(options.scope ?? "project");
+        const root = resolveRoot(options.root);
+        const candidates = scanTranscript(transcriptPath);
+        const stored = await withDb((db) => {
+          const kept: string[] = [];
+          for (const candidate of candidates) {
+            if (factWithTextExists(db, candidate.text)) {
+              continue;
+            }
+            try {
+              const { fact } = captureSuggested(db, {
+                text: candidate.text,
+                kind: candidate.kind,
+                scope,
+                root,
+                sourceRef: `${transcriptPath}#turn${candidate.turnIndex}`,
+              });
+              kept.push(fact.id);
+            } catch {
+              // One rejected candidate must not abandon the rest. `captureSuggested` throws for
+              // secret screening and for validation, and a transcript is exactly where a pasted
+              // credential shows up -- that rejection is the screening working, not a scan failure.
+              continue;
+            }
+          }
+          return kept;
+        });
+        if (options.quiet === true) {
+          return;
+        }
+        process.stdout.write(
+          stored.length === 0
+            ? "no new durable statements found\n"
+            : `filed ${stored.length} pending suggestion${stored.length === 1 ? "" : "s"}; mem review to resolve\n`
+        );
       })
     );
 

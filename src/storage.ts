@@ -341,6 +341,23 @@ export function insertFact(db: Db, fact: NewFact): Fact {
 }
 
 /** Reads one fact by id, or `undefined` if no such fact exists. */
+/**
+ * Whether any fact already holds exactly this text, in any status.
+ *
+ * The idempotency guard for `mem scan-session`: the Stop hook fires at the end of every assistant
+ * turn, so the same sentence is re-extracted for the rest of the session. Matching on text rather
+ * than on a session marker is what makes a *rejected* candidate stay rejected -- a rejected fact is
+ * still in the store as `superseded`, so re-filing it would resurrect a decision the user already
+ * made, which is the one thing a review queue must not do.
+ *
+ * Comparison is `text = ?`, exact and case-sensitive: SQLite's `NOCASE` applies to ASCII only, so a
+ * looser match would be inconsistent across alphabets for no benefit here, where both sides come
+ * from the same whitespace-collapsing extractor.
+ */
+export function factWithTextExists(db: Db, text: string): boolean {
+  return db.prepare<[string], { one: number }>("SELECT 1 AS one FROM facts WHERE text = ? LIMIT 1").get(text) !== undefined;
+}
+
 export function getFactById(db: Db, id: string): Fact | undefined {
   const row = getFactRow(db, id);
   return row === undefined ? undefined : rowToFact(row);
