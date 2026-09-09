@@ -44,6 +44,7 @@ import {
   captureExplicit,
   captureSuggested,
   CaptureValidationError,
+  parseCapturedAtOrThrow,
   InvalidAnchorError,
   screenInputOrThrow,
   SecretDetectedError,
@@ -530,6 +531,7 @@ interface ExportedFactJson {
   readonly value: string | null;
   readonly scope: FactScope;
   readonly scopeRoot: string | null;
+  readonly scopeRepo: string | null;
   readonly source_type: Fact["source_type"];
   readonly source_ref: string | null;
   readonly captured_at: string;
@@ -555,6 +557,7 @@ function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boo
     value: fact.value,
     scope: fact.scope,
     scopeRoot: fact.scopeRoot ?? null,
+    scopeRepo: fact.scopeRepo ?? null,
     source_type: fact.source_type,
     source_ref: fact.source_ref,
     captured_at: fact.captured_at,
@@ -1169,6 +1172,7 @@ interface ImportCliOptions {
   readonly kind?: string;
   readonly dryRun?: boolean;
   readonly path?: string;
+  readonly capturedAt?: string;
 }
 
 /**
@@ -1426,6 +1430,10 @@ export function buildProgram(): Command {
     .option("--scope <scope>", "--from-md only: global, project, or path", "project")
     .option("--kind <kind>", "--from-md only: preference, decision, fact, or correction", "preference")
     .option("--path <file>", "--from-md only: file or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
+    .option(
+      "--captured-at <iso>",
+      "--from-md only: ISO 8601 timestamp to record as each imported fact's captured_at, instead of now -- a file's rules are usually older than the store reading them, and captured_at drives time-decay and contradiction precedence. For the file's last commit date: --captured-at \"$(git log -1 --format=%aI -- CLAUDE.md)\""
+    )
     .option("--dry-run", "Report what would be imported without writing anything")
     .action(
       guard(async (options: ImportCliOptions) => {
@@ -1450,6 +1458,12 @@ export function buildProgram(): Command {
         }
 
         const fromMd = options.fromMd as string;
+        // Validated once here rather than left to fail per candidate inside the import: a malformed
+        // flag is a usage error, and reporting it as N skipped candidates while exiting 0 would let
+        // a script read a typo'd date as a successful import of zero facts.
+        if (options.capturedAt !== undefined) {
+          parseCapturedAtOrThrow(options.capturedAt);
+        }
         const root = resolveRoot(options.root);
         const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
         const kind = options.kind !== undefined ? parseFactKind(options.kind) : undefined;
@@ -1462,6 +1476,7 @@ export function buildProgram(): Command {
                 ...(scope !== undefined ? { scope } : {}),
                 ...(kind !== undefined ? { kind } : {}),
                 ...(options.path !== undefined ? { boundPath: options.path } : {}),
+                ...(options.capturedAt !== undefined ? { capturedAt: options.capturedAt } : {}),
               })
             );
         process.stdout.write(`${formatImportResult(result, dryRun)}\n`);

@@ -203,6 +203,17 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
   } else if (obj["scopeRoot"] === null) {
     newFact.scopeRoot = null;
   }
+  // Preserved verbatim rather than recomputed from the importing machine's checkout: the identity
+  // describes the project the fact was captured in, and re-deriving it here would silently rebind
+  // an imported fact to whatever repository the importer happens to be standing in. Absent on any
+  // export written before identities existed, which correctly leaves the fact path-bound.
+  if (newFact.scope !== "project") {
+    newFact.scopeRepo = null;
+  } else if (typeof obj["scopeRepo"] === "string") {
+    newFact.scopeRepo = obj["scopeRepo"];
+  } else if (obj["scopeRepo"] === null) {
+    newFact.scopeRepo = null;
+  }
   if (typeof obj["source_ref"] === "string") {
     newFact.source_ref = obj["source_ref"];
   } else if (obj["source_ref"] === null) {

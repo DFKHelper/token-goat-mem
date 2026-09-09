@@ -133,6 +133,19 @@ export interface ImportFromMarkdownOptions {
   readonly kind?: FactKind;
   /** File or directory each imported fact is bound to when `scope === "path"`, forwarded verbatim to `captureSuggested`'s `path` field (resolved against `root`, never against ambient `process.cwd()`). Named distinctly from `path` (the markdown file being imported) to avoid confusing the two. */
   readonly boundPath?: string;
+  /**
+   * ISO 8601 timestamp recorded as every imported fact's `captured_at`, instead of the moment of
+   * the import. A CLAUDE.md's rules are usually older than the store reading them, and stamping
+   * them `now` tells time-decay and contradiction precedence the opposite.
+   *
+   * No automatic default: there is no reliable machine-readable age for a markdown file. `mtime` is
+   * reset to checkout time by `git clone` (so it reads as "today" on precisely the fresh checkout
+   * where an import is most likely) and restored backups can carry arbitrary ones, while the real
+   * answer -- the file's last commit date -- needs git history this codebase deliberately does not
+   * shell out for. So the caller supplies it, and `mem import --help` shows the one-liner that
+   * produces the commit date.
+   */
+  readonly capturedAt?: string;
   /** When true, extracts and reports candidates but writes nothing (`captureSuggested` is never called). */
   readonly dryRun?: boolean;
 }
@@ -234,6 +247,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       sourceType: "derived",
       root: options.root,
       ...(options.boundPath !== undefined ? { path: options.boundPath } : {}),
+      ...(options.capturedAt !== undefined ? { capturedAt: options.capturedAt } : {}),
     };
     try {
       const { fact } = captureSuggested(db, input);

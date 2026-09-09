@@ -14,6 +14,41 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
   Dogfooded against a real 33 MB session transcript at each step: 28 proposed facts before these channels were excluded, 0 after, with every one of the 28 traced to a channel rather than to the user. Five separate guards, each independently revert-proved.
 
+- **A project-scoped fact was bound to the absolute path it happened to be captured at**, so it
+  vanished from a second clone of the same repository, from every git worktree (a different root by
+  construction), and from an `mem export`/`mem import` onto another machine -- the three cases a
+  memory tool exists to cover. A new `scope_repo` column records
+  `<normalized git remote>#<root relative to the working tree>` alongside the path, and recall
+  matches a fact whose path binding *or* identity binding holds.
+
+  Identity is the remote **plus the subpath** on purpose: a monorepo has one remote and many project
+  roots, so remote-only identity would leak `packages/a`'s decisions into `packages/b`. The remote is
+  normalized so `git@github.com:acme/widget.git`, `https://github.com/acme/widget`, and
+  `ssh://git@github.com/acme/widget.git` produce one string; several remotes with no `origin` is
+  genuinely ambiguous and yields no identity rather than a guess. Nothing shells out -- `git` need
+  not be installed, and only `.git`'s own files are read (including the `commondir` indirection,
+  without which every worktree reads as remote-less). Identity only ever widens: the path comparison
+  runs first and is unchanged, and a fact with no identity is matched by path exactly as before.
+  `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path` restores the path-only binding at both capture and recall,
+  for two clones that are deliberately not the same project.
+
+  Contradiction bucketing deliberately still keys on `scope_root`: that key decides the persisted
+  `superseded`/`contested` transitions, no honest backfill exists for facts captured before this
+  column, and widening it would rewrite facts across checkouts on the first `mem epoch --gc` after
+  upgrade. The cost, stated rather than hidden: two facts on one subject captured in two clones are
+  both in scope and are not detected as rivals.
+
+- **`mem import --from-md --captured-at <iso>`** back-dates a whole import run instead of stamping
+  everything with the moment of the import. A `CLAUDE.md` full of two-year-old conventions imported
+  today otherwise reads as the newest thing in the store, and `captured_at` drives both time-decay
+  and contradiction precedence, so those bullets outranked facts the user actually stated recently.
+  There is no automatic default because no honest one exists: mtime is reset to checkout time by
+  `git clone`, restored backups carry arbitrary ones, and the real answer is the file's last commit
+  date -- which this codebase deliberately does not shell out to git for. Hence the one-liner in
+  `--help`: `--captured-at "$(git log -1 --format=%aI -- CLAUDE.md)"`. A malformed or future value is
+  rejected once at the CLI boundary with exit 1, rather than being reported once per candidate while
+  the command still exits 0.
+
 ## [0.4.0] - 2026-09-03
 
 ### Fixed

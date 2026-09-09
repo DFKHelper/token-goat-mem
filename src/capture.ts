@@ -41,6 +41,7 @@ import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot } from "./anchors.js";
 import { insertAuditLog } from "./db.js";
+import { resolveProjectIdentity } from "./projectIdentity.js";
 import { insertFact as storageInsertFact } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
@@ -562,6 +563,20 @@ export interface CaptureExplicitInput {
 }
 
 export interface CaptureSuggestedInput extends CaptureExplicitInput {
+  /**
+   * ISO 8601 timestamp to record as the fact's `captured_at`, instead of the moment of the call.
+   *
+   * Offered on the suggested path only, and the asymmetry is the point: `captureExplicit` is the
+   * user saying something *now*, so the clock is the truth. A suggested fact is extracted from an
+   * artifact that already existed -- a CLAUDE.md whose rules predate this store by years -- and
+   * stamping those with today's date tells `captured_at`'s two consumers (time-decay, and
+   * contradiction precedence, which prefers the newer fact) that a years-old convention is the
+   * freshest thing in the store.
+   *
+   * Rejected if unparseable or in the future: a future timestamp would win every precedence
+   * comparison against facts that have not happened yet.
+   */
+  readonly capturedAt?: string;
   /** Defaults to `"derived"` — the more suspicious option — when omitted, per the quarantine-hardest rule (Section 3). */
   readonly sourceType?: FactSourceType;
   /** Advisory only: always clamped to `[0, SUGGESTED_CONFIDENCE_CAP]` regardless of what is requested, since a pending/suggested fact can never carry full trust (S9). */
@@ -668,6 +683,29 @@ export function screenInputOrThrow(
  * `| undefined`, and `exactOptionalPropertyTypes` (tsconfig.json) rejects
  * writing `undefined` into them.
  */
+/**
+ * Validates a caller-supplied `capturedAt` and returns it in the canonical ISO form the column
+ * stores, so a legal-but-differently-spelled timestamp (`2024-01-02`, an offset other than Z) does
+ * not break the lexical comparability `captured_at` is documented to have (types.ts).
+ *
+ * A future timestamp is refused rather than clamped: it would win every contradiction-precedence
+ * comparison and sit permanently at the top of any recency ordering, and silently rewriting the
+ * value a caller asked for would hide that they got something other than what they requested.
+ */
+export function parseCapturedAtOrThrow(raw: string): string {
+  const trimmed = raw.trim();
+  const parsed = new Date(trimmed);
+  if (trimmed.length === 0 || Number.isNaN(parsed.getTime())) {
+    throw new CaptureValidationError(`invalid capturedAt ${JSON.stringify(raw)}: expected an ISO 8601 timestamp`);
+  }
+  if (parsed.getTime() > Date.now()) {
+    throw new CaptureValidationError(
+      `capturedAt ${JSON.stringify(raw)} is in the future; captured_at drives time-decay and contradiction precedence, so a future date would outrank every real fact`
+    );
+  }
+  return parsed.toISOString();
+}
+
 function applyOptionalFields(
   target: NewFact,
   input: CaptureExplicitInput,
@@ -691,6 +729,17 @@ function applyOptionalFields(
       scope === "path" && trimmedPath !== undefined && trimmedPath.length > 0
         ? resolve(root, trimmedPath)
         : resolve(root);
+  }
+  if (scope === "project") {
+    // Recorded alongside `scopeRoot`, never instead of it: the path stays the primary binding (and
+    // the anchor evaluation root), and the identity only widens which roots can also claim the
+    // fact. `null` whenever no identity is available, which is the common case outside a repository
+    // with a remote -- see src/projectIdentity.ts. Project scope only: `path` facts bind to a file
+    // rather than to a project, and `global` facts are in scope everywhere already.
+    const identity = resolveProjectIdentity(root);
+    if (identity !== null) {
+      target.scopeRepo = identity;
+    }
   }
 }
 
@@ -774,6 +823,9 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
     status: "pending",
     confidence,
   };
+  if (input.capturedAt !== undefined) {
+    newFact.captured_at = parseCapturedAtOrThrow(input.capturedAt);
+  }
   applyOptionalFields(newFact, input, scope, root);
 
   const fact = writeFact(
