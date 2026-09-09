@@ -6,7 +6,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,5 +188,53 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     );
     expect(viaEnvelope.exitCode, viaEnvelope.stderr).toBe(0);
     expect(viaEnvelope.stdout).toBe("TGMEM/2  delta=1\n");
+  });
+});
+
+
+describe("mem scan-session --hook-stdin (built bundle, Stop envelope on stdin)", () => {
+  /** Writes the transcript at the path `envelope()` already points every envelope at. */
+  function writeTranscript(turns: readonly string[]): void {
+    writeFileSync(
+      join(root, "transcript.jsonl"),
+      turns.map((text) => JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })).join("\n"),
+      "utf8"
+    );
+  }
+
+  it("takes transcript_path from the envelope and files the match as pending", () => {
+    writeTranscript(["Never commit generated files to the repository."]);
+    const result = runBundle(
+      ["scan-session", "--hook-stdin", "--root", root],
+      envelope({ session_id: "s1", hook_event_name: "Stop", stop_hook_active: false })
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("filed 1 pending suggestion");
+
+    const listed = runBundle(["list", "--status", "pending", "--json"]);
+    const facts = (JSON.parse(listed.stdout) as { facts: { text: string; status: string }[] }).facts;
+    expect(facts).toHaveLength(1);
+    expect(facts[0]?.status).toBe("pending");
+  });
+
+  it("stays silent and exits 0 under --quiet, the shape mem init installs", () => {
+    writeTranscript(["Always run the linter before pushing."]);
+    const result = runBundle(
+      ["scan-session", "--hook-stdin", "--quiet", "--root", root],
+      envelope({ session_id: "s1", hook_event_name: "Stop", stop_hook_active: false })
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+    const listed = runBundle(["list", "--status", "pending", "--json"]);
+    expect((JSON.parse(listed.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
+  });
+
+  it("exits 1 with a usage error when the envelope carries no transcript_path", () => {
+    // The hook shape always supplies one; a bare invocation must say so rather than scan nothing
+    // and report success, which would look identical to a session with no durable statements.
+    const result = runBundle(["scan-session", "--hook-stdin", "--root", root], JSON.stringify({ session_id: "s1", hook_event_name: "Stop" }));
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--transcript");
   });
 });

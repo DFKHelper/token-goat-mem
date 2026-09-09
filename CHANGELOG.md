@@ -2,6 +2,18 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Added
+
+- **Capture had no path that did not depend on an agent volunteering it** -- both hooks `mem init claude-code` installed (`SessionStart`, `UserPromptSubmit`) are recall paths, so unless the agent obeyed the `CLAUDE.md` instruction block or the user typed `mem remember` by hand, a session ended with everything it established forgotten. That made capture the weakest link in a tool whose entire purpose is not forgetting.
+
+  `mem scan-session` closes it, wired as a third hook on `Stop` -- the only event that fires after the user has actually spoken, and the only one whose envelope carries `transcript_path`. It matches sentences against a fixed table of durable-statement openers (`remember that`, `from now on`, `always`/`never`, `don't`, `we decided`, `decision:`) and files each match as **pending**. No model is involved, so the same transcript always yields the same candidates; nothing it produces can be recalled until `mem review --promote` resolves it, and the dedup matches on fact text so a rejected suggestion is never re-filed by a later scan. Takes `--transcript <path>` as a manual/testing entry point and `--quiet` (the shape `mem init` installs, since a `Stop` hook's stdout lands in the session it just read).
+
+  **Only the human's own text is scanned, which is narrower than it sounds.** A transcript stores tool results, `<system-reminder>` injections, slash-command payloads and their stdout, relayed subagent reports, and compaction summaries of the assistant's own prior output -- all under the user role, and all but the first as ordinary `text` blocks. Treating any of them as speech would let a file mem reads dictate what mem remembers. Each is rejected: tool-result blocks and `toolUseResult` envelopes, `isMeta`/`isCompactSummary`/`isVisibleInTranscriptOnly` entries, entries whose `origin.kind` is present and not `human`, and blocks carrying a `<command-name>`/`<command-message>`/`<local-command-stdout>`/`<task-notification>` wrapper; `<system-reminder>` spans are stripped out of otherwise genuine turns rather than discarding the turn. Both content shapes (bare string and block array) go through one sanitizer -- an earlier revision returned string content unfiltered, which exempted it from every check above.
+
+  Dogfooded against a real 33 MB session transcript at each step: 28 proposed facts before these channels were excluded, 0 after, with every one of the 28 traced to a channel rather than to the user. Five separate guards, each independently revert-proved.
+
 ## [0.4.0] - 2026-09-03
 
 ### Fixed

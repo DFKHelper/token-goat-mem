@@ -18,11 +18,22 @@ export const HOOK_PROMPT_KEYS: readonly string[] = ["prompt", "user_prompt", "me
 /** Key carrying the hook's session identifier. */
 export const HOOK_SESSION_KEY = "session_id";
 
+/**
+ * Key carrying the path to the session transcript.
+ *
+ * Present on Claude Code's `Stop` envelope, which carries no `prompt` -- the turn is already over.
+ * The transcript is the only thing a Stop hook gets that says what was said, so it is what
+ * `mem scan-session` reads.
+ */
+export const HOOK_TRANSCRIPT_KEY = "transcript_path";
+
 export interface HookEnvelope {
   /** Session identifier, when the envelope carried a non-empty string under `session_id`. */
   readonly sessionId?: string;
   /** Submitted prompt text, when one of {@link HOOK_PROMPT_KEYS} held a non-empty string. */
   readonly prompt?: string;
+  /** Session transcript path, when the envelope carried a non-empty string under `transcript_path`. */
+  readonly transcriptPath?: string;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -53,9 +64,11 @@ export function parseHookEnvelope(raw: string): HookEnvelope {
       break;
     }
   }
+  const transcriptPath = nonEmptyString(record[HOOK_TRANSCRIPT_KEY]);
   return {
     ...(sessionId !== undefined ? { sessionId } : {}),
     ...(prompt !== undefined ? { prompt } : {}),
+    ...(transcriptPath !== undefined ? { transcriptPath } : {}),
   };
 }
 
