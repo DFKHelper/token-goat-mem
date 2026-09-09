@@ -64,6 +64,7 @@ import {
 import {
   findSupersedingFactId,
   insertAuditLog,
+  listAuditLogForFact,
   resolveDbPath,
   SUPERSEDED_AS_DUPLICATE_PREFIX,
   SUPERSEDED_BY_FACT_PREFIX,
@@ -124,6 +125,7 @@ import {
 } from "./storage.js";
 import { extractFacets } from "./facets.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
+import type { AuditLogRow } from "./db.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
 
 const MS_PER_DAY = 86_400_000;
@@ -164,6 +166,58 @@ export class UsageError extends Error {
 
 /** Classifies a thrown error per the exit-code contract: deliberate input-rejection errors are user errors; everything else (sqlite failures, bugs) is internal. */
 /** Renders a stored fact's noun phrase for CLI confirmations. Every kind reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself, where the template degenerates into "fact fact". */
+/** Longest a single before/after value is allowed to be in an audit `detail` line. Long enough to identify the change, short enough that an edited 500-character fact does not turn one audit row into a second copy of the store. */
+const AUDIT_VALUE_PREVIEW_LENGTH = 120;
+
+function auditValuePreview(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return "(none)";
+  }
+  const text = String(value);
+  return text.length > AUDIT_VALUE_PREVIEW_LENGTH ? `${text.slice(0, AUDIT_VALUE_PREVIEW_LENGTH)}...` : text;
+}
+
+/**
+ * Audit detail for `mem edit`, recording what each edited field said *before*.
+ *
+ * The previous wording recorded only which field names changed, so the audit log could say a fact's
+ * text was edited but never what it used to say -- and since `mem edit` overwrites in place, that
+ * made the prior value unrecoverable from the store at all. A fact's whole value is that it can be
+ * trusted, and "it says X now, it said Y before, and Y is gone" is the one question an audit trail
+ * of an edit exists to answer.
+ *
+ * Deliberately a `detail` string rather than a version chain: a full history table is a schema
+ * migration and a retention policy bought for a question the audit log can already answer. Values
+ * are previewed, not stored whole, so one edit of a long fact cannot bloat the log.
+ */
+function describeEdit(before: Fact, after: Fact, patch: FactUpdate): string {
+  type AuditValue = string | number | null | undefined;
+  const fieldOf: Readonly<Record<string, readonly [AuditValue, AuditValue]>> = {
+    text: [before.text, after.text],
+    subject: [before.subject, after.subject],
+    value: [before.value, after.value],
+    anchor: [before.anchor, after.anchor],
+    scope: [before.scope, after.scope],
+    scopeRoot: [before.scopeRoot, after.scopeRoot],
+    scopeRepo: [before.scopeRepo, after.scopeRepo],
+    status: [before.status, after.status],
+    confidence: [before.confidence, after.confidence],
+  };
+  const changes = Object.keys(patch)
+    .map((field) => {
+      const pair = fieldOf[field];
+      if (pair === undefined) {
+        return field;
+      }
+      const [old, now] = pair;
+      // A field named in the patch whose value did not actually move is still worth recording as
+      // touched, but without a misleading "X -> X" arrow.
+      return old === now ? `${field} (unchanged)` : `${field}: ${auditValuePreview(old)} -> ${auditValuePreview(now)}`;
+    })
+    .join("; ");
+  return `edited ${changes}`;
+}
+
 function factNounPhrase(kind: FactKind): string {
   return kind === "fact" ? "fact" : `${kind} fact`;
 }
@@ -492,7 +546,8 @@ function formatFactDetail(
   fact: Fact,
   freshness: AnchorVerdict,
   sources: readonly Source[],
-  edge: SupersessionEdge | null
+  edge: SupersessionEdge | null,
+  history: readonly AuditLogRow[] = []
 ): string {
   const scopeRoot = fact.scopeRoot ?? null;
   const lines: string[] = [
@@ -517,6 +572,16 @@ function formatFactDetail(
     lines.push("sources:");
     for (const source of sources) {
       lines.push(`  - [${source.storedAt}] ${source.excerpt}`);
+    }
+  }
+  // The audit log has recorded every capture, edit, pin, and status change since the first release
+  // and nothing could read it back, so the trail that exists so this tool's output can be trusted
+  // was write-only. It matters most for `mem edit`, which overwrites text in place: the previous
+  // wording lives nowhere else in the store once the row is updated.
+  if (history.length > 0) {
+    lines.push("history:");
+    for (const entry of history) {
+      lines.push(`  - [${entry.createdAt}] ${entry.event}: ${entry.detail}`);
     }
   }
   return lines.join("\n");
@@ -1349,8 +1414,12 @@ export function buildProgram(): Command {
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
-        const { fact } = await withDb((db) => captureExplicit(db, input));
-        process.stdout.write(`remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`);
+        const { fact, reaffirmed } = await withDb((db) => captureExplicit(db, input));
+        process.stdout.write(
+          reaffirmed === true
+            ? `reaffirmed ${factNounPhrase(fact.kind)} ${fact.id} (already stored; refreshed rather than duplicated)\n`
+            : `remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`
+        );
         await attachEmbeddingBestEffort(fact);
       })
     );
@@ -1773,7 +1842,7 @@ export function buildProgram(): Command {
     .option("--root <path>", "Project root for anchor freshness evaluation (default: a project-scoped fact's own scope root, else the current directory)")
     .option(
       "--json",
-      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none. Carries supersededBy: the fact that replaced this one, or null when nothing did -- the fact's own status distinguishes 'not superseded' from 'superseded with no successor'."
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none. Carries supersededBy: the fact that replaced this one, or null when nothing did -- the fact's own status distinguishes 'not superseded' from 'superseded with no successor'. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it."
     )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
@@ -1788,6 +1857,7 @@ export function buildProgram(): Command {
           const root = anchorRootFor(fact, resolveRoot(options.root));
           const freshness = evaluateAnchor(fact.anchor, root);
           const sources = listSourcesForFact(db, fact.id);
+          const history = listAuditLogForFact(db, fact.id);
           // Only for a superseded fact: the audit log's most recent row for an active fact says
           // something else entirely (a promotion, a pin), and reading a winner id out of it would
           // be reporting an edge that does not exist.
@@ -1800,6 +1870,7 @@ export function buildProgram(): Command {
               fact: factToExportJson(fact, { includeEmbedding: false }),
               freshness,
               sources,
+              history,
               // null covers both "not superseded" and "superseded with no successor"; the fact's own
               // status distinguishes them, so this stays one nullable field rather than two.
               supersededBy:
@@ -1809,7 +1880,7 @@ export function buildProgram(): Command {
             };
             return JSON.stringify(envelope, null, 2);
           }
-          return formatFactDetail(fact, freshness, sources, edge);
+          return formatFactDetail(fact, freshness, sources, edge, history);
         });
         process.stdout.write(`${output}\n`);
       })
@@ -2034,7 +2105,7 @@ export function buildProgram(): Command {
             if (fact === undefined) {
               throw new UsageError(`no such fact: ${existing.id}`);
             }
-            insertAuditLog(db, { event: "edit", factId: existing.id, detail: `edited fields: ${Object.keys(patch).join(", ")}` });
+            insertAuditLog(db, { event: "edit", factId: existing.id, detail: describeEdit(existing, fact, patch) });
             return fact;
           });
           // BEGIN IMMEDIATE: `updateFact` reads before writing; see storage.insertFact.
