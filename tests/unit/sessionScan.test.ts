@@ -159,6 +159,59 @@ describe("extractCandidates", () => {
   });
 });
 
+describe("durable statements behind a discourse prefix", () => {
+  /**
+   * Measured before this suite existed: of seven ordinary phrasings of a durable preference, the
+   * `^`-anchored triggers matched exactly one. The anchors are right -- they are what keeps
+   * "I never got that to work" out of the queue -- but every one of these misses is a sentence that
+   * *starts* with a filler word and then says the same thing the anchored form says.
+   *
+   * The fix is a closed prefix list, not a substring search. Matching a trigger anywhere in the
+   * sentence is what would put "I never got that to work" back in the queue; skipping a known,
+   * bounded set of openers does not, because the trigger still has to be the next thing said.
+   */
+  function textsFor(turn: string): string[] {
+    return extractCandidates([turn]).map((candidate) => candidate.text);
+  }
+
+  it("captures a preference behind each of the openers people actually use", () => {
+    expect(textsFor("Also from now on prefer yarn for the docs site.")).toHaveLength(1);
+    expect(textsFor("Please always run the linter before committing anything.")).toHaveLength(1);
+    expect(textsFor("So never force-push to master.")).toHaveLength(1);
+    expect(textsFor("Ok, from now on run the tests before pushing.")).toHaveLength(1);
+    expect(textsFor("Note that always adding a changeset is required here.")).toHaveLength(1);
+  });
+
+  it("captures the two phrasings that had no trigger at all", () => {
+    expect(textsFor("Rule: keep the migrations idempotent and reversible.")).toHaveLength(1);
+    expect(textsFor("We should never commit directly to main.")).toHaveLength(1);
+    expect(textsFor("Let's always open a branch for review.")).toHaveLength(1);
+  });
+
+  it("keeps the whole sentence, prefix included, rather than storing a truncated claim", () => {
+    // The prefix is skipped to find the trigger, not removed from what gets stored: a fact whose
+    // text has been quietly edited is a fact the user never said.
+    expect(textsFor("Please always run the linter before committing anything.")[0]).toBe(
+      "Please always run the linter before committing anything."
+    );
+  });
+
+  it("still refuses a trigger word that is not the start of a claim", () => {
+    // The reason the anchors exist. These must stay out of the queue: past-tense narration, a
+    // question, and a report about a tool -- none is a durable instruction.
+    expect(textsFor("I never got that to work.")).toEqual([]);
+    expect(textsFor("The linter always crashes on this file.")).toEqual([]);
+    expect(textsFor("Should we always run the linter?")).toEqual([]);
+    expect(textsFor("Also, run the tests.")).toEqual([]);
+  });
+
+  it("does not let an unbounded run of filler smuggle a trigger to the front", () => {
+    // A closed list applied repeatedly is still bounded in what it will skip, but a sentence that
+    // is mostly filler is not a crisp instruction and should not be treated as one.
+    expect(textsFor("Well anyway whatever, always run the linter.")).toEqual([]);
+  });
+});
+
 describe("scanTranscript", () => {
   let dir: string;
 
@@ -201,6 +254,25 @@ describe("scanTranscript", () => {
     const path = writeTranscript([userEntry([textBlock("never commit the lockfile by hand")]), ...filler]);
     try {
       expect(scanTranscript(path)).toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("numbers turns from the start of the transcript, not the start of the scan window", () => {
+    // `turnIndex` becomes `<transcript>#turn<n>` in a suggestion's `source_ref` (cli.ts), which is
+    // the only pointer back to where a pending fact came from. Numbering it inside the sliced
+    // window made that pointer both wrong and *unstable*: the same sentence reported a different
+    // turn on every scan as the transcript grew, so a reviewer checking provenance twice got two
+    // answers and neither located the sentence.
+    const filler = Array.from({ length: MAX_SCANNED_TURNS }, (_unused, index) => userEntry([textBlock(`filler turn ${index}`)]));
+    const path = writeTranscript([...filler, userEntry([textBlock("never commit the lockfile by hand")])]);
+    try {
+      const found = scanTranscript(path);
+      expect(found).toHaveLength(1);
+      // The statement is the last of MAX_SCANNED_TURNS + 1 user turns, so its real index is the
+      // count of turns before it -- not MAX_SCANNED_TURNS - 1, its position within the window.
+      expect(found[0]?.turnIndex).toBe(MAX_SCANNED_TURNS);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

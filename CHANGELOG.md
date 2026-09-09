@@ -6,6 +6,30 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem scan-session` recorded a turn number that was wrong and that moved.** `turnIndex` was
+  numbered from the start of the scan window rather than the start of the transcript, and the window
+  is the last `MAX_SCANNED_TURNS` turns. So a statement at true turn 249 was filed with
+  `source_ref` `<transcript>#turn199`. Worse than wrong: *unstable*. The same sentence reported a
+  different turn on every scan as the transcript grew past the cap, so a reviewer who checked a
+  pending suggestion's provenance twice got two answers and neither located the sentence. That
+  pointer is the only thing tying a suggestion back to what was actually said, which is what a
+  reviewer needs in order to resolve it. `scanTranscript` now offsets the window's indices back to
+  transcript coordinates.
+
+- **`mem scan-session` missed durable statements that opened with a filler word.** Measured against
+  seven ordinary phrasings of a preference, the `^`-anchored opener table matched exactly one. The
+  anchors are right -- they are what keeps "I never got that to work" and "the linter always crashes
+  on this file" out of the review queue -- but they also rejected "Please always run the linter" and
+  "So never force-push to master", which say precisely what the anchored form says. Relaxing the
+  anchor to a substring search would have recovered those and reinstated every false positive the
+  anchor exists to prevent, so instead a *closed* list of discourse openers (`please`, `also`, `so`,
+  `ok`, `note that`) may now precede a trigger: the trigger still has to be the very next thing
+  said, and only those specific words may come before it. Two phrasings that had no trigger at all
+  were added alongside -- `rule:` and `we should`/`let's` followed by `always`/`never`. The skip
+  applies to matching only; the stored text stays the whole sentence, filler included, because a
+  fact whose text was silently edited is a fact the user never said. Same transcript, same
+  candidates, still no model: seven of seven where it had been one of seven.
+
 - **`mem recall` ranked a fact naming an identifier below facts that merely shared its stems.**
   BM25 reduces `src/retrieval.ts` to `src`/`retriev`/`ts`, so against a three-fact store the fact
   that actually named the file came back *last*, behind two that used those three words in a
