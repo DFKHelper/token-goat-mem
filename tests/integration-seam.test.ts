@@ -13,6 +13,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db.js";
+import { insertFact, openStorage } from "../src/storage.js";
 import { buildHintFormat, TGMEM_HEADER } from "../src/integration-seam.js";
 import type { HintFormatOptions, HintFormatResult } from "../src/integration-seam.js";
 import type { Fact } from "../src/types.js";
@@ -378,5 +379,62 @@ describe("regression: the seam's row mapper projects every column retrieval depe
     // check on the SELECT itself. If the wire format ever exposes trust, replace this with the
     // behavioural test that then becomes possible.
     expect(select).toContain("prior_status");
+  });
+});
+
+describe("entity ranking on the hint-format path", () => {
+  let root: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "mem-seam-entity-"));
+    dbPath = join(root, "mem.db");
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /**
+   * Seeded through `insertFact` rather than this file's `seedFacts` helper: the helper writes rows
+   * straight into `facts` and so leaves `fact_terms` empty, which is the correct behaviour for a
+   * fact that never went through capture but means the entity layer these tests are about would not
+   * exist at all.
+   */
+  function seedThroughCapture(texts: readonly string[]): void {
+    const db = openStorage(dbPath);
+    try {
+      for (const text of texts) {
+        insertFact(db, { text, kind: "fact", scope: "global", source_type: "user" });
+      }
+    } finally {
+      db.close();
+    }
+  }
+
+  it("ranks the fact naming a path above ones that only share its stems", async () => {
+    // This is the path that matters most: an agent gets one shot at the context it is handed and
+    // never sees what ranked below the cap, so a mis-ranked identifier is not a worse ordering --
+    // it is a fact the agent never learns.
+    seedThroughCapture([
+      "the BM25 scorer lives in src/retrieval.ts and owns fusion",
+      "we retriev data from various src locations using ts helpers",
+      "retrieval of ts source files happens in the src directory",
+    ]);
+    const result = await buildHint({ root, dbPath, query: "src/retrieval.ts" });
+    const factLines = result.lines.filter((line) => line.includes("stored fact"));
+    expect(factLines.length).toBeGreaterThan(0);
+    expect(factLines[0]).toContain("src/retrieval.ts and owns fusion");
+  });
+
+  it("changes nothing when the query names no identifier", async () => {
+    // The guard: no signal, no vote. Same store, a query with nothing identifier-shaped in it.
+    seedThroughCapture([
+      "the BM25 scorer lives in src/retrieval.ts and owns fusion",
+      "we retriev data from various src locations using ts helpers",
+    ]);
+    const withQuery = await buildHint({ root, dbPath, query: "source files and helpers" });
+    expect(withQuery.header).toContain("TGMEM");
+    expect(withQuery.lines.join(" ")).toContain("retriev");
   });
 });

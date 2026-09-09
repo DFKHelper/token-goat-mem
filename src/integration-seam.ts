@@ -43,7 +43,15 @@
 
 import { resolve as resolvePath, sep } from "node:path";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
-import { getEmbeddingMeta, getUsefulnessCounts, insertRecallLog, listSurfacedFactIds, openStorage, unpackEmbedding } from "./storage.js";
+import {
+  getEmbeddingMeta,
+  getEntityOverlapForQuery,
+  getUsefulnessCounts,
+  insertRecallLog,
+  listSurfacedFactIds,
+  openStorage,
+  unpackEmbedding,
+} from "./storage.js";
 import { resolveDbPath } from "./db.js";
 import { planEmbeddingRanking } from "./embeddings.js";
 import { identityMatches } from "./projectIdentity.js";
@@ -326,6 +334,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   let allFacts: Fact[];
   let alreadySurfaced: ReadonlySet<string> = new Set();
   let usefulness: ReadonlyMap<string, { surfaced: number; used: number }>;
+  let entityOverlap: ReadonlyMap<string, number>;
   // Decided before the fact query, not after, because it decides the query's row shape: an
   // embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget
   // for a signal that is switched off on every install without a configured endpoint is exactly the
@@ -346,6 +355,11 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // inside a ~150ms hard budget and a second WAL open plus schema migration is the kind of cost
     // that turns a healthy response into a truncated one.
     usefulness = getUsefulnessCounts(db);
+    // On the same open connection, for the same budget reason. One indexed lookup per identifier in
+    // the query and none at all when it has none, so the ~150ms budget is safe: this is the path
+    // where the ranking matters most, since an agent gets one shot at the context it is handed and
+    // never sees the facts that ranked below the cap.
+    entityOverlap = getEntityOverlapForQuery(db, options.query ?? "");
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }
@@ -373,6 +387,11 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // something it should have re-sent. On a store nobody has run `mem used` against -- every install
     // until someone does -- the list is empty and the scores are unchanged.
     usefulness,
+    // The signal BM25 structurally cannot carry: stemming reduces `src/retrieval.ts` to
+    // `src`/`retriev`/`ts`, so a fact naming that file scored no higher than one merely using those
+    // three words. Empty whenever the query names no identifier, so it cannot vote on a query it has
+    // no signal for.
+    ...(entityOverlap.size > 0 ? { entityOverlap } : {}),
     ...(embeddingBackend !== null ? { embeddingBackend, embeddingTimeoutMs: embeddingBudgetMs } : {}),
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });

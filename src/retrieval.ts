@@ -164,6 +164,28 @@ export interface RetrievalOptions {
    * captured before facet extraction existed, until `mem facets` backfills it.
    */
   readonly factEntityKeys?: ReadonlyMap<string, ReadonlySet<string>>;
+  /**
+   * How many of the *query's* own entities each fact carries (`storage.getEntityOverlapForQuery`),
+   * fused as one more RRF rank list.
+   *
+   * Distinct from {@link entities}, which is a filter the caller opts into by naming an identifier
+   * on the command line. This is a ranking signal derived from the query text itself, and it exists
+   * because BM25 cannot see identifiers: it stems `src/retrieval.ts` to `src`/`retriev`/`ts` and
+   * then scores a fact naming that file no higher than one using those three words in a sentence.
+   * Dogfooded against a three-fact store, the fact naming the file ranked *last*. The entity layer
+   * already knew the difference; nothing consulted it unless the caller passed `--entity`, which
+   * requires already knowing the answer.
+   *
+   * A vote, never an override -- it joins {@link usefulness} and the embedding list in fusion, so a
+   * fact that merely carries the identifier cannot displace one that carries it and matches the
+   * rest of the query. Empty whenever the query names no identifier, which is the guard that keeps
+   * this off the queries it has no signal for: see the zero-score BM25 note in `retrieve` for the
+   * dogfooding incident that rule comes from.
+   *
+   * Passed in rather than read here for the same reason as {@link usefulness}: this module ranks
+   * and gates, it does not open databases.
+   */
+  readonly entityOverlap?: ReadonlyMap<string, number>;
 }
 
 export interface RetrievedFact {
@@ -645,6 +667,27 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
  * across runs -- without it, two equally-useful facts would swap places on `Array.prototype.sort`'s
  * implementation-defined ordering and make recall output non-reproducible.
  */
+/**
+ * Candidates ordered by how many of the query's entities each carries, most first.
+ *
+ * Facts carrying none are omitted rather than ranked last: a rank list is a statement about the
+ * facts it contains, and padding it with the rest would make "carries no identifier from the query"
+ * vote with the same machinery as "carries one".
+ */
+function entityOverlapRanking(candidates: readonly Fact[], overlap: RetrievalOptions["entityOverlap"]): string[] {
+  if (overlap === undefined || overlap.size === 0) {
+    return [];
+  }
+  const scored = candidates
+    .map((fact) => ({ fact, count: overlap.get(fact.id) ?? 0 }))
+    .filter((entry) => entry.count > 0);
+  scored.sort((a, b) => {
+    const byCount = b.count - a.count;
+    return byCount !== 0 ? byCount : b.fact.captured_at.localeCompare(a.fact.captured_at);
+  });
+  return scored.map((entry) => entry.fact.id);
+}
+
 function usefulnessRanking(candidates: readonly Fact[], usefulness: RetrievalOptions["usefulness"]): string[] {
   if (usefulness === undefined) {
     return [];
@@ -1047,7 +1090,8 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
 
   // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a
   // fourth signal is one push rather than another doubling of cases.
-  const extraRankLists = [embeddingRankIds, usefulnessRankIds].filter((list) => list.length > 0);
+  const entityRankIds = entityOverlapRanking(filtered, options.entityOverlap);
+  const extraRankLists = [embeddingRankIds, usefulnessRankIds, entityRankIds].filter((list) => list.length > 0);
 
   // A BM25 list where every score is zero is a *ranking* but not a *signal*: nothing matched, so
   // `bm25Ranked`'s sort fell through to its `captured_at` tie-break and the list is now pure recency

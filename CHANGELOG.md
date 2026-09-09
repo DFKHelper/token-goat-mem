@@ -4,6 +4,28 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+### Fixed
+
+- **`mem recall` ranked a fact naming an identifier below facts that merely shared its stems.**
+  BM25 reduces `src/retrieval.ts` to `src`/`retriev`/`ts`, so against a three-fact store the fact
+  that actually named the file came back *last*, behind two that used those three words in a
+  sentence. The entity layer already knew the difference -- `mem facets --list-entities` extracts
+  `src/retrieval.ts` as a single entity on exactly the right fact, and `mem recall --entity` returned
+  it alone -- but nothing consulted that layer unless the caller passed `--entity`, which requires
+  already knowing the answer. Recall now extracts entities from the query text with the same
+  extractor that wrote them at capture time, and fuses an entity-overlap rank list alongside BM25,
+  usefulness, and embeddings.
+
+  It is a vote, not an override: a fact that merely carries the identifier does not displace one that
+  carries it *and* matches the rest of the query. The list is empty whenever the query names no
+  identifier, so it cannot vote on queries it has no signal for -- the rule the zero-score BM25 guard
+  in `retrieval.ts` already encodes, after a rank list with no signal was found outvoting one with
+  signal. Cost is one indexed `fact_terms` lookup per identifier in the query and nothing at all for
+  a query with none, deliberately not the full-table scan `--entity` pays for, since this runs on
+  every recall including the ~150 ms `--hint-format` budget. That agent-facing path is where it
+  matters most: an agent gets one shot at the context it is handed and never sees what ranked below
+  the cap, so a mis-ranked identifier is not a worse ordering but a fact the agent never learns.
+
 ### Added
 
 - **`mem dream`** reports what a configured model thinks follows from several stored facts taken
