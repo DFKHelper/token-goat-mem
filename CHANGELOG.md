@@ -6,6 +6,18 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **`mem review --undo <id>`** reverses a `--reject`. Review is a two-key decision made one key at a
+  time, and reject was the only irreversible one: it marks the fact `superseded`, and `--promote`
+  refuses anything that is not `pending` or `contested`, so a mistyped id could not be walked back
+  through the CLI at all -- only by hand-editing the database or round-tripping a `mem export`. A
+  review queue whose reject key is unrecoverable is one users are right to hesitate over, which
+  defeats the queue. The fact returns to the status it actually had, so a rejected `contested` fact
+  comes back `contested` rather than being quietly upgraded. Scoped to rejections by name: `mem
+  forget` is a considered decision about a fact the user chose to keep, and reversing that is a
+  different question, so a fact superseded any other way is refused with the mechanism that claimed
+  it.
+
+
 - **A pinned fact could fall off the recall it was pinned for.** With no query -- the shape of the
   `SessionStart` hook `mem init` installs -- every BM25 score ties at zero, the sort falls through to
   recency, and the default cap of 20 keeps the newest facts. A pinned fact behind 20 newer ones
