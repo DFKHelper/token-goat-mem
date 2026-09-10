@@ -6,6 +6,30 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **The hook path dropped the column that had just been added to fix the anchor-root defect.** The
+  recall seam keeps its own hand-written `SELECT` over `facts`, and it has silently omitted a needed
+  column three separate times now: `prior_status`, then `scope_repo` (which made every
+  project-scoped fact invisible from a worktree), and now `capture_root` — so the capture-root fix
+  below worked from `mem recall` and not from the hook that runs on every prompt, which is the path that matters
+  most. The same fact read `affirmed` when you asked for it and `unverified` when mem offered it.
+  Each omission failed open: no error, no crash, just a different answer on one path, and each was
+  preceded by a comment in the drifting file asking the next person to keep the list in step.
+  `tests/guards/fact-columns.test.ts` now asserts it instead: every column of `facts` has to reach
+  the seam's `SELECT` and its row mapper, `insertFact`, `EDITABLE_FACT_FIELDS`, and the export
+  envelope, or be named in an allowlist with a sentence saying why it is deliberately absent.
+- **`mem edit --undo` restored an anchor and left it pointed at the wrong tree.** `captureRoot` was
+  missing from the list of fields an edit snapshots, so `mem edit --anchor` re-pointed the capture
+  root while undo put back only the old anchor: the original predicate returned aimed at the tree
+  its *replacement* had been written for, and the fact could never be affirmed anywhere again —
+  after a command whose help promises to restore the fields it touched.
+- **A filesystem anchor returned a decisive verdict about a directory that was not there.** Against
+  a missing root, `file-absent` affirmed (nothing is absent from a directory that does not exist)
+  and `file-exists` contradicted, both read off nothing at all, while `git-tracked` already said
+  `unverified` — so the predicates disagreed with each other about the same absence. Reachable by
+  moving a project, importing a fact from another machine, or handing the hook a stale `--root`.
+  Filesystem predicates now yield `unverified` when the root they name is gone. Date-only
+  predicates are deliberately unaffected: `valid-until` reads no path, so a missing root tells it
+  nothing it needed.
 - **A path-scoped fact's anchor was judged against whatever directory you happened to be in.** An
   anchor's target is validated at capture time to sit inside the `--root` it was captured under, but
   nothing on the fact recorded that root — a path-scoped fact's `scope_root` holds the file it is

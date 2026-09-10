@@ -1086,6 +1086,29 @@ function evaluateFileContainsRaw(
  * verdict is genuine, including a memo hit -- a budget-limited verdict is never memoized (see below),
  * so a cache hit can only ever be a real one.
  */
+/**
+ * The predicates that ask nothing of the filesystem, and so mean exactly the same thing against a
+ * root that is not there as against one that is. `valid-until` compares a stored date to the clock
+ * and reads no path at all; every other predicate names a target inside the root and cannot answer
+ * without it. Kept as a list rather than folded into the check below so that adding another
+ * date-shaped or otherwise rootless predicate is a one-line change here instead of a silent
+ * downgrade to `unverified` for it.
+ */
+const ROOTLESS_PREDICATES = ["valid-until"] as const;
+
+/**
+ * Whether `path` is a directory that exists right now. `statSync` throws for a missing path rather
+ * than reporting it, and a broken symlink or a plain file standing where a root should be is just as
+ * unusable as nothing at all, so both collapse to false.
+ */
+function isExistingDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?: number, budgetHit?: { hit: boolean }): AnchorVerdict {
   if (anchor === null || anchor.trim().length === 0) {
     return "unverified";
@@ -1101,6 +1124,19 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
 
   const resolvedRoot = resolve(root);
   const trimmed = anchor.trim();
+  if (!ROOTLESS_PREDICATES.some((name) => trimmed === name || trimmed.startsWith(`${name} `)) && !isExistingDirectory(resolvedRoot)) {
+    // Every predicate below asks a question *about a tree*, and a root that is not there answers
+    // none of them: `file-absent` would affirm because nothing is absent from a directory that does
+    // not exist, and `file-exists` would contradict for the same empty reason -- a confident verdict
+    // read off nothing at all. That happens whenever a project is moved or deleted, whenever a fact
+    // is imported from another machine and keeps its foreign root, and whenever a host hands the
+    // hook a `--root` that has since gone away. `git-tracked` already answered `unverified` here
+    // (its own command fails), so the predicates disagreed with each other about the same absence.
+    //
+    // Deliberately not memoized: unlike a predicate outcome, this is a statement about the root
+    // rather than the anchor, and a directory that is missing now may be present later.
+    return "unverified";
+  }
   const key = `${resolvedRoot} ${trimmed}`;
   const cached = memo.get(key);
   if (cached !== undefined) {

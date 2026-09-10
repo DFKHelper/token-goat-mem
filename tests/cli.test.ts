@@ -2583,6 +2583,57 @@ describe("regression: review and show resolve anchor roots the way recall does",
 
 // --- regression: a path-scoped fact's anchor is evaluated against its persisted capture root ---
 
+describe("regression: the hook path and the CLI path agree about the same fact", () => {
+  // `src/integration-seam.ts` builds its own SELECT by hand rather than reusing storage.ts's, and
+  // that list has now silently dropped a needed column three times in three separate releases:
+  // `prior_status`, then `scope_repo` (which made every project fact invisible from a worktree), then
+  // `capture_root` (which caveated a fact the CLI affirmed). Each time the omission failed open --
+  // no error, no crash, just a different answer on the path that runs unprompted on every session
+  // start and every prompt. The file's own comment already states the rule; a comment has now failed
+  // three times, so this asserts it instead.
+  //
+  // Comparing the two paths' *rendered* answers, rather than the SELECT's text, is what makes this
+  // catch the next omission too: any column that changes what a user is told will diverge here
+  // regardless of which column it is.
+  let home: string;
+  let repo: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "mem-seam-agree-home-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    repo = mkdtempSync(join(tmpdir(), "mem-seam-agree-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  });
+
+  it("reports the same freshness for a path-scoped anchored fact through both paths", async () => {
+    writeFileSync(join(repo, "pkg.txt"), "x", "utf8");
+    await runCli([
+      "remember", "the package ships a manifest", "--kind", "fact", "--scope", "path",
+      "--path", "pkg.txt", "--root", repo, "--anchor", "file-exists pkg.txt",
+    ]);
+
+    // Plain recall affirms it: the anchored file is right there. Rendered ground truth carries no
+    // freshness caveat at all, which is what "affirmed" looks like on this path.
+    const plain = await runCli(["recall", "--root", repo]);
+    expect(plain.stdout).toContain("the package ships a manifest");
+    expect(plain.stdout).not.toContain("unverified");
+
+    // The hook path must reach the same verdict. Pre-fix it emitted `fresh=unverified` here, because
+    // its SELECT omitted `capture_root` and `anchorRootFor` cannot judge a path-scoped anchor
+    // without one.
+    const hint = await runCli([
+      "recall", "--hint-format", "--root", repo, "--context-files", join(repo, "pkg.txt"),
+    ]);
+    expect(hint.stdout).toContain("the package ships a manifest");
+    expect(hint.stdout).toContain("fresh=affirmed");
+    expect(hint.stdout).not.toContain("fresh=unverified");
+  });
+});
+
 describe("regression: a path-scoped fact's anchor evaluates against its recorded capture root", () => {
   /** `<repo>/pkg`, matching the bug report's own reproduction (proj/pkg under proj). */
   function makePkg(repo: string): string {
@@ -2639,6 +2690,96 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       expect(review.stdout).toContain("pkg has no yarn.lock");
     } finally {
       rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("restores the capture root along with the anchor, so an undone edit is judged where it was", async () => {
+    // `mem edit --anchor` re-points the capture root to the root it validated the new anchor
+    // against. Undo restored the anchor and left the root, so the original anchor came back pointed
+    // at the tree the *replacement* was written for: the fact reported `contradicted` from the
+    // repository root and `unverified` from its own package, and could never be affirmed anywhere
+    // again -- after a command whose help promises to restore "the fields it touched".
+    const proj = mkdtempSync(join(tmpdir(), "mem-undo-root-"));
+    try {
+      const pkg = join(proj, "pkg");
+      mkdirSync(pkg, { recursive: true });
+      writeFileSync(join(pkg, "foo.txt"), "x", "utf8");
+      writeFileSync(join(proj, "yarn.lock"), "x", "utf8");
+      writeFileSync(join(proj, "top.txt"), "x", "utf8");
+
+      // True of `pkg`, which has no yarn.lock of its own -- `proj` does, which is what makes the
+      // wrong root observable rather than merely theoretical.
+      const captured = await runCli([
+        "remember", "pkg has no yarn.lock", "--kind", "fact", "--scope", "path",
+        "--path", "foo.txt", "--root", pkg, "--anchor", "file-absent yarn.lock",
+      ]);
+      const id = extractRememberedId(captured);
+      const before = JSON.parse((await runCli(["show", id, "--root", pkg, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(before.freshness).toBe("affirmed");
+
+      await runCli(["edit", id, "--force", "--anchor", "file-exists top.txt", "--root", proj]);
+      const undone = await runCli(["edit", id, "--undo"]);
+      expect(undone.exitCode ?? 0).toBe(0);
+
+      const after = JSON.parse((await runCli(["show", id, "--root", pkg, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(after.freshness).toBe("affirmed");
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
+  it("cannot affirm or contradict a filesystem anchor when the root it names is gone", async () => {
+    // A predicate asks a question about a tree. Against a tree that is not there, `file-absent`
+    // affirmed (nothing is absent from a directory that does not exist) and `file-exists`
+    // contradicted, both read off nothing at all -- while `git-tracked` already said `unverified`,
+    // so the predicates disagreed with each other about the same absence. This is reachable by
+    // moving a project, importing a fact from another machine, or handing the hook a stale --root.
+    const gone = mkdtempSync(join(tmpdir(), "mem-missing-root-"));
+    const live = mkdtempSync(join(tmpdir(), "mem-missing-root-live-"));
+    try {
+      writeFileSync(join(gone, "foo.txt"), "x", "utf8");
+      const absent = extractRememberedId(
+        await runCli([
+          "remember", "no lockfile here", "--kind", "fact", "--scope", "global",
+          "--root", gone, "--anchor", "file-absent yarn.lock",
+        ])
+      );
+      const exists = extractRememberedId(
+        await runCli([
+          "remember", "foo.txt is present", "--kind", "fact", "--scope", "global",
+          "--root", gone, "--anchor", "file-exists foo.txt",
+        ])
+      );
+      rmSync(gone, { recursive: true, force: true });
+
+      const freshnessOf = async (id: string): Promise<string> => {
+        const shown = JSON.parse((await runCli(["show", id, "--root", gone, "--json"])).stdout) as {
+          freshness: string;
+        };
+        return shown.freshness;
+      };
+      expect(await freshnessOf(absent)).toBe("unverified");
+      expect(await freshnessOf(exists)).toBe("unverified");
+
+      // The date-only predicate is deliberately unaffected: it reads no path, so a missing root
+      // tells it nothing it needed.
+      const dated = extractRememberedId(
+        await runCli([
+          "remember", "ships this decade", "--kind", "fact", "--scope", "global",
+          "--root", live, "--anchor", "valid-until 2099-01-01",
+        ])
+      );
+      const shownDated = JSON.parse((await runCli(["show", dated, "--root", gone, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(shownDated.freshness).toBe("affirmed");
+    } finally {
+      rmSync(gone, { recursive: true, force: true });
+      rmSync(live, { recursive: true, force: true });
     }
   });
 

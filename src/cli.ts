@@ -232,7 +232,7 @@ function auditValuePreview(value: string | number | null | undefined): string {
  * `undoEdit` replays through `updateFact`. One list here means a field added to `FactUpdate` only
  * has to be added once for all three to pick it up, instead of three lists silently drifting apart.
  */
-const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "scope", "scopeRoot", "scopeRepo", "status", "confidence"] as const;
+const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "scope", "scopeRoot", "scopeRepo", "captureRoot", "status", "confidence"] as const;
 type EditableFactField = (typeof EDITABLE_FACT_FIELDS)[number];
 
 function isEditableFactField(field: string): field is EditableFactField {
