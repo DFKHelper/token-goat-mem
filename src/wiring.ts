@@ -964,10 +964,11 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
  * wrong: a user's own pre-existing `"hooks": {"SessionStart": []}` looks identical, after mem's own
  * stamped entries are removed, to a container mem created and drained back to empty itself. The two
  * are indistinguishable from the current file content alone, so this reads the pre-install snapshot
- * instead of guessing from emptiness. `undefined` return means the snapshot is missing or unreadable
- * (e.g. mem created the file itself and took no backup, or the backup is corrupt) -- callers must
- * treat that as "assume everything pre-existed" so pruning stays a no-op rather than risking deletion
- * of content mem cannot prove it owns.
+ * instead of guessing from emptiness. Three outcomes: missing `.bak` returns `{hooksExisted: false, hooks: {}}`,
+ * because no backup is taken unless the file pre-existed, so mem created it and pruning is safe;
+ * present and parseable returns the snapshot's own `hooks`; present but unparseable returns `undefined`,
+ * which callers must read as "assume everything pre-existed" so pruning fails closed. Note: if a user
+ * deletes the `.bak` by hand, that is indistinguishable from mem having created the file.
  */
 function preInstallHooks(path: string): { readonly hooksExisted: boolean; readonly hooks: Record<string, unknown> } | undefined {
   const bakPath = `${path}.token-goat-mem.bak`;

@@ -28,6 +28,7 @@ import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSec
 import { insertAuditLog } from "./db.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
+import { identityMatches } from "./projectIdentity.js";
 import { getFactById, ID_PREFIX_PATTERN, insertFact } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
@@ -131,6 +132,15 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
       `facts[${index}] has scope ${JSON.stringify(scopeForBindingCheck)} but no "scopeRoot" binding (expected an absolute path)`
     );
   }
+  // Set below only for a project fact whose own `scopeRoot` falls outside `--root` but whose
+  // `scopeRepo` identifies the same repository `--root` is a checkout of (an export restored onto
+  // another machine, or into a second clone/worktree) -- rebinding to the caller's own `--root`
+  // rather than rejecting, since AGENTS.md/CHANGELOG.md promise export/import survives a move to
+  // another machine, where the fact's recorded `scopeRoot` path does not exist and there is no
+  // `--root` the user could otherwise pass. The oracle concern this whole check exists for
+  // (`anchorRootFor` using an imported `scopeRoot` verbatim as an anchor-evaluation root) does not
+  // apply to the rebound value -- it IS the caller's own `--root`.
+  let rebindScopeRootTo: string | null = null;
   if (scopeForBindingCheck !== "global" && hasBoundScopeRoot) {
     // `anchorRootFor` (src/retrieval.ts) uses a project-scoped fact's `scopeRoot` verbatim as the
     // anchor-evaluation root, so an imported row that smuggles in an arbitrary directory becomes a
@@ -141,9 +151,14 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
       return fail(`facts[${index}] has a "scopeRoot" that is not an absolute path: ${JSON.stringify(scopeRootValue)}`);
     }
     if (root !== undefined && anchorPathWithinRoot(root, scopeRootValue) === null) {
-      return fail(
-        `facts[${index}] has a "scopeRoot" ${JSON.stringify(scopeRootValue)} outside the import root ${JSON.stringify(root)}`
-      );
+      const scopeRepoValue = typeof obj["scopeRepo"] === "string" ? obj["scopeRepo"] : null;
+      if (scopeForBindingCheck === "project" && identityMatches(scopeRepoValue, root)) {
+        rebindScopeRootTo = root;
+      } else {
+        return fail(
+          `facts[${index}] has a "scopeRoot" ${JSON.stringify(scopeRootValue)} outside the import root ${JSON.stringify(root)}`
+        );
+      }
     }
   }
   if (!FACT_SOURCE_TYPES.includes(obj["source_type"] as FactSourceType)) {
@@ -216,6 +231,8 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     // on scope before ever looking at it) -- normalize rather than fail so a stray binding on a
     // global fact round-trips cleanly instead of becoming a per-item error.
     newFact.scopeRoot = null;
+  } else if (rebindScopeRootTo !== null) {
+    newFact.scopeRoot = rebindScopeRootTo;
   } else if (typeof obj["scopeRoot"] === "string") {
     newFact.scopeRoot = obj["scopeRoot"];
   } else if (obj["scopeRoot"] === null) {

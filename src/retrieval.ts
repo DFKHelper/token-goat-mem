@@ -29,6 +29,7 @@
 import { resolve as resolvePath, sep } from "node:path";
 
 import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
+import { screenForSecrets } from "./capture.js";
 import { resolveContradictions } from "./contradiction.js";
 import { normalizePath } from "./pathUtils.js";
 import { identityMatches } from "./projectIdentity.js";
@@ -105,6 +106,14 @@ export interface RetrievalOptions {
   readonly embeddingBackend?: EmbeddingBackend | EmbeddingBackendLoader;
   /** Hard budget for loading/calling the embedding backend. Default `DEFAULT_EMBEDDING_TIMEOUT_MS`. */
   readonly embeddingTimeoutMs?: number;
+  /**
+   * `.mem/allowlist` entries (see capture.ts's `loadAllowlist`/`screenForSecrets`), used to decide
+   * whether the query itself is safe to send to an embedding endpoint. A query that trips secret
+   * screening skips dense ranking entirely -- BM25 still runs and results still return -- mirroring
+   * the capture-side invariant that text failing screening is never handed to an endpoint. Omitted =
+   * empty allowlist (screening still runs, just with no exemptions).
+   */
+  readonly secretAllowlist?: readonly string[];
   /** Hard overall budget for anchor re-evaluation across all candidates. Default `DEFAULT_ANCHOR_TIME_BUDGET_MS`. */
   readonly anchorTimeBudgetMs?: number;
   /**
@@ -984,6 +993,18 @@ function normalizeSubjectForFilter(subject: string): string {
  */
 export function anchorRootFor(fact: Fact, queryRoot: string): string {
   if (fact.scope === "project" && typeof fact.scopeRoot === "string" && fact.scopeRoot.trim().length > 0) {
+    // `isBoundToRoot` puts this fact in scope for a query root that is not its own `scopeRoot`
+    // whenever `identityMatches(fact.scopeRepo, queryRoot)` holds -- a worktree or second clone of
+    // the same repository. Evaluating the anchor against the capture-time `scopeRoot` in that case
+    // reads ground truth off a tree the user is not in (a lockfile the query root deleted, a file
+    // the query root added). Only redirect on an actual identity match, not merely because the two
+    // roots differ, so a fact bound to the same directory it was captured in is untouched.
+    if (normalizePath(resolvePath(fact.scopeRoot)) === normalizePath(resolvePath(queryRoot))) {
+      return fact.scopeRoot;
+    }
+    if (identityMatches(fact.scopeRepo, queryRoot)) {
+      return queryRoot;
+    }
     return fact.scopeRoot;
   }
   return queryRoot;
@@ -1129,7 +1150,12 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const bm25RankIds = bm25Ranked.map((fact) => fact.id);
 
   let embeddingRankIds: string[] = [];
-  if (options.query.trim().length > 0) {
+  // A query that trips secret screening is never handed to the embedding endpoint -- BM25 still
+  // ranks it (nothing here narrows `filtered` or skips the lexical pass), only the outbound call is
+  // skipped, mirroring the capture-side invariant that screened-out text is never sent off-machine.
+  const queryTripsScreening =
+    options.query.trim().length > 0 && screenForSecrets({ query: options.query }, options.secretAllowlist ?? []).length > 0;
+  if (options.query.trim().length > 0 && !queryTripsScreening) {
     const backend = await resolveEmbeddingBackend(options.embeddingBackend, options.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
     if (backend !== null) {
       const embeddable = filtered.filter((fact): fact is Fact & { embedding: Float32Array } => fact.embedding !== null);

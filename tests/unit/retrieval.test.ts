@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { _clearAnchorMemoForTests } from "../../src/anchors.js";
 import {
@@ -644,6 +644,34 @@ describe("retrieve", () => {
     // b wins the embedding signal outright (cosine similarity 1 vs 0), and RRF gives it credit
     // even though it has zero BM25 score, so it should not rank last.
     expect(ids.indexOf("b")).toBeLessThan(1 + 1);
+  });
+
+  it("skips the embedding call when the query itself trips secret screening, but still returns BM25 results", async () => {
+    // A query containing an AWS-key-shaped literal must never reach an embedding endpoint -- the
+    // capture-side invariant (text failing secret screening is never sent off-machine) has to hold
+    // for the query too, since the `UserPromptSubmit` hook hands every user prompt through here.
+    const embed = vi.fn(() => new Float32Array([1, 0]));
+    const backend: EmbeddingBackend = { embed };
+    const facts = [
+      makeFact({ id: "1", text: "AKIAIOSFODNN7EXAMPLE is the old deploy key", kind: "fact", embedding: new Float32Array([1, 0]) }),
+    ];
+    const { results } = await retrieve(facts, { query: "AKIAIOSFODNN7EXAMPLE", root, embeddingBackend: backend });
+    expect(embed).not.toHaveBeenCalled();
+    expect(results).toHaveLength(1);
+    expect(results[0]?.fact.id).toBe("1");
+  });
+
+  it("does not skip the embedding call for a query trip that is allowlisted", async () => {
+    const embed = vi.fn(() => new Float32Array([1, 0]));
+    const backend: EmbeddingBackend = { embed };
+    const facts = [makeFact({ id: "1", text: "uses AKIAIOSFODNN7EXAMPLE", kind: "fact", embedding: new Float32Array([1, 0]) })];
+    await retrieve(facts, {
+      query: "AKIAIOSFODNN7EXAMPLE",
+      root,
+      embeddingBackend: backend,
+      secretAllowlist: ["AKIAIOSFODNN7EXAMPLE"],
+    });
+    expect(embed).toHaveBeenCalled();
   });
 
   it("returns nothing when there are no candidate facts after filtering", async () => {

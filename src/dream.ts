@@ -15,11 +15,12 @@
  * candidate lands `pending` with `source_type: "derived"` and reaches recall only through an
  * explicit `mem review --promote`. A fact nobody said must never be surfaced as if somebody had.
  *
- * **It is off unless configured, and it is the only path here that sends fact text off the
- * machine.** `TOKEN_GOAT_MEM_DREAM_URL` + `TOKEN_GOAT_MEM_DREAM_MODEL` name an OpenAI-compatible
- * chat-completions endpoint, matching the opt-in shape src/embeddings.ts already established. Unset,
- * `mem dream` says so and does nothing. Point it at a local endpoint if the store holds anything you
- * would not paste into a hosted API.
+ * **It is off unless configured, and once configured it sends stored fact text off the machine.**
+ * `TOKEN_GOAT_MEM_DREAM_URL` + `TOKEN_GOAT_MEM_DREAM_MODEL` name an OpenAI-compatible chat-completions
+ * endpoint, matching the opt-in shape src/embeddings.ts already established -- that other opt-in path
+ * sends fact/query text of its own, to a separate endpoint, when configured. Unset, `mem dream` says
+ * so and does nothing. Point it at a local endpoint if the store holds anything you would not paste
+ * into a hosted API.
  *
  * **Store content is data, not instruction.** Facts reach the store from files and transcripts via
  * `mem import`/`mem scan-session`, so a fact's text can contain anything -- including text aimed at
