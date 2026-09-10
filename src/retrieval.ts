@@ -985,29 +985,108 @@ function normalizeSubjectForFilter(subject: string): string {
  * to. Freshness is the trust signal this tool exists to provide, so a wrong verdict is worse than
  * no verdict.
  *
- * Only `scope="project"` is redirected, because only there is `scopeRoot` documented (types.ts) to
- * be an absolute *project root directory*. `scope="path"` stores a file or directory inside some
- * project whose root is not recorded anywhere, and `scope="global"` stores nothing -- for both, the
- * caller's root remains the only root available, and using a file path as an anchor root would be
- * strictly worse than the status quo.
+ * `scope="project"` is redirected to `queryRoot` on an identity match, because only there is
+ * `scopeRoot` documented (types.ts) to be an absolute *project root directory* AND is there a
+ * `scopeRepo` identity to widen the match with. `scope="path"` stores a file or directory inside
+ * some project, not a root an anchor predicate can run under -- for it, the fact's `captureRoot`
+ * (the `--root` it was captured under, recorded by `capture.ts`'s `applyOptionalFields`) is the only
+ * honest root, but with no identity to widen it, it is used only when `queryRoot` is an *exact*
+ * match for it; any other root (an ancestor -- a `path` fact's binding is deliberately visible from
+ * every ancestor of its `scopeRoot`, so this is the common monorepo-hook-at-repo-root case, not a
+ * rare one -- a descendant, or an unrelated directory) returns `null` rather than guess.
+ * `scope="global"` is deliberately left on `queryRoot` unconditionally: a global fact carries no
+ * location binding at all, and its anchor (if any) is meant to be re-checked against wherever the
+ * caller currently is, not pinned to wherever it was captured -- see the function body for why this
+ * is not the same defect as `path` scope's.
+ *
+ * Returns `null` when no such root is known for `scope="path"` -- a row written before
+ * `captureRoot` existed, one imported from an envelope that carries none, or `queryRoot` is not an
+ * exact match for a known `captureRoot`. Every caller must treat `null` as "cannot evaluate this
+ * anchor", i.e. `unverified`, never as `affirmed` or `contradicted` (design principle P3): asserting
+ * a decisive verdict off the wrong root is worse than admitting mem cannot check.
  */
-export function anchorRootFor(fact: Fact, queryRoot: string): string {
-  if (fact.scope === "project" && typeof fact.scopeRoot === "string" && fact.scopeRoot.trim().length > 0) {
-    // `isBoundToRoot` puts this fact in scope for a query root that is not its own `scopeRoot`
-    // whenever `identityMatches(fact.scopeRepo, queryRoot)` holds -- a worktree or second clone of
-    // the same repository. Evaluating the anchor against the capture-time `scopeRoot` in that case
-    // reads ground truth off a tree the user is not in (a lockfile the query root deleted, a file
-    // the query root added). Only redirect on an actual identity match, not merely because the two
-    // roots differ, so a fact bound to the same directory it was captured in is untouched.
-    if (normalizePath(resolvePath(fact.scopeRoot)) === normalizePath(resolvePath(queryRoot))) {
+export function anchorRootFor(fact: Fact, queryRoot: string): string | null {
+  if (fact.scope === "project") {
+    if (typeof fact.scopeRoot === "string" && fact.scopeRoot.trim().length > 0) {
+      // `isBoundToRoot` puts this fact in scope for a query root that is not its own `scopeRoot`
+      // whenever `identityMatches(fact.scopeRepo, queryRoot)` holds -- a worktree or second clone of
+      // the same repository. Evaluating the anchor against the capture-time `scopeRoot` in that case
+      // reads ground truth off a tree the user is not in (a lockfile the query root deleted, a file
+      // the query root added). Only redirect on an actual identity match, not merely because the two
+      // roots differ, so a fact bound to the same directory it was captured in is untouched.
+      if (normalizePath(resolvePath(fact.scopeRoot)) === normalizePath(resolvePath(queryRoot))) {
+        return fact.scopeRoot;
+      }
+      if (identityMatches(fact.scopeRepo, queryRoot)) {
+        return queryRoot;
+      }
       return fact.scopeRoot;
     }
-    if (identityMatches(fact.scopeRepo, queryRoot)) {
-      return queryRoot;
-    }
-    return fact.scopeRoot;
+    // A `project` fact with no `scopeRoot` at all never happens via a real capture (`capture.ts`
+    // always sets it for every scope but `global`) -- this is untouched, pre-existing behavior for
+    // whatever test fixture or corrupted row reaches it, deliberately preserved rather than folded
+    // into the `path` handling below.
+    return queryRoot;
   }
+  if (fact.scope === "path") {
+    // Unlike the `project` branch above there is no `scopeRepo` identity to widen this with -- the
+    // scope records none (types.ts) -- so the capture root is the only thing that makes a
+    // `path`-scoped anchor evaluable at all. Without it there is no honest verdict: the pre-column
+    // code handed the anchor the bare `queryRoot`, which is how a `file-absent` fact came back
+    // `affirmed` from a directory where the file plainly existed.
+    if (typeof fact.captureRoot !== "string" || fact.captureRoot.trim().length === 0) {
+      return null;
+    }
+    const captureRoot = normalizePath(resolvePath(fact.captureRoot));
+    const normalizedQueryRoot = normalizePath(resolvePath(queryRoot));
+    // The capture root itself, and any ancestor of it, can both evaluate this anchor honestly: the
+    // anchor's target was validated to sit inside `captureRoot` at capture time, and a caller
+    // standing at or above that directory has the very tree the predicate describes. This is the
+    // case the fix exists for -- `isBoundToRoot` widens a `path` fact to every ancestor of its
+    // binding precisely so a monorepo hook running at the repository root still sees a package's
+    // facts, and answering `unverified` there would caveat the fact forever on every prompt for the
+    // one user who most needs the anchor.
+    //
+    // Every other root is refused. A descendant may not contain the target at all, and an unrelated
+    // root (a second clone, another machine's checkout of the same layout) would have the anchor
+    // read ground truth off a tree the caller is not in -- the failure the `project` branch above
+    // uses `scopeRepo` identity to avoid, and `path` scope records no identity to avoid it with.
+    if (captureRoot === normalizedQueryRoot || captureRoot.startsWith(normalizedQueryRoot + sep)) {
+      return fact.captureRoot;
+    }
+    return null;
+  }
+  // `global` scope carries no location binding at all -- it is in scope everywhere, by definition
+  // (`isInScope`/`isBoundToRoot` never even consult a root for it) -- so unlike `path`, there is no
+  // "wrong tree" a global fact's anchor could be evaluated against: a global fact's anchor is
+  // deliberately re-checked against wherever the caller currently is on every query, not pinned to
+  // wherever it happened to be captured (a preference like "uses pnpm not npm", anchored to
+  // `pnpm-lock.yaml`, is meant to verify against the *current* project's lockfile, not the one that
+  // was open the day it was stated). `captureRoot` is still recorded for a global fact (capture.ts),
+  // but `anchorRootFor` intentionally does not consult it here -- see the item-4 finding in the task
+  // this column was added for. Existing `buildHint`/`mem recall` coverage exercises this queryRoot
+  // fallback directly and would regress if it changed.
   return queryRoot;
+}
+
+/**
+ * Evaluates `fact`'s anchor against the root it was actually captured under, rather than a bare
+ * caller-supplied root. Wraps `anchorRootFor` + `evaluateAnchor` so the one place that knows how to
+ * turn "capture root unknown" into `unverified` (rather than handing `evaluateAnchor` a fabricated
+ * root, or a `null` it does not accept) is not re-derived at each of this function's three callers
+ * (`retrieve` below, `mem review`'s `formatReview`, and `mem show`, all in cli.ts/retrieval.ts).
+ */
+export function evaluateFactFreshness(
+  fact: Fact,
+  queryRoot: string,
+  deadlineMs?: number,
+  budgetHit?: { hit: boolean }
+): AnchorVerdict {
+  const root = anchorRootFor(fact, queryRoot);
+  if (root === null) {
+    return "unverified";
+  }
+  return evaluateAnchor(fact.anchor, root, deadlineMs, budgetHit);
 }
 
 /**
@@ -1219,7 +1298,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   let anchorBudgetHits = 0;
   const results: RetrievedFact[] = filtered.map((fact) => {
     const budgetHit = { hit: false };
-    const freshness = evaluateAnchor(fact.anchor, anchorRootFor(fact, options.root), anchorDeadline, budgetHit);
+    const freshness = evaluateFactFreshness(fact, options.root, anchorDeadline, budgetHit);
     if (budgetHit.hit) {
       anchorBudgetHits += 1;
     }

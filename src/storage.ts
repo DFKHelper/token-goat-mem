@@ -136,6 +136,13 @@ export function ensureStorageSchema(db: Db): void {
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN scope_repo TEXT");
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN status_changed_at TEXT");
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN prior_status TEXT");
+  // Capture-time root (retrieval.ts's `anchorRootFor`). Nullable with no backfill, same reasoning
+  // as `scope_repo` above: a row written before this column existed recorded no capture root at
+  // all, and there is no honest value to invent for it -- the directory a `path`/`global` fact's
+  // anchor was meant to be evaluated against is simply unrecoverable from the row itself. NULL is
+  // exactly "capture root unknown", and every reader must treat it as `unverified` rather than
+  // guessing `affirmed` or `contradicted` off whatever directory the query happened to run from.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN capture_root TEXT");
   // Usefulness feedback (`mem used`). Nullable with no backfill for the same reason as the two
   // columns above and one of its own: `recall_log` rows written before this column existed record
   // only that a fact was *surfaced*, and no value invented for them would be honest. A `0`-style
@@ -367,6 +374,7 @@ interface FactRow {
   scope: string;
   scope_root: string | null;
   scope_repo: string | null;
+  capture_root: string | null;
   source_type: string;
   source_ref: string | null;
   captured_at: string;
@@ -390,6 +398,7 @@ function rowToFact(row: FactRow): Fact {
     scope: row.scope as Fact["scope"],
     scopeRoot: row.scope_root,
     scopeRepo: row.scope_repo,
+    captureRoot: row.capture_root,
     source_type: row.source_type as Fact["source_type"],
     source_ref: row.source_ref,
     captured_at: row.captured_at,
@@ -432,8 +441,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
@@ -447,6 +456,7 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       fact.scope,
       fact.scopeRoot ?? null,
       fact.scopeRepo ?? null,
+      fact.captureRoot ?? null,
       fact.source_type,
       fact.source_ref ?? null,
       capturedAt,
@@ -680,6 +690,10 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
   if (patch.scopeRepo !== undefined) {
     sets.push("scope_repo = ?");
     params.push(patch.scopeRepo);
+  }
+  if (patch.captureRoot !== undefined) {
+    sets.push("capture_root = ?");
+    params.push(patch.captureRoot);
   }
   if (patch.anchor !== undefined) {
     sets.push("anchor = ?");

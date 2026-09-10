@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -731,7 +731,17 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
     expect(result?.freshness).toBe("contradicted");
   });
 
-  it("leaves path- and global-scoped facts on the caller's root, where scopeRoot is not a project directory", async () => {
+  it("cannot evaluate a path-scoped fact's anchor with no recorded capture root, even from the directory its target lives in", async () => {
+    // This used to assert `affirmed` -- the pre-fix `anchorRootFor` handed a `path`-scoped fact's
+    // anchor the bare `queryRoot` unconditionally, so the assertion passed here purely because this
+    // test's `root` happens to be both the query root and where `present.txt` lives. That is the
+    // same defect the ancestor-directory regression above exists to fix (retrieval.ts's
+    // `anchorRootFor`): without a real `captureRoot` on the fact -- this one predates the column, as
+    // every `Fact` built by `makeFact` above does -- there is no honest way to know `queryRoot` is
+    // the fact's own root rather than an unrelated one that happens to share a filename. `unverified`
+    // is now the correct verdict for a `path`-scoped fact whose `captureRoot` is unknown, whatever
+    // its query root. (`global` is deliberately unaffected: it carries no location binding, so its
+    // anchor is re-checked against wherever the caller currently is, by design.)
     writeFileSync(join(root, "present.txt"), "x");
     const facts = [
       makeFact({
@@ -747,7 +757,35 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
     ];
 
     const { results: [result] } = await retrieve(facts, { query: "postgres", root });
-    expect(result?.freshness).toBe("affirmed");
+    expect(result?.freshness).toBe("unverified");
+  });
+
+  it("still answers decisively for a path-scoped fact queried from an ancestor of its capture root", async () => {
+    // The monorepo case the capture-root column exists for: a package's fact captured in
+    // `<root>/pkg`, recalled by a hook running at the repository root. The anchor's target was
+    // validated to sit inside the capture root, and an ancestor has that whole tree, so refusing to
+    // answer here would caveat the fact forever on every prompt -- the anchor would buy the user
+    // nothing. Both polarities are covered because the pre-column bug produced one wrong verdict of
+    // each kind from exactly this directory.
+    const pkg = join(root, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "present.txt"), "x");
+    const anchored = (id: string, anchor: string): Fact =>
+      makeFact({
+        id,
+        text: `pkg fact ${id}`,
+        kind: "decision",
+        scope: "path",
+        scopeRoot: join(pkg, "some", "file.ts"),
+        captureRoot: pkg,
+        anchor,
+      });
+
+    const present = await retrieve([anchored("1", "file-exists present.txt")], { query: "pkg", root });
+    expect(present.results[0]?.freshness).toBe("affirmed");
+
+    const absent = await retrieve([anchored("2", "file-absent present.txt")], { query: "pkg", root });
+    expect(absent.results[0]?.freshness).toBe("contradicted");
   });
 });
 

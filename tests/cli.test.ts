@@ -2581,6 +2581,181 @@ describe("regression: review and show resolve anchor roots the way recall does",
   });
 });
 
+// --- regression: a path-scoped fact's anchor is evaluated against its persisted capture root ---
+
+describe("regression: a path-scoped fact's anchor evaluates against its recorded capture root", () => {
+  /** `<repo>/pkg`, matching the bug report's own reproduction (proj/pkg under proj). */
+  function makePkg(repo: string): string {
+    const pkg = join(repo, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    writeFileSync(join(pkg, "pkg.txt"), "x\n", "utf8");
+    return pkg;
+  }
+
+  it("answers against the capture root, not the caller's, when queried from an ancestor of it", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-capture-root-"));
+    try {
+      const pkg = makePkg(repo);
+      // True from `pkg` on both counts: `pkg.txt` exists there, `yarn.lock` does not yet.
+      const exists = await runCli([
+        "remember", "pkg.txt exists here", "--kind", "fact", "--scope", "path", "--path", "pkg.txt",
+        "--root", pkg, "--anchor", "file-exists pkg.txt",
+      ]);
+      const existsId = extractRememberedId(exists);
+      const absent = await runCli([
+        "remember", "pkg has no yarn.lock", "--kind", "fact", "--scope", "path", "--path", "pkg.txt",
+        "--root", pkg, "--anchor", "file-absent yarn.lock",
+      ]);
+      const absentId = extractRememberedId(absent);
+      writeFileSync(join(pkg, "yarn.lock"), "x\n", "utf8");
+
+      // Query from `repo` -- an ancestor of `pkg`, not `pkg` itself. This is the monorepo shape the
+      // capture-root column exists for: a hook runs recall at the repository root while the facts
+      // belong to a package inside it. Pre-fix, `anchorRootFor` handed both anchors the bare
+      // `--root repo` regardless of where the facts were captured, so `file-exists pkg.txt` resolved
+      // against `repo` (no `pkg.txt` directly under `repo`, wrongly `contradicted`) and
+      // `file-absent yarn.lock` resolved against `repo` (no `yarn.lock` directly under `repo`
+      // either, even though one now exists under `pkg`, wrongly a plain affirmed ground-truth fact)
+      // -- confidently wrong in both directions on the same query.
+      //
+      // The two expectations below are the exact inverse of those two wrong verdicts, which is what
+      // makes this a regression test rather than a restatement: the anchors now resolve against
+      // `pkg`, where `pkg.txt` does exist and `yarn.lock` now does too. If the caller's root ever
+      // comes back, both flip.
+      const shownExists = JSON.parse((await runCli(["show", existsId, "--root", repo, "--json"])).stdout) as {
+        freshness: string;
+      };
+      const shownAbsent = JSON.parse((await runCli(["show", absentId, "--root", repo, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(shownExists.freshness).toBe("affirmed");
+      expect(shownAbsent.freshness).toBe("contradicted");
+
+      // The same inversion, seen through the command that acts on it: pre-fix this listed the fact
+      // whose file was present under the heading inviting the user to forget it, and omitted the one
+      // whose predicate had genuinely been broken.
+      const review = await runCli(["review", "--root", repo, "--section", "contradicted"]);
+      expect(review.stdout).not.toContain("pkg.txt exists here");
+      expect(review.stdout).toContain("pkg has no yarn.lock");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("re-points the capture root when `mem edit` writes a new anchor, so the new anchor is judged where it was validated", async () => {
+    // `mem edit --anchor` validates the new anchor's path against its own `--root`. If the stored
+    // capture root stayed at the original, the anchor would be written against one tree and read
+    // against another -- the same split this column exists to close, arriving by a different door.
+    const first = mkdtempSync(join(tmpdir(), "mem-capture-root-a-"));
+    const second = mkdtempSync(join(tmpdir(), "mem-capture-root-b-"));
+    try {
+      const pkg = makePkg(first);
+      const captured = await runCli([
+        "remember", "the package ships a manifest", "--kind", "fact", "--scope", "path", "--path", "pkg.txt",
+        "--root", pkg, "--anchor", "file-exists pkg.txt",
+      ]);
+      const id = extractRememberedId(captured);
+
+      // `marker.txt` exists only under `second`, so an anchor naming it can only be affirmed when it
+      // is evaluated there -- which is exactly where `mem edit` validated it.
+      writeFileSync(join(second, "marker.txt"), "x", "utf8");
+      const edited = await runCli(["edit", id, "--anchor", "file-exists marker.txt", "--root", second, "--force"]);
+      expect(edited.exitCode ?? 0).toBe(0);
+
+      const shown = JSON.parse((await runCli(["show", id, "--root", second, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(shown.freshness).toBe("affirmed");
+    } finally {
+      rmSync(first, { recursive: true, force: true });
+      rmSync(second, { recursive: true, force: true });
+    }
+  });
+
+  it("still yields the correct decisive verdict when queried from the capture root itself", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-capture-root-"));
+    try {
+      const pkg = makePkg(repo);
+      const exists = await runCli([
+        "remember", "pkg.txt exists here", "--kind", "fact", "--scope", "path", "--path", "pkg.txt",
+        "--root", pkg, "--anchor", "file-exists pkg.txt",
+      ]);
+      const existsId = extractRememberedId(exists);
+      const absent = await runCli([
+        "remember", "pkg has no yarn.lock", "--kind", "fact", "--scope", "path", "--path", "pkg.txt",
+        "--root", pkg, "--anchor", "file-absent yarn.lock",
+      ]);
+      const absentId = extractRememberedId(absent);
+      writeFileSync(join(pkg, "yarn.lock"), "x\n", "utf8");
+
+      const shownExists = JSON.parse((await runCli(["show", existsId, "--root", pkg, "--json"])).stdout) as {
+        freshness: string;
+      };
+      const shownAbsent = JSON.parse((await runCli(["show", absentId, "--root", pkg, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(shownExists.freshness).toBe("affirmed");
+      expect(shownAbsent.freshness).toBe("contradicted");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("mem show does not report a decisive freshness verdict for a path-scoped fact from an unrelated directory", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-capture-root-show-"));
+    const unrelated = mkdtempSync(join(tmpdir(), "mem-capture-root-unrelated-"));
+    try {
+      const pkg = makePkg(repo);
+      const remembered = await runCli([
+        "remember", "pkg.txt exists here", "--kind", "fact", "--scope", "path", "--path", "pkg.txt",
+        "--root", pkg, "--anchor", "file-exists pkg.txt",
+      ]);
+      const id = extractRememberedId(remembered);
+
+      const shown = JSON.parse((await runCli(["show", id, "--root", unrelated, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(shown.freshness).toBe("unverified");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+      rmSync(unrelated, { recursive: true, force: true });
+    }
+  });
+
+  it("yields unverified, never a decisive verdict, for a fact with a null capture_root regardless of query root", async () => {
+    // Simulates a pre-migration row: written directly through `insertFact` the way an older mem
+    // version would have, with no `captureRoot` at all -- exactly the shape `capture_root TEXT`
+    // (nullable, no backfill) leaves on disk for every fact captured before this column existed.
+    const dir = mkdtempSync(join(tmpdir(), "mem-null-capture-root-"));
+    const target = join(dir, "target.txt");
+    writeFileSync(target, "x\n", "utf8");
+    try {
+      const db = openStorage(resolveDbPath());
+      const inserted = insertFact(db, {
+        text: "a pre-migration path-scoped fact",
+        kind: "fact",
+        scope: "path",
+        scopeRoot: target,
+        source_type: "user",
+        anchor: "file-exists target.txt",
+      });
+      db.close();
+      expect(inserted.captureRoot ?? null).toBeNull();
+
+      // Queried from the very directory the anchor's target actually lives in -- the one root a
+      // decisive verdict could conceivably be justified from -- and it is still `unverified`, per
+      // the "null capture_root -> never decisive" rule: mem has no recorded root to trust here, even
+      // though this particular query happens to line up with where the file is.
+      const shown = JSON.parse((await runCli(["show", inserted.id, "--root", dir, "--json"])).stdout) as {
+        freshness: string;
+      };
+      expect(shown.freshness).toBe("unverified");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 // --- regression: --since-epoch is a display window, not a detection window ---
 
 describe("regression: --since-epoch cannot defeat the contested gate", () => {

@@ -754,6 +754,13 @@ function applyOptionalFields(
   if (input.sourceRef !== undefined && input.sourceRef.trim().length > 0) {
     target.source_ref = input.sourceRef.trim();
   }
+  // Recorded for every scope, not just `path`/`project`: `retrieval.ts`'s `anchorRootFor` needs a
+  // capture-time root to evaluate a `scope="path"` fact's anchor against (its `scopeRoot` is the
+  // bound file, not a directory an anchor predicate can run under) and a `scope="global"` fact has
+  // no `scopeRoot` at all, yet its anchor -- if it has one -- still needs a root to mean anything.
+  // `scope="project"` already has `scopeRoot` for this, but recording it here too costs nothing and
+  // keeps the column meaning "the root this fact was captured under" uniformly across every scope.
+  target.captureRoot = resolve(root);
   if (scope !== "global") {
     const trimmedPath = input.path?.trim();
     if (scope === "path" && trimmedPath !== undefined && trimmedPath.length > 0) {
