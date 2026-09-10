@@ -167,6 +167,13 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   if (obj["status"] !== undefined && !FACT_STATUSES.includes(obj["status"] as FactStatus)) {
     return fail(`facts[${index}] has invalid "status" ${JSON.stringify(obj["status"])}`);
   }
+  if (
+    obj["prior_status"] !== undefined &&
+    obj["prior_status"] !== null &&
+    !FACT_STATUSES.includes(obj["prior_status"] as FactStatus)
+  ) {
+    return fail(`facts[${index}] has invalid "prior_status" ${JSON.stringify(obj["prior_status"])}`);
+  }
   if (obj["confidence"] !== undefined && typeof obj["confidence"] !== "number") {
     return fail(`facts[${index}] has a non-numeric "confidence"`);
   }
@@ -193,6 +200,24 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     const roundTrip = new Date(capturedAtStr).toISOString();
     if (roundTrip !== capturedAtStr) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}: expected canonical form ${JSON.stringify(roundTrip)}`);
+    }
+  }
+  if (obj["last_surfaced_at"] !== undefined && obj["last_surfaced_at"] !== null && typeof obj["last_surfaced_at"] !== "string") {
+    return fail(`facts[${index}] has a non-string "last_surfaced_at"`);
+  }
+  if (typeof obj["last_surfaced_at"] === "string") {
+    const lastSurfacedAtStr = obj["last_surfaced_at"];
+    if (lastSurfacedAtStr.length === 0 || isNaN(Date.parse(lastSurfacedAtStr))) {
+      return fail(`facts[${index}] has an invalid ISO-8601 "last_surfaced_at" ${JSON.stringify(lastSurfacedAtStr)}`);
+    }
+    // Same canonical-form check as `captured_at` above, for the same reason: `last_surfaced_at` is
+    // compared lexicographically (storage.ts's `markFactsSurfaced` MAXes it against itself), so a
+    // non-canonical but Date.parse-able string would silently corrupt that comparison.
+    const roundTrip = new Date(lastSurfacedAtStr).toISOString();
+    if (roundTrip !== lastSurfacedAtStr) {
+      return fail(
+        `facts[${index}] has an invalid ISO-8601 "last_surfaced_at" ${JSON.stringify(lastSurfacedAtStr)}: expected canonical form ${JSON.stringify(roundTrip)}`
+      );
     }
   }
 
@@ -267,6 +292,16 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   }
   if (typeof obj["confidence"] === "number") {
     newFact.confidence = obj["confidence"];
+  }
+  if (typeof obj["last_surfaced_at"] === "string") {
+    newFact.last_surfaced_at = obj["last_surfaced_at"];
+  } else if (obj["last_surfaced_at"] === null) {
+    newFact.last_surfaced_at = null;
+  }
+  if (typeof obj["prior_status"] === "string") {
+    newFact.prior_status = obj["prior_status"] as FactStatus;
+  } else if (obj["prior_status"] === null) {
+    newFact.prior_status = null;
   }
 
   // Apply the same structural guards every other write path enforces (capture.ts's

@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
-import { deleteFact, insertFact, openStorage } from "../src/storage.js";
+import { deleteFact, insertFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 
@@ -1441,6 +1441,8 @@ interface ExportedFact {
   readonly status: string;
   readonly confidence: number;
   readonly captured_at: string;
+  readonly last_surfaced_at: string | null;
+  readonly prior_status: string | null;
 }
 
 interface ExportEnvelope {
@@ -1756,6 +1758,91 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
       process.env["TOKEN_GOAT_MEM_HOME"] = home;
       rmSync(targetHome, { recursive: true, force: true });
       rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("round-trips last_surfaced_at and prior_status -- a restored fact keeps looking surfaced and undo-able", async () => {
+    const remembered = await runCli(["remember", "the deploy target is fly.io", "--kind", "fact"]);
+    const id = extractRememberedId(remembered);
+
+    const surfacedAt = "2026-01-15T00:00:00.000Z";
+    const db = openStorage(resolveDbPath());
+    // A genuine status transition so `prior_status` moves off its default NULL, then a stamp so
+    // `last_surfaced_at` is non-null too -- both are the signals listStaleUnsurfacedFacts reads.
+    setFactStatus(db, id, "pinned");
+    setFactStatus(db, id, "active");
+    markFactsSurfaced(db, [id], surfacedAt);
+    db.close();
+
+    const exported = await runCli(["export"]);
+    expect(exported.exitCode).toBe(0);
+    const envelope = JSON.parse(exported.stdout) as ExportEnvelope;
+    const originalFact = envelope.facts.find((fact) => fact.id === id);
+    expect(originalFact?.last_surfaced_at).toBe(surfacedAt);
+    expect(originalFact?.prior_status).toBe("pinned");
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-json", jsonPath]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+      const shown = await runCli(["show", id, "--json"]);
+      expect(shown.exitCode).toBe(0);
+      const shownEnvelope = JSON.parse(shown.stdout) as { fact: ExportedFact };
+      expect(shownEnvelope.fact.last_surfaced_at).toBe(surfacedAt);
+      expect(shownEnvelope.fact.prior_status).toBe("pinned");
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("imports a legacy export envelope that predates last_surfaced_at/prior_status", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-export-legacy-"));
+    const jsonPath = join(dir, "export.json");
+    const envelope = {
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      facts: [
+        {
+          id: "22222222-2222-2222-2222-222222222222",
+          text: "legacy envelope fact",
+          kind: "fact",
+          subject: null,
+          value: null,
+          scope: "global",
+          scopeRoot: null,
+          source_type: "user",
+          source_ref: null,
+          captured_at: "2026-01-01T00:00:00.000Z",
+          anchor: null,
+          status: "active",
+          confidence: 1,
+          embedding: null,
+          // last_surfaced_at/prior_status deliberately absent.
+        },
+      ],
+    };
+    writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
+    try {
+      const imported = await runCli(["import", "--from-json", jsonPath]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+      const shown = await runCli(["show", "22222222-2222-2222-2222-222222222222", "--json"]);
+      expect(shown.exitCode).toBe(0);
+      const shownEnvelope = JSON.parse(shown.stdout) as { fact: ExportedFact };
+      expect(shownEnvelope.fact.last_surfaced_at).toBeNull();
+      expect(shownEnvelope.fact.prior_status).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -3491,6 +3578,46 @@ describe("project identity (scope binding across checkouts)", () => {
     expect(result.stdout).not.toContain("unreachable from any session");
     expect(result.stdout).toContain("still reachable by repository identity from any checkout");
   });
+
+  it("mem edit --scope project writes scopeRepo, so a second checkout of the same repository sees the rebound fact", async () => {
+    const a = makeRepo("a");
+    const b = makeRepo("b");
+    const remembered = await runCli(["remember", "shared config lives in a monorepo package", "--kind", "fact"]);
+    const id = extractRememberedId(remembered);
+
+    const edited = await runCli(["edit", id, "--scope", "project", "--root", a, "--force"]);
+    expect(edited.exitCode).toBe(0);
+
+    const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: { id: string; scopeRepo: string | null }[] };
+    expect(listed.facts.find((fact) => fact.id === id)?.scopeRepo).not.toBeNull();
+
+    // The identity match, not the path match, is what has to carry this: `b` never appeared in the
+    // fact's own scopeRoot.
+    expect((await runCli(["recall", "--root", b, "--scope", "project"])).stdout).toContain("monorepo package");
+  });
+
+  it("mem edit --scope project rebinding to a second repository moves visibility -- new repo sees it, old repo stops", async () => {
+    const widget = makeRepo("widget-rebind");
+    const gadget = makeRepo("gadget-rebind", "https://github.com/acme/gadget.git");
+    const remembered = await runCli([
+      "remember",
+      "the build target is fly.io",
+      "--kind",
+      "fact",
+      "--scope",
+      "project",
+      "--root",
+      widget,
+    ]);
+    const id = extractRememberedId(remembered);
+    expect((await runCli(["recall", "--root", widget, "--scope", "project"])).stdout).toContain("fly.io");
+
+    const edited = await runCli(["edit", id, "--scope", "project", "--root", gadget, "--force"]);
+    expect(edited.exitCode).toBe(0);
+
+    expect((await runCli(["recall", "--root", gadget, "--scope", "project"])).stdout).toContain("fly.io");
+    expect((await runCli(["recall", "--root", widget, "--scope", "project"])).stdout).not.toContain("fly.io");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── import --captured-at ───────────────────────────────────────────────────────────────────────────
@@ -3683,6 +3810,42 @@ describe("mem remember reaffirms rather than duplicating", () => {
     } finally {
       rmSync(a, { recursive: true, force: true });
       rmSync(b, { recursive: true, force: true });
+    }
+  });
+
+  it("reaffirms a project fact restated from a second checkout of the same repository, instead of duplicating it", async () => {
+    // AGENTS.md documents reaffirm as keying on "scope binding", not the literal scope_root path --
+    // that stricter wording is reserved there for contradiction bucketing. A project fact survives a
+    // second clone/worktree for recall (scope_root OR scope_repo); restating it from that same second
+    // checkout has to hit the same fact, not insert a duplicate `mem recall` then lists twice.
+    function git(cwd: string, ...args: string[]): void {
+      execFileSync("git", args, { cwd, stdio: "pipe" });
+    }
+    function makeCheckout(name: string): string {
+      const repo = join(work, name);
+      mkdirSync(repo, { recursive: true });
+      git(repo, "init", "-q");
+      git(repo, "config", "user.email", "t@example.com");
+      git(repo, "config", "user.name", "t");
+      writeFileSync(join(repo, "file.txt"), "x", "utf8");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-qm", "init");
+      git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
+      return repo;
+    }
+    const work = mkdtempSync(join(tmpdir(), "mem-reaffirm-identity-"));
+    try {
+      const a = makeCheckout("a");
+      const b = makeCheckout("b");
+      const first = await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", a]);
+      expect(first.stdout).toContain("remembered");
+
+      const second = await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", b]);
+      expect(second.exitCode).toBe(0);
+      expect(second.stdout).toContain("reaffirmed");
+      expect(await facts()).toHaveLength(1);
+    } finally {
+      rmSync(work, { recursive: true, force: true });
     }
   });
 

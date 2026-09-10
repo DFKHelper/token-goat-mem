@@ -6,6 +6,35 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A restored store deleted the facts you used most.** `mem export` calls itself a "full-fidelity
+  JSON envelope" but omitted `last_surfaced_at`, while faithfully preserving `captured_at` — and
+  those are precisely the two signals `mem consolidate --stale` reads to decide a fact is dead. So
+  every fact came back from a backup looking old and never-recalled, and the first `--stale --apply`
+  on the destination machine superseded the ones that had been surfacing daily on the source. The
+  envelope now carries `last_surfaced_at` and `prior_status`, so a restored store reaches the same
+  verdict as the store it came from; verified by running the stale pass on both sides of an export.
+  Envelopes written before this release still import — both fields are optional, and a malformed
+  value is rejected rather than coerced. Without `prior_status`, `mem review --undo` on a restored
+  rejected fact also silently restored it to `pending` instead of the status it actually held.
+- **`mem edit --scope project` bound the fact to the wrong repository.** The edit path wrote
+  `scope_root` and never `scope_repo`, which only the capture path had ever set. Moving a fact from
+  one repository to another left the first repository's identity attached, and because a fact is in
+  scope when *either* its path or its identity matches, the fact went on surfacing in the repository
+  you moved it away from while staying invisible in the one you moved it to. Rebinding a global fact
+  to a project had the mirror-image failure: no identity was recorded, so worktrees and second clones
+  could not see it, unlike an identical fact captured directly.
+- **Restating a fact from a worktree duplicated it instead of reaffirming it.** Reaffirm matched on
+  the capture-time path *and* the repository identity, while recall binds on either — so the same
+  sentence restated from a second clone failed to match itself and inserted a second row, and every
+  subsequent recall listed it twice, spending the hook path's line budget twice on one fact. Reaffirm
+  now uses the same binding recall does. Contradiction bucketing is untouched: it keys on
+  `scope_root` alone by an explicit, separately documented decision.
+- **`mem edit --text` left the old text's embedding attached, and `mem embed` could not repair it.**
+  Editing a fact's text re-extracted its search terms in the same transaction but kept the vector
+  built from the text that no longer existed, so with embeddings configured, recall fused a dense
+  rank computed from deleted words. The backfill selects on a null embedding and therefore reported
+  nothing to do; only `mem embed --all`, documented as the model-migration path, would have fixed it.
+  Changing the text now clears the vector, so the ordinary backfill picks it up.
 - **`mem consolidate --stale --apply` deleted facts on the strength of a false claim.** Only the
   hook path ever recorded that a fact had been surfaced, so a fact recalled twenty times by plain
   `mem recall` still had `last_surfaced_at` unset and no `recall_log` row — and `--stale` reads

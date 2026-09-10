@@ -265,6 +265,23 @@ describe("mem embed", () => {
     expect(second.stdout).toBe("no facts need embedding\n");
   });
 
+  it("mem edit --text nulls the stale embedding, so a plain mem embed picks it back up", async () => {
+    await seed(1);
+    await configureEmbeddings();
+    await runCli(["embed"]);
+    const id = storedFacts()[0]?.id as string;
+    expect(storedFacts().find((fact) => fact.id === id)?.embedding).not.toBeNull();
+
+    const edited = await runCli(["edit", id, "--text", "uses jest for tests", "--force"]);
+    expect(edited.exitCode).toBe(0);
+    expect(storedFacts().find((fact) => fact.id === id)?.embedding).toBeNull();
+
+    const result = await runCli(["embed"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("embedded 1, skipped 0, failed 0 (model stub-model, dim 4)\n");
+    expect(storedFacts().find((fact) => fact.id === id)?.embedding).not.toBeNull();
+  });
+
   it("--limit bounds the work and leaves the rest for a later run", async () => {
     await seed(4);
     await configureEmbeddings();

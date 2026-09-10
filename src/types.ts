@@ -111,6 +111,15 @@ export interface Fact {
    * is re-written to the value it already held (e.g. re-pinning to refresh the reconfirm clock).
    */
   readonly prior_status?: FactStatus | null;
+  /**
+   * ISO 8601 timestamp of the most recent recall that surfaced this fact, or null/absent if it has
+   * never been surfaced (or predates this column). Backing field for `listStaleUnsurfacedFacts`'s
+   * stale-supersede eligibility check -- an export that dropped this made a restored, previously
+   * in-use fact look never-surfaced, so `mem consolidate --stale --apply` would supersede it on the
+   * next run. Optional for the same reason as `status_changed_at`: existing `Fact` literals that
+   * predate the column keep typechecking.
+   */
+  readonly last_surfaced_at?: string | null;
 }
 
 /**
@@ -162,6 +171,10 @@ export interface NewFact {
   /** Defaults to `1.0` when omitted. */
   confidence?: number;
   embedding?: Float32Array | null;
+  /** See `Fact.last_surfaced_at`. Defaults to `null` (never surfaced) when omitted; preserved verbatim by full-fidelity JSON import. */
+  last_surfaced_at?: string | null;
+  /** See `Fact.prior_status`. Defaults to `null` when omitted; preserved verbatim by full-fidelity JSON import -- never set by the capture path itself, which always inserts a fact with no prior state. */
+  prior_status?: FactStatus | null;
 }
 
 /**
