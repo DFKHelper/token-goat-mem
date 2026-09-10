@@ -2458,6 +2458,40 @@ describe("regression: review and show resolve anchor roots the way recall does",
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("does not list a valid path-scoped fact as anchor-contradicted when review runs from an unrelated root", async () => {
+    // Unlike the project-scope case above, `anchorRootFor` has no special case for `path` scope at
+    // all -- it always hands the bare caller root to `evaluateAnchor` for anything that is not
+    // `project` scope. So `mem review --root <anywhere>` evaluated a path-scoped fact's anchor
+    // against wherever the reviewer happened to be standing, found the anchored file predictably
+    // missing there, and filed a perfectly valid fact under "anchor-contradicted (suppressed from
+    // ground truth)" -- the one heading that invites the user to forget it.
+    const rootA = mkdtempSync(join(tmpdir(), "mem-path-review-a-"));
+    const rootB = mkdtempSync(join(tmpdir(), "mem-path-review-b-"));
+    const target = join(rootA, "target.txt");
+    writeFileSync(target, "x\n");
+    try {
+      const db = openStorage(resolveDbPath());
+      insertFact(db, {
+        text: "a path-scoped fact bound to target.txt",
+        kind: "fact",
+        scope: "path",
+        scopeRoot: target,
+        source_type: "user",
+        anchor: "file-exists target.txt",
+      });
+      db.close();
+
+      // rootB is unrelated and empty: not an ancestor of rootA, so the fact is not bound to it at
+      // all -- the review should say nothing about it, positive or negative.
+      const review = await runCli(["review", "--root", rootB]);
+      expect(review.exitCode).toBe(0);
+      expect(review.stdout).not.toContain("a path-scoped fact bound to target.txt");
+    } finally {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    }
+  });
 });
 
 // --- regression: --since-epoch is a display window, not a detection window ---
@@ -3508,6 +3542,69 @@ describe("mem remember reaffirms rather than duplicating", () => {
     // on -- refreshing it is the whole substance of a reaffirmation.
     expect(String(after[0]?.["captured_at"]) > String(before?.["captured_at"])).toBe(true);
     expect(after[0]?.["confidence"]).toBe(1);
+  });
+
+  it("applies an --anchor carried by a restatement instead of discarding it", async () => {
+    // Regression: `reaffirmFact`'s UPDATE never touched `anchor`, so restating a fact with a new
+    // `--anchor` printed "reaffirmed" while `mem show` kept reporting `anchor: (none)
+    // freshness=unverified` forever -- the fact could never reach `contradicted` when the anchored
+    // file went away, which is the entire point of attaching an anchor.
+    const root = mkdtempSync(join(tmpdir(), "mem-reaffirm-anchor-"));
+    try {
+      const first = await runCli(["remember", "uses pnpm", "--kind", "fact", "--scope", "project", "--root", root]);
+      expect(first.stdout).toContain("remembered");
+      const id = extractRememberedId(first);
+      expect((await runCli(["show", id])).stdout).toContain("anchor: (none)  freshness=unverified");
+
+      writeFileSync(join(root, "pnpm-lock.yaml"), "", "utf8");
+      const second = await runCli([
+        "remember",
+        "uses pnpm",
+        "--kind",
+        "fact",
+        "--scope",
+        "project",
+        "--root",
+        root,
+        "--anchor",
+        "file-exists pnpm-lock.yaml",
+      ]);
+      expect(second.stdout).toContain("reaffirmed");
+      expect(second.stdout).toContain("anchor: file-exists pnpm-lock.yaml");
+
+      const shown = await runCli(["show", id]);
+      expect(shown.stdout).toContain("anchor: file-exists pnpm-lock.yaml  freshness=affirmed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not clear an existing anchor when a restatement omits one", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-reaffirm-anchor-keep-"));
+    try {
+      writeFileSync(join(root, "pnpm-lock.yaml"), "", "utf8");
+      const first = await runCli([
+        "remember",
+        "uses pnpm",
+        "--kind",
+        "fact",
+        "--scope",
+        "project",
+        "--root",
+        root,
+        "--anchor",
+        "file-exists pnpm-lock.yaml",
+      ]);
+      const id = extractRememberedId(first);
+
+      const second = await runCli(["remember", "uses pnpm", "--kind", "fact", "--scope", "project", "--root", root]);
+      expect(second.stdout).toContain("reaffirmed");
+
+      const shown = await runCli(["show", id]);
+      expect(shown.stdout).toContain("anchor: file-exists pnpm-lock.yaml  freshness=affirmed");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("does not collapse the same sentence carrying a different value", async () => {

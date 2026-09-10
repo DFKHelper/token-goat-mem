@@ -369,11 +369,25 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("file-absent link.txt", root)).toBe("unverified");
     });
 
-    it("file-contains contradicts (does not read through) a symlink to a file outside root", () => {
+    it("file-contains is unverified (does not read through) a symlink to a file outside root", () => {
+      // Regression: this used to assert `contradicted`, but `file-contains`/`file-not-contains` is
+      // an asserts-presence/asserts-absence pair exactly like `file-exists`/`file-absent` (this
+      // file's own precedent below) -- mem refuses to read through the symlink, so it can confirm
+      // neither the substring's presence nor its absence. `contradicted` here would assert the
+      // substring is absent with no basis for that claim.
       const target = join(outside, "secret.txt");
       writeFileSync(target, "super-secret-value");
       symlinkSync(target, join(root, "link.txt"), "file");
-      expect(evaluateAnchor("file-contains link.txt super-secret-value", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-contains link.txt super-secret-value", root)).toBe("unverified");
+    });
+
+    it("file-not-contains is unverified (does not read through) a symlink to a file outside root", () => {
+      // The negated form of the above: `contradicted` here would assert the substring IS present --
+      // a claim mem has no basis for either, since it never read the file.
+      const target = join(outside, "secret.txt");
+      writeFileSync(target, "super-secret-value");
+      symlinkSync(target, join(root, "link.txt"), "file");
+      expect(evaluateAnchor("file-not-contains link.txt super-secret-value", root)).toBe("unverified");
     });
 
     it("package-version contradicts (does not read through) a symlink to a package.json outside root", () => {
@@ -388,7 +402,7 @@ describe("evaluateAnchor", () => {
       mkdirSync(targetDir, { recursive: true });
       writeFileSync(join(targetDir, "config.json"), '{"packageManager": "pnpm"}');
       symlinkSync(targetDir, join(root, "linked-dir"), "junction");
-      expect(evaluateAnchor("file-contains linked-dir/config.json pnpm", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-contains linked-dir/config.json pnpm", root)).toBe("unverified");
       expect(evaluateAnchor("file-exists linked-dir/config.json", root)).toBe("unverified");
     });
 

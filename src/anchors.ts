@@ -25,10 +25,13 @@
  * `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check
  * before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived`
  * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified. A detected
- * symlink escape is *not* uniformly `contradicted`: `file-exists`/`file-absent` return `unverified`
- * (a symlink means mem cannot safely resolve the path, so it can assert neither presence nor absence —
- * `contradicted` would be a lie for whichever of the pair asserts absence, per P3), while
- * `file-newer-than`/`newest-of` still return `contradicted` for a symlinked comparison target.
+ * symlink escape is *not* uniformly `contradicted`: `file-exists`/`file-absent` and
+ * `file-contains`/`file-not-contains` return `unverified` (a symlink means mem cannot safely resolve
+ * or read the path, so it can assert neither presence/absence nor the substring's presence/absence —
+ * `contradicted` would be a lie for whichever of each pair asserts absence, per P3), while
+ * `file-newer-than`/`newest-of`/`package-version` still return `contradicted` for a symlinked
+ * comparison target — none of those three has a negated counterpart that would turn `contradicted`
+ * into exactly the lie the first group avoids.
  *
  * Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`,
  * `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`,
@@ -269,7 +272,14 @@ function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): An
  */
 function evaluateFileContains(root: string, path: string, substring: string, negate: boolean): AnchorVerdict {
   if (containsSymlink(root, path)) {
-    return "contradicted";
+    // `file-contains`/`file-not-contains` is the same asserts-presence/asserts-absence pair as
+    // `file-exists`/`file-absent` (header comment above): a symlink means mem refuses to read the
+    // target at all, so it can confirm neither the substring's presence nor its absence.
+    // `contradicted` for `file-not-contains` would assert the substring IS present -- a claim mem
+    // has no basis for, since it never read the file. Unverified for both forms, uniformly, matches
+    // the `file-exists`/`file-absent` precedent rather than the `file-newer-than`/`newest-of` one,
+    // which has no negated counterpart making the same claim.
+    return "unverified";
   }
   let stat;
   try {

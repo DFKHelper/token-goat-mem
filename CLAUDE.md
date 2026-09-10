@@ -43,7 +43,7 @@ Test setup via `tests/setup/` points to an isolated temp `TOKEN_GOAT_MEM_HOME` s
 
 ### Token-goat integration
 
-One-directional, pull-based, stateless function call. `token-goat` optionally calls `mem recall --hint-format --root <project>` with a ~150 ms timeout. Returns self-caveating `display` strings that token-goat surfaces verbatim. Fail-open if binary missing, timeout, or parse error. No shared state, no caching of results (live call = fresh freshness verdicts + instant forget/edit reflection).
+One-directional, pull-based, stateless. `token-goat` reads `mem epoch` (cache invalidation) and does not consume the `TGMEM/2` recall seam today; that seam is published for host tools, and the consumer that exists is mem itself -- `mem init claude-code` installs hooks running `mem recall --hint-format` on `SessionStart` and `UserPromptSubmit`. Returns self-caveating `display` strings the host surfaces verbatim. Fail-open if binary missing, timeout, or parse error. No shared state, no caching of results (live call = fresh freshness verdicts + instant forget/edit reflection).
 
 ### Reference
 

@@ -47,11 +47,6 @@ function isKeyedDetectionFact(fact: Fact): fact is KeyedFact {
   return fact.subject !== null && fact.value !== null && DETECTION_ELIGIBLE_STATUSES.includes(fact.status);
 }
 
-/** Whether a fact would be surfaceable as ground truth if nothing else withheld it. Kept as the separate, narrower predicate {@link DETECTION_ELIGIBLE_STATUSES} widens against. */
-export function isGroundTruthStatus(status: FactStatus): boolean {
-  return GROUND_TRUTH_STATUSES.includes(status);
-}
-
 /**
  * The status a fact leaving `contested` returns to. A pin is a deliberate user act that exempts a
  * fact from time-decay, and contesting it overwrote that status -- so reinstating unconditionally to

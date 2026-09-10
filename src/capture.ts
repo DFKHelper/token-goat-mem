@@ -838,14 +838,30 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
   const tx = db.transaction((): CaptureResult => {
     const existing = findReaffirmableFact(db, newFact);
     if (existing !== undefined) {
-      const refreshed = reaffirmFact(db, existing.id);
+      // The user's latest statement wins: an anchor or source-ref carried on this restatement
+      // replaces whatever the existing row had, rather than being silently discarded (see
+      // reaffirmFact's doc comment). Omitted here means "say nothing new" -- the existing value,
+      // anchor included, is left untouched.
+      const anchorChanged = newFact.anchor !== undefined && newFact.anchor !== existing.anchor;
+      const sourceRefChanged = newFact.source_ref !== undefined && newFact.source_ref !== existing.source_ref;
+      const refreshed = reaffirmFact(db, existing.id, new Date(), {
+        ...(newFact.anchor !== undefined && newFact.anchor !== null ? { anchor: newFact.anchor } : {}),
+        ...(newFact.source_ref !== undefined && newFact.source_ref !== null ? { sourceRef: newFact.source_ref } : {}),
+      });
       if (refreshed === undefined) {
         throw new CaptureValidationError(`fact ${existing.id} vanished while being reaffirmed`);
+      }
+      const refreshedFields = ["captured_at and confidence refreshed"];
+      if (anchorChanged) {
+        refreshedFields.push("anchor updated");
+      }
+      if (sourceRefChanged) {
+        refreshedFields.push("source ref updated");
       }
       insertAuditLog(db, {
         event: "capture_reaffirmed",
         factId: refreshed.id,
-        detail: `restated ${refreshed.kind} fact (scope=${refreshed.scope}); captured_at and confidence refreshed`,
+        detail: `restated ${refreshed.kind} fact (scope=${refreshed.scope}); ${refreshedFields.join("; ")}`,
       });
       return { fact: refreshed, reaffirmed: true };
     }
