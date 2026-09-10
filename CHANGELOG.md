@@ -6,6 +6,37 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Six shipped claims said mem made no network calls while `mem recall` was sending every query
+  to a third party.** README, AGENTS.md, `mem doctor`, and the `mem dream` error text all described
+  `mem dream` as the only path that leaves the machine — one README paragraph contradicted itself in
+  consecutive sentences. With `TOKEN_GOAT_MEM_EMBED_URL` set, semantic recall embeds the query, and
+  because `mem init claude-code` installs a `UserPromptSubmit` hook that feeds each prompt in as that
+  query, every prompt typed at the coding tool was being POSTed to the configured endpoint. The
+  behaviour is legitimate and opt-in; describing it as impossible was not. Every one of those claims
+  now states what actually leaves the machine, and `mem doctor`'s `embeddings:` line discloses it the
+  way its `dreaming:` line already did.
+- **A query containing a secret was sent to the embeddings endpoint verbatim.** Capture has always
+  refused to store text that trips secret screening, but the recall path applied no such check to the
+  query — so a pasted key reached the endpoint even though the same string could not have been stored.
+  A query that trips screening now skips dense ranking entirely; BM25 still ranks it and results still
+  come back, so the only thing lost is the outbound call.
+- **A fact could report freshness read off a checkout the user was not in.** A project-scoped fact is
+  in scope for any worktree or second clone of the same repository, but its anchor was still evaluated
+  against the directory it was captured in. Asking from a worktree that had deleted the anchored file
+  returned `affirmed` from the original tree. The anchor is now evaluated against the querying root
+  whenever repository identity is what put the fact in scope.
+- **`mem import` refused the cross-machine restore the docs promise.** Rejecting any fact whose
+  recorded `scopeRoot` fell outside `--root` closed a real hole — an imported row could otherwise
+  name an arbitrary directory and have anchors evaluated there — but it also rejected every fact in a
+  legitimate export moved to another machine, where the recorded path does not exist and no `--root`
+  could satisfy it. A project fact whose `scopeRepo` identifies the repository `--root` is a checkout
+  of is now accepted with its `scopeRoot` rebound to that root. Everything else stays rejected.
+- **`mem embed` sent the text of facts the user had deleted.** The query behind it filtered on
+  missing embeddings but never on status, and `--all` filtered on nothing at all, so a fact retired
+  by `mem forget` or `mem review --reject` had its text re-sent to the embeddings endpoint on every
+  run. Superseded facts are now excluded from both.
+- **`mem recall --root` was documented as affecting freshness only.** It also decides which project's
+  facts are returned at all; the help text now says both.
 - **`mem uninstall claude-code` could delete configuration a user wrote themselves.** Install
   creates `hooks` and `hooks.<event>` when a `settings.json` has neither, so uninstall pruned the
   containers its own removals had emptied. But an event array that is empty *after* mem's stamped
@@ -13,8 +44,8 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   hand-authored `"hooks": {"SessionStart": []}` was silently deleted along with the now-empty
   `hooks` object around it. Uninstall now reads the one-time `.token-goat-mem.bak` snapshot taken
   before mem's first write to answer the question emptiness cannot: did this key exist beforehand.
-  A missing or unparseable snapshot is treated as "everything pre-existed", so pruning fails
-  closed rather than deleting content mem cannot prove it owns.
+  A missing snapshot indicates mem created the file; an unparseable one is treated as "everything
+  pre-existed", so pruning fails closed rather than deleting content mem cannot prove it owns.
 - **`mem init` and `mem uninstall` rejected any `settings.json` containing a comment or a trailing
   comma.** Claude Code's own settings file commonly carries both, and this file already depends on
   `jsonc-parser` to preserve exactly that formatting on the VS Code path -- the Claude Code path was

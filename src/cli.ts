@@ -631,7 +631,11 @@ function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: numbe
   if (config === null) {
     return [`embeddings: off (set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV} to enable)`, stored, coverage];
   }
-  const lines = [`embeddings: ${endpointLabelFor(config.url)}, model ${config.model}, api key ${config.apiKey === undefined ? "absent" : "configured"}`, stored];
+  const lines = [
+    `embeddings: ${endpointLabelFor(config.url)}, model ${config.model}, api key ${config.apiKey === undefined ? "absent" : "configured"} ` +
+      "-- `mem remember`/`mem suggest`/`mem embed` send fact text to this endpoint, and `mem recall` sends the query text (every prompt, if wired via a hook)",
+    stored,
+  ];
   if (recorded !== null && recorded.model !== config.model) {
     lines.push(`embedding ranking: disabled -- stored vectors are ${recorded.model}'s; run \`mem embed --all\` to re-embed`);
   }
@@ -1630,9 +1634,9 @@ async function runDream(db: Database.Database, options: DreamCliOptions): Promis
   if (config === null) {
     throw new UsageError(
       `dreaming is not configured; set ${DREAM_URL_ENV} to an OpenAI-compatible chat-completions endpoint and ` +
-        `${DREAM_MODEL_ENV} to a model name (${DREAM_API_KEY_ENV} is optional). This is the only command that sends ` +
-        `fact text off this machine -- point it at a local endpoint if the store holds anything you would not paste ` +
-        `into a hosted API.`
+        `${DREAM_MODEL_ENV} to a model name (${DREAM_API_KEY_ENV} is optional). Once set, this command sends stored ` +
+        `fact text off this machine to that endpoint -- point it at a local endpoint if the store holds anything ` +
+        `you would not paste into a hosted API.`
     );
   }
   // Live facts only. A superseded fact is a fact the store has already decided is wrong, and
@@ -1925,7 +1929,7 @@ export function buildProgram(): Command {
     .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
     .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/contradicted facts are never subject to this cap)", (v) => parseInt(v, 10))
-    .option("--root <path>", "Project root for anchor evaluation")
+    .option("--root <path>", "Project root (scopes which project's facts are returned; global facts always included) and root for anchor evaluation")
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
     .option(
       "--hint-style <full|terse>",
@@ -2080,6 +2084,7 @@ export function buildProgram(): Command {
           // project's decisions. `global` facts are unaffected; see RetrievalOptions.restrictToRoot
           // for why this is a filter inside `retrieve` rather than a narrower `listFacts` query.
           restrictToRoot: true,
+          secretAllowlist: loadAllowlist(root),
           ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
           ...(options.subject !== undefined ? { subject: options.subject } : {}),
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),

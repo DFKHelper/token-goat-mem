@@ -164,4 +164,37 @@ describe("documentation consistency guards", () => {
       ).toMatch(/store.*write|store.*only|write.*only/i);
     });
   });
+
+  describe("network-egress claims (mem recall's UserPromptSubmit hook also reaches an embeddings endpoint when configured)", () => {
+    const NETWORK_CLAIM_FILES = [
+      "README.md",
+      "AGENTS.md",
+      "src/cli.ts",
+      "src/dream.ts",
+    ];
+
+    it("no doc or source claims a single command is 'the only command/path that sends' fact text off the machine", () => {
+      const pattern = /only (command|path)[^.]*sends/i;
+      for (const filePath of NETWORK_CLAIM_FILES) {
+        const content = readDocFile(filePath);
+        expect(
+          content,
+          `${filePath} must not claim a single command/path is "the only" one that sends fact text off this machine -- ` +
+            "mem recall sends the query text (including every prompt, via the UserPromptSubmit hook) whenever " +
+            "TOKEN_GOAT_MEM_EMBED_URL/_MODEL are set, so no single command holds that title"
+        ).not.toMatch(pattern);
+      }
+    });
+
+    it("README and AGENTS.md do not claim mem is 'zero network' unconditionally", () => {
+      for (const filePath of ["README.md", "AGENTS.md"]) {
+        const content = readDocFile(filePath);
+        expect(
+          content,
+          `${filePath} must not claim "zero network" -- network calls happen whenever ` +
+            "TOKEN_GOAT_MEM_EMBED_URL/_MODEL or TOKEN_GOAT_MEM_DREAM_URL/_MODEL are configured"
+        ).not.toMatch(/zero network/i);
+      }
+    });
+  });
 });

@@ -2671,9 +2671,12 @@ describe("regression: recall does not surface another project's facts", () => {
       const jsonPath = join(exportDir, "export.json");
       writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
 
-      // `--root projA` here, not the default cwd: `importFromJson` now bounds a non-global fact's
-      // `scopeRoot` to the caller's `--root` (see the exportImport.ts scopeRoot-containment fix),
-      // so a full-fidelity restore must be run with `--root` set to (an ancestor of) the fact's own
+      // `--root projA` here, not the default cwd: `importFromJson` rejects a non-global fact whose
+      // recorded `scopeRoot` falls outside `--root`, unless the fact's `scopeRepo` identifies the
+      // same repository `--root` is a checkout of, in which case it is accepted and rebound to
+      // `--root` (the cross-machine-restore case, since the original `scopeRoot` path does not
+      // exist there). This fact has no `scopeRepo`, so the path binding is the only one available,
+      // and a full-fidelity restore must be run with `--root` set to (an ancestor of) its own
       // recorded `scopeRoot` -- exactly how a real restore-into-the-same-project would be invoked.
       const imported = await runCli(["import", "--from-json", jsonPath, "--root", projA]);
       expect(imported.exitCode).toBe(0);
@@ -3306,6 +3309,33 @@ describe("project identity (scope binding across checkouts)", () => {
 
     expect((await runCli(["recall", "--root", a, "--scope", "project"])).stdout).toContain("esbuild");
     expect((await runCli(["recall", "--root", b, "--scope", "project"])).stdout).toContain("esbuild");
+  });
+
+  it("regression: an identity-bound fact's anchor is re-evaluated against the querying checkout, not its capture-time root", async () => {
+    // A `project` fact surfaces across checkouts that share an identity (the test just above), but
+    // `anchorRootFor` used to hand the anchor predicate the fact's *capture-time* `scopeRoot`
+    // unconditionally -- so a fact captured in checkout `a` and recalled from checkout `b` had its
+    // anchor evaluated against `a`, not `b`. A marker file present only in `b` therefore read as
+    // absent, and `mem recall --root b` reported `contradicted` for ground truth read off a tree the
+    // user was not in.
+    const a = makeRepo("a");
+    const b = makeRepo("b");
+    writeFileSync(join(b, "marker"), "x", "utf8");
+    const remembered = await runCli([
+      "remember",
+      "the widget build has a marker file",
+      "--kind",
+      "fact",
+      "--scope",
+      "project",
+      "--root",
+      a,
+      "--anchor",
+      "file-exists marker",
+    ]);
+    const id = extractRememberedId(remembered);
+    const shownFromB = JSON.parse((await runCli(["show", id, "--root", b, "--json"])).stdout) as { freshness: string };
+    expect(shownFromB.freshness).toBe("affirmed");
   });
 
   it("does not leak between two packages of one monorepo", async () => {

@@ -2,9 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import type Database from "better-sqlite3";
 
 import { getFactById, insertFact, openStorage } from "../src/storage.js";
+import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
 
@@ -423,6 +425,68 @@ describe("importFromJson", () => {
     const result = importFromJson(db, { path: jsonPath, root });
     expect(result.outcomes).toHaveLength(1);
     expect(result.outcomes[0]?.status).toBe("imported");
+  });
+
+  it("regression: an imported project-scoped fact whose scopeRoot escapes --root is accepted and rebound when scopeRepo identifies the same repository --root is a checkout of (cross-machine restore)", () => {
+    // AGENTS.md/CHANGELOG.md promise a fact survives an export/import onto another machine, but the
+    // scopeRoot-containment check above rejects any non-global fact whose recorded scopeRoot falls
+    // outside --root -- and on another machine the original scopeRoot path does not exist, so there
+    // is no --root the user could pass to satisfy it. The fix: accept and rebind to --root when
+    // scopeRepo identifies the same repository --root is a checkout of.
+    const cloneA = mkdtempSync(join(tmpdir(), "mem-exportimport-clonea-"));
+    const cloneB = mkdtempSync(join(tmpdir(), "mem-exportimport-cloneb-"));
+    const unrelated = mkdtempSync(join(tmpdir(), "mem-exportimport-unrelated-"));
+    try {
+      for (const clone of [cloneA, cloneB, unrelated]) {
+        execFileSync("git", ["init", "-q"], { cwd: clone, stdio: "pipe" });
+        execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: clone, stdio: "pipe" });
+        execFileSync("git", ["config", "user.name", "t"], { cwd: clone, stdio: "pipe" });
+        writeFileSync(join(clone, "file.txt"), "x", "utf8");
+        execFileSync("git", ["add", "-A"], { cwd: clone, stdio: "pipe" });
+        execFileSync("git", ["commit", "-qm", "init"], { cwd: clone, stdio: "pipe" });
+      }
+      const sharedRemote = "https://github.com/acme/widget.git";
+      execFileSync("git", ["remote", "add", "origin", sharedRemote], { cwd: cloneA, stdio: "pipe" });
+      execFileSync("git", ["remote", "add", "origin", sharedRemote], { cwd: cloneB, stdio: "pipe" });
+      execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/gadget.git"], { cwd: unrelated, stdio: "pipe" });
+      clearProjectIdentityCache();
+      const identityOfA = resolveProjectIdentity(cloneA);
+      expect(identityOfA).not.toBeNull();
+
+      const restoredFact = {
+        ...VALID_FACT,
+        id: "12121212-1212-1212-1212-121212121212",
+        scope: "project",
+        scopeRoot: cloneA,
+        scopeRepo: identityOfA,
+      };
+      writeFileSync(jsonPath, envelope([restoredFact]), "utf8");
+
+      const acceptedIntoB = importFromJson(db, { path: jsonPath, root: cloneB });
+      expect(acceptedIntoB.outcomes).toHaveLength(1);
+      const outcome = acceptedIntoB.outcomes[0];
+      expect(outcome?.status).toBe("imported");
+      if (outcome?.status !== "imported") {
+        throw new Error("expected imported outcome");
+      }
+      expect(outcome.fact.scopeRoot).toBe(cloneB);
+
+      // Importing the same envelope into an unrelated directory (no shared identity, no path
+      // containment) must still fail with the existing "outside the import root" message.
+      const secondFact = { ...restoredFact, id: "13131313-1313-1313-1313-131313131313" };
+      writeFileSync(jsonPath, envelope([secondFact]), "utf8");
+      const rejectedIntoUnrelated = importFromJson(db, { path: jsonPath, root: unrelated });
+      expect(rejectedIntoUnrelated.outcomes).toHaveLength(1);
+      expect(rejectedIntoUnrelated.outcomes[0]?.status).toBe("skipped_error");
+      if (rejectedIntoUnrelated.outcomes[0]?.status === "skipped_error") {
+        expect(rejectedIntoUnrelated.outcomes[0].reason).toContain("outside the import root");
+      }
+    } finally {
+      clearProjectIdentityCache();
+      rmSync(cloneA, { recursive: true, force: true });
+      rmSync(cloneB, { recursive: true, force: true });
+      rmSync(unrelated, { recursive: true, force: true });
+    }
   });
 
   it("normalizes a global fact's non-empty scopeRoot to null instead of failing", () => {

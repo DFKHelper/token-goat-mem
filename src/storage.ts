@@ -1117,7 +1117,7 @@ export function clearAllEmbeddings(db: Db): number {
  * deterministically, so re-running it makes progress instead of re-offering the same newest slice.
  */
 export function listFactsNeedingEmbedding(db: Db, options: { readonly all?: boolean; readonly limit?: number } = {}): Array<{ id: string; text: string }> {
-  const where = options.all === true ? "" : "WHERE embedding IS NULL";
+  const where = options.all === true ? "WHERE status != 'superseded'" : "WHERE embedding IS NULL AND status != 'superseded'";
   const sql = `SELECT id, text FROM facts ${where} ORDER BY captured_at ASC, id ASC${options.limit !== undefined ? " LIMIT ?" : ""}`;
   const params = options.limit !== undefined ? [options.limit] : [];
   return db.prepare<unknown[], { id: string; text: string }>(sql).all(...params);

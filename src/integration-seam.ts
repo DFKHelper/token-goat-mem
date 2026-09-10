@@ -43,6 +43,7 @@
 
 import { resolve as resolvePath, sep } from "node:path";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
+import { loadAllowlist } from "./capture.js";
 import {
   getEmbeddingMeta,
   getEntityOverlapForQuery,
@@ -482,6 +483,10 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     root,
     hintFormat: true,
     limit: HINT_FORMAT_RECALL_LIMIT,
+    // The `UserPromptSubmit` hook path (`mem recall --hint-format --hook-stdin`) sends every user
+    // prompt through here as `query` -- the same screen-before-send invariant `retrieve()` applies
+    // to that query has to see this project's own `.mem/allowlist`, not an empty one.
+    secretAllowlist: loadAllowlist(root),
     now,
     anchorTimeBudgetMs,
     // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc

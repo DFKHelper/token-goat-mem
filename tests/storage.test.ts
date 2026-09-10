@@ -23,6 +23,7 @@ import {
   getEpoch,
   getUsefulnessCounts,
   insertRecallLog,
+  listFactsNeedingEmbedding,
   markRecallUsed,
   resolveFactIdOrPrefix,
 } from "../src/storage.js";
@@ -260,6 +261,24 @@ describe("listFacts / countFacts", () => {
     expect(listFacts(db, { epochAfter: epochAfterFirst }).map((f) => f.id)).toEqual([second.id]);
     expect(countFacts(db, { epochAfter: epochAfterFirst })).toBe(1);
     expect(listFacts(db, { epochAfter: second.epoch ?? 0 })).toEqual([]);
+  });
+});
+
+describe("listFactsNeedingEmbedding", () => {
+  it("filters out superseded facts from both default and --all queries", () => {
+    const active = insertFact(db, baseFact({ text: "active fact" }));
+    const superseded = insertFact(db, baseFact({ text: "superseded fact" }));
+
+    // Mark the second one as superseded
+    setFactStatus(db, superseded.id, "superseded");
+
+    // Default query (embedding IS NULL): should only return active
+    const defaultResults = listFactsNeedingEmbedding(db);
+    expect(defaultResults.map((f) => f.id)).toEqual([active.id]);
+
+    // --all query: should also only return active, not superseded
+    const allResults = listFactsNeedingEmbedding(db, { all: true });
+    expect(allResults.map((f) => f.id)).toEqual([active.id]);
   });
 });
 
