@@ -3296,6 +3296,46 @@ describe("scan-session", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--transcript");
   });
+
+  it("rejects --scope path because scan-session cannot bind facts to a file", async () => {
+    const transcript = writeTranscript(["Always run the linter before pushing."]);
+    const result = await runCli(["scan-session", "--transcript", transcript, "--root", ".", "--scope", "path"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("cannot bind facts to a file");
+    expect(result.stderr).toContain("mem remember --scope path --path");
+  });
+
+  it("exits non-zero rather than reporting success when a candidate fails to store for a non-screening reason", async () => {
+    // `scan-session` must swallow exactly two rejections -- validation and secret screening, both
+    // of which mean "this candidate is not worth storing" while the scan itself is fine. Anything
+    // else (a SqliteError, a full disk, a read-only store) means the store is broken, and reporting
+    // "no new durable statements found" over the top of it tells the user their session held
+    // nothing worth keeping when in truth nothing could be kept at all.
+    //
+    // The failure is injected with a trigger rather than a filesystem permission change, because a
+    // chmod-based test silently no-ops on Windows and would assert nothing on the primary dev
+    // platform. A trigger fails the INSERT itself, inside the loop, on every platform.
+    const transcript = writeTranscript(["Always run the linter before pushing."]);
+    const first = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    expect(first.exitCode ?? 0).toBe(0);
+    expect(first.stdout).toContain("filed 1 pending suggestion");
+
+    const db = openDb(resolveDbPath());
+    db.exec("CREATE TRIGGER refuse_fact_insert BEFORE INSERT ON facts BEGIN SELECT RAISE(ABORT, 'store is broken'); END;");
+    db.close();
+
+    const second = await runCli([
+      "scan-session",
+      "--transcript",
+      writeTranscript(["Never commit secrets to the repository."]),
+      "--root",
+      ".",
+    ]);
+
+    expect(second.exitCode).not.toBe(0);
+    expect(second.stdout).not.toContain("no new durable statements found");
+    expect(second.stderr).toContain("store is broken");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── project identity ───────────────────────────────────────────────────────────────────────────
@@ -3434,6 +3474,22 @@ describe("project identity (scope binding across checkouts)", () => {
     const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: { scopeRepo: string | null }[] };
     expect(listed.facts[0]?.scopeRepo).toBe("github.com/acme/widget#.");
     expect((await runCli(["recall", "--root", gadget, "--scope", "project"])).stdout).not.toContain("esbuild");
+  });
+
+  it("mem doctor does not call an identity-bound fact unreachable once its capture-time root is gone", async () => {
+    // `mem doctor` used to group solely by `scope_root` and report every fact whose root no longer
+    // exists as unreachable, suggesting `mem forget` -- but recall binds a project fact by
+    // `scope_root` OR repository identity, so a fact carrying `scope_repo` is still recallable from
+    // any other checkout of the same repository after this one is removed or re-cloned elsewhere.
+    const repo = makeRepo("doomed-but-identified");
+    await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", repo]);
+    rmSync(repo, { recursive: true, force: true });
+
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("active=1");
+    expect(result.stdout).not.toContain("unreachable from any session");
+    expect(result.stdout).toContain("still reachable by repository identity from any checkout");
   });
 });
 

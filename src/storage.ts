@@ -801,15 +801,32 @@ export function insertRecallLog(db: Db, sessionId: string, factIds: readonly str
     return;
   }
   const insert = db.prepare("INSERT INTO recall_log (fact_id, session_id, surfaced_at) VALUES (?, ?, ?)");
-  // The `facts.last_surfaced_at` mirror is written in the same transaction as the log row it
-  // summarizes, so the two can never disagree about whether a fact was ever surfaced. Monotonic
-  // (`MAX`) rather than last-write-wins: a backdated replay must not walk the mark backwards.
+  const tx = db.transaction(() => {
+    for (const factId of factIds) {
+      insert.run(factId, sessionId, atIso);
+    }
+    // Same transaction as the log rows it summarizes, so the two can never disagree about whether
+    // a fact was ever surfaced.
+    markFactsSurfaced(db, factIds, atIso);
+  });
+  tx.immediate();
+}
+
+/**
+ * Stamps `facts.last_surfaced_at` for `factIds` at `atIso`, independent of `recall_log` -- a fact
+ * can be surfaced (and so ineligible for stale-supersede) without a `recall_log` row existing for
+ * it, e.g. a caller with no session id to log against. Monotonic (`MAX`) rather than
+ * last-write-wins: a backdated replay must not walk the mark backwards.
+ */
+export function markFactsSurfaced(db: Db, factIds: readonly string[], atIso: string): void {
+  if (factIds.length === 0) {
+    return;
+  }
   const mark = db.prepare(
     "UPDATE facts SET last_surfaced_at = MAX(COALESCE(last_surfaced_at, ''), ?) WHERE id = ?"
   );
   const tx = db.transaction(() => {
     for (const factId of factIds) {
-      insert.run(factId, sessionId, atIso);
       mark.run(atIso, factId);
     }
   });

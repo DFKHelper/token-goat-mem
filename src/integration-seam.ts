@@ -50,6 +50,7 @@ import {
   getUsefulnessCounts,
   insertRecallLog,
   listSurfacedFactIds,
+  markFactsSurfaced,
   openStorage,
   unpackEmbedding,
 } from "./storage.js";
@@ -345,11 +346,13 @@ export interface HintFormatOptions {
   /** Threaded straight through to `retrieve()`'s `RetrievalOptions.hintStyle` -- see retrieval.ts's doc comment. Defaults to `"full"`. */
   readonly hintStyle?: "full" | "terse" | undefined;
   /**
-   * Identifier of the consumer session this response is for (a hook's `session_id`). When set, the
-   * ids of the facts actually emitted are recorded in `recall_log` best-effort -- a failure to log
-   * never fails the recall -- so a later `delta` call for the same session can leave them out.
-   * Nothing is logged under `stable`, which exists to make output deterministic for tests, or when
-   * the budget blew (an empty response surfaced nothing).
+   * Identifier of the consumer session this response is for (a hook's `session_id`). When set and
+   * not `stable`, the ids of the facts actually emitted are recorded in `recall_log` best-effort --
+   * a failure to log never fails the recall -- so a later `delta` call for the same session can
+   * leave them out. `facts.last_surfaced_at` is stamped for the emitted ids regardless of whether
+   * `sessionId` is set or `stable` is true (only `recall_log` cares about either): a fact does not
+   * need a session id or a `recall_log` row to count as having been surfaced. Nothing is stamped
+   * when the budget blew (an empty response surfaced nothing).
    */
   readonly sessionId?: string | undefined;
   /**
@@ -583,8 +586,15 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     lines.push(footer);
   }
 
+  const emittedIds = emittable.map((result) => result.fact.id);
   if (sessionId !== undefined && !stable) {
-    recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittable.map((result) => result.fact.id), now);
+    // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction.
+    recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittedIds, now);
+  } else {
+    // No session id to log against, or `--stable` (which only affects output ordering, not
+    // whether a fact was actually surfaced): still stamp the durable mark so stale-supersede
+    // never treats an emitted fact as never-surfaced.
+    markSurfaced(options.dbPath ?? resolveDbPath(), emittedIds, now);
   }
 
   return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta };
@@ -608,6 +618,27 @@ function recordSurfaced(dbPath: string, sessionId: string, factIds: readonly str
     }
   } catch (error) {
     logWarning(`could not record surfaced facts for session ${JSON.stringify(sessionId)}: ${errorMessage(error)}`);
+  }
+}
+
+/**
+ * Best-effort stamp of `facts.last_surfaced_at` for the emitted fact ids, with no `recall_log`
+ * row -- used when there is no session id to log against, or under `--stable`. Same fail-open
+ * contract as `recordSurfaced`: a bookkeeping failure must not turn a successful recall into one.
+ */
+function markSurfaced(dbPath: string, factIds: readonly string[], now: Date): void {
+  if (factIds.length === 0) {
+    return;
+  }
+  try {
+    const db = openStorage(dbPath);
+    try {
+      markFactsSurfaced(db, factIds, now.toISOString());
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    logWarning(`could not mark facts surfaced: ${errorMessage(error)}`);
   }
 }
 

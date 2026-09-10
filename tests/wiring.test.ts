@@ -1431,6 +1431,22 @@ describe("regression: integration docs match the markdown mem init actually writ
     },
   );
 
+  it("the shared AGENTS.md block's recall command and its mem-used bullet (if any) agree about a session id", () => {
+    // Regression: this block once told the agent to run `mem recall --hint-format --root .` (no
+    // session id) and then, further down, to run `mem used <id>... --session-id <session>` "passing
+    // the same session id you recalled under" -- but codex/copilot-cli/copilot-vscode have no hook
+    // mechanism (unlike Claude Code's --hook-stdin) supplying one, so no such id ever existed and
+    // `mem used` always failed. The block must not promise `mem used` unless its own recall command
+    // actually supplies a session id for it to reuse.
+    codex.install({ root, homeDir: home });
+    const written = writtenBlock(join(root, "AGENTS.md"), "<!-- token-goat-mem:start", "<!-- token-goat-mem:end -->");
+    const recallLine = written.split("\n").find((line) => line.includes("mem recall --hint-format")) ?? "";
+    expect(recallLine).not.toBe("");
+    if (written.includes("mem used")) {
+      expect(recallLine).toMatch(/--session-id|--hook-stdin/u);
+    }
+  });
+
   it("copilot-vscode.md's walkthrough names the keybindings the installer actually writes", () => {
     copilotVscode.install({ root, homeDir: home });
     const installed = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<{ key: string }>;
