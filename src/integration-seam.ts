@@ -651,6 +651,7 @@ interface RawFactRow {
   readonly scope: Fact["scope"];
   readonly scopeRoot: string | null;
   readonly scopeRepo: string | null;
+  readonly captureRoot: string | null;
   readonly source_type: Fact["source_type"];
   readonly source_ref: string | null;
   readonly captured_at: string;
@@ -688,7 +689,7 @@ function queryAllFacts(db: ReturnType<typeof openStorage>, withEmbeddings = fals
       // this SELECT, or it silently reads as absent on this path only, with the CLI's own SELECT
       // (storage.ts) unaffected.
       `SELECT id, text, kind, subject, value, scope, scope_root as scopeRoot, scope_repo as scopeRepo,
-              source_type, source_ref, captured_at, anchor, status, confidence,
+              capture_root as captureRoot, source_type, source_ref, captured_at, anchor, status, confidence,
               prior_status${withEmbeddings ? ", embedding" : ""}
        FROM facts`
     )
@@ -706,6 +707,7 @@ function toFact(row: RawFactRow): Fact {
     scope: row.scope,
     scopeRoot: row.scopeRoot,
     scopeRepo: row.scopeRepo,
+    captureRoot: row.captureRoot,
     source_type: row.source_type,
     source_ref: row.source_ref,
     captured_at: row.captured_at,
