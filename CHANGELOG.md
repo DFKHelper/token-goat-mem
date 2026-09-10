@@ -6,6 +6,40 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem consolidate --stale --apply` deleted facts on the strength of a false claim.** Only the
+  hook path ever recorded that a fact had been surfaced, so a fact recalled twenty times by plain
+  `mem recall` still had `last_surfaced_at` unset and no `recall_log` row — and `--stale` reads
+  exactly those two signals to decide a fact is dead. It reported "never surfaced by recall, never
+  marked used" about a fact recall had just returned, and `--apply` superseded it; the next recall
+  said "no matching facts". Both recall shapes now stamp `last_surfaced_at`, including
+  `--hint-format --stable`, which previously suppressed the stamp along with the session log.
+  Reproduced end to end against the shipping bundle before the fix and after. The stamp is
+  best-effort: a write failure warns and never fails the recall.
+- **`mem scan-session` reported "no new durable statements found" over a broken store.** Its
+  per-candidate `catch` swallowed every error, not just the two that mean "this candidate is not
+  worth storing" (validation and secret screening). A `SqliteError`, a full disk, or a read-only
+  store produced a clean exit 0 and a message saying the session held nothing worth keeping — when
+  in truth nothing could be kept at all. The two screening rejections are still swallowed by design;
+  everything else now surfaces and exits non-zero.
+- **`mem scan-session --scope path` silently stored facts bound to a directory.** `path` scope binds
+  a fact to a single file, and a transcript scan has no file to bind to, so the flag was accepted and
+  quietly produced a binding the user did not ask for. It is now rejected with the command that does
+  work, and the help text offers only the two scopes that mean something here.
+- **`mem doctor` told users to delete facts that still worked.** Its scope-placement check called a
+  fact unreachable whenever its capture-time directory was gone, even when the fact was still
+  reachable from every checkout by repository identity — the case `mem recall` handles correctly.
+  Relocated and genuinely-unreachable facts are now reported separately, and only the latter suggests
+  `mem forget`. Confirmed by recalling such a fact from a clone after deleting the original root.
+- **The installed Codex and Copilot instructions prescribed a command that could not run.** The
+  shared `AGENTS.md` block told the agent to run `mem used <id>... --session-id <session>` "passing
+  the same session id you recalled under", but its own recall command supplies no session id and
+  those tools have no hook mechanism that would — so the call always failed. The bullet is gone from
+  the installer and the three integration docs, and a test now fails if the block ever promises
+  `mem used` without a session id to reuse.
+- Corrected two comments that described the code doing something it does not: `MAX_SCANNED_TURNS`
+  caps how many transcript turns are screened, not how much of the file is read (the whole file is
+  read and parsed first), and the `recall_log` retention window has two live readers rather than the
+  zero its comment claimed.
 - **The hook path returned no memory at all from a git worktree or second clone.** `mem recall`
   surfaced a project fact from any checkout of the same repository, but `mem recall --hint-format`
   returned an empty header — and that is the path `mem init claude-code` installs for `SessionStart`

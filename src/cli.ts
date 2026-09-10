@@ -135,6 +135,7 @@ import {
   listFactsNeedingTerms,
   listSourcesForFact,
   listTermsForFact,
+  markFactsSurfaced,
   markRecallUsed,
   openStorage,
   replaceFactTerms,
@@ -570,24 +571,37 @@ function describeHintBudget(recallable: number, pinned: number): string {
 /**
  * `mem doctor`'s scope-placement line: project- and path-scoped facts whose `scope_root` is gone.
  *
- * These are the one fact class that fails silently and permanently. Scope is matched by root, so a
- * fact bound to a directory that has since been renamed, moved, or deleted is not stale, contested,
- * or decayed -- every status column calls it healthy -- it is simply unreachable from anywhere,
- * because no session will ever run with that root again. Nothing else in `doctor` would show it: the
- * status counts include it as active, and term coverage and embedding coverage both count it as
- * covered. Re-scoping is a human decision (the fact may belong to the moved directory's new path or
- * may have been about the old one), so this names `mem list --scope` to find them and leaves the
- * call to the user rather than guessing a root.
+ * A fact bound to a directory that has since been renamed, moved, or deleted is not stale,
+ * contested, or decayed -- every status column calls it healthy. Nothing else in `doctor` would
+ * show it: the status counts include it as active, and term coverage and embedding coverage both
+ * count it as covered. `relocated*` counts the subset that still carries a `scope_repo`: recall
+ * binds a project fact by `scope_root` OR repository identity (`retrieval.ts`'s `identityMatches`),
+ * so these are still reachable from any checkout of that repository -- the directory moved or was
+ * re-cloned, not lost. `unreachable*` is the rest: a root-less fact with no `scope_repo`, which is
+ * genuinely unreachable from anywhere, because no session will ever run with that root again.
+ * Re-scoping is a human decision (the fact may belong to the moved directory's new path or may have
+ * been about the old one), so this names `mem list --scope` to find them and leaves the call to the
+ * user rather than guessing a root.
  */
-function describeScopePlacement(orphanedRoots: number, orphanedFacts: number): string {
-  if (orphanedFacts === 0) {
-    return "scope placement: every project/path-scoped fact's root still exists";
+function describeScopePlacement(unreachableRoots: number, unreachableFacts: number, relocatedRoots: number, relocatedFacts: number): string[] {
+  if (unreachableFacts === 0 && relocatedFacts === 0) {
+    return ["scope placement: every project/path-scoped fact's root still exists"];
   }
-  return (
-    `scope placement: ${orphanedFacts} fact${orphanedFacts === 1 ? "" : "s"} bound to ${orphanedRoots} missing ` +
-    `root${orphanedRoots === 1 ? "" : "s"} -- unreachable from any session ` +
-    "(`mem list --scope project` / `--scope path` to review, then re-capture or `mem forget`)"
-  );
+  const lines: string[] = [];
+  if (relocatedFacts > 0) {
+    lines.push(
+      `scope placement: ${relocatedFacts} fact${relocatedFacts === 1 ? "" : "s"} bound to ${relocatedRoots} moved ` +
+        `root${relocatedRoots === 1 ? "" : "s"} -- still reachable by repository identity from any checkout`
+    );
+  }
+  if (unreachableFacts > 0) {
+    lines.push(
+      `scope placement: ${unreachableFacts} fact${unreachableFacts === 1 ? "" : "s"} bound to ${unreachableRoots} missing ` +
+        `root${unreachableRoots === 1 ? "" : "s"} -- unreachable from any session ` +
+        "(`mem list --scope project` / `--scope path` to review, then re-capture or `mem forget`)"
+    );
+  }
+  return lines;
 }
 
 /**
@@ -1293,9 +1307,13 @@ const GC_SOURCES_MAX_AGE_DAYS = 90;
 const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
 /**
  * The recall log (`recall_log`: which facts were surfaced to which hook session) is session
- * bookkeeping, not history: its only reader is a `--delta` recall for the *same* session id, and a
- * coding-tool session does not live for weeks. Same age-only shape as the audit-log window above,
- * with a shorter horizon because nothing consults these rows once their session is over.
+ * bookkeeping, not history, but it has two live readers, not zero: a `--delta` recall filters
+ * against rows for the *same* session id (`listSurfacedFactIds`), and `getUsefulnessCounts` groups
+ * every row store-wide, on both recall paths, to feed the usefulness rank list `mem used` confirms
+ * into. A coding-tool session does not live for weeks, so the `--delta` reader stops caring about a
+ * row long before this window closes; the usefulness reader keeps caring for as long as the row
+ * exists, which is exactly what this window bounds. Same age-only shape as the audit-log window
+ * above, with a shorter horizon.
  */
 const GC_RECALL_LOG_MAX_AGE_DAYS = 30;
 
@@ -2131,6 +2149,17 @@ export function buildProgram(): Command {
         // --stable is a strictly-additive output-ordering override: same facts, same caps, just a
         // deterministic id order instead of the default relevance/recency order.
         const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
+        // Best-effort durability stamp: plain `mem recall` has no session id to log a `recall_log`
+        // row against, so stamp `facts.last_surfaced_at` directly for the facts actually shown --
+        // otherwise a fact recalled only this way stays eligible for stale-supersede forever,
+        // however often it is actually surfaced. A stamping failure must never fail the recall.
+        try {
+          await withDb((db) => {
+            markFactsSurfaced(db, ordered.map((result) => result.fact.id), new Date().toISOString());
+          });
+        } catch (error) {
+          err(`mem: could not mark facts surfaced -- ${extractErrorMessage(error)}`);
+        }
         // A query is a *ranking* input, not a filter: BM25 orders the candidate set and never
         // removes from it, so `results.length === 0` above cannot fire for a query that simply
         // matched nothing -- only for one whose filters excluded everything. Without the line
@@ -2286,7 +2315,7 @@ export function buildProgram(): Command {
     .option("--hook-stdin", "Read a Stop or PreCompact hook's JSON envelope from stdin and take transcript_path from it")
     .option("--transcript <path>", "Scan this transcript file instead of one named by a hook envelope")
     .option("--root <path>", "Project root the captured facts bind to (default: current directory)")
-    .option("--scope <scope>", "global, project, or path", "project")
+    .option("--scope <scope>", "global or project", "project")
     .option("--quiet", "Emit nothing on success -- the hook default, so a scan never writes into the session")
     .action(
       guard(async (options: ScanSessionCliOptions) => {
@@ -2296,6 +2325,9 @@ export function buildProgram(): Command {
           throw new UsageError("scan-session needs a transcript: pass --transcript <path> or --hook-stdin");
         }
         const scope = parseFactScope(options.scope ?? "project");
+        if (scope === "path") {
+          throw new UsageError("scan-session cannot bind facts to a file: use `mem remember --scope path --path <file>` instead");
+        }
         const root = resolveRoot(options.root);
         const candidates = scanTranscript(transcriptPath);
         const stored = await withDb((db) => {
@@ -2313,11 +2345,16 @@ export function buildProgram(): Command {
                 sourceRef: `${transcriptPath}#turn${candidate.turnIndex}`,
               });
               kept.push(fact.id);
-            } catch {
+            } catch (error) {
               // One rejected candidate must not abandon the rest. `captureSuggested` throws for
               // secret screening and for validation, and a transcript is exactly where a pasted
               // credential shows up -- that rejection is the screening working, not a scan failure.
-              continue;
+              // Any other error (SqliteError, disk full, readonly store) is a real failure and
+              // must not be silently swallowed.
+              if (error instanceof CaptureValidationError || error instanceof SecretDetectedError) {
+                continue;
+              }
+              throw error;
             }
           }
           return kept;
@@ -2631,7 +2668,7 @@ export function buildProgram(): Command {
   program
     .command("epoch")
     .description("Print the current write epoch (monotonic, bumped on every store write; covers store state only for efficient polling)")
-    .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log, report preference decay")
+    .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log/recall bookkeeping, report preference decay")
     .action(
       guard(async (options: EpochCliOptions) => {
         if (options.gc !== true) {
@@ -2848,11 +2885,16 @@ export function buildProgram(): Command {
           // Grouped by root so one renamed directory holding forty facts reports as one missing
           // root, not forty -- and so each root is stat'd once however many facts hang off it.
           const scopedRoots = db
-            .prepare<[], { scope_root: string; c: number }>(
-              "SELECT scope_root, COUNT(*) AS c FROM facts WHERE scope IN ('project','path') AND scope_root IS NOT NULL GROUP BY scope_root"
+            .prepare<[], { scope_root: string; scope_repo: string | null; c: number }>(
+              "SELECT scope_root, scope_repo, COUNT(*) AS c FROM facts WHERE scope IN ('project','path') AND scope_root IS NOT NULL GROUP BY scope_root, scope_repo"
             )
             .all();
           const orphaned = scopedRoots.filter((row) => !existsSync(row.scope_root));
+          // `scope_repo IS NULL` split: recall binds a project fact by `scope_root` OR repository
+          // identity (see `describeScopePlacement`'s doc comment), so an orphaned root with a
+          // `scope_repo` is still reachable and must not be reported as unreachable.
+          const relocated = orphaned.filter((row) => row.scope_repo !== null);
+          const unreachable = orphaned.filter((row) => row.scope_repo === null);
           return [
             `db: ${dbPath}`,
             `journal_mode: ${journalMode}`,
@@ -2866,7 +2908,12 @@ export function buildProgram(): Command {
             describeDream(),
             describeFacets(countFactsWithTerms(db), totalFacts),
             describeHintBudget(recallableFacts, pinnedFacts),
-            describeScopePlacement(orphaned.length, orphaned.reduce((sum, row) => sum + row.c, 0)),
+            ...describeScopePlacement(
+              unreachable.length,
+              unreachable.reduce((sum, row) => sum + row.c, 0),
+              relocated.length,
+              relocated.reduce((sum, row) => sum + row.c, 0)
+            ),
           ].join("\n");
         });
         process.stdout.write(`${output}\n`);

@@ -435,6 +435,20 @@ describe("mem consolidate (end to end)", () => {
     expect(plural.stdout).toContain("re-run with --apply to supersede them");
   });
 
+  it("plain `mem recall` (no session id) marks a fact surfaced, so --stale never catches it", async () => {
+    const id = withStore((db) => seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) }).id);
+
+    const recall = await runCli(["recall"]);
+    expect(recall.exitCode).toBe(0);
+    expect(recall.stdout).toContain("fly.io");
+
+    const result = await runCli(["consolidate", "--stale"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("no stale facts older than 90 days");
+    expect(result.stdout).not.toContain(id);
+    expect(statusOf(id)).toBe("active");
+  });
+
   it("--stale --apply supersedes and audit-logs the stale reason", async () => {
     const stale = withStore((db) => seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) }).id);
 

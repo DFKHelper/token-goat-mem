@@ -72,8 +72,9 @@ const DISCOURSE_PREFIX = /^(?:(?:please|also|so|ok|okay|note(?: that)?)[,:]?\s+)
  * Upper bound on user turns examined, counted from the end of the transcript.
  *
  * The Stop hook fires at the end of every assistant turn, so a long session re-scans the same
- * history repeatedly. Duplicate candidates are already discarded by the caller, so this bound is
- * about not reading an unbounded file on every turn, not about correctness.
+ * history repeatedly. Duplicate candidates are already discarded by the caller, so this bound
+ * caps how many turns are extracted and screened, not how much is read -- the whole file is
+ * read and parsed before the window is sliced.
  */
 export const MAX_SCANNED_TURNS = 200;
 
