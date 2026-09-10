@@ -100,7 +100,7 @@ import {
   type WiringPlan,
   type WiringResult,
 } from "./wiring.js";
-import { buildHintFormat, type HintFormatOptions } from "./integration-seam.js";
+import { buildHintFormat, FOLLOW_UP_REVIEW, FOLLOW_UP_SHOW_DETAIL, type HintFormatOptions } from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { scanTranscript } from "./sessionScan.js";
 import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
@@ -179,6 +179,11 @@ export class UsageError extends Error {
 /** Longest a single before/after value is allowed to be in an audit `detail` line. Long enough to identify the change, short enough that an edited 500-character fact does not turn one audit row into a second copy of the store. */
 const AUDIT_VALUE_PREVIEW_LENGTH = 120;
 
+/** Renders a value for an audit `detail` line without truncating it -- for the side of an edit the store is about to forget. */
+function auditValueWhole(value: string | number | null | undefined): string {
+  return value === null || value === undefined ? "(none)" : String(value);
+}
+
 function auditValuePreview(value: string | number | null | undefined): string {
   if (value === null || value === undefined) {
     return "(none)";
@@ -197,35 +202,126 @@ function auditValuePreview(value: string | number | null | undefined): string {
  * of an edit exists to answer.
  *
  * Deliberately a `detail` string rather than a version chain: a full history table is a schema
- * migration and a retention policy bought for a question the audit log can already answer. Values
- * are previewed, not stored whole, so one edit of a long fact cannot bloat the log.
+ * migration and a retention policy bought for a question the audit log can already answer.
+ *
+ * The *prior* value is recorded whole; only the new one is previewed. Truncating both was a defect
+ * measured against the built bundle: editing a 223-character fact left 103 characters recorded
+ * nowhere in the store, while AGENTS.md promised "an edited fact's previous text is recorded there
+ * and nowhere else" -- so the log kept a prefix of the one value it exists to preserve. The
+ * asymmetry is the whole point of the trade the previous wording tried to make: the new value is
+ * never lost (it is the fact's current text, one column away in the same row), so previewing it
+ * costs nothing, and the growth this bounds is at most one prior value per changed field.
  */
+/**
+ * Every field `mem edit` can change, in the order `describeEdit` walks them. The single list
+ * driving three things that previously would have had to agree by convention rather than by
+ * construction: the before/after pairs `describeEdit` diffs into the audit `detail` line, the
+ * prior-value payload `buildEditPriorPayload` records for `mem edit --undo`, and the patch
+ * `undoEdit` replays through `updateFact`. One list here means a field added to `FactUpdate` only
+ * has to be added once for all three to pick it up, instead of three lists silently drifting apart.
+ */
+const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "scope", "scopeRoot", "scopeRepo", "status", "confidence"] as const;
+type EditableFactField = (typeof EDITABLE_FACT_FIELDS)[number];
+
+function isEditableFactField(field: string): field is EditableFactField {
+  return (EDITABLE_FACT_FIELDS as readonly string[]).includes(field);
+}
+
 function describeEdit(before: Fact, after: Fact, patch: FactUpdate): string {
-  type AuditValue = string | number | null | undefined;
-  const fieldOf: Readonly<Record<string, readonly [AuditValue, AuditValue]>> = {
-    text: [before.text, after.text],
-    subject: [before.subject, after.subject],
-    value: [before.value, after.value],
-    anchor: [before.anchor, after.anchor],
-    scope: [before.scope, after.scope],
-    scopeRoot: [before.scopeRoot, after.scopeRoot],
-    scopeRepo: [before.scopeRepo, after.scopeRepo],
-    status: [before.status, after.status],
-    confidence: [before.confidence, after.confidence],
-  };
   const changes = Object.keys(patch)
     .map((field) => {
-      const pair = fieldOf[field];
-      if (pair === undefined) {
+      if (!isEditableFactField(field)) {
         return field;
       }
-      const [old, now] = pair;
+      const old = before[field];
+      const now = after[field];
       // A field named in the patch whose value did not actually move is still worth recording as
       // touched, but without a misleading "X -> X" arrow.
-      return old === now ? `${field} (unchanged)` : `${field}: ${auditValuePreview(old)} -> ${auditValuePreview(now)}`;
+      return old === now ? `${field} (unchanged)` : `${field}: ${auditValueWhole(old)} -> ${auditValuePreview(now)}`;
     })
     .join("; ");
   return `edited ${changes}`;
+}
+
+/**
+ * The reversal payload `mem edit --undo` needs: a JSON object of only the fields `patch` actually
+ * touched, each mapped to the value `before` held for it. Scoped to the touched fields rather than
+ * every editable field on the fact so an edit that only ever set `--text` cannot be undone into
+ * clobbering a `--scope` no one asked to change back.
+ */
+function buildEditPriorPayload(before: Fact, patch: FactUpdate): string {
+  const prior: Partial<Record<EditableFactField, unknown>> = {};
+  for (const field of EDITABLE_FACT_FIELDS) {
+    if (field in patch) {
+      prior[field] = before[field];
+    }
+  }
+  return JSON.stringify(prior);
+}
+
+/**
+ * Refuses to edit a `source_type=user` fact unless the caller passes `--force`. Promotion into
+ * ground truth is already gated hard -- `captureSuggested` caps a derived fact's confidence at 0.6,
+ * and only `mem review --promote` activates a pending one -- but mutation of an already-active fact
+ * was not: `mem edit` treated a fact the user typed themselves exactly like one `mem` inferred on
+ * its own.
+ *
+ * `--force` is a per-invocation override, not a stored flag on the fact -- there is deliberately no
+ * `facts.read_only` column. That would be a second axis of a distinction `source_type` already
+ * makes (a fact is either user-stated or derived; a read-only bit would just restate "user-stated"
+ * with its own storage and its own drift risk to keep in sync). The tradeoff this leaves is honest,
+ * not hidden: a *derived* fact has no equivalent protection through this guard, and there is
+ * currently no way to ask for one.
+ */
+function guardUserFactEditOrThrow(fact: Fact, force: boolean | undefined): void {
+  if (fact.source_type === "user" && force !== true) {
+    throw new UsageError(
+      `fact ${fact.id} is source_type=user -- editing a user-stated fact requires --force ` +
+        "(mem edit --undo can walk an edit back if this was a mistake)"
+    );
+  }
+}
+
+/**
+ * Reverses the most recent `mem edit` on a fact, restoring every field that edit touched to the
+ * value `buildEditPriorPayload` recorded for it -- `mem review --undo`'s `undoReject` pattern
+ * applied to `mem edit`, which had no equivalent: an edit overwrote a fact in place with no way to
+ * walk it back through the CLI, only by hand-editing the database.
+ *
+ * Refuses on anything other than the fact's own last audit row being a recoverable `edit`: a fact
+ * whose last action was a `pin`/`forget`/earlier `edit_undo` names that action instead of guessing,
+ * and a fact whose last edit predates the `prior_json` column (or was itself an `edit_undo`, which
+ * never records one) refuses cleanly rather than restoring nothing and reporting success.
+ */
+function undoEdit(db: Database.Database, id: string): string {
+  const fact = resolveIdArgOrThrow(db, id);
+  const history = listAuditLogForFact(db, fact.id);
+  const last = history[history.length - 1];
+  if (last?.event !== "edit") {
+    throw new UsageError(
+      `fact ${fact.id}'s last recorded action was not an edit (last recorded action: ${last?.event ?? "none"}) -- ` +
+        "--undo reverses `mem edit` only"
+    );
+  }
+  if (last.priorJson === undefined) {
+    throw new UsageError(`fact ${fact.id}'s last edit has no recoverable prior value recorded -- nothing to undo`);
+  }
+  const patch = JSON.parse(last.priorJson) as FactUpdate;
+  const tx = db.transaction((): Fact => {
+    const restored = updateFact(db, fact.id, patch);
+    if (restored === undefined) {
+      throw new UsageError(`no such fact: ${fact.id}`);
+    }
+    insertAuditLog(db, {
+      event: "edit_undo",
+      factId: fact.id,
+      detail: `undid edit, restored ${Object.keys(patch).join(", ")}`,
+    });
+    return restored;
+  });
+  // BEGIN IMMEDIATE: `updateFact` reads before writing; see storage.insertFact.
+  tx.immediate();
+  return fact.id;
 }
 
 function factNounPhrase(kind: FactKind): string {
@@ -1397,6 +1493,8 @@ interface EditCliOptions {
   readonly scope?: string;
   readonly root?: string;
   readonly path?: string;
+  readonly force?: boolean;
+  readonly undo?: boolean;
 }
 
 interface DreamCliOptions {
@@ -1916,7 +2014,13 @@ export function buildProgram(): Command {
           process.stdout.write(`${result.fact.id.slice(0, RECALL_SHORT_ID_LENGTH)}  ${result.display}\n`);
         }
         if (hintStyle !== "terse") {
-          process.stdout.write("mem show <id> for detail; mem review to resolve contested/pending\n");
+          // The review clause only when something on screen actually needs resolving. Unlike the
+          // wire path, plain recall *shows* withheld facts (annotated), so the trigger is their
+          // presence in the output rather than a count of what was dropped -- but printing the CTA
+          // on every call regardless was the same defect: advice that is always on is not a signal,
+          // and a reader learns to skip the line exactly where it would have mattered.
+          const needsReview = ordered.some((result) => result.trust === "withheld");
+          process.stdout.write(`${FOLLOW_UP_SHOW_DETAIL}${needsReview ? `; ${FOLLOW_UP_REVIEW}` : ""}\n`);
         }
         if (shownNonWithheld < totalNonWithheld) {
           process.stdout.write(`showing ${shownNonWithheld} of ${totalNonWithheld} -- use --limit to see more\n`);
@@ -2210,8 +2314,22 @@ export function buildProgram(): Command {
     .option("--scope <scope>", "New scope: global, project, or path")
     .option("--root <path>", "Project root for .mem/allowlist and (if --scope is given) scope binding (default: current directory)")
     .option("--path <file>", "File or directory to bind to, resolved against --root (required when --scope path, rejected otherwise)")
+    .option("--force", "Edit a source_type=user fact anyway; the override is recorded in the audit log")
+    .option("--undo", "Reverse the most recent edit to this fact, restoring the fields it touched")
     .action(
       guard(async (id: string, options: EditCliOptions) => {
+        const fieldOptionsUsed = (["text", "subject", "value", "anchor", "scope"] as const).filter(
+          (name) => options[name] !== undefined
+        );
+        if (options.undo === true) {
+          if (fieldOptionsUsed.length > 0) {
+            throw new UsageError(`--undo cannot be used together with --${fieldOptionsUsed.join(", --")}`);
+          }
+          const restored = await withDb((db) => undoEdit(db, id));
+          process.stdout.write(`restored ${restored}\n`);
+          return;
+        }
+
         const hasSubject = options.subject !== undefined;
         const hasValue = options.value !== undefined;
         if (hasSubject !== hasValue) {
@@ -2237,6 +2355,7 @@ export function buildProgram(): Command {
 
         const updated = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
+          guardUserFactEditOrThrow(existing, options.force);
           screenInputOrThrow(
             db,
             {
@@ -2256,7 +2375,16 @@ export function buildProgram(): Command {
             if (fact === undefined) {
               throw new UsageError(`no such fact: ${existing.id}`);
             }
-            insertAuditLog(db, { event: "edit", factId: existing.id, detail: describeEdit(existing, fact, patch) });
+            const detail =
+              existing.source_type === "user"
+                ? `${describeEdit(existing, fact, patch)} (--force override of a source_type=user fact)`
+                : describeEdit(existing, fact, patch);
+            insertAuditLog(db, {
+              event: "edit",
+              factId: existing.id,
+              detail,
+              priorJson: buildEditPriorPayload(existing, patch),
+            });
             return fact;
           });
           // BEGIN IMMEDIATE: `updateFact` reads before writing; see storage.insertFact.

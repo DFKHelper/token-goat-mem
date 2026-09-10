@@ -102,6 +102,12 @@ import type { Fact, FactKind } from "./types.js";
  * since consumers validate against them -- bumps the integer version. Consumers
  * treat versions they don't know as "no hints".
  *
+ * `footer-text` is the one part explicitly outside that set, along with the
+ * condition under which a footer-line appears at all. It is prose for a reader,
+ * a consumer is told not to parse it, and bumping the version to reword a
+ * sentence would cost every consumer *all* hints -- unknown version means no
+ * hints -- to protect a line nobody is allowed to depend on.
+ *
  * TGMEM/1 (superseded default, still fully supported -- see `protocolVersion`
  * below): every fact-line's `display` carries its own trailing
  * `" — <follow-up command>"` CTA (e.g. `— mem show <id>`, `— verify; mem show
@@ -109,25 +115,86 @@ import type { Fact, FactKind } from "./types.js";
  *
  * TGMEM/2 (current default): this bumped because of two additive-but-
  * grammar-changing facts -- `display` no longer carries a per-line CTA
- * (bare caveated fact text only), and a response with at least one fact-line
- * now ends with exactly one `footer-line` summarizing the available
- * follow-up commands once, instead of repeating one on every line:
+ * (bare caveated fact text only), and a response now ends with at most one
+ * `footer-line` summarizing the available follow-up commands once, instead of
+ * repeating one on every line:
  *
  *   footer-line   = "footer" SEP footer-text
- *   footer-text   = "mem show <id> for detail; mem review to resolve contested/pending"
+ *   footer-text   = clause *("; " clause)
  *
- * A footer-line is only emitted when the response has at least one fact-line
- * (an empty hint set has nothing to follow up on). `footer` is a fixed
- * constant, not JSON-escaped -- callers should treat it as informational
- * text, not something to `JSON.parse`.
+ * A footer-line is emitted when the response has anything to follow up on:
+ * at least one fact-line, results the caps did not send, or results withheld
+ * from ground truth. An empty response over an empty review queue emits none.
+ * `footer-text` is prose assembled from those counts -- informational text,
+ * not something to `JSON.parse`, and deliberately outside the version-bump
+ * set above: its wording and the condition under which it appears are both
+ * free to change, because no consumer can parse it without violating that
+ * contract. What is pinned is that a footer-line, when present, is last.
+ *
+ * The counts are there because their absence is unfalsifiable from the wire.
+ * A capped payload is byte-indistinguishable from a complete one, and a
+ * response with no fact-lines is byte-indistinguishable from a project with
+ * no memory -- even when a review queue is filling every session behind it.
+ * See `footerLineFor` for the two measured cases.
  */
 export const TGMEM_PROTOCOL_VERSION = 2;
 
 /** Header line every hint-format response starts with, for the default protocol version. */
 export const TGMEM_HEADER = `TGMEM/${TGMEM_PROTOCOL_VERSION}`;
 
-/** The one fixed footer line TGMEM/2+ appends after fact-lines, when there is at least one. */
-export const TGMEM_FOOTER_LINE = "footer  mem show <id> for detail; mem review to resolve contested/pending";
+/** Literal prefix of every footer-line, including its `SEP`. */
+const FOOTER_PREFIX = "footer  ";
+
+/**
+ * The clause naming how to inspect a fact-line. Exported because plain recall prints the same
+ * sentence (src/cli.ts) and the two surfaces were separately-maintained copies of one string.
+ */
+export const FOLLOW_UP_SHOW_DETAIL = "mem show <id> for detail";
+
+/** The clause naming how to resolve facts held back from ground truth. Shared with plain recall for the same reason. */
+export const FOLLOW_UP_REVIEW = "mem review to resolve contested/pending";
+
+/**
+ * The footer-line for a response that has fact-lines and nothing else to disclose.
+ *
+ * Equal to `footerLineFor({ facts: 1, cut: 0, withheld: 0 })` -- pinned by a test so the constant and
+ * the composer cannot drift.
+ */
+export const TGMEM_FOOTER_LINE = `${FOOTER_PREFIX}${FOLLOW_UP_SHOW_DETAIL}`;
+
+/**
+ * Composes the footer-line, or `undefined` when the response has nothing to say.
+ *
+ * Two failures this replaces, both measured against the built bundle:
+ *
+ *  1. **The review CTA was unconditional.** Every response carrying a fact-line advertised
+ *     `mem review to resolve contested/pending`, including the overwhelmingly common case of a store
+ *     with neither. A permanent CTA is not a signal -- a consumer that sees it on every call learns
+ *     to ignore it, so it was loudest exactly where it meant nothing and indistinguishable from
+ *     itself where it mattered.
+ *  2. **What was held back was never disclosed.** Six matching decisions emitted four lines and this
+ *     footer, with nothing saying two were cut; a store with three pending and nothing active
+ *     emitted a bare `TGMEM/2` -- byte-identical to a project with no memory at all. That second
+ *     shape is the steady state wherever `mem init` wired the `Stop` hook, since the hook fills the
+ *     review queue every session and this is the only surface that runs unprompted.
+ *
+ * So the counts travel with the payload, and the footer now appears whenever there is something to
+ * report -- including with zero fact-lines, which is the only way case 2 can be told from silence.
+ * An empty response with an empty queue still emits no footer: nothing withheld, nothing to follow up.
+ */
+function footerLineFor(counts: { readonly facts: number; readonly cut: number; readonly withheld: number }): string | undefined {
+  const clauses: string[] = [];
+  if (counts.facts > 0) {
+    clauses.push(FOLLOW_UP_SHOW_DETAIL);
+  }
+  if (counts.cut > 0) {
+    clauses.push(`${counts.cut} more matched, not sent`);
+  }
+  if (counts.withheld > 0) {
+    clauses.push(`${counts.withheld} withheld; ${FOLLOW_UP_REVIEW}`);
+  }
+  return clauses.length > 0 ? `${FOOTER_PREFIX}${clauses.join("; ")}` : undefined;
+}
 
 function tgmemHeaderFor(protocolVersion: number, delta = false): string {
   return delta ? `TGMEM/${protocolVersion}  delta=1` : `TGMEM/${protocolVersion}`;
@@ -370,7 +437,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const scoped = allFacts.filter((fact) => isInScope(fact, root, contextFiles));
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
-  const { results } = await retrieve(scoped, {
+  const { results, withheldCount } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
     hintFormat: true,
@@ -448,8 +515,12 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   });
 
   const lines = emittable.map(formatLine);
-  if (protocolVersion === 2 && lines.length > 0) {
-    lines.push(TGMEM_FOOTER_LINE);
+  // `unseen`, not `results`: a fact the caps dropped was withheld from this payload, but one the
+  // delta filter dropped was already sent and the consumer still has it. Counting the latter as
+  // "not sent" would report a shortfall that does not exist on a `--delta` call.
+  const footer = protocolVersion === 2 ? footerLineFor({ facts: emittable.length, cut: unseen.length - emittable.length, withheld: withheldCount }) : undefined;
+  if (footer !== undefined) {
+    lines.push(footer);
   }
 
   if (sessionId !== undefined && !stable) {

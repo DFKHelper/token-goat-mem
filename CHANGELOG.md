@@ -6,6 +6,49 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem recall --hint-format` could not tell "nothing to say" from "held things back".** A
+  response carrying two of six matching decisions was byte-identical to one carrying all six, and a
+  response for a project with three facts sitting in the review queue was byte-identical -- a bare
+  `TGMEM/2` header -- to a response for a project with no memory at all. Both absences are
+  unfalsifiable from the wire, so a consumer could not distinguish a complete answer from a truncated
+  one, and a queue could fill indefinitely behind a payload that looked like an empty store. The
+  single footer line now carries only the clauses that apply: `mem show <id> for detail` when a fact
+  line was emitted, `N more matched, not sent` when the per-kind caps dropped results, and
+  `N withheld; mem review to resolve contested/pending` when facts were held back. A response with
+  nothing to follow up on has no footer at all, where before it always carried the same fixed
+  sentence -- including the review call-to-action, on a store with nothing to review. The withheld
+  count is store-scoped rather than query-scoped, because `retrieve()` ranks the whole scoped
+  candidate pool rather than filtering it; that is the honest number for the question the clause
+  answers ("is something waiting for you"), and the surrounding doc comment says so rather than
+  leaving a reader to infer it. Footer text is deliberately outside the protocol's version-bump set:
+  bumping would cost every consumer *all* hints to protect a line consumers are told not to parse.
+
+- **`mem edit` truncated the one value it exists to preserve.** The audit `detail` line previewed
+  both sides of each change at 120 characters, so editing a 223-character fact left 103 characters
+  recorded nowhere in the store -- while AGENTS.md promised "an edited fact's previous text is
+  recorded there and nowhere else". The preview is now asymmetric: the prior value is recorded whole,
+  the new one is still previewed, because the new value is never lost (it is the fact's current text,
+  one column away in the same row). Building on that, `mem edit <id> --undo` reverses the most recent
+  edit -- `mem review --undo`'s pattern applied to a command that had none, where walking an edit back
+  previously meant hand-editing SQLite. The reversal payload is a new nullable `audit_log.prior_json`
+  column scoped to the fields that edit actually touched, so undoing a `--text` edit cannot clobber a
+  `--scope` nobody asked to change back, and an edit row written before the column existed refuses
+  cleanly instead of restoring nothing and reporting success.
+
+- **`mem edit` treated a fact you typed yourself exactly like one mem inferred.** Promotion into
+  ground truth was already gated hard -- `captureSuggested` caps a derived fact's confidence, and only
+  `mem review --promote` activates a pending one -- but mutation of an already-active fact was not.
+  Editing a `source_type=user` fact now requires `--force`, and the override is recorded in the audit
+  log. It is a per-invocation override rather than a stored `read_only` column, which would be a
+  second axis of a distinction `source_type` already makes. The tradeoff is stated rather than hidden:
+  a derived fact has no equivalent protection through this guard, and there is currently no way to ask
+  for one.
+
+- **Plain `mem recall` told every user to run `mem review`, on every recall.** The trailing line was a
+  fixed string, so a store with nothing pending, contested, or contradicted still advertised a command
+  with nothing to do -- the shape of call-to-action that teaches a reader to ignore the line. It now
+  names `mem review` only when a result in that recall is actually withheld.
+
 - **`mem scan-session` recorded a turn number that was wrong and that moved.** `turnIndex` was
   numbered from the start of the scan window rather than the start of the transcript, and the window
   is the last `MAX_SCANNED_TURNS` turns. So a statement at true turn 249 was filed with

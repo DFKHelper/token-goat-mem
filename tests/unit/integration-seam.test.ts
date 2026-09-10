@@ -33,9 +33,17 @@ async function buildHint(options: HintFormatOptions): Promise<HintFormatResult> 
   return buildHintFormat({ retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS, ...options });
 }
 
-/** TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the fact caps/ordering that predate the footer line. */
+/**
+ * TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the
+ * fact caps/ordering that predate the footer line.
+ *
+ * Matches on the `footer` tag rather than on `TGMEM_FOOTER_LINE`'s exact bytes: the footer carries
+ * counts now, so an equality filter silently stops stripping the moment a test's store has anything
+ * withheld or capped, and every caps/ordering assertion downstream would then be counting a footer
+ * as a fact.
+ */
 function factLines(result: HintFormatResult): readonly string[] {
-  return result.lines.filter((line) => line !== TGMEM_FOOTER_LINE);
+  return result.lines.filter((line) => !line.startsWith("footer  "));
 }
 
 interface FactSeed {
@@ -282,7 +290,11 @@ describe("buildHintFormat", () => {
     ]);
 
     const result = await buildHint({ root, dbPath });
-    expect(result.lines).toEqual([]);
+    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while
+    // the footer says something is being held back. Both halves matter -- a silent exclusion is
+    // byte-indistinguishable from a project with no memory at all.
+    expect(factLines(result)).toEqual([]);
+    expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
   });
 
   it("excludes pending facts", async () => {
@@ -298,7 +310,11 @@ describe("buildHintFormat", () => {
       },
     ]);
     const result = await buildHint({ root, dbPath });
-    expect(result.lines).toEqual([]);
+    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while
+    // the footer says something is being held back. Both halves matter -- a silent exclusion is
+    // byte-indistinguishable from a project with no memory at all.
+    expect(factLines(result)).toEqual([]);
+    expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
   });
 
   it("excludes contested facts (ambiguous same-subject contradiction, tied precedence)", async () => {
@@ -329,7 +345,11 @@ describe("buildHintFormat", () => {
       },
     ]);
     const result = await buildHint({ root, dbPath });
-    expect(result.lines).toEqual([]);
+    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while
+    // the footer says something is being held back. Both halves matter -- a silent exclusion is
+    // byte-indistinguishable from a project with no memory at all.
+    expect(factLines(result)).toEqual([]);
+    expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
   });
 
   it("includes a project-scoped fact only when --root matches its bound project root", async () => {
@@ -540,7 +560,9 @@ describe("buildHintFormat", () => {
     expect(result.lines[1]).toBe(TGMEM_FOOTER_LINE);
   });
 
-  it("TGMEM/2: omits the footer line when there are no fact-lines", async () => {
+  it("TGMEM/2: omits the footer line when there is nothing at all to follow up on", async () => {
+    // Titled for the empty *store*, not for "no fact-lines": those stopped being the same thing
+    // once a withheld fact started producing a footer with no fact-line to attach it to.
     const result = await buildHint({ root, dbPath });
     expect(result.header).toBe("TGMEM/2");
     expect(result.lines).toEqual([]);
@@ -1203,5 +1225,103 @@ describe("buildHintFormat", () => {
     expect(exhausted.truncated).toBe(true);
     expect(exhausted.lines).toEqual([]);
     expect(loggedIds("sess-1")).toEqual([]);
+  });
+});
+
+/**
+ * What the payload does not contain, said out loud.
+ *
+ * TGMEM/2 has no way to mark a response partial -- that is why an over-budget retrieval returns
+ * empty rather than a slice. The same indistinguishability applies to the two shapes below, and
+ * both were measured against the built bundle before this block existed: six matching decisions
+ * emitted four lines with nothing saying two were cut, and a store holding three pending facts and
+ * nothing active emitted a bare `TGMEM/2` -- byte-identical to a project with no memory at all.
+ *
+ * The second is the one that costs a user something. `mem init claude-code` installs `scan-session`
+ * as a `Stop` hook, so the review queue fills every session, while `recall --hint-format` is the
+ * only surface that runs unprompted -- and it was the one surface that never mentioned the queue.
+ */
+describe("the footer discloses what the payload withheld", () => {
+  let workDir: string;
+  let root: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "mem-seam-footer-"));
+    root = join(workDir, "project");
+    mkdirSync(root, { recursive: true });
+    dbPath = join(workDir, "mem.db");
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  /** `count` active decisions, all in scope, all matching the query below. */
+  function seedDecisions(count: number): void {
+    seedFacts(
+      dbPath,
+      Array.from({ length: count }, (_unused, index) => ({
+        id: `cut-dec-${index}`,
+        text: `we decided to deploy service ${index} through the staging gate`,
+        kind: "decision" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: `2026-07-0${index + 1}T00:00:00.000Z`,
+        status: "active" as const,
+      }))
+    );
+  }
+
+  function footerOf(result: HintFormatResult): string | undefined {
+    return result.lines.find((line) => line.startsWith("footer  "));
+  }
+
+  it("says how many matching facts the caps did not send", async () => {
+    // PRECISION_CAP is 4, so two of six are dropped. Without the count, a consumer holding four
+    // decisions cannot tell that from a project that only ever made four.
+    seedDecisions(6);
+    const result = await buildHint({ root, dbPath, query: "deploy" });
+    expect(factLines(result)).toHaveLength(4);
+    expect(footerOf(result)).toBe("footer  mem show <id> for detail; 2 more matched, not sent");
+  });
+
+  it("reports a review queue even when it has no fact-lines to attach it to", async () => {
+    seedFacts(dbPath, [
+      { id: "pend-1", text: "always run the linter before pushing", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-07-01T00:00:00.000Z", status: "pending" },
+      { id: "pend-2", text: "always vacuum the analytics table weekly", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-07-02T00:00:00.000Z", status: "pending" },
+    ]);
+    const result = await buildHint({ root, dbPath, query: "linter" });
+    expect(factLines(result)).toEqual([]);
+    expect(footerOf(result)).toBe("footer  2 withheld; mem review to resolve contested/pending");
+  });
+
+  it("reports the queue for a query that matches none of it, because the queue is not a search result", async () => {
+    // A query ranks the candidate pool; it never filters it (src/retrieval.ts). If the disclosure
+    // were query-scoped instead, the one call that runs unprompted -- SessionStart's, which passes
+    // no query at all -- would be the call least likely to mention the queue.
+    seedFacts(dbPath, [
+      { id: "pend-3", text: "always run the linter before pushing", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-07-01T00:00:00.000Z", status: "pending" },
+    ]);
+    const result = await buildHint({ root, dbPath, query: "nothing-here-matches-this" });
+    expect(footerOf(result)).toBe("footer  1 withheld; mem review to resolve contested/pending");
+  });
+
+  it("drops the review call-to-action when nothing needs reviewing", async () => {
+    // It used to print on every response carrying a fact-line, including the overwhelmingly common
+    // case of a clean store. Advice that is always on is not a signal: a consumer that sees it
+    // every call learns to skip it, so it was loudest where it meant nothing.
+    seedDecisions(1);
+    const result = await buildHint({ root, dbPath, query: "deploy" });
+    expect(footerOf(result)).toBe(TGMEM_FOOTER_LINE);
+    expect(TGMEM_FOOTER_LINE).not.toContain("mem review");
+  });
+
+  it("stays silent when there is genuinely nothing to say", async () => {
+    // The one shape that must not gain a footer: no facts, no queue, nothing held back. Otherwise
+    // the disclosure becomes the same always-on noise it replaced.
+    seedFacts(dbPath, []);
+    const result = await buildHint({ root, dbPath, query: "anything" });
+    expect(result.lines).toEqual([]);
   });
 });

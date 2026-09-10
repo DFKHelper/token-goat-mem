@@ -33,8 +33,8 @@ All memory operations are explicit and auditable:
 - `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks)
 - `mem used <id...> --session-id <id>` — record that facts recalled in that session were actually useful; feeds recall ranking as a third RRF rank list
-- `mem edit <id>` — modify fact text, subject/value, anchor, or scope
-- `mem show <id>` — view a fact and its full provenance, including `history`: every audit row for the fact, oldest first. An edited fact's previous text is recorded there and nowhere else, since `mem edit` overwrites in place
+- `mem edit <id>` — modify fact text, subject/value, anchor, or scope (`--force` is required for a `source_type=user` fact and is recorded in the audit log; `--undo` reverses the most recent edit, restoring only the fields it touched)
+- `mem show <id>` — view a fact and its full provenance, including `history`: every audit row for the fact, oldest first. An edited fact's previous text is recorded there in full and nowhere else, since `mem edit` overwrites in place
 - `mem list` — all facts, filtered by status/kind/subject/scope
 - `mem facets` — extract and inspect the structured entity/topic terms behind `mem recall --entity`; no flags backfills facts missing terms, `--all` re-extracts everything after an extraction-rule change, `--fact <id>` shows one fact's terms, `--list-entities` lists the distinct entities with fact counts
 - `mem embed` — compute embedding vectors for facts, enabling semantic recall alongside BM25; `--all` re-embeds everything after a model change, `--limit <n>` bounds the run. Off unless `TOKEN_GOAT_MEM_EMBED_URL` and `TOKEN_GOAT_MEM_EMBED_MODEL` are set
@@ -62,7 +62,7 @@ Mem's integration into token-goat is stateless, live, and fail-open:
 mem recall --hint-format --root <project-root> [--context-files a.ts,b.ts]
 ```
 
-Returns `TGMEM/2` header + one line per fact (`pref  fresh=affirmed|unverified|contradicted  id=abc  display="..."`), then one shared footer line (`footer  mem show <id> for detail; mem review to resolve contested/pending`) when at least one fact line was emitted. Token-goat surfaces `display` verbatim; trust caveat is embedded in the payload, not something the consumer reconstructs. Contested/low-trust facts excluded from `--hint-format` entirely. `TGMEM/1` (per-line CTA, no footer) is still fully supported by the programmatic seam via `protocolVersion: 1`.
+Returns `TGMEM/2` header + one line per fact (`pref  fresh=affirmed|unverified|contradicted  id=abc  display="..."`), then at most one shared footer line carrying only the clauses that apply: `mem show <id> for detail` when a fact line was emitted, `N more matched, not sent` when the caps dropped results, and `N withheld; mem review to resolve contested/pending` when facts were held back. A response with nothing to follow up on has no footer; one with a filling review queue and no fact lines still does, since that shape is otherwise byte-identical to a project with no memory. Footer text is informational prose, deliberately outside the version-bump set. Token-goat surfaces `display` verbatim; trust caveat is embedded in the payload, not something the consumer reconstructs. Contested/low-trust facts excluded from `--hint-format` entirely. `TGMEM/1` (per-line CTA, no footer) is still fully supported by the programmatic seam via `protocolVersion: 1`.
 
 If `mem` is missing, the binary times out, or parsing fails, token-goat treats it as "no hints" — fail-open to no memory (safe).
 

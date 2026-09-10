@@ -163,6 +163,13 @@ export function ensureStorageSchema(db: Db): void {
   // covers that window by *also* requiring no surviving `recall_log` row, so a pre-migration fact
   // surfaced inside the rotation window is still excluded.
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN last_surfaced_at TEXT");
+  // `mem edit --undo`'s reversal payload (cli.ts `buildEditPriorPayload`/`undoEdit`). Nullable with
+  // no backfill, same reasoning as the columns above: an `edit` row written before this column
+  // existed recorded only a previewed `detail` string, and there is no prior value to reconstruct
+  // from that -- reconstructing one would be exactly the truncation defect this column exists to
+  // fix, wearing a different hat. NULL is exactly "this edit predates undo", and `undoEdit` refuses
+  // cleanly on it rather than treating a stale row as reversible.
+  applyIdempotentAlter(db, "ALTER TABLE audit_log ADD COLUMN prior_json TEXT");
 }
 
 /**

@@ -108,7 +108,7 @@ Run `mem recall --hint-format` in the integrated terminal, then reference the ou
 $ mem recall --hint-format --root .
 TGMEM/2
 pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager"
-footer  mem show <id> for detail; mem review to resolve contested/pending
+footer  mem show <id> for detail
 ```
 
 Then in chat:
