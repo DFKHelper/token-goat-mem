@@ -12,3 +12,4 @@ coverage/
 .idea/
 *.token-goat-mem.bak
 SCRATCH.md
+.bughunt/
