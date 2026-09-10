@@ -260,13 +260,37 @@ export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefin
  *
  * Narrow on purpose rather than a `captured_at` field on {@link FactUpdate}: that clock decides
  * decay and precedence, and `mem edit` has no business moving it.
+ *
+ * Also applies `updates.anchor`/`updates.sourceRef` when the caller restates the same fact
+ * carrying a new one.
+ *
+ * The user's latest statement wins, for the same reason `captured_at` and `confidence` already
+ * refresh here: `mem remember "uses pnpm"` followed by `mem remember "uses pnpm" --anchor
+ * "file-exists pnpm-lock.yaml"` used to print "reaffirmed" while silently discarding the anchor,
+ * leaving the fact caveated `unverified` forever with no way to ever reach `contradicted`. An
+ * `updates` field left `undefined` means the incoming capture carried nothing for that field --
+ * the existing value (including an existing anchor) is left untouched, never cleared.
  */
-export function reaffirmFact(db: Db, id: string, at: Date = new Date()): Fact | undefined {
+export function reaffirmFact(
+  db: Db,
+  id: string,
+  at: Date = new Date(),
+  updates: { anchor?: string; sourceRef?: string } = {}
+): Fact | undefined {
   const tx = db.transaction((): Fact | undefined => {
     const epoch = bumpEpoch(db);
-    const changed = db
-      .prepare("UPDATE facts SET captured_at = ?, confidence = 1.0, epoch = ? WHERE id = ?")
-      .run(at.toISOString(), epoch, id).changes;
+    const sets = ["captured_at = ?", "confidence = 1.0", "epoch = ?"];
+    const params: unknown[] = [at.toISOString(), epoch];
+    if (updates.anchor !== undefined) {
+      sets.push("anchor = ?");
+      params.push(updates.anchor);
+    }
+    if (updates.sourceRef !== undefined) {
+      sets.push("source_ref = ?");
+      params.push(updates.sourceRef);
+    }
+    params.push(id);
+    const changed = db.prepare(`UPDATE facts SET ${sets.join(", ")} WHERE id = ?`).run(...params).changes;
     return changed === 0 ? undefined : getFactById(db, id);
   });
   return tx.immediate();

@@ -9,6 +9,7 @@
  *     are excluded from --hint-format entirely").
  */
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +17,7 @@ import { openDb } from "../src/db.js";
 import { insertFact, openStorage } from "../src/storage.js";
 import { buildHintFormat, TGMEM_HEADER } from "../src/integration-seam.js";
 import type { HintFormatOptions, HintFormatResult } from "../src/integration-seam.js";
+import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { Fact } from "../src/types.js";
 
 /** A soft budget no test machine can exceed. */
@@ -381,6 +383,64 @@ describe("regression: the seam's row mapper projects every column retrieval depe
     // check on the SELECT itself. If the wire format ever exposes trust, replace this with the
     // behavioural test that then becomes possible.
     expect(select).toContain("prior_status");
+  });
+
+  it("selects scope_repo, without which a second checkout of the same repository is invisible to the hint path", () => {
+    const source = readFileSync(new URL("../src/integration-seam.ts", import.meta.url), "utf8");
+    const select = /SELECT id, text[\s\S]*?FROM facts/u.exec(source)?.[0] ?? "";
+    expect(select).toContain("scope_repo");
+  });
+
+  it("surfaces a project fact captured in one checkout from a second checkout of the same repository", async () => {
+    // Mirrors the git fixture in tests/cli.test.ts's "project identity" describe block. Without
+    // `scope_repo` in the SELECT, `toFact` leaves `scopeRepo` undefined, `isInScope` calls
+    // `identityMatches(undefined, root)`, which is always false, and the fact never surfaces from
+    // checkout `b` even though it is the exact case `mem init`'s SessionStart/UserPromptSubmit
+    // hooks (the only unprompted consumer of this path) are meant to cover.
+    const work = mkdtempSync(join(tmpdir(), "mem-seam-worktree-"));
+    try {
+      function git(cwd: string, ...args: string[]): void {
+        execFileSync("git", args, { cwd, stdio: "pipe" });
+      }
+      function makeRepo(name: string): string {
+        const repo = join(work, name);
+        mkdirSync(repo, { recursive: true });
+        git(repo, "init", "-q");
+        git(repo, "config", "user.email", "t@example.com");
+        git(repo, "config", "user.name", "t");
+        writeFileSync(join(repo, "file.txt"), "x", "utf8");
+        git(repo, "add", "-A");
+        git(repo, "commit", "-qm", "init");
+        git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
+        return repo;
+      }
+
+      clearProjectIdentityCache();
+      const a = makeRepo("a");
+      const b = makeRepo("b");
+      const dbPath = join(work, "mem.db");
+
+      const db = openStorage(dbPath);
+      try {
+        insertFact(db, {
+          text: "the widget build uses esbuild",
+          kind: "fact",
+          scope: "project",
+          scopeRoot: a,
+          scopeRepo: resolveProjectIdentity(a),
+          source_type: "user",
+        });
+      } finally {
+        db.close();
+      }
+
+      const result = await buildHint({ root: b, dbPath });
+      const line = result.lines.find((l) => l.includes("esbuild"));
+      expect(line).toBeDefined();
+    } finally {
+      clearProjectIdentityCache();
+      rmSync(work, { recursive: true, force: true });
+    }
   });
 });
 

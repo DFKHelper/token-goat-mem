@@ -276,7 +276,7 @@ Each evaluation yields `affirmed`, `unverified` (missing file, no repo, malforme
 
 ## Optional token-goat seam
 
-Mem works standalone. When [token-goat](https://github.com/DFKHelper/token-goat) is on PATH, token-goat reads `mem epoch` (a monotonic integer) to invalidate its compaction cache. The `TGMEM/2` wire format is published as an optional seam � a future host tool *can* call `mem recall --hint-format --root <project-root>` to embed memory hints into its own manifest, but no tool consumes it today.
+Mem works standalone. When [token-goat](https://github.com/DFKHelper/token-goat) is on PATH, token-goat reads `mem epoch` (a monotonic integer) to invalidate its compaction cache. The `TGMEM/2` wire format is published as an optional seam for host tools to adopt; token-goat does not consume it today. It is not unused, though: `mem init claude-code` installs hooks that run `mem recall --hint-format` on `SessionStart` and `UserPromptSubmit`, so the format is what mem emits into Claude Code on every session and every prompt.
 
 The seam is one-directional (Mem reads nothing from token-goat), stateless (live calls, no caching), and self-caveating (display strings include their own trust caveats). Contested or low-trust facts are excluded from `--hint-format` entirely — only ground-truth-eligible or explicitly-caveated hints are emitted. Mem does not cache results; forget/edit reflect instantly. If mem is not on PATH or the call times out, token-goat falls back to no hints (fail-open).
 

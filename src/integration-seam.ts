@@ -619,6 +619,7 @@ interface RawFactRow {
   readonly value: string | null;
   readonly scope: Fact["scope"];
   readonly scopeRoot: string | null;
+  readonly scopeRepo: string | null;
   readonly source_type: Fact["source_type"];
   readonly source_ref: string | null;
   readonly captured_at: string;
@@ -648,9 +649,16 @@ function queryAllFacts(db: ReturnType<typeof openStorage>, withEmbeddings = fals
       // is gone and restores `prior_status` when that fact was `pinned` before it was contested.
       // Selecting without the column made every reinstatement in the hint path land on `active`,
       // quietly stripping a pinned fact of its decay exemption on the one surface another tool
-      // consumes programmatically.
-      `SELECT id, text, kind, subject, value, scope, scope_root as scopeRoot, source_type, source_ref,
-              captured_at, anchor, status, confidence, prior_status${withEmbeddings ? ", embedding" : ""}
+      // consumes programmatically. `scope_repo` had the same defect once already fixed here: omitting
+      // it left every project fact invisible to a second clone or worktree of the same repository,
+      // because `isInScope` falls back to `identityMatches(undefined, root)`, which is always false.
+      // General rule: any `facts` column that a reader downstream of this function depends on --
+      // directly or through a helper like `isInScope` or `resolveContradictions` -- must be added to
+      // this SELECT, or it silently reads as absent on this path only, with the CLI's own SELECT
+      // (storage.ts) unaffected.
+      `SELECT id, text, kind, subject, value, scope, scope_root as scopeRoot, scope_repo as scopeRepo,
+              source_type, source_ref, captured_at, anchor, status, confidence,
+              prior_status${withEmbeddings ? ", embedding" : ""}
        FROM facts`
     )
     .all();
@@ -666,6 +674,7 @@ function toFact(row: RawFactRow): Fact {
     value: row.value,
     scope: row.scope,
     scopeRoot: row.scopeRoot,
+    scopeRepo: row.scopeRepo,
     source_type: row.source_type,
     source_ref: row.source_ref,
     captured_at: row.captured_at,

@@ -6,6 +6,41 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **The hook path returned no memory at all from a git worktree or second clone.** `mem recall`
+  surfaced a project fact from any checkout of the same repository, but `mem recall --hint-format`
+  returned an empty header — and that is the path `mem init claude-code` installs for `SessionStart`
+  and `UserPromptSubmit`, so it is the one that runs unprompted. The seam's hand-written SELECT
+  omitted `scope_repo`, leaving the identity check to compare `undefined` and always fail. It failed
+  open and silently, against a README that promises the fact surfaces "from a git worktree". The same
+  SELECT had already been fixed once for exactly this reason on a different column; its comment now
+  states the general rule instead of the one instance.
+- **`mem remember` said "reaffirmed" while discarding the `--anchor` you just gave it.** Restating a
+  fact you had already stored refreshed its clock but dropped any anchor or source reference the
+  restatement carried, so a fact you had just made re-verifiable stayed caveated forever and could
+  never reach `contradicted` when the world changed. The latest statement now wins for those fields,
+  as it already did for the timestamp, and the CLI says which ones it applied. Omitting a field still
+  leaves the stored value alone rather than clearing it.
+- **`mem review` run from an unrelated directory reported perfectly valid facts as contradicted.** It
+  evaluated every fact's anchor against whatever root it happened to be run from, so a path-scoped
+  fact bound elsewhere had its anchored file looked for in the wrong tree, not found, and listed under
+  the heading that invites the user to forget it — while `mem recall` from the fact's own root
+  affirmed the same fact. Anchors are now evaluated only for facts actually bound to the root being
+  asked about. (Recalling a path-scoped fact from a directory *above* its binding is a related gap
+  that needs a persisted capture root; it is not addressed here.)
+- **`file-not-contains` through a symlink asserted the substring was present.** mem deliberately
+  refuses to read through a symlink that escapes the root — but then returned `contradicted`, which
+  for the negated predicate means "the substring is there", a claim it had no basis for because it
+  never opened the file. Both forms now return `unverified`, matching the `file-exists`/`file-absent`
+  precedent the file's own header already argued for. The security behaviour is unchanged: the file
+  is still never read, and the fact is still withheld from ground truth.
+- **README claimed the `TGMEM/2` seam had no consumer, and CLAUDE.md claimed token-goat was one.**
+  Both were wrong in opposite directions: token-goat reads only `mem epoch`, while mem's own installed
+  Claude Code hooks consume the recall seam on every session and every prompt. README also carried a
+  literal U+FFFD replacement character in that sentence. The guard that exists to catch this class was
+  scanning neither `AGENTS.md` nor `CLAUDE.md`, and its pattern missed the phrasing CLAUDE.md used; it
+  now covers both files and allows for intervening words.
+- Removed `isGroundTruthStatus`, an exported function with no callers; the constant behind it is used
+  directly and already carries the distinction its comment described.
 - **Six shipped claims said mem made no network calls while `mem recall` was sending every query
   to a third party.** README, AGENTS.md, `mem doctor`, and the `mem dream` error text all described
   `mem dream` as the only path that leaves the machine — one README paragraph contradicted itself in

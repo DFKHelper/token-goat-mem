@@ -113,7 +113,7 @@ import {
 } from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { scanTranscript } from "./sessionScan.js";
-import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
+import { anchorRootFor, isBoundToRoot, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
 import {
   clearAllEmbeddings,
   countEmbeddedFacts,
@@ -1214,12 +1214,23 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
 
   // `anchorRootFor`, not the bare caller root: a project-scoped fact carries the root its anchor is
   // meaningful relative to, and evaluating it against wherever `mem review` happened to be run
-  // resolves the predicate inside an unrelated checkout. That produced a confident `contradicted`
-  // for a perfectly valid fact -- listed here, under the one heading that invites the user to forget
-  // it, while `mem recall` simultaneously affirmed the same fact. Retrieval has resolved roots this
-  // way since the scope_root fix; review is the path that fix did not reach.
+  // resolves the predicate inside an unrelated checkout. That fix covers project scope: retrieval
+  // has resolved project-scope roots this way since the scope_root fix. It does not cover a
+  // `path`-scoped fact, whose anchor `anchorRootFor` still evaluates against the bare caller root
+  // regardless of binding -- so `mem review` run from any unrelated directory found the anchored
+  // file missing there and reported a perfectly valid fact `contradicted`, under the one heading
+  // that invites the user to forget it, while `mem recall` from the fact's own root simultaneously
+  // affirmed it. `isBoundToRoot` gates that: a fact not actually bound to `root` is left
+  // `unverified` rather than evaluated at all -- unverified is honest ("cannot confirm or deny from
+  // here"), `contradicted` here would be a lie about a tree the user is not in. The
+  // ancestor-root/path-scope case (recalling a `path` fact from a directory above its binding) is a
+  // known related gap, deliberately out of scope here: it needs a persisted capture root, which is
+  // a schema change.
   const contradicted = groundTruth.filter(
-    (fact) => !contestedIds.has(fact.id) && evaluateAnchor(fact.anchor, anchorRootFor(fact, root)) === "contradicted"
+    (fact) =>
+      !contestedIds.has(fact.id) &&
+      isBoundToRoot(fact, root) &&
+      evaluateAnchor(fact.anchor, anchorRootFor(fact, root)) === "contradicted"
   );
 
   const now = Date.now();
@@ -1778,7 +1789,9 @@ export function buildProgram(): Command {
         const { fact, reaffirmed } = await withDb((db) => captureExplicit(db, input));
         process.stdout.write(
           reaffirmed === true
-            ? `reaffirmed ${factNounPhrase(fact.kind)} ${fact.id} (already stored; refreshed rather than duplicated)\n`
+            ? `reaffirmed ${factNounPhrase(fact.kind)} ${fact.id} (already stored; refreshed rather than duplicated` +
+                (fact.anchor !== null ? `; anchor: ${fact.anchor}` : "") +
+                `)\n`
             : `remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`
         );
         await attachEmbeddingBestEffort(fact);

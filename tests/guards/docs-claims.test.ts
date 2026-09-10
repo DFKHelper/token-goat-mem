@@ -18,6 +18,10 @@ describe("documentation consistency guards", () => {
   const getAllDocFiles = (): string[] => {
     return [
       "README.md",
+      // AGENTS.md and CLAUDE.md are read by an agent every turn, so a false claim in either
+      // misleads more often than one in README -- they belong inside this guard, not outside it.
+      "AGENTS.md",
+      "CLAUDE.md",
       "docs/integrations/claude-code.md",
       "docs/integrations/codex.md",
       "docs/integrations/copilot-cli.md",
@@ -39,7 +43,9 @@ describe("documentation consistency guards", () => {
 
     it("no doc file claims token-goat calls, invokes, or runs 'mem recall'", () => {
       const files = getAllDocFiles();
-      const pattern = /token-goat\s+(calls|invokes|runs)\s+`mem recall/i;
+      // Allows intervening words ("token-goat optionally calls") and optional backticks around
+      // the tool name: CLAUDE.md carried exactly that phrasing past the original stricter pattern.
+      const pattern = /`?token-goat`?\s+(?:\w+\s+){0,2}(calls|invokes|runs)\s+`?mem recall/i;
       for (const filePath of files) {
         const content = readDocFile(filePath);
         expect(

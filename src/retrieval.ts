@@ -1012,14 +1012,16 @@ export function anchorRootFor(fact: Fact, queryRoot: string): string {
 
 /**
  * Whether `fact`'s scope binding resolves to `root` -- the predicate behind
- * {@link RetrievalOptions.restrictToRoot}.
+ * {@link RetrievalOptions.restrictToRoot}, and reused by `mem review` (cli.ts) to decide whether a
+ * fact's anchor is even meaningful to evaluate against a given root before calling it
+ * `contradicted`.
  *
  * A `path` fact counts as bound when its `scopeRoot` names a file or directory *inside* `root`,
  * which is the containment direction the CLI needs: the caller supplies a project directory and
  * the fact is bound to a file within it. integration-seam.ts's `isInScope` tests the opposite
  * direction against open editor files, so the two predicates are deliberately not shared.
  */
-function isBoundToRoot(fact: Fact, root: string): boolean {
+export function isBoundToRoot(fact: Fact, root: string): boolean {
   if (fact.scope === "global") {
     return true;
   }
