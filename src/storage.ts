@@ -234,6 +234,8 @@ export function normalizeFactText(text: string): string {
 export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefined {
   const wanted = normalizeFactText(candidate.text);
   const subject = candidate.subject === undefined || candidate.subject === null ? null : normalizeSubject(candidate.subject);
+  const candidateScopeRoot = candidate.scopeRoot ?? null;
+  const candidateScopeRepo = candidate.scopeRepo ?? null;
   const rows = db
     .prepare<[string, string], FactRow>(
       "SELECT * FROM facts WHERE kind = ? AND scope = ? AND status IN ('active', 'pinned')"
@@ -244,11 +246,41 @@ export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefin
     .find(
       (fact) =>
         normalizeFactText(fact.text) === wanted &&
-        (fact.scopeRoot ?? null) === (candidate.scopeRoot ?? null) &&
-        (fact.scopeRepo ?? null) === (candidate.scopeRepo ?? null) &&
+        scopeBindingMatchesCandidate(fact, candidate.scope, candidateScopeRoot, candidateScopeRepo) &&
         (fact.subject ?? null) === subject &&
         (fact.value ?? null) === (candidate.value ?? null)
     );
+}
+
+/**
+ * Whether `fact` and a reaffirm candidate share the same scope binding, per this file's own
+ * `findReaffirmableFact` doc comment ("a project fact in one repo is not a restatement of the same
+ * sentence in another") -- which is a statement about the *repository*, not about the literal path
+ * a fact happened to be captured at. An exact AND of `scopeRoot` and `scopeRepo` equality is
+ * stricter than that: restating identical text from a second clone or a worktree of the same
+ * project changes `scopeRoot` (a different absolute path) while `scopeRepo` (the repository
+ * identity) stays the same, and the AND check failed that match and inserted a duplicate row
+ * instead of reaffirming. Recall's own `isBoundToRoot` (src/retrieval.ts) treats a project fact's
+ * `scopeRoot`/`scopeRepo` as an OR for exactly this reason, and AGENTS.md documents reaffirm's own
+ * match as "scope binding" -- reserving the stricter "keys on scope_root alone" wording specifically
+ * for contradiction bucketing (`sameContradictionBucket`, src/contradiction.ts), a deliberate,
+ * separate exception this does not extend to.
+ *
+ * `path` scope carries no identity (`scopeRepo` is always null there), so exact `scopeRoot`
+ * equality is already "the same binding" for it; `global` has no binding to compare at all, and
+ * both sides are always null by construction.
+ */
+function scopeBindingMatchesCandidate(
+  fact: Fact,
+  scope: NewFact["scope"],
+  candidateScopeRoot: string | null,
+  candidateScopeRepo: string | null
+): boolean {
+  if ((fact.scopeRoot ?? null) === candidateScopeRoot) {
+    return true;
+  }
+  const factScopeRepo = fact.scopeRepo ?? null;
+  return scope === "project" && factScopeRepo !== null && factScopeRepo === candidateScopeRepo;
 }
 
 /**
@@ -345,6 +377,7 @@ interface FactRow {
   epoch: number;
   status_changed_at: string | null;
   prior_status: string | null;
+  last_surfaced_at: string | null;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -367,6 +400,7 @@ function rowToFact(row: FactRow): Fact {
     epoch: row.epoch,
     status_changed_at: row.status_changed_at,
     prior_status: row.prior_status as FactStatus | null,
+    last_surfaced_at: row.last_surfaced_at,
   };
 }
 
@@ -398,8 +432,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
@@ -431,7 +465,18 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // `mem epoch --gc` -- silent data loss on the documented backup path. The envelope carries no
       // status timestamp to restore (see exportImport.ts), so the honest clock start is when this
       // store learned of the status, which is now.
-      status === "active" ? capturedAt : new Date().toISOString()
+      status === "active" ? capturedAt : new Date().toISOString(),
+      // Preserved verbatim rather than defaulted, for the same restore-from-export reason as
+      // `status === "active" ? capturedAt : ...` above: a fact restored via full-fidelity JSON
+      // import must keep the status it held immediately before its current one (see
+      // `Fact.prior_status`), or `mem review --undo`/contradiction reinstatement land it on the
+      // wrong state. The capture path never supplies this -- a freshly captured fact has no prior
+      // state -- so it stays NULL there, matching the old hardcoded default.
+      fact.prior_status ?? null,
+      // Preserved verbatim for the same reason: an export that dropped this made a restored fact
+      // look never-surfaced (see `Fact.last_surfaced_at`), so the stale-supersede pass would
+      // re-supersede a fact that was in daily use on the source store.
+      fact.last_surfaced_at ?? null
     );
     replaceFactTerms(db, id, extractFacets(fact.text));
   });
@@ -686,6 +731,17 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
         // nothing downstream could tell it apart from a correct hit. Trimmed to match what was
         // actually stored above, not the raw patch.
         replaceFactTerms(db, id, extractFacets(patch.text.trim()));
+        // Embedding describes `facts.text` too, and for the same reason cannot be left in place: a
+        // vector computed from the old text is a stale claim about the new one, not a missing
+        // embedding -- and unlike the terms above, nothing here can cheaply recompute it (that needs
+        // a network call to the configured embeddings endpoint, which an edit transaction must not
+        // make). Nulling it instead routes the fact back through `listFactsNeedingEmbedding`, so the
+        // next plain `mem embed` backfills it against the current text. Only when the patch doesn't
+        // already carry a fresher `embedding` of its own (none of today's callers pass both `text`
+        // and `embedding` in one patch, but this keeps the precedence unambiguous if one ever does).
+        if (patch.embedding === undefined) {
+          db.prepare("UPDATE facts SET embedding = NULL WHERE id = ?").run(id);
+        }
       }
     }
   });

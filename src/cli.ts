@@ -48,6 +48,7 @@ import {
   loadAllowlist,
   parseCapturedAtOrThrow,
   InvalidAnchorError,
+  resolveScopeRepo,
   screenForSecrets,
   screenInputOrThrow,
   SecretDetectedError,
@@ -875,6 +876,8 @@ interface ExportedFactJson {
   readonly anchor: string | null;
   readonly status: FactStatus;
   readonly confidence: number;
+  readonly last_surfaced_at: string | null;
+  readonly prior_status: FactStatus | null;
   readonly embedding?: number[] | null;
 }
 
@@ -901,6 +904,8 @@ function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boo
     anchor: fact.anchor,
     status: fact.status,
     confidence: fact.confidence,
+    last_surfaced_at: fact.last_surfaced_at ?? null,
+    prior_status: fact.prior_status ?? null,
     ...(includeEmbedding ? { embedding: fact.embedding === null ? null : Array.from(fact.embedding) } : {}),
   };
 }
@@ -2528,6 +2533,12 @@ export function buildProgram(): Command {
           ...(scope !== undefined
             ? { scopeRoot: scope === "global" ? null : scope === "path" ? pathScopeRoot : root }
             : {}),
+          // Recomputed on every scope change, the same way capture does, rather than left at
+          // whatever `scopeRepo` the fact held under its previous scope/root: a rebind to a new
+          // project must drop the old repository's identity (or `isBoundToRoot`'s identity-match
+          // arm keeps serving the fact in the old repo's checkouts), and a rebind onto project
+          // scope from global/path must pick up an identity if one is now available.
+          ...(scope !== undefined ? { scopeRepo: resolveScopeRepo(scope, root) } : {}),
         };
         if (Object.keys(patch).length === 0) {
           throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");

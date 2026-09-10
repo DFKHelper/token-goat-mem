@@ -766,17 +766,26 @@ function applyOptionalFields(
       target.scopeRoot = resolve(root);
     }
   }
-  if (scope === "project") {
-    // Recorded alongside `scopeRoot`, never instead of it: the path stays the primary binding (and
-    // the anchor evaluation root), and the identity only widens which roots can also claim the
-    // fact. `null` whenever no identity is available, which is the common case outside a repository
-    // with a remote -- see src/projectIdentity.ts. Project scope only: `path` facts bind to a file
-    // rather than to a project, and `global` facts are in scope everywhere already.
-    const identity = resolveProjectIdentity(root);
-    if (identity !== null) {
-      target.scopeRepo = identity;
-    }
+  const scopeRepo = resolveScopeRepo(scope, root);
+  if (scopeRepo !== null) {
+    target.scopeRepo = scopeRepo;
   }
+}
+
+/**
+ * Repository identity to record as a fact's `scopeRepo` for the given scope/root, or null when
+ * `scope` never carries one -- every scope but `project` (`path` facts bind to a file rather than
+ * to a project, and `global` facts are in scope everywhere already) -- or when no identity is
+ * available for `root`, the common case outside a repository with a remote (src/projectIdentity.ts).
+ * Recorded alongside `scopeRoot`, never instead of it: the path stays the primary binding (and the
+ * anchor evaluation root), and the identity only widens which roots can also claim the fact.
+ *
+ * Factored out of `applyOptionalFields` so `mem edit --scope` (src/cli.ts) can recompute
+ * `scopeRepo` the same way capture does when a fact's scope binding changes, instead of leaving it
+ * stuck at whatever identity it held under the fact's previous scope/root.
+ */
+export function resolveScopeRepo(scope: FactScope, root: string): string | null {
+  return scope === "project" ? resolveProjectIdentity(root) : null;
 }
 
 /**
