@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -219,6 +219,28 @@ describe("importFromMarkdown", () => {
     for (const outcome of imported) {
       if (outcome.status !== "imported") {continue;}
       expect(outcome.fact.status).toBe("pending");
+    }
+  });
+
+  // Defect 5: --from-md path has no file size cap
+  it("rejects markdown files over the size limit (50 MB), matching the JSON import path", () => {
+    const tempFile = join(tmpdir(), `test-oversized-${Date.now()}.md`);
+
+    try {
+      // Create a file larger than 50 MB (50_000_000 bytes)
+      const sizeLimit = 50_000_000;
+      const oversized = "- " + "x".repeat(sizeLimit + 1);
+      writeFileSync(tempFile, oversized);
+
+      expect(() => {
+        planImportFromMarkdown({ path: tempFile });
+      }).toThrow(/too large/i);
+    } finally {
+      try {
+        unlinkSync(tempFile);
+      } catch {
+        // Ignore cleanup errors
+      }
     }
   });
 });

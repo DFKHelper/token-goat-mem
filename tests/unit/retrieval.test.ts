@@ -329,6 +329,54 @@ describe("retrieve", () => {
     expect(byId.get("3")).not.toContain("—");
   });
 
+  it("hintStyle 'terse' elides a body past its budget, states how much it dropped, and names the command that returns it", async () => {
+    // 200 characters with no spaces, so `trimEnd` cannot move the boundary and the arithmetic in
+    // the marker is assertable exactly: 140 kept, 60 dropped.
+    const long = "a".repeat(200);
+    const facts = [makeFact({ id: "long-1", text: long, kind: "fact" })];
+    const { results } = await retrieve(facts, { query: "", root, hintStyle: "terse" });
+    const display = results[0]?.display ?? "";
+    expect(display).toContain(`${"a".repeat(140)}... (+60 chars: mem show <id>)`);
+    // The id is already on the line in both surfaces that render a terse display, so the marker
+    // must not repeat it: interpolating the 36-character UUID cost more than the elision saved.
+    expect(display).not.toContain("long-1");
+    // The whole body must not be on the line -- that is the defect, not the marker's absence.
+    expect(display).not.toContain(long);
+  });
+
+  it("non-firing: hintStyle 'full' never elides the same body, so the budget belongs to terse alone", async () => {
+    const long = "a".repeat(200);
+    const facts = [makeFact({ id: "long-1", text: long, kind: "fact" })];
+    const { results } = await retrieve(facts, { query: "", root, hintStyle: "full" });
+    const display = results[0]?.display ?? "";
+    expect(display).toContain(long);
+    expect(display).not.toContain("chars: mem show");
+  });
+
+  it("non-firing: hintStyle 'terse' leaves a body inside the budget untouched, with no elision marker", async () => {
+    const facts = [makeFact({ id: "short-1", text: "staging DB host is db.internal", kind: "fact" })];
+    const { results } = await retrieve(facts, { query: "", root, hintStyle: "terse" });
+    const display = results[0]?.display ?? "";
+    expect(display).toContain("staging DB host is db.internal");
+    expect(display).not.toContain("chars: mem show");
+  });
+
+  it("hintStyle 'terse' never splits a surrogate pair straddling the budget boundary", async () => {
+    // U+1F600 is two UTF-16 code units. Padding to 139 puts the pair across index 139/140, so a
+    // bare slice(0, 140) would keep the high half alone: valid JSON once escaped, a replacement
+    // character on screen. The fact body has to be longer than the budget for elision to fire.
+    const text = `${"a".repeat(139)}\u{1F600}${"b".repeat(80)}`;
+    const facts = [makeFact({ id: "emoji-1", text, kind: "fact" })];
+    const { results } = await retrieve(facts, { query: "", root, hintStyle: "terse" });
+    const display = results[0]?.display ?? "";
+    expect(display).toContain("chars: mem show <id>");
+    const lone = [...display].some((char) => {
+      const code = char.codePointAt(0) ?? 0;
+      return code >= 0xd800 && code <= 0xdfff;
+    });
+    expect(lone).toBe(false);
+  });
+
   it("hintStyle 'terse' still applies the (verify) caveat to preferences, just without the CTA", async () => {
     writeFileSync(join(root, "pnpm-lock.yaml"), "x");
     const facts = [

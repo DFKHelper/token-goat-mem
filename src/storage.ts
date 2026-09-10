@@ -783,12 +783,13 @@ export function insertRecallLog(db: Db, sessionId: string, factIds: readonly str
   const mark = db.prepare(
     "UPDATE facts SET last_surfaced_at = MAX(COALESCE(last_surfaced_at, ''), ?) WHERE id = ?"
   );
-  db.transaction(() => {
+  const tx = db.transaction(() => {
     for (const factId of factIds) {
       insert.run(factId, sessionId, atIso);
       mark.run(atIso, factId);
     }
-  })();
+  });
+  tx.immediate();
 }
 
 /** The set of fact ids already logged as surfaced in `sessionId`. */

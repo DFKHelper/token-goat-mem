@@ -208,11 +208,16 @@ const SUPERSEDING_ID_PATTERN = new RegExp(
  * and the caller is the one positioned to decide how to present either case.
  */
 export function findSupersedingFactId(db: Database.Database, factId: string): string | null {
+  // The last audit row for a fact need not be the supersession row -- e.g. `mem used` appends a
+  // row after supersession -- so this filters to rows that actually name a superseding fact rather
+  // than assuming the last row is that one.
   const row = db
-    .prepare<[string], { detail: string }>(
-      "SELECT detail FROM audit_log WHERE fact_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1"
+    .prepare<[string, string, string], { detail: string }>(
+      `SELECT detail FROM audit_log
+       WHERE fact_id = ? AND (detail LIKE ? OR detail LIKE ?)
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`
     )
-    .get(factId);
+    .get(factId, `${SUPERSEDED_BY_FACT_PREFIX}%`, `${SUPERSEDED_AS_DUPLICATE_PREFIX}%`);
   return row === undefined ? null : (SUPERSEDING_ID_PATTERN.exec(row.detail)?.[1] ?? null);
 }
 

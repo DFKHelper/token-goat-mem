@@ -320,6 +320,14 @@ describe("mem facets", () => {
     expect(result.stderr).toContain("mutually exclusive");
   });
 
+  // Defect 4: --backfill missing from mutual-exclusion guard
+  it("refuses --backfill combined with --all (not silently honouring one)", async () => {
+    const result = await runCli(["facets", "--backfill", "--all"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/^mem: \S/u);
+    expect(result.stderr).toContain("mutually exclusive");
+  });
+
   it("`mem doctor` names the term shortfall and the command that fixes it, so a store captured before facets existed is not silently unfilterable", async () => {
     await remember("the ranking lives in src/retrieval.ts");
     await remember("the delta filter lives in src/integration-seam.ts");

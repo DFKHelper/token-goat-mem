@@ -71,7 +71,19 @@ describe("claudeCode wiring", () => {
     const stopHook = settings.hooks.Stop[0].hooks[0];
     expect(stopHook.__token_goat_mem).toBe(true);
     expect(stopHook.command).toContain("mem scan-session --hook-stdin --quiet --root");
-    expect(Object.keys(settings.hooks).sort()).toEqual(["SessionStart", "Stop", "UserPromptSubmit"]);
+    // PreCompact runs the same scan as Stop, and is the only event guaranteed to fire while the
+    // pre-compaction transcript is still on disk -- a session compacted mid-task and then killed
+    // rather than ending a turn never fires Stop at all.
+    expect(settings.hooks.PreCompact).toHaveLength(1);
+    const preCompactHook = settings.hooks.PreCompact[0].hooks[0];
+    expect(preCompactHook.__token_goat_mem).toBe(true);
+    expect(preCompactHook.command).toBe(stopHook.command);
+    expect(Object.keys(settings.hooks).sort()).toEqual([
+      "PreCompact",
+      "SessionStart",
+      "Stop",
+      "UserPromptSubmit",
+    ]);
 
     const claudeMd = read(join(root, "CLAUDE.md"));
     expect(claudeMd).toContain("<!-- token-goat-mem:claude-code:start -->");
@@ -327,6 +339,21 @@ describe("claudeCode wiring", () => {
     seed(settingsPath, JSON.stringify(mutated));
     claudeCode.install({ root, homeDir: home });
     expect(read(bakPath)).toBe(originalText);
+  });
+
+  it("CRITICAL: does not delete a pre-existing empty hooks.SessionStart array on uninstall", () => {
+    // Reproduces a real data-loss bug: an empty event array a user wrote themselves is
+    // indistinguishable, once mem's own stamped entries are removed, from one mem created and
+    // drained back to empty. The naive "empty means mem's" prune deleted the user's own key, then
+    // the now-empty `hooks` object too, silently discarding hand-authored config on uninstall.
+    const settingsPath = join(root, ".claude", "settings.json");
+    const original = `{"model":"opus","hooks":{"SessionStart":[]}}`;
+    seed(settingsPath, original);
+
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+
+    expect(read(settingsPath)).toBe(original);
   });
 });
 
@@ -949,6 +976,22 @@ describe("regression: per-tool marker pairing survives malformed markers", () =>
     expect(after).not.toContain("mem body");
     expect(after).not.toContain(START);
   });
+
+  it("removes every duplicated block, not just the first, when two complete blocks exist back-to-back", () => {
+    // Realistic outcome of a git merge: two branches each ran `mem init` and both committed blocks
+    // ended up in the merged CLAUDE.md. Stopping at the first pair used to leave a whole second
+    // block -- body included -- behind while uninstall still reported success.
+    const path = join(root, "CLAUDE.md");
+    seed(path, `# My notes\n\n${START}\nmem body\n${END}\n\n${START}\nmem body\n${END}\n`);
+
+    claudeCode.uninstall({ root, homeDir: home });
+
+    const after = read(path);
+    expect(after).toContain("# My notes");
+    expect(after).not.toContain("mem body");
+    expect(after).not.toContain(START);
+    expect(after).not.toContain(END);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── shared block body upgrades ───────────────────────────────────────────────────────────────────────────
@@ -1125,6 +1168,54 @@ describe("regression: mem does not restyle config files it did not author", () =
     // user's task -- uninstall prunes the array it emptied rather than leaving `"inputs": []`.
     copilotVscode.uninstall({ root, homeDir: home });
     expect(read(tasksPath)).toBe(original);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── Claude settings.json accepts JSONC ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * `installClaudeSettings`/`uninstallClaudeSettings` used to parse with strict `JSON.parse`, so a
+ * `~/.claude/settings.json` with a `//`/`/* *\/` comment or a trailing comma was rejected outright
+ * with "is not valid JSON; refusing to modify a hand-edited config" -- for exactly the users this
+ * project's own `jsonc-parser` dependency exists to support. Routes through the same
+ * `parseJsoncOrConflict` the VS Code path already used.
+ */
+describe("regression: Claude settings.json accepts JSONC (comments, trailing commas)", () => {
+  const JSONC_SETTINGS = [
+    "{",
+    '    // a hand-written comment mem must not choke on',
+    '    "model": "opus",',
+    "    /* block comment */",
+    '    "permissions": {',
+    '        "allow": ["Bash(ls:*)"],',
+    "    },",
+    "}",
+    "",
+  ].join("\n");
+
+  it("installs into a settings.json with a line comment, a block comment, and a trailing comma", () => {
+    const settingsPath = join(home, ".claude", "settings.json");
+    seed(settingsPath, JSONC_SETTINGS);
+
+    expect(() => claudeCode.install({ root, homeDir: home, user: true })).not.toThrow();
+
+    const after = read(settingsPath);
+    expect(after).toContain('"SessionStart"');
+  });
+
+  it("round-trips comments and indentation byte-for-byte through install and uninstall", () => {
+    const settingsPath = join(home, ".claude", "settings.json");
+    seed(settingsPath, JSONC_SETTINGS);
+
+    claudeCode.install({ root, homeDir: home, user: true });
+    const after = read(settingsPath);
+    expect(after).toContain("// a hand-written comment mem must not choke on");
+    expect(after).toContain("/* block comment */");
+
+    claudeCode.uninstall({ root, homeDir: home, user: true });
+    // Byte-for-byte, not a parsed-object comparison: a parsed comparison is exactly the weak
+    // assertion that let mem restyle/reject hand-edited configs unnoticed before.
+    expect(read(settingsPath)).toBe(JSONC_SETTINGS);
   });
 });
 
@@ -1375,7 +1466,7 @@ describe("regression: integration docs match the markdown mem init actually writ
     // Extract the hook structure from what was written, per event, with the STAMP_KEY stripped
     const writtenHooks = written.hooks as Record<string, unknown>;
     const events = Object.keys(writtenHooks).sort();
-    expect(events).toEqual(["SessionStart", "Stop", "UserPromptSubmit"]);
+    expect(events).toEqual(["PreCompact", "SessionStart", "Stop", "UserPromptSubmit"]);
     function hookWithoutStamp(container: Record<string, unknown>, event: string): Record<string, unknown> {
       const groups = container[event] as Record<string, unknown>[];
       expect(groups, `${event} groups`).toHaveLength(1);

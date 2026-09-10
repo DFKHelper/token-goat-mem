@@ -6,6 +6,83 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem uninstall claude-code` could delete configuration a user wrote themselves.** Install
+  creates `hooks` and `hooks.<event>` when a `settings.json` has neither, so uninstall pruned the
+  containers its own removals had emptied. But an event array that is empty *after* mem's stamped
+  entries are removed is indistinguishable from one the user wrote empty in the first place, and a
+  hand-authored `"hooks": {"SessionStart": []}` was silently deleted along with the now-empty
+  `hooks` object around it. Uninstall now reads the one-time `.token-goat-mem.bak` snapshot taken
+  before mem's first write to answer the question emptiness cannot: did this key exist beforehand.
+  A missing or unparseable snapshot is treated as "everything pre-existed", so pruning fails
+  closed rather than deleting content mem cannot prove it owns.
+- **`mem init` and `mem uninstall` rejected any `settings.json` containing a comment or a trailing
+  comma.** Claude Code's own settings file commonly carries both, and this file already depends on
+  `jsonc-parser` to preserve exactly that formatting on the VS Code path -- the Claude Code path was
+  the one still going through a strict `JSON.parse`, so it refused to modify the configurations it
+  most needed to handle. Both paths now share the JSONC parser.
+- **`mem uninstall` left a duplicated marker block behind while reporting success.** A `CLAUDE.md`
+  or `AGENTS.md` that ended up with two complete back-to-back blocks for one tool -- the realistic
+  outcome of merging two branches that each ran `mem init` -- had only its first block stripped.
+  Removal now loops until no resolvable pair remains.
+- **A transient `.git/index` read error withheld a correctly-tracked fact.** Both catch blocks in
+  the git-index reader returned "index parsed, definitively empty" for *any* stat or read failure,
+  so a Windows file lock from a git GUI, antivirus, or a concurrent git command made `git-tracked`
+  report `contradicted` -- the opposite of the truth -- and the fact was dropped from ground truth.
+  Only `ENOENT` now means empty; every other error means unverified, matching `package-version`.
+- **`mem show --json` reported no successor for a superseded fact that had one.** The lookup read
+  the last audit row for the fact, and `mem used` appends one, so recording a use erased the
+  supersession link from the payload. It now finds the superseding row specifically.
+- **Two concurrent `mem remember` calls of the same sentence both inserted.** The
+  "have I already stored this" read sat outside the transaction that reaffirms, so both callers saw
+  nothing to reaffirm -- producing exactly the duplicate the reaffirm path exists to prevent. The
+  read now happens inside the immediate transaction that acts on it.
+- **`mem facets --backfill` was declared, never read, and absent from the mutual-exclusion guard,**
+  so `--backfill --all` silently ran a full re-extract while the ignored flag looked honoured. The
+  guard and its error message now name all four modes.
+- **`mem import --from-md` had no file size cap** while the JSON path capped at 50 MB. Both now
+  share the same constant.
+
+### Security
+
+- **`mem import --from-json` accepted a `scopeRoot` pointing anywhere on disk.** The field was
+  copied verbatim after a bare non-empty-string check -- the validation error text claimed to
+  expect an absolute path without ever verifying one -- and for a `project`-scoped fact it becomes
+  the root that anchor predicates are evaluated against. A crafted import file could therefore turn
+  every later `mem recall` into a file-existence and content-substring oracle for a directory
+  outside `--root`. `scopeRoot` is now required to be absolute and contained by the import root,
+  reusing the same containment check every anchor argument already goes through; a row that fails
+  is skipped like any other invalid row rather than aborting the file.
+- **`--path` was documented as "resolved against `--root`" and was not.** It used a bare
+  `path.resolve`, so `--path "../../other-repo"` bound a fact to a tree outside the root it was
+  captured under. All capture paths now enforce containment.
+- **`SecretDetectedError` carried the raw credential.** The message was redacted, but the thrown
+  object retained the full literal, so any caller logging or serializing it echoed the secret back.
+  The error now carries only the pattern name, field, redacted preview, and length.
+- **`mem edit` copied the prior field value into the audit log without re-screening it,** making a
+  second at-rest copy of anything that got past capture screening. Prior values are now screened
+  and redacted on the way in. Because the audit row is also what `--undo` restores from, undoing an
+  edit whose prior value was redacted now refuses and says so, rather than restoring the redaction
+  marker in as the fact's text and reporting success.
+- **AWS STS session key ids (`ASIA...`) were stored verbatim** -- only `AKIA` was matched, and at 20
+  characters they sit permanently below the generic entropy floor, so no fallback layer caught them.
+- **The OpenAI key pattern could not match the current `sk-proj-` format,** stopping four characters
+  in because `-` was absent from its character class.
+- **`password-assignment` matched inside longer words,** flagging `notpassword=` and `mypwd=` as
+  credentials. A screener that refuses ordinary text trains users into blanket allowlists, which is
+  its own security failure.
+
+### Changed
+
+- The `mem recall --hint-format` footer now says `N more in scope, not sent` rather than
+  `N more matched, not sent`. `retrieve()` ranks the scoped pool, it does not filter it, so the
+  count includes facts that never matched the query -- the old wording asserted something untrue.
+- The transaction-mode guard now catches an inline `db.transaction(...)()` invocation. Its regex
+  keyed on a `tx`-named variable, so the one call site that did not follow that convention was
+  invisible to it and ran in deferred mode while the guard reported zero offenders.
+- `CLAUDE.md` no longer claims there is no CI workflow, and `mem dream` no longer claims to be the
+  only command that sends fact text off the machine (`mem embed` does too).
+### Fixed
+
 - **`mem recall --hint-format` could not tell "nothing to say" from "held things back".** A
   response carrying two of six matching decisions was byte-identical to one carrying all six, and a
   response for a project with three facts sitting in the review queue was byte-identical -- a bare
@@ -13,7 +90,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   unfalsifiable from the wire, so a consumer could not distinguish a complete answer from a truncated
   one, and a queue could fill indefinitely behind a payload that looked like an empty store. The
   single footer line now carries only the clauses that apply: `mem show <id> for detail` when a fact
-  line was emitted, `N more matched, not sent` when the per-kind caps dropped results, and
+  line was emitted, `N more in scope, not sent` when the per-kind caps dropped results, and
   `N withheld; mem review to resolve contested/pending` when facts were held back. A response with
   nothing to follow up on has no footer at all, where before it always carried the same fixed
   sentence -- including the review call-to-action, on a store with nothing to review. The withheld

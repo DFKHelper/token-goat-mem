@@ -326,6 +326,60 @@ describe("captureExplicit (happy path)", () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────── concurrent-reaffirm race ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Regression: `findReaffirmableFact` used to run outside the transaction that decides whether to
+ * reaffirm or insert. Two concurrent `mem remember` of the same sentence could therefore both read
+ * "nothing to reaffirm" and both insert -- the exact duplicate the reaffirm path exists to prevent.
+ *
+ * The interleave is reproduced exactly, mirroring tests/exportImport.test.ts's
+ * `dbWithRivalInsertAtLockTime`: `db` is proxied so a rival `captureExplicit` of the identical
+ * sentence fires the moment `db.transaction(...)` is first called to build the write's transaction
+ * wrapper -- the earliest point at which the buggy code had already finished its (unguarded) read.
+ * Racing two real processes would test the same thing nondeterministically.
+ */
+describe("regression: a reaffirmable fact inserted between the read and the write lock", () => {
+  const SENTENCE = { text: "uses pnpm not npm", kind: "preference" as const };
+
+  /** `db` with a rival `captureExplicit` of the same sentence spliced into the race window, fired once. */
+  function dbWithRivalCaptureAtLockTime(realDb: Database.Database): Database.Database {
+    let fired = false;
+    return new Proxy(realDb, {
+      get(target, prop, receiver): unknown {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (prop !== "transaction" || typeof value !== "function") {
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return (fn: (...args: unknown[]) => unknown): unknown => {
+          if (!fired) {
+            // Set before capturing: the rival's own captureExplicit call also calls
+            // db.transaction() and would re-enter here otherwise.
+            fired = true;
+            captureExplicit(target, { ...SENTENCE, root });
+          }
+          return target.transaction(fn);
+        };
+      },
+    });
+  }
+
+  it("reaffirms instead of inserting a duplicate when a rival capture wins the race", () => {
+    const raced = dbWithRivalCaptureAtLockTime(db);
+
+    const { fact, reaffirmed } = captureExplicit(raced, { ...SENTENCE, root });
+
+    // Whichever side is treated as the "second" write, it must land as a reaffirm of the rival's
+    // row, never as a second row for the same sentence.
+    expect(reaffirmed).toBe(true);
+    const rows = db
+      .prepare<[string], { id: string }>("SELECT id FROM facts WHERE text = ? AND status IN ('active', 'pinned')")
+      .all(SENTENCE.text);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.id).toBe(fact.id);
+  });
+});
+
 describe("captureSuggested -- derived-source facts never auto-promote (design plan Section 3 / S9)", () => {
   it("always stores pending regardless of the requested confidence, and clamps confidence below the trust cap", () => {
     const { fact } = captureSuggested(db, {
@@ -401,6 +455,33 @@ describe("screenForSecrets", () => {
   });
 });
 
+describe("SecretDetectedError does not retain the raw credential", () => {
+  it("exposes only patternName/field/preview/length on `matches`, never the raw matched literal", () => {
+    const rawKey = "AKIAIOSFODNN7EXAMPLE";
+    let caught: unknown;
+    try {
+      captureExplicit(db, { text: "suspicious", kind: "fact", sourceRef: rawKey, root });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SecretDetectedError);
+    const err = caught as SecretDetectedError;
+    expect(err.matches).toHaveLength(1);
+    const match = err.matches[0] as unknown as Record<string, unknown>;
+    expect(match["matched"]).toBeUndefined();
+    expect(Object.values(match)).not.toContain(rawKey);
+    expect(match["preview"]).not.toBe(rawKey);
+    expect(match["preview"]).not.toContain(rawKey);
+    expect(match["patternName"]).toBe("aws-access-key-id");
+    expect(match["field"]).toBe("sourceRef");
+    expect(match["length"]).toBe(rawKey.length);
+
+    // The redacted message is fine to carry the credential; the structured `matches` array is the
+    // part any caller might serialize or log wholesale.
+    expect(JSON.stringify(err.matches)).not.toContain(rawKey);
+  });
+});
+
 describe("loadAllowlist", () => {
   it("returns an empty list when .mem/allowlist does not exist", () => {
     expect(loadAllowlist(root)).toEqual([]);
@@ -452,5 +533,26 @@ describe("regression: screenForSecrets catches a hex secret sitting next to its 
       expect(screenForSecrets({ text: `hash ${lower}` }, [])).toHaveLength(0);
       expect(screenForSecrets({ text: `hash ${lower.toUpperCase()}` }, [])).toHaveLength(0);
     }
+  });
+
+  // Defect 1: openai-style-key missing - and _ in character class
+  it("catches modern OpenAI project keys (sk-proj-...)", () => {
+    expect(screenForSecrets({ text: "openai key is sk-proj-abcdefghijklmnopqrst1234567890ab" }, [])).not.toHaveLength(0);
+  });
+
+  // Defect 2: password-assignment missing word boundary
+  it("does not false-positive on notpassword= or mypwd=", () => {
+    expect(screenForSecrets({ text: "notpassword=hunter2" }, [])).toHaveLength(0);
+    expect(screenForSecrets({ text: "mypwd=secret123" }, [])).toHaveLength(0);
+  });
+
+  it("still catches actual password assignments", () => {
+    expect(screenForSecrets({ text: "password=hunter2" }, [])).not.toHaveLength(0);
+    expect(screenForSecrets({ text: "pwd=secret123" }, [])).not.toHaveLength(0);
+  });
+
+  // Defect 3: AWS ASIA STS keys not caught
+  it("catches AWS STS temporary session key ids (ASIA...)", () => {
+    expect(screenForSecrets({ text: "sts key is ASIAIOSFODNN7EXAMPLE1234" }, [])).not.toHaveLength(0);
   });
 });

@@ -90,23 +90,41 @@ export class InvalidAnchorError extends Error {
 }
 
 /**
+ * A `SecretMatch` reduced to what a caller of `SecretDetectedError` legitimately needs -- which
+ * pattern fired, which field, and a masked preview -- with the raw matched literal dropped. The
+ * whole purpose of {@link SecretDetectedError} is that the credential must not travel any further;
+ * retaining `matched` on a field as public as `matches` would let any `JSON.stringify(err)` or log
+ * of the caught error echo the secret straight back out.
+ */
+export interface SecretMatchSummary {
+  readonly patternName: string;
+  readonly field: string;
+  readonly preview: string;
+  readonly length: number;
+}
+
+/**
  * Thrown when a captured value matches a secret pattern that is not covered
  * by an explicit `.mem/allowlist` entry. Deny-by-default (design principle
  * 7): the write is refused outright, not redacted-and-stored.
  */
 export class SecretDetectedError extends Error {
-  readonly matches: readonly SecretMatch[];
+  readonly matches: readonly SecretMatchSummary[];
 
   constructor(matches: readonly SecretMatch[]) {
-    const summary = matches
-      .map((match) => `${match.field}: ${match.patternName} (${redactPreview(match.matched)})`)
-      .join("; ");
+    const summaries: SecretMatchSummary[] = matches.map((match) => ({
+      patternName: match.patternName,
+      field: match.field,
+      preview: redactPreview(match.matched),
+      length: match.matched.length,
+    }));
+    const summaryText = summaries.map((s) => `${s.field}: ${s.patternName} (${s.preview})`).join("; ");
     super(
-      `refusing to store fact: possible secret detected -- ${summary}. If this is not a secret, ` +
+      `refusing to store fact: possible secret detected -- ${summaryText}. If this is not a secret, ` +
         `add the exact value to .mem/allowlist in the project root.`
     );
     this.name = "SecretDetectedError";
-    this.matches = matches;
+    this.matches = summaries;
   }
 }
 
@@ -125,18 +143,18 @@ interface SecretPattern {
 
 /** Named, well-known secret formats. Zero-effort to reason about, near-zero false-positive rate. */
 const SECRET_PATTERNS: readonly SecretPattern[] = [
-  { name: "aws-access-key-id", regex: /AKIA[0-9A-Z]{16}/g },
+  { name: "aws-access-key-id", regex: /A(?:KIA|SIA)[0-9A-Z]{16}/g },
   { name: "github-token", regex: /gh[pousr]_[A-Za-z0-9]{36,255}/g },
   { name: "slack-token", regex: /xox[baprs]-[0-9A-Za-z-]{10,72}/g },
   { name: "google-api-key", regex: /AIza[0-9A-Za-z_-]{35}/g },
   { name: "stripe-key", regex: /sk_(?:live|test)_[0-9a-zA-Z]{16,}/g },
   { name: "anthropic-api-key", regex: /sk-ant-[A-Za-z0-9_-]{20,}/g },
-  { name: "openai-style-key", regex: /sk-[A-Za-z0-9]{20,}/g },
+  { name: "openai-style-key", regex: /sk-[A-Za-z0-9_-]{20,}/g },
   { name: "private-key-block", regex: /-----BEGIN[ A-Z]*PRIVATE KEY-----/g },
   { name: "jwt", regex: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g },
   {
     name: "password-assignment",
-    regex: /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[^\s'"]{6,}['"]?/gi,
+    regex: /\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[^\s'"]{6,}['"]?/gi,
   },
   /**
    * A long hex run written near a credential word, in prose rather than assignment syntax.
@@ -738,10 +756,15 @@ function applyOptionalFields(
   }
   if (scope !== "global") {
     const trimmedPath = input.path?.trim();
-    target.scopeRoot =
-      scope === "path" && trimmedPath !== undefined && trimmedPath.length > 0
-        ? resolve(root, trimmedPath)
-        : resolve(root);
+    if (scope === "path" && trimmedPath !== undefined && trimmedPath.length > 0) {
+      const bound = anchorPathWithinRoot(root, trimmedPath);
+      if (bound === null) {
+        throw new CaptureValidationError(`--path ${JSON.stringify(trimmedPath)} resolves outside --root ${JSON.stringify(root)}`);
+      }
+      target.scopeRoot = bound;
+    } else {
+      target.scopeRoot = resolve(root);
+    }
   }
   if (scope === "project") {
     // Recorded alongside `scopeRoot`, never instead of it: the path stays the primary binding (and
@@ -809,9 +832,12 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
   // Explicit capture only. `captureSuggested` deliberately does not reaffirm: its candidates come
   // from file and transcript content, and letting derived text refresh a user-stated fact's clock
   // would hand a `CLAUDE.md` the power to keep a fact alive that the user never restated.
-  const existing = findReaffirmableFact(db, newFact);
-  if (existing !== undefined) {
-    const tx = db.transaction((): Fact => {
+  // The lookup and the reaffirm-or-insert it decides between must be one atomic unit: read outside
+  // the transaction (as this used to do) let two concurrent `mem remember` of the same sentence both
+  // see "nothing to reaffirm" and both insert -- the exact duplicate reaffirm exists to prevent.
+  const tx = db.transaction((): CaptureResult => {
+    const existing = findReaffirmableFact(db, newFact);
+    if (existing !== undefined) {
       const refreshed = reaffirmFact(db, existing.id);
       if (refreshed === undefined) {
         throw new CaptureValidationError(`fact ${existing.id} vanished while being reaffirmed`);
@@ -821,13 +847,15 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
         factId: refreshed.id,
         detail: `restated ${refreshed.kind} fact (scope=${refreshed.scope}); captured_at and confidence refreshed`,
       });
-      return refreshed;
-    });
-    return { fact: tx.immediate(), reaffirmed: true };
-  }
-
-  const fact = writeFact(db, newFact, "capture_explicit", (f) => `stored active ${f.kind} fact (scope=${f.scope})`);
-  return { fact };
+      return { fact: refreshed, reaffirmed: true };
+    }
+    return { fact: writeFact(db, newFact, "capture_explicit", (f) => `stored active ${f.kind} fact (scope=${f.scope})`) };
+  });
+  // BEGIN IMMEDIATE, for the same reason as `writeFact`: this reads (`findReaffirmableFact`) before
+  // it writes, and once this outer transaction is open, the nested `writeFact` transaction it may
+  // call degrades to a savepoint -- so this outer invocation is the one that decides whether the
+  // read-then-write pair is safe against a concurrent writer under WAL.
+  return tx.immediate();
 }
 
 /**

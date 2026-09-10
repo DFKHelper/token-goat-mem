@@ -564,6 +564,58 @@ describe("mem doctor (read-only health check)", () => {
     const epochAfter = await runCli(["epoch"]);
     expect(epochAfter.stdout.trim()).toBe("1");
   });
+
+  it("reports the hint budget, so a store that has outgrown one recall block says so", async () => {
+    // 15 recallable facts against a 14-line ceiling: the first store size at which a fact the user
+    // can see in `mem list` may never reach a session, and nothing else in doctor would say it.
+    for (let index = 0; index < 15; index += 1) {
+      await runCli(["remember", `budget fact number ${index}`, "--kind", "fact"]);
+    }
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("hint budget: 15 recallable facts, at most 14 per recall; 0 pinned of 2 reserved slots");
+    expect(result.stdout).toContain("`mem pin <id>`");
+  });
+
+  it("non-firing: a store inside the ceiling gets the same line without the pin remediation", async () => {
+    await runCli(["remember", "the only fact here", "--kind", "fact"]);
+    const result = await runCli(["doctor"]);
+    expect(result.stdout).toContain("hint budget: 1 recallable fact, at most 14 per recall; 0 pinned of 2 reserved slots");
+    expect(result.stdout).not.toContain("mem pin <id>");
+  });
+
+  it("warns when more facts are pinned than the reserve can guarantee", async () => {
+    const ids: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const stored = await runCli(["remember", `pinned fact ${index}`, "--kind", "fact"]);
+      ids.push((/[0-9a-f-]{36}/u.exec(stored.stdout) ?? [""])[0]);
+    }
+    for (const id of ids) {
+      await runCli(["pin", id]);
+    }
+    const result = await runCli(["doctor"]);
+    expect(result.stdout).toContain("3 pinned of 2 reserved slots");
+    expect(result.stdout).toContain("only 2 pins are guaranteed a slot");
+  });
+
+  it("reports project-scoped facts whose root no longer exists, which every other line calls healthy", async () => {
+    const gone = mkdtempSync(join(tmpdir(), "mem-doctor-gone-"));
+    await runCli(["remember", "bound to a doomed directory", "--kind", "fact", "--scope", "project", "--root", gone]);
+    rmSync(gone, { recursive: true, force: true });
+
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    // Still active, still term-covered: the status counts are exactly why this line has to exist.
+    expect(result.stdout).toContain("active=1");
+    expect(result.stdout).toContain("scope placement: 1 fact bound to 1 missing root -- unreachable from any session");
+  });
+
+  it("non-firing: a project-scoped fact whose root still exists is not reported as orphaned", async () => {
+    await runCli(["remember", "bound to a live directory", "--kind", "fact", "--scope", "project", "--root", home]);
+    const result = await runCli(["doctor"]);
+    expect(result.stdout).toContain("scope placement: every project/path-scoped fact's root still exists");
+    expect(result.stdout).not.toContain("missing root");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── integration-seam.ts fail-open via `mem recall --hint-format` ───────────────────────────────────────────────────────────────────────────
@@ -1236,6 +1288,19 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(envelope.facts[0]?.scopeRoot).toBe(join(home, "src", "auth.ts"));
   });
 
+  it("--from-md --scope path --path <escaping-relative-path> skips every bullet with a per-item error, not bound outside --root", async () => {
+    const path = writeFixture(["- auth.ts owns migrations."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home, "--scope", "path", "--path", "../../etc/passwd"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("imported 0 of 1 candidate fact(s)");
+    expect(result.stdout).toContain("resolves outside --root");
+
+    const listed = await runCli(["list", "--status", "pending", "--json"]);
+    const envelope = JSON.parse(listed.stdout) as { facts: readonly unknown[] };
+    expect(envelope.facts).toHaveLength(0);
+  });
+
   it("--from-md --scope path without --path exits 1 with a pinned message", async () => {
     const path = writeFixture(["- auth.ts owns migrations."].join("\n"));
 
@@ -1563,6 +1628,48 @@ describe("mem show --json", () => {
 
     const asJson = await runCli(["show", loserId, "--json"]);
     const envelope = JSON.parse(asJson.stdout) as {
+      supersededBy: { id: string; status: string; text: string } | null;
+    };
+    expect(envelope.supersededBy).toEqual({ id: winnerId, status: "active", text: "node 20 is the floor" });
+  });
+
+  it("still resolves the superseding fact after a later audit row (`mem used`) is appended", async () => {
+    // `findSupersedingFactId` used to read the *last* audit row for a fact and assume it named the
+    // successor. `mem used` appends its own audit row after supersession, so once a superseded fact
+    // is later marked used, the last row is a "used" row, not a "superseded by" row -- and the
+    // lookup must not fall back to treating that as "no successor".
+    const first = await runCli([
+      "remember",
+      "node 18 is the floor",
+      "--kind",
+      "decision",
+      "--subject",
+      "node-floor-used",
+      "--value",
+      "18",
+    ]);
+    const loserId = extractRememberedId(first);
+    const second = await runCli([
+      "remember",
+      "node 20 is the floor",
+      "--kind",
+      "decision",
+      "--subject",
+      "node-floor-used",
+      "--value",
+      "20",
+    ]);
+    const winnerId = extractRememberedId(second);
+
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+
+    expect((await runCli(["used", loserId, "--session-id", "sess-1"])).exitCode).toBe(0);
+
+    const shown = await runCli(["show", loserId]);
+    expect(shown.stdout).toContain("status: superseded");
+    expect(shown.stdout).toContain(`superseded_by: ${winnerId} (active): node 20 is the floor`);
+
+    const envelope = JSON.parse((await runCli(["show", loserId, "--json"])).stdout) as {
       supersededBy: { id: string; status: string; text: string } | null;
     };
     expect(envelope.supersededBy).toEqual({ id: winnerId, status: "active", text: "node 20 is the floor" });
@@ -2564,7 +2671,11 @@ describe("regression: recall does not surface another project's facts", () => {
       const jsonPath = join(exportDir, "export.json");
       writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
 
-      const imported = await runCli(["import", "--from-json", jsonPath]);
+      // `--root projA` here, not the default cwd: `importFromJson` now bounds a non-global fact's
+      // `scopeRoot` to the caller's `--root` (see the exportImport.ts scopeRoot-containment fix),
+      // so a full-fidelity restore must be run with `--root` set to (an ancestor of) the fact's own
+      // recorded `scopeRoot` -- exactly how a real restore-into-the-same-project would be invoked.
+      const imported = await runCli(["import", "--from-json", jsonPath, "--root", projA]);
       expect(imported.exitCode).toBe(0);
       expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
 
@@ -2696,6 +2807,57 @@ describe("regression: --scope path binds to --path, not --root (previously unrea
     const result = await runCli(["remember", "some fact", "--kind", "fact", "--path", "src/auth.ts"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--path requires --scope path");
+  });
+
+  it("mem remember --scope path --path <escaping-relative-path> is rejected, not bound outside --root", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-scope-path-escape-remember-"));
+    try {
+      const result = await runCli([
+        "remember",
+        "escapes the project root",
+        "--kind",
+        "fact",
+        "--scope",
+        "path",
+        "--path",
+        "../../etc/passwd",
+        "--root",
+        proj,
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("resolves outside --root");
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
+  it("mem edit --scope path --path <escaping-relative-path> is rejected, not bound outside --root", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-scope-path-escape-edit-"));
+    try {
+      const remembered = await runCli([
+        "remember",
+        "a.ts owns retries",
+        "--kind",
+        "fact",
+        "--scope",
+        "path",
+        "--path",
+        "src/a.ts",
+        "--root",
+        proj,
+      ]);
+      const id = extractRememberedId(remembered);
+
+      const edited = await runCli(["edit", id, "--scope", "path", "--path", "../../etc/passwd", "--root", proj, "--force"]);
+      expect(edited.exitCode).toBe(1);
+      expect(edited.stderr).toContain("resolves outside --root");
+
+      const shown = await runCli(["show", id]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toContain(`scope: path (${join(proj, "src", "a.ts")})`);
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
   });
 
   it("mem edit --scope path --path <file> rebinds scopeRoot to the new file", async () => {
@@ -3416,6 +3578,39 @@ describe("mem edit --undo", () => {
     expect(restored.stdout).toContain(`text: ${original}`);
   });
 
+  it("redacts a secret-bearing prior value out of the edit audit row's detail and prior_json, instead of duplicating it", async () => {
+    // Simulates a secret that slipped past capture-time screening (a heuristic, not a guarantee) --
+    // inserted directly via storage, bypassing capture.ts entirely, the same way a hand-edited row
+    // or a gap in the screener's coverage would land one.
+    const rawKey = "AKIAIOSFODNN7EXAMPLE";
+    const db = openStorage(resolveDbPath());
+    const fact = insertFact(db, {
+      text: `uses key ${rawKey} for the legacy importer`,
+      kind: "fact",
+      scope: "global",
+      source_type: "user",
+    });
+    db.close();
+
+    const edited = await runCli(["edit", fact.id, "--text", "uses a rotated key for the legacy importer", "--force"]);
+    expect(edited.exitCode).toBe(0);
+
+    const auditDb = openStorage(resolveDbPath());
+    const row = auditDb
+      .prepare("SELECT detail, prior_json FROM audit_log WHERE fact_id = ? AND event = 'edit'")
+      .get(fact.id) as { detail: string; prior_json: string | null };
+    auditDb.close();
+
+    expect(row.detail).not.toContain(rawKey);
+    expect(row.detail).toContain("redacted");
+    expect(row.prior_json ?? "").not.toContain(rawKey);
+    expect(row.prior_json ?? "").toContain("redacted");
+
+    // The edit itself still succeeds and stores the new (non-secret) text normally.
+    const shown = await runCli(["show", fact.id]);
+    expect(shown.stdout).toContain("text: uses a rotated key for the legacy importer");
+  });
+
   it("refuses when the last recorded action was not an edit, naming that action", async () => {
     const remembered = await runCli(["remember", "we cache build output", "--kind", "decision"]);
     const id = extractRememberedId(remembered);
@@ -3435,6 +3630,42 @@ describe("mem edit --undo", () => {
   // has a history whose last row is not an edit. The refusal names that row rather than saying
   // something generic, which is the difference between "you have not edited this" and "this command
   // does not know what you did".
+  // Redacting a secret-shaped prior value on its way into the audit log is the right call -- it stops
+  // `mem edit` making a second at-rest copy of a credential that slipped past capture screening. The
+  // realistic way a value gets past capture and trips later is the allowlist: it was an accepted
+  // exception when the fact was stored, and is not one by the time the fact is edited. But the audit
+  // row is also what `--undo` restores from, so a redacted prior value means the original is gone.
+  // Restoring it anyway would write the literal marker in as the fact's text and report success;
+  // refusing says what actually happened and leaves the current value alone.
+  it("refuses to undo an edit whose prior value was redacted, instead of restoring the marker", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-undo-redacted-"));
+    const secret = "AKIAIOSFODNN7EXAMPLE";
+    mkdirSync(join(root, ".mem"), { recursive: true });
+    writeFileSync(join(root, ".mem", "allowlist"), `${secret}
+`, "utf8");
+
+    const remembered = await runCli(["remember", `rotate ${secret} quarterly`, "--kind", "fact", "--root", root]);
+    const id = extractRememberedId(remembered);
+
+    // The exception lapses: the value is no longer allowlisted when the edit records the prior text.
+    rmSync(join(root, ".mem", "allowlist"));
+    const edited = await runCli(["edit", id, "--text", "rotate creds quarterly", "--force", "--root", root]);
+    expect(edited.stderr).toBe("");
+
+    const undone = await runCli(["edit", id, "--undo", "--root", root]);
+    expect(undone.exitCode).toBe(1);
+    const output = `${undone.stdout}${undone.stderr}`;
+    expect(output).toContain("tripped secret screening at edit time");
+    expect(output).toContain("nothing safe to restore");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("rotate creds quarterly");
+    // The marker DOES appear further down, in the audit history -- that is where it belongs. What
+    // must not have happened is the marker being restored in as the fact's own text.
+    expect(shown.stdout.split("history")[0]).not.toContain("[redacted: possible secret");
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("names the action it found when the last one was not an edit", async () => {
     const remembered = await runCli(["remember", "we deploy nightly", "--kind", "decision"]);
     const id = extractRememberedId(remembered);

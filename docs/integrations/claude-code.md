@@ -12,7 +12,7 @@ mem init claude-code --user            # writes ~/.claude/settings.json instead 
 mem init claude-code --dry-run         # preview what would be written, without touching disk
 ```
 
-This writes exactly the `SessionStart` and `UserPromptSubmit` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
+This writes exactly the `SessionStart`, `UserPromptSubmit`, `Stop`, and `PreCompact` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
 
 The rest of this doc is the manual version -- what `mem init claude-code` does under the hood, and useful if you want to wire it by hand or understand exactly what changed.
 
@@ -98,6 +98,16 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
           }
         ]
       }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || true"
+          }
+        ]
+      }
     ]
   }
 }
@@ -107,11 +117,13 @@ Every new session then opens with the `TGMEM/2` hint block (or just the bare `TG
 
 Each prompt then gets a `TGMEM/2  delta=1` block ranked by what was just asked: `--hook-stdin` takes the envelope's `prompt` as the recall query, and `--delta` leaves out every fact already surfaced to this `session_id` (by `SessionStart` or an earlier prompt) that does not match the current prompt, so repeated recalls in one session never re-send filler Claude already has. A fact that does match the prompt is re-sent even if it was surfaced before: Claude Code compacts context over a long session, and a fact that was sent as filler early on must still arrive when it becomes the answer. A prompt whose relevant facts have all been sent gets just the `TGMEM/2  delta=1` header line. `--delta` is opt-in per call: a plain `mem recall --hint-format` in the same session still returns the full set, and the `delta=1` header marks the partial one so no consumer can mistake it for a complete block. The log is kept in the store's `recall_log` table and pruned by `mem epoch --gc` after 30 days; `mem recall --stable` never writes to it. If the envelope is missing, malformed, or has no `session_id`, the recall falls back to an unranked full response and still exits 0 — a hook that fails is worse than a hook that returns unranked facts.
 
-The third hook is the capture half, and the only one that runs after the user has actually said something. `Stop` is also the only event whose envelope carries `transcript_path`, which is what `mem scan-session` reads. It matches sentences against a fixed table of durable-statement openers -- `remember that`, `from now on`, `always`/`never`, `don't`, `we decided`, `we should`/`let's` followed by `always`/`never`, `decision:`, `rule:` -- and files each match as a **pending** suggestion. The opener has to be the first thing said, past a closed list of discourse fillers (`please`, `also`, `so`, `ok`, `note that`) that may precede it: "Please always run the linter" is the same instruction as "Always run the linter", while "I never got that to work" is narration and stays out. What gets stored is the whole sentence, filler and all -- a fact whose text was quietly edited is a fact you never said. No model is involved, so the same transcript always yields the same candidates, and nothing it produces can be recalled until you resolve it with `mem review --promote <id>` or `--reject <id>`. A rejected suggestion stays rejected: the dedup matches on the fact's text, so a later scan of the same session will not re-file a decision you already made.
+The last two hooks are the capture half, and the only ones that run after the user has actually said something. `Stop` and `PreCompact` are also the only events whose envelopes carry `transcript_path`, which is what `mem scan-session` reads. It matches sentences against a fixed table of durable-statement openers -- `remember that`, `from now on`, `always`/`never`, `don't`, `we decided`, `we should`/`let's` followed by `always`/`never`, `decision:`, `rule:` -- and files each match as a **pending** suggestion. The opener has to be the first thing said, past a closed list of discourse fillers (`please`, `also`, `so`, `ok`, `note that`) that may precede it: "Please always run the linter" is the same instruction as "Always run the linter", while "I never got that to work" is narration and stays out. What gets stored is the whole sentence, filler and all -- a fact whose text was quietly edited is a fact you never said. No model is involved, so the same transcript always yields the same candidates, and nothing it produces can be recalled until you resolve it with `mem review --promote <id>` or `--reject <id>`. A rejected suggestion stays rejected: the dedup matches on the fact's text, so a later scan of the same session will not re-file a decision you already made.
 
 Only text the human typed is considered, and that is a narrower set than it sounds. A transcript stores a great deal under the user role, because that is how the protocol carries it: tool results, `<system-reminder>` injections (often a verbatim copy of this very file), slash-command payloads and their stdout, relayed subagent reports, and compaction summaries of Claude's own earlier output. A scan that treated any of those as user speech would let a file mem reads dictate what mem remembers. `mem scan-session` rejects each channel: tool-result blocks and envelopes, entries flagged as meta or as a compaction summary, entries the host attributes to a non-human origin, and blocks carrying a command or task-notification wrapper -- and it strips `<system-reminder>` spans out of otherwise genuine turns. Run against a real 33 MB session, that is the difference between 28 proposed facts and none: every candidate the first version found came from one of these channels rather than from the user.
 
-It runs `--quiet` because a `Stop` hook's stdout lands in the session it just finished reading. Check the queue with `mem review`, or turn the hook off by deleting the `Stop` entry -- capture through the CLAUDE.md block below still works without it.
+Both run `--quiet` because a capture hook's stdout lands in the session it just finished reading. Check the queue with `mem review`, or turn capture off by deleting those entries -- capture through the CLAUDE.md block below still works without them.
+
+`PreCompact` runs the same command as `Stop` for a reason `Stop` alone cannot cover: `Stop` fires when a turn ends, so a session long enough to be compacted mid-task has had everything before the compaction boundary summarized away by the time the next `Stop` reads the transcript -- and a session that is killed, closed, or interrupted rather than ending a turn cleanly never fires `Stop` at all, leaving the whole transcript captured by nothing. `PreCompact` is the one event guaranteed to fire while the pre-compaction transcript still exists on disk. Scanning the overlap twice is free: every candidate whose text is already stored is skipped before capture, so the second scan files nothing the first one already did.
 
 `.claude/settings.json` is typically committed and shared, so these hooks also have to work for a collaborator who has never installed mem. The `command -v mem >/dev/null 2>&1 &&` guard skips the call entirely when `mem` isn't on PATH, and the trailing `|| true` forces exit 0 either way -- a bare `&&` guard would still exit 1 (and could be surfaced as a failed hook) when mem is missing. This is the same fail-open contract described above, just enforced at the shell level instead of inside `mem` itself.
 
@@ -156,8 +168,9 @@ Returns a `TGMEM/2` header, one line per fact plus a shared `footer` line when a
 1. **Start of session:** the `SessionStart` hook surfaces prior facts at the top of context, each with a freshness verdict.
 2. **Each prompt:** the `UserPromptSubmit` hook adds a `delta=1` block of facts ranked against the prompt text -- those matching it plus any not yet surfaced this session -- or just its header line when there is nothing new.
 3. **During work:** Claude writes facts as decisions land: `mem remember "chose Postgres for JOIN semantics" --kind decision --scope project`.
-4. **End of session:** optional `mem review --root .` to audit what's stored and resolve pending or anchor-contradicted facts.
-5. **Next session:** the same facts re-surface, with verdicts telling Claude which ones to re-verify.
+4. **End of a turn, and before each compaction:** the `Stop` and `PreCompact` hooks scan the transcript for durable-statement sentences and file them as **pending** suggestions -- nothing they find is recallable until you resolve it.
+5. **End of session:** optional `mem review --root .` to audit what's stored and resolve pending or anchor-contradicted facts.
+6. **Next session:** the same facts re-surface, with verdicts telling Claude which ones to re-verify.
 
 ## Shell quoting
 

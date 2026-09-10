@@ -13,7 +13,7 @@ npm run lint                         # Lint (eslint src tests)
 npm run typecheck                    # Type check (tsc --noEmit)
 ```
 
-No CI workflow is wired yet. The gate is manual: `npm run lint`, `npm run typecheck`, and full `npm test` must all pass before pushing.
+CI runs `npm run lint`, `npm run typecheck`, and `npm run test:coverage` on push and pull request (across ubuntu-latest and windows-latest with Node 20, plus Node 18 runtime floor check). The gate is the workflow status (`.github/workflows/ci.yml`).
 
 ## Architecture
 
