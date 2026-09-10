@@ -6,6 +6,29 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A path-scoped fact's anchor was judged against whatever directory you happened to be in.** An
+  anchor's target is validated at capture time to sit inside the `--root` it was captured under, but
+  nothing on the fact recorded that root — a path-scoped fact's `scope_root` holds the file it is
+  bound to, not the tree its anchor describes — so evaluation fell back to the caller's current
+  directory. Asked from a parent directory, mem printed a `file-absent` fact as plain ground truth
+  while the file plainly existed, and listed a `git-tracked` fact under the heading inviting the user
+  to delete it while the file was tracked: confidently wrong in both directions on the same query.
+  `mem show` had no root check at all and reported a decisive verdict from any directory on the
+  machine. This is the case a monorepo hits on every prompt, since the recall hook runs at the
+  repository root while the facts belong to packages inside it.
+
+  Facts now record the root they were captured under, and an anchor is evaluated against that root
+  from the capture directory or any ancestor of it — the two places that demonstrably hold the tree
+  the predicate describes. Every other directory, and any fact whose capture root is unknown
+  (captured before this release, or imported from an envelope carrying none), now yields
+  `unverified` rather than a guess. That is the design's own rule: mem may decline to answer, but it
+  must never assert the opposite of what it knows. `mem edit` re-points the capture root when it
+  writes a new anchor, so an anchor is judged against the root it was validated against rather than
+  the one the fact was first captured in.
+
+  Global scope is deliberately unchanged: a global fact carries no location binding and its anchor is
+  meant to be re-checked wherever you currently are, so a preference like "uses pnpm" anchored to a
+  lockfile keeps answering about the project you are in rather than the one you first said it in.
 - **A restored store deleted the facts you used most.** `mem export` calls itself a "full-fidelity
   JSON envelope" but omitted `last_surfaced_at`, while faithfully preserving `captured_at` — and
   those are precisely the two signals `mem consolidate --stale` reads to decide a fact is dead. So

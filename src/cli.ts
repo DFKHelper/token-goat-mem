@@ -39,7 +39,7 @@ import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
-import { anchorPathWithinRoot, evaluateAnchor, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
+import { anchorPathWithinRoot, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
 import type { FactStatusUpdate } from "./contradiction.js";
 import {
   captureExplicit,
@@ -114,7 +114,7 @@ import {
 } from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { scanTranscript } from "./sessionScan.js";
-import { anchorRootFor, isBoundToRoot, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
+import { evaluateFactFreshness, isBoundToRoot, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
 import {
   clearAllEmbeddings,
   countEmbeddedFacts,
@@ -870,6 +870,7 @@ interface ExportedFactJson {
   readonly scope: FactScope;
   readonly scopeRoot: string | null;
   readonly scopeRepo: string | null;
+  readonly captureRoot: string | null;
   readonly source_type: Fact["source_type"];
   readonly source_ref: string | null;
   readonly captured_at: string;
@@ -898,6 +899,7 @@ function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boo
     scope: fact.scope,
     scopeRoot: fact.scopeRoot ?? null,
     scopeRepo: fact.scopeRepo ?? null,
+    captureRoot: fact.captureRoot ?? null,
     source_type: fact.source_type,
     source_ref: fact.source_ref,
     captured_at: fact.captured_at,
@@ -1234,22 +1236,18 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
   // `anchorRootFor`, not the bare caller root: a project-scoped fact carries the root its anchor is
   // meaningful relative to, and evaluating it against wherever `mem review` happened to be run
   // resolves the predicate inside an unrelated checkout. That fix covers project scope: retrieval
-  // has resolved project-scope roots this way since the scope_root fix. It does not cover a
-  // `path`-scoped fact, whose anchor `anchorRootFor` still evaluates against the bare caller root
-  // regardless of binding -- so `mem review` run from any unrelated directory found the anchored
-  // file missing there and reported a perfectly valid fact `contradicted`, under the one heading
-  // that invites the user to forget it, while `mem recall` from the fact's own root simultaneously
-  // affirmed it. `isBoundToRoot` gates that: a fact not actually bound to `root` is left
-  // `unverified` rather than evaluated at all -- unverified is honest ("cannot confirm or deny from
-  // here"), `contradicted` here would be a lie about a tree the user is not in. The
-  // ancestor-root/path-scope case (recalling a `path` fact from a directory above its binding) is a
-  // known related gap, deliberately out of scope here: it needs a persisted capture root, which is
-  // a schema change.
+  // has resolved project-scope roots this way since the scope_root fix. `isBoundToRoot` gates the
+  // project case further: a fact not actually bound to `root` is left `unverified` rather than
+  // evaluated at all -- unverified is honest ("cannot confirm or deny from here"), `contradicted`
+  // here would be a lie about a tree the user is not in. A `path`-scoped fact recalled from an
+  // ancestor of its binding is `isBoundToRoot`-true (the file is inside `root`) but was previously
+  // evaluated against the bare caller root regardless of where it was actually captured -- e.g. a
+  // fact anchored `file-absent yarn.lock` against its own project directory, reviewed from that
+  // project's parent, where an unrelated `yarn.lock` happens to exist. `evaluateFactFreshness` closes
+  // that: it falls back to the fact's persisted `captureRoot` (recorded by capture.ts for every
+  // scope) and reports `unverified` rather than a wrong verdict when that root is unknown.
   const contradicted = groundTruth.filter(
-    (fact) =>
-      !contestedIds.has(fact.id) &&
-      isBoundToRoot(fact, root) &&
-      evaluateAnchor(fact.anchor, anchorRootFor(fact, root)) === "contradicted"
+    (fact) => !contestedIds.has(fact.id) && isBoundToRoot(fact, root) && evaluateFactFreshness(fact, root) === "contradicted"
   );
 
   const now = Date.now();
@@ -2273,14 +2271,16 @@ export function buildProgram(): Command {
       guard(async (id: string, options: ShowCliOptions) => {
         const output = await withDb((db) => {
           const fact = resolveIdArgOrThrow(db, id);
-          // `anchorRootFor` rather than a bare `?? fact.scopeRoot` fallback. `scopeRoot` is documented
-          // as an absolute project root only for `scope="project"`; for `scope="path"` it holds a
-          // file, and handing a file path to an anchor predicate as its root is (in retrieval.ts's
-          // own words) strictly worse than the status quo. The old fallback did exactly that, so
-          // `mem show` and `mem recall` could report different freshness for the same fact -- on the
-          // surface the recall footer points the user to for detail.
-          const root = anchorRootFor(fact, resolveRoot(options.root));
-          const freshness = evaluateAnchor(fact.anchor, root);
+          // `evaluateFactFreshness` rather than a bare `?? fact.scopeRoot` fallback. `scopeRoot` is
+          // documented as an absolute project root only for `scope="project"`; for `scope="path"` it
+          // holds a file, and handing a file path to an anchor predicate as its root is (in
+          // retrieval.ts's own words) strictly worse than the status quo. The old fallback did
+          // exactly that, so `mem show` and `mem recall` could report different freshness for the
+          // same fact -- on the surface the recall footer points the user to for detail. Falling
+          // back further to the fact's persisted `captureRoot` (and to `unverified` when that too is
+          // unknown, or when the query root does not exactly match it) is what keeps `mem show` from
+          // asserting a decisive verdict from an unrelated directory for a `path`-scoped fact.
+          const freshness = evaluateFactFreshness(fact, resolveRoot(options.root));
           const sources = listSourcesForFact(db, fact.id);
           const history = listAuditLogForFact(db, fact.id);
           // Only for a superseded fact: the audit log's most recent row for an active fact says
@@ -2539,6 +2539,12 @@ export function buildProgram(): Command {
           // arm keeps serving the fact in the old repo's checkouts), and a rebind onto project
           // scope from global/path must pick up an identity if one is now available.
           ...(scope !== undefined ? { scopeRepo: resolveScopeRepo(scope, root) } : {}),
+          // A new anchor is validated against *this* command's `--root` a few lines below, and a
+          // scope change rebinds the fact outright -- either way the root the anchor must later be
+          // evaluated against is this one, not wherever the fact was first captured. Leaving the
+          // capture-time value would resolve a freshly written anchor against the original tree,
+          // which is the wrong-root evaluation `anchorRootFor` exists to prevent.
+          ...(scope !== undefined || options.anchor !== undefined ? { captureRoot: root } : {}),
         };
         if (Object.keys(patch).length === 0) {
           throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");

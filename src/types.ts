@@ -73,6 +73,20 @@ export interface Fact {
    * consulted for `global` (in scope everywhere) or `path` scope (bound to a file, not a project).
    */
   readonly scopeRepo?: string | null;
+  /**
+   * The `--root` this fact was captured under (`src/capture.ts`'s `applyOptionalFields`), or
+   * null/absent when unknown -- a row written before this column existed, or one imported from an
+   * envelope that carries none. Distinct from `scopeRoot`: for `scope="path"` the two differ (the
+   * fact is bound to a file, but its anchor -- if any -- is meant to be evaluated against the
+   * project root it was captured in, which is recorded nowhere else); for `scope="project"` the two
+   * are always equal at capture time; `scope="global"` has no `scopeRoot` at all, yet its anchor (if
+   * present) still needs a root to mean anything, which only this field supplies.
+   *
+   * `retrieval.ts`'s `anchorRootFor` is the sole reader: null here means "capture root unknown", and
+   * every caller must treat that as `unverified`, never as `affirmed` or `contradicted` -- asserting
+   * either off the wrong root is worse than admitting mem cannot check (design principle P3).
+   */
+  readonly captureRoot?: string | null;
   readonly source_type: FactSourceType;
   /** Reference to the originating conversation/message, or null if unavailable. */
   readonly source_ref: string | null;
@@ -162,6 +176,8 @@ export interface NewFact {
   scopeRoot?: string | null;
   /** See `Fact.scopeRepo`. Written by the capture path for project-scoped facts; preserved verbatim by full-fidelity JSON import. */
   scopeRepo?: string | null;
+  /** See `Fact.captureRoot`. Written by the capture path for every scope; rebound (never preserved verbatim) by full-fidelity JSON import -- see `exportImport.ts`. */
+  captureRoot?: string | null;
   source_ref?: string | null;
   /** ISO 8601 timestamp. Defaults to `new Date().toISOString()` when omitted. */
   captured_at?: string;
@@ -193,6 +209,13 @@ export interface FactUpdate {
   scope?: FactScope;
   scopeRoot?: string | null;
   scopeRepo?: string | null;
+  /**
+   * The root an edited `anchor` was validated against, and the root that anchor will later be
+   * evaluated against. `mem edit` re-validates a new anchor's path against its own `--root`, so
+   * leaving the capture-time value in place would pin a freshly written anchor to the tree the fact
+   * was first captured in -- the same wrong-root evaluation `anchorRootFor` exists to prevent.
+   */
+  captureRoot?: string | null;
   anchor?: string | null;
   status?: FactStatus;
   confidence?: number;

@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { openStorage } from "../../src/storage.js";
+import { insertFact, openStorage } from "../../src/storage.js";
 import type { Db } from "../../src/storage.js";
 
 let workDir: string;
@@ -192,6 +192,32 @@ describe("opening a database that predates a schema change", () => {
       // `openDb` seeds the epoch and `ensureStorageSchema` re-seeds it; a store that lost the row
       // must not come back with a NULL epoch that every `epoch > n` comparison then mis-answers.
       expect(reopened.prepare("SELECT value FROM meta WHERE key = 'epoch'").get()).toEqual({ value: "0" });
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("opens and inserts/reads facts.capture_root on a store that predates the column", () => {
+    // A store built before `capture_root TEXT` existed on `facts` -- the generic column-by-column
+    // check above already proves this survives reopen; this test additionally proves the reopened
+    // store can actually insert and read a fact through it, not just carry the column.
+    const { db, path } = freshStore();
+    db.exec("ALTER TABLE facts DROP COLUMN capture_root");
+    db.close();
+
+    const reopened = openStorage(path);
+    try {
+      const inserted = insertFact(reopened, {
+        text: "a fact written after a pre-capture_root store reopened",
+        kind: "fact",
+        scope: "path",
+        scopeRoot: join(workDir, "some", "file.ts"),
+        captureRoot: join(workDir, "some"),
+        source_type: "user",
+      });
+      expect(inserted.captureRoot).toBe(join(workDir, "some"));
+      const row = reopened.prepare("SELECT capture_root FROM facts WHERE id = ?").get(inserted.id);
+      expect(row).toEqual({ capture_root: join(workDir, "some") });
     } finally {
       reopened.close();
     }

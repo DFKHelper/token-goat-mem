@@ -161,6 +161,35 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
       }
     }
   }
+  // Same containment discipline as `scopeRoot` just above, and for the same reason:
+  // `anchorRootFor` (src/retrieval.ts) uses a `path`/`global`-scoped fact's `captureRoot` verbatim
+  // as the anchor-evaluation root, so an imported row that smuggles in an arbitrary directory
+  // becomes a file-existence/content-substring oracle against any path on disk. Unlike `scopeRoot`,
+  // there is no forced-null branch for `scope="global"` here -- `captureRoot` is exactly what makes
+  // a global fact's anchor evaluable at all (item 4 of the fix this comment describes), so nulling
+  // it on import would silently regress every re-imported anchored global fact back to `unverified`.
+  // Also unlike `scopeRoot`, there is no `scopeRepo`-identity rebind path for anything but `project`
+  // scope (path/global carry no repository identity) -- so a `captureRoot` outside `root` with no
+  // identity match is rejected rather than guessed at.
+  let rebindCaptureRootTo: string | null = null;
+  if (typeof obj["captureRoot"] === "string") {
+    const captureRootValue = obj["captureRoot"];
+    if (!isAbsolute(captureRootValue)) {
+      return fail(`facts[${index}] has a "captureRoot" that is not an absolute path: ${JSON.stringify(captureRootValue)}`);
+    }
+    if (root !== undefined && anchorPathWithinRoot(root, captureRootValue) === null) {
+      const scopeRepoValue = typeof obj["scopeRepo"] === "string" ? obj["scopeRepo"] : null;
+      if (scopeForBindingCheck === "project" && identityMatches(scopeRepoValue, root)) {
+        rebindCaptureRootTo = root;
+      } else {
+        return fail(
+          `facts[${index}] has a "captureRoot" ${JSON.stringify(captureRootValue)} outside the import root ${JSON.stringify(root)}`
+        );
+      }
+    }
+  } else if (obj["captureRoot"] !== undefined && obj["captureRoot"] !== null) {
+    return fail(`facts[${index}] has a non-string, non-null "captureRoot"`);
+  }
   if (!FACT_SOURCE_TYPES.includes(obj["source_type"] as FactSourceType)) {
     return fail(`facts[${index}] has invalid "source_type" ${JSON.stringify(obj["source_type"])}`);
   }
@@ -262,6 +291,17 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     newFact.scopeRoot = obj["scopeRoot"];
   } else if (obj["scopeRoot"] === null) {
     newFact.scopeRoot = null;
+  }
+  // No global-forced-null branch here, unlike `scopeRoot` above -- see the validation comment for
+  // why. Otherwise the same three cases: rebound (project, identity match, outside root), preserved
+  // verbatim (already inside root, or `root` undefined so no containment check ran), or absent
+  // entirely (an export written before this column existed).
+  if (rebindCaptureRootTo !== null) {
+    newFact.captureRoot = rebindCaptureRootTo;
+  } else if (typeof obj["captureRoot"] === "string") {
+    newFact.captureRoot = obj["captureRoot"];
+  } else if (obj["captureRoot"] === null) {
+    newFact.captureRoot = null;
   }
   // Preserved verbatim rather than recomputed from the importing machine's checkout: the identity
   // describes the project the fact was captured in, and re-deriving it here would silently rebind
