@@ -1034,6 +1034,16 @@ export interface RetrieveOutcome {
    * finishes in time.
    */
   readonly anchorBudgetHits: number;
+  /**
+   * How many results this call removed from `results` because the caller asked for `hintFormat`.
+   *
+   * Zero for every other caller, and that is the point rather than an omission: withheld results are
+   * *included* in `results` for an ordinary caller, so nothing was kept from it and there is nothing
+   * to disclose. Only `hintFormat` drops them, and a wire payload that drops them silently is
+   * byte-indistinguishable from one saying the project has nothing awaiting review -- which is the
+   * steady state on any install where `mem init` wired the `Stop` hook that fills the queue.
+   */
+  readonly withheldCount: number;
 }
 
 /**
@@ -1054,7 +1064,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
 
   const filtered = pool.filter((fact) => matchesFilters(fact, options, now));
   if (filtered.length === 0) {
-    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0 };
+    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0, withheldCount: 0 };
   }
 
   const bm25Scores = computeBm25Scores(filtered, options.query);
@@ -1153,6 +1163,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   });
 
   const visible = options.hintFormat === true ? results.filter((result) => result.trust !== "withheld") : results;
+  const withheldCount = results.length - visible.length;
 
   // With no rank list at all -- no query, no embedding signal, no usefulness signal -- every score
   // ties at zero and this sort falls through to its recency tie-break, so the cap below keeps the
@@ -1186,5 +1197,5 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const shownIds = new Set(shownNonWithheldResults.map((result) => result.fact.id));
   const final = visible.filter((result) => result.trust === "withheld" || shownIds.has(result.fact.id));
 
-  return { results: final, totalNonWithheld: nonWithheld.length, shownNonWithheld: shownNonWithheldResults.length, anchorBudgetHits };
+  return { results: final, totalNonWithheld: nonWithheld.length, shownNonWithheld: shownNonWithheldResults.length, anchorBudgetHits, withheldCount };
 }

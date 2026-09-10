@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   event TEXT NOT NULL,
   fact_id TEXT,
   detail TEXT NOT NULL,
+  prior_json TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_audit_log_fact_id ON audit_log(fact_id);
@@ -219,6 +220,14 @@ export interface AuditLogEntry {
   readonly event: string;
   readonly factId: string | null;
   readonly detail: string;
+  /**
+   * Reversal payload for an `edit` row: a JSON object of the fields that edit touched, each mapped
+   * to the value it held immediately before. Absent for every other event, and absent (not an
+   * empty object) rather than present-and-empty is deliberate -- `mem edit --undo` treats a missing
+   * value the same as "not an edit with recoverable history", so a row from before this column
+   * existed refuses cleanly instead of restoring nothing and reporting success.
+   */
+  readonly priorJson?: string;
 }
 
 /** One audit row as read back, with the timestamp the writer stamped it with. */
@@ -239,11 +248,18 @@ export interface AuditLogRow extends AuditLogEntry {
  */
 export function listAuditLogForFact(db: Database.Database, factId: string): AuditLogRow[] {
   return db
-    .prepare<[string], { event: string; fact_id: string | null; detail: string; created_at: string }>(
-      "SELECT event, fact_id, detail, created_at FROM audit_log WHERE fact_id = ? ORDER BY created_at ASC, rowid ASC"
-    )
+    .prepare<
+      [string],
+      { event: string; fact_id: string | null; detail: string; created_at: string; prior_json: string | null }
+    >("SELECT event, fact_id, detail, prior_json, created_at FROM audit_log WHERE fact_id = ? ORDER BY created_at ASC, rowid ASC")
     .all(factId)
-    .map((row) => ({ event: row.event, factId: row.fact_id, detail: row.detail, createdAt: row.created_at }));
+    .map((row) => ({
+      event: row.event,
+      factId: row.fact_id,
+      detail: row.detail,
+      createdAt: row.created_at,
+      ...(row.prior_json !== null ? { priorJson: row.prior_json } : {}),
+    }));
 }
 
 /**
@@ -252,8 +268,8 @@ export function listAuditLogForFact(db: Database.Database, factId: string): Audi
  */
 export function insertAuditLog(db: Database.Database, entry: AuditLogEntry): void {
   db.prepare(
-    "INSERT INTO audit_log (id, event, fact_id, detail, created_at) VALUES (?, ?, ?, ?, ?)"
-  ).run(randomUUID(), entry.event, entry.factId, entry.detail, new Date().toISOString());
+    "INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(randomUUID(), entry.event, entry.factId, entry.detail, entry.priorJson ?? null, new Date().toISOString());
 }
 
 // Note: the write-epoch increment/read pair lives in src/storage.ts (`getEpoch` /

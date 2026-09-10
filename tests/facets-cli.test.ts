@@ -206,7 +206,7 @@ describe("fact_terms write path", () => {
 
   it("re-extracts when `mem edit` rewrites a fact's text, so terms never describe the old text", async () => {
     const id = await remember("the ranking lives in src/retrieval.ts");
-    const edited = await runCli(["edit", id, "--text", "the ranking moved to src/ranking.ts"]);
+    const edited = await runCli(["edit", id, "--text", "the ranking moved to src/ranking.ts", "--force"]);
     expect(edited.exitCode).toBe(0);
 
     const stale = await runCli(["recall", "--entity", "src/retrieval.ts", "--root", root]);

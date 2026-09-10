@@ -120,7 +120,7 @@ Over time, `mem list --kind decision` accumulates a log of team design decisions
 TGMEM/2
 pref  fresh=affirmed  id=7ac43f22-...  display="stored pref (verify): pnpm is the package manager"
 pref  fresh=unverified  id=21a1330e-...  display="stored pref (unverified, 2026-07): switched to bun"
-footer  mem show <id> for detail; mem review to resolve contested/pending
+footer  mem show <id> for detail
 ```
 
 The caveat lives inside `display` — "verify", "unverified", "contradicted, excluded" — so Codex treats low-trust facts accordingly without parsing anything. The shared `footer` line (present whenever at least one fact line was emitted) points to the same follow-up commands instead of repeating a CTA on every line. Anchor-contradicted facts are excluded from ground truth and routed to `mem review`.

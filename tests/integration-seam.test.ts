@@ -234,8 +234,10 @@ describe("buildHintFormat (integration seam)", () => {
     const result = await buildHint({ root, dbPath });
 
     // Neither side of the tied contradiction is surfaced -- the seam never hands the caller an
-    // unresolved either/or to gamble on (design plan P4 / Section 4).
-    expect(result.lines).toEqual([]);
+    // unresolved either/or to gamble on (design plan P4 / Section 4) -- but the footer discloses
+    // that something was held back, so "withheld" stays distinguishable from "nothing stored".
+    expect(result.lines.filter((line) => !line.startsWith("footer  "))).toEqual([]);
+    expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
     expect(result.header).toBe(TGMEM_HEADER);
   });
 

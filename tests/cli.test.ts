@@ -17,7 +17,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
-import { openDb, resolveDbPath } from "../src/db.js";
+import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
@@ -118,9 +118,15 @@ describe("mem CLI happy path", () => {
     // anchor was set, so freshness is "unverified" (not "affirmed"), which buildDisplay renders as an
     // "(unverified, <month>)" tag. Default output no longer carries a per-line CTA (footer-ized).
     expect(recalled.stdout).toContain("stored pref (unverified,");
-    expect(recalled.stdout).toContain("mem show <id> for detail; mem review to resolve contested/pending");
+    // Only the clause that applies: this store has nothing pending or contested, so the review CTA
+    // stays off. It used to print here unconditionally.
+    expect(recalled.stdout).toContain("mem show <id> for detail");
+    expect(recalled.stdout).not.toContain("mem review");
 
-    const edited = await runCli(["edit", id, "--text", "uses pnpm exclusively"]);
+    // `remember` always stores `source_type=user`, and Defect 2's guard requires `--force` to edit
+    // one -- see "mem edit refuses to change a source_type=user fact without --force" below for the
+    // guard itself; this round-trip just needs to get past it to keep exercising pin/forget.
+    const edited = await runCli(["edit", id, "--text", "uses pnpm exclusively", "--force"]);
     expect(edited.exitCode).toBe(0);
     expect(edited.stdout).toBe(`edited ${id}\n`);
     const afterEdit = await runCli(["show", id]);
@@ -189,7 +195,7 @@ describe("mem CLI happy path", () => {
     const created = await runCli(["remember", "short fact", "--kind", "fact"]);
     const id = extractRememberedId(created);
 
-    const edited = await runCli(["edit", id, "--text", "deploy key is AKIAABCDEFGHIJKLMNOP"]);
+    const edited = await runCli(["edit", id, "--text", "deploy key is AKIAABCDEFGHIJKLMNOP", "--force"]);
     expect(edited.exitCode).toBe(1);
     expect(edited.stderr).toContain("secret");
 
@@ -208,7 +214,7 @@ describe("mem CLI happy path", () => {
     const created = await runCli(["remember", "audit row check", "--kind", "fact"]);
     const id = extractRememberedId(created);
 
-    const edited = await runCli(["edit", id, "--text", "audit row check v2"]);
+    const edited = await runCli(["edit", id, "--text", "audit row check v2", "--force"]);
     expect(edited.exitCode).toBe(0);
 
     const pinned = await runCli(["pin", id]);
@@ -259,7 +265,7 @@ describe("mem CLI happy path", () => {
     const id = extractRememberedId(created);
 
     // CLI enforces --subject and --value together, but test the validation directly via pattern
-    const edited = await runCli(["edit", id, "--subject", "new_x", "--value", "y"]);
+    const edited = await runCli(["edit", id, "--subject", "new_x", "--value", "y", "--force"]);
     expect(edited.exitCode).toBe(0); // This should succeed if both are provided
     const shown = await runCli(["show", id]);
     expect(shown.stdout).toContain("subject: new_x");
@@ -270,7 +276,7 @@ describe("mem CLI happy path", () => {
     const created = await runCli(["remember", "test fact", "--kind", "fact", "--subject", "key1", "--value", "val1"]);
     const id = extractRememberedId(created);
 
-    const edited = await runCli(["edit", id, "--subject", "key2", "--value", "val2"]);
+    const edited = await runCli(["edit", id, "--subject", "key2", "--value", "val2", "--force"]);
     expect(edited.exitCode).toBe(0);
     expect(edited.stdout).toContain("edited");
 
@@ -784,8 +790,8 @@ describe("recall --hint-style full|terse", () => {
     // Section 4: default output drops the per-line CTA in favor of one trailing footer line.
     expect(defaulted.stdout).not.toContain("—");
     const lines = defaulted.stdout.split("\n").filter((line) => line.length > 0);
-    expect(lines.at(-1)).toBe("mem show <id> for detail; mem review to resolve contested/pending");
-    expect(lines.filter((line) => line === "mem show <id> for detail; mem review to resolve contested/pending")).toHaveLength(1);
+    expect(lines.at(-1)).toBe("mem show <id> for detail");
+    expect(lines.filter((line) => line.startsWith("mem show <id> for detail"))).toHaveLength(1);
   });
 
   it("terse drops the CTA and shortens the kind label", async () => {
@@ -986,7 +992,7 @@ describe("short id prefixes (git-style, all 6 id-accepting commands)", () => {
     expect(shown.exitCode).toBe(0);
     expect(shown.stdout).toContain("id: aaaa1111-0000-0000-0000-000000000001");
 
-    const edited = await runCli(["edit", "aaaa1111", "--text", "edited via prefix"]);
+    const edited = await runCli(["edit", "aaaa1111", "--text", "edited via prefix", "--force"]);
     expect(edited.exitCode).toBe(0);
     expect(edited.stdout).toBe("edited aaaa1111-0000-0000-0000-000000000001\n");
 
@@ -2709,7 +2715,7 @@ describe("regression: --scope path binds to --path, not --root (previously unrea
       ]);
       const id = extractRememberedId(remembered);
 
-      const edited = await runCli(["edit", id, "--scope", "path", "--path", "src/b.ts", "--root", proj]);
+      const edited = await runCli(["edit", id, "--scope", "path", "--path", "src/b.ts", "--root", proj, "--force"]);
       expect(edited.exitCode).toBe(0);
 
       const shown = await runCli(["show", id]);
@@ -3368,7 +3374,7 @@ describe("mem edit records what the fact said before", () => {
     // entirely: the audit log could say the text was edited but never what it used to say.
     const remembered = await runCli(["remember", "we use yarn", "--kind", "preference", "--scope", "global"]);
     const id = remembered.stdout.trim().split(/\s+/u).pop() ?? "";
-    await runCli(["edit", id, "--text", "we use pnpm"]);
+    await runCli(["edit", id, "--text", "we use pnpm", "--force"]);
 
     const shown = JSON.parse((await runCli(["show", id, "--json"])).stdout) as {
       history?: Array<{ event: string; detail: string }>;
@@ -3380,6 +3386,131 @@ describe("mem edit records what the fact said before", () => {
     const human = (await runCli(["show", id])).stdout;
     expect(human).toContain("history:");
     expect(human).toContain("we use yarn");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── edit --undo ───────────────────────────────────────────────────────────────────────────
+
+describe("mem edit --undo", () => {
+  it("restores an edited fact's text byte-for-byte, past the 120-character audit preview", async () => {
+    // `auditValuePreview` truncates at AUDIT_VALUE_PREVIEW_LENGTH (120), which is exactly why a
+    // reversal payload separate from the `detail` string exists: undo does not go through that
+    // truncation at all. A body shorter than 120 characters would not distinguish the two.
+    const original =
+      "we decided the ingestion worker must batch writes in groups of 250 rows because the upstream vendor API " +
+      "throttles at 300 requests per minute and the retry budget is exhausted by the third burst, measured in staging";
+    expect(original.length).toBeGreaterThan(120);
+
+    const remembered = await runCli(["remember", original, "--kind", "decision"]);
+    const id = extractRememberedId(remembered);
+
+    await runCli(["edit", id, "--text", "ingestion worker batches 250 rows", "--force"]);
+    const afterEdit = await runCli(["show", id]);
+    expect(afterEdit.stdout).toContain("text: ingestion worker batches 250 rows");
+
+    const undone = await runCli(["edit", id, "--undo"]);
+    expect(undone.exitCode).toBe(0);
+    expect(undone.stdout).toBe(`restored ${id}\n`);
+
+    const restored = await runCli(["show", id]);
+    expect(restored.stdout).toContain(`text: ${original}`);
+  });
+
+  it("refuses when the last recorded action was not an edit, naming that action", async () => {
+    const remembered = await runCli(["remember", "we cache build output", "--kind", "decision"]);
+    const id = extractRememberedId(remembered);
+    await runCli(["edit", id, "--text", "we cache the build output aggressively", "--force"]);
+    await runCli(["pin", id]);
+
+    const result = await runCli(["edit", id, "--undo"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("last recorded action: pin");
+    // Nothing moved: the edit that ran before the pin is still the current text.
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("text: we cache the build output aggressively");
+  });
+
+  // Every path that creates a fact writes an audit row for it -- `capture_explicit` here,
+  // `json_import` for an imported one -- so a never-edited fact does not have an *empty* history, it
+  // has a history whose last row is not an edit. The refusal names that row rather than saying
+  // something generic, which is the difference between "you have not edited this" and "this command
+  // does not know what you did".
+  it("names the action it found when the last one was not an edit", async () => {
+    const remembered = await runCli(["remember", "we deploy nightly", "--kind", "decision"]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["edit", id, "--undo"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("last recorded action: capture_explicit");
+  });
+
+  it("rejects --undo combined with a field-setting option", async () => {
+    const remembered = await runCli(["remember", "we run tests in CI", "--kind", "decision"]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["edit", id, "--undo", "--text", "we run tests before merge"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("--undo cannot be used together");
+  });
+
+  it("refuses cleanly, rather than throwing, on an edit row that predates the prior_json column", async () => {
+    const remembered = await runCli(["remember", "we vendor our own fork", "--kind", "decision"]);
+    const id = extractRememberedId(remembered);
+
+    // Simulates a database migrated from a pre-`prior_json` release: an `edit` audit row with no
+    // reversal payload, because the column did not exist when it was written. `insertAuditLog`
+    // omitting `priorJson` writes NULL, same as a real pre-migration row would read back as.
+    const db = openStorage(resolveDbPath());
+    insertAuditLog(db, { event: "edit", factId: id, detail: "edited text: (old) -> (new)" });
+    db.close();
+
+    const result = await runCli(["edit", id, "--undo"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("no recoverable prior value");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── edit source_type=user guard ───────────────────────────────────────────────────────────────────────────
+
+describe("mem edit refuses to change a source_type=user fact without --force", () => {
+  it("fails, names --force, and changes nothing", async () => {
+    const remembered = await runCli(["remember", "we use pnpm", "--kind", "preference", "--scope", "global"]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["edit", id, "--text", "we use yarn now"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("--force");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("text: we use pnpm");
+  });
+
+  it("succeeds with --force, and the override is recorded in the audit log", async () => {
+    const remembered = await runCli(["remember", "we use pnpm", "--kind", "preference", "--scope", "global"]);
+    const id = extractRememberedId(remembered);
+
+    const result = await runCli(["edit", id, "--text", "we use yarn now", "--force"]);
+    expect(result.exitCode).toBe(0);
+
+    const shown = JSON.parse((await runCli(["show", id, "--json"])).stdout) as {
+      history?: Array<{ event: string; detail: string }>;
+    };
+    const edit = shown.history?.find((entry) => entry.event === "edit");
+    expect(edit?.detail).toContain("--force override");
+  });
+
+  it("does not require --force for a derived fact (the guard is scoped, not a blanket block)", async () => {
+    const db = openStorage(resolveDbPath());
+    const { fact } = captureSuggested(db, { text: "we cache lookups", kind: "decision", root: home });
+    db.close();
+    expect(fact.source_type).toBe("derived");
+    await runCli(["review", "--promote", fact.id]);
+
+    const result = await runCli(["edit", fact.id, "--text", "we cache lookups aggressively"]);
+    expect(result.exitCode).toBe(0);
+    const shown = await runCli(["show", fact.id]);
+    expect(shown.stdout).toContain("source_type: derived");
+    expect(shown.stdout).toContain("text: we cache lookups aggressively");
   });
 });
 
@@ -3678,5 +3809,46 @@ describe("mem dream", () => {
         expect(parsed.candidates[0]?.supports).toHaveLength(2);
       }
     );
+  });
+});
+
+// --- what recall and edit tell the user about what they are not seeing ---
+describe("recall's follow-up line names only the commands that apply", () => {
+  it("omits the review call-to-action when no result needs resolving, and adds it when one does", async () => {
+    await runCli(["remember", "the ingestion worker batches 250 rows", "--kind", "decision"]);
+
+    // It used to print unconditionally. That is not merely noise: tests/cli.test.ts's own
+    // contested-annotation test carries a comment explaining that the permanent CTA made a looser
+    // assertion pass vacuously against unfixed code -- an always-on string is indistinguishable
+    // from a real signal to a reader and to a test alike.
+    const clean = await runCli(["recall", "ingestion"]);
+    expect(clean.stdout).toContain("mem show <id> for detail");
+    expect(clean.stdout).not.toContain("mem review");
+
+    await runCli(["suggest", "always vacuum the analytics table weekly", "--kind", "preference"]);
+    const queued = await runCli(["recall", "vacuum"]);
+    expect(queued.stdout).toContain("mem show <id> for detail; mem review to resolve contested/pending");
+  });
+});
+
+describe("mem edit keeps the value it is about to destroy", () => {
+  it("records the whole prior text, not a 120-character prefix of it", async () => {
+    // AGENTS.md: "an edited fact's previous text is recorded there and nowhere else, since mem edit
+    // overwrites in place." Measured against the built bundle, editing a 223-character fact left
+    // 103 characters recorded nowhere in the store -- the log kept a prefix of the one value it
+    // exists to preserve. The new value stays previewed: it is the fact's current text, one column
+    // away in the same row, so it is never the value that goes missing.
+    const prior =
+      "we decided the ingestion worker must batch writes in groups of 250 rows because the upstream vendor API " +
+      "throttles at 300 requests per minute and the retry budget is exhausted by the third burst, measured in staging";
+    expect(prior.length).toBeGreaterThan(120);
+
+    const stored = await runCli(["remember", prior, "--kind", "decision"]);
+    const id = /([0-9a-f-]{36})/u.exec(stored.stdout)?.[1];
+    expect(id).toBeDefined();
+
+    await runCli(["edit", String(id), "--text", "ingestion worker batches 250 rows", "--force"]);
+    const shown = await runCli(["show", String(id)]);
+    expect(shown.stdout).toContain(prior);
   });
 });
