@@ -32,12 +32,56 @@ function sourceFiles(): readonly string[] {
     .map((name) => join(SRC_DIR, name));
 }
 
+/** The index of `source`'s `)` that closes the `(` at `openIndex`, or -1 if unbalanced. */
+function matchingCloseParen(source: string, openIndex: number): number {
+  let depth = 1;
+  let i = openIndex + 1;
+  while (i < source.length && depth > 0) {
+    if (source[i] === "(") {
+      depth++;
+    } else if (source[i] === ")") {
+      depth--;
+    }
+    i++;
+  }
+  return depth === 0 ? i - 1 : -1;
+}
+
+/**
+ * Finds every `db.transaction(...)()` call invoked inline -- immediately, on the closing paren of
+ * the `db.transaction(...)` call itself, whether that call is one line or spans many. This is the
+ * shape the line-by-line scan below cannot see: its closing `})();` carries no `tx`-named
+ * identifier for the bare-invocation regex to match, and no `.immediate()`/etc. to require. Walking
+ * matched parens rather than scanning lines is what makes a multi-line callback body irrelevant.
+ */
+function findInlineTransactionInvocations(source: string, fileLabel: string): string[] {
+  const offenders: string[] = [];
+  const opener = /db\.transaction\(/gu;
+  let match: RegExpExecArray | null;
+  while ((match = opener.exec(source)) !== null) {
+    const openParenIndex = match.index + match[0].length - 1;
+    const closeParenIndex = matchingCloseParen(source, openParenIndex);
+    if (closeParenIndex === -1) {
+      continue;
+    }
+    const rest = source.slice(closeParenIndex + 1);
+    if (!/^\s*\(\)/u.test(rest)) {
+      continue; // not immediately re-invoked here (e.g. assigned to a variable) -- handled below
+    }
+    const lineNumber = source.slice(0, closeParenIndex).split("\n").length;
+    const lineText = (source.split("\n")[lineNumber - 1] ?? "").trim();
+    offenders.push(`${fileLabel}:${lineNumber}  ${lineText}`);
+  }
+  return offenders;
+}
+
 describe("transaction guards", () => {
   it("invokes every db.transaction() as .immediate(), so read-then-write pairs cannot lose their snapshot", () => {
     const offenders: string[] = [];
 
     for (const file of sourceFiles()) {
       const source = readFileSync(file, "utf8");
+      const fileLabel = file.split(/[\\/]/u).pop() ?? file;
       const lines = source.split("\n");
       lines.forEach((line, index) => {
         // A bare `tx();` / `return tx();` invocation of a transaction function. `tx.immediate()`,
@@ -49,11 +93,17 @@ describe("transaction guards", () => {
         if (/db\.transaction\(/u.test(line)) {
           return; // the definition, not an invocation
         }
-        const site = `${file.split(/[\\/]/u).pop() ?? file}:${index + 1}`;
+        const site = `${fileLabel}:${index + 1}`;
         if (!READ_ONLY_TRANSACTIONS.includes(site)) {
           offenders.push(`${site}  ${line.trim()}`);
         }
       });
+
+      for (const site of findInlineTransactionInvocations(source, fileLabel)) {
+        if (!READ_ONLY_TRANSACTIONS.includes(site.split("  ")[0] ?? site) && !offenders.includes(site)) {
+          offenders.push(site);
+        }
+      }
     }
 
     expect(offenders).toEqual([]);

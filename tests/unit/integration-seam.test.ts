@@ -457,6 +457,154 @@ describe("buildHintFormat", () => {
     expect(factLines(result)).toHaveLength(4);
   });
 
+  // ── The pinned reserve ─────────────────────────────────────────
+  //
+  // `PINNED_RESERVE` exists for one shape: a pinned fact that shares no terms with the current
+  // prompt, behind a full cap's worth of facts that do. Before the reserve, `mem pin` bought
+  // nothing on this surface once a query carried any signal at all -- retrieval sorts pins first
+  // only in the zero-signal case, deliberately, so with a real query a pin ranked on relevance like
+  // anything else and a standing constraint fell off the payload. Every test below is keyed on the
+  // *aggressive* kinds, because that is the only pool where the failure reproduces: a pinned
+  // decision would land inside the precision cap's spare room on its own.
+  it("emits a pinned fact that matches nothing, behind a full cap of facts that match the query", async () => {
+    const seeds: FactSeed[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      seeds.push({
+        id: `matching-pref-${i}`,
+        text: `always run pnpm install before the build step ${i}`,
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: `2026-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        status: "active",
+      });
+    }
+    seeds.push({
+      id: "pinned-unrelated",
+      text: "deployments require a signed changelog entry",
+      kind: "preference",
+      scope: "global",
+      source_type: "user",
+      captured_at: "2026-01-01T00:00:00.000Z",
+      status: "pinned",
+    });
+    seedFacts(dbPath, seeds);
+
+    const result = await buildHint({ root, dbPath, query: "pnpm install build step" });
+    const lines = factLines(result);
+    expect(lines.some((line) => line.includes("id=pinned-unrelated"))).toBe(true);
+    // The reserve is additive, so the twelve matching preferences still fill their own cap of 8.
+    expect(lines).toHaveLength(9);
+  });
+
+  it("non-firing: the same store without the pin emits only the capped set, so the reserve is what added the line", async () => {
+    // The control for the test above. Without it, a store that emitted 9 lines for an unrelated
+    // reason would read as the reserve working.
+    const seeds: FactSeed[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      seeds.push({
+        id: `matching-pref-${i}`,
+        text: `always run pnpm install before the build step ${i}`,
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: `2026-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        status: "active",
+      });
+    }
+    seeds.push({
+      id: "active-unrelated",
+      text: "deployments require a signed changelog entry",
+      kind: "preference",
+      scope: "global",
+      source_type: "user",
+      captured_at: "2026-01-01T00:00:00.000Z",
+      status: "active",
+    });
+    seedFacts(dbPath, seeds);
+
+    const result = await buildHint({ root, dbPath, query: "pnpm install build step" });
+    const lines = factLines(result);
+    expect(lines).toHaveLength(8);
+    expect(lines.some((line) => line.includes("id=active-unrelated"))).toBe(false);
+  });
+
+  it("reserves at most PINNED_RESERVE slots: extra pins compete on relevance like any other fact", async () => {
+    const seeds: FactSeed[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      seeds.push({
+        id: `matching-pref-${i}`,
+        text: `always run pnpm install before the build step ${i}`,
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: `2026-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        status: "active",
+      });
+    }
+    for (let i = 0; i < 5; i += 1) {
+      seeds.push({
+        id: `pinned-unrelated-${i}`,
+        text: `deployments require a signed changelog entry ${i}`,
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: `2026-02-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        status: "pinned",
+      });
+    }
+    seedFacts(dbPath, seeds);
+
+    const result = await buildHint({ root, dbPath, query: "pnpm install build step" });
+    const pinnedLines = factLines(result).filter((line) => line.includes("id=pinned-unrelated-"));
+    // Five pins, two reserved slots. The other three are not hidden -- they rank against the
+    // matching preferences and lose, which is the caps working, not the reserve failing.
+    expect(pinnedLines).toHaveLength(2);
+    expect(factLines(result)).toHaveLength(10);
+  });
+
+  it("does not spend an aggressive slot on a reserved fact: a store of pinned preferences emits 2 + 8, not 8", async () => {
+    // This is what "reserved" has to mean. If the reserve merely re-ordered the aggressive pool,
+    // a pinned preference would consume one of its own eight slots and the guarantee would be
+    // indistinguishable from the pre-reserve behaviour at this store shape.
+    const seeds: FactSeed[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      seeds.push({
+        id: `pinned-pref-${i}`,
+        text: `pinned preference number ${i}`,
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: `2026-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        status: "pinned",
+      });
+    }
+    seedFacts(dbPath, seeds);
+
+    const result = await buildHint({ root, dbPath });
+    expect(factLines(result)).toHaveLength(10);
+  });
+
+  it("counts pins the caps could not send in the footer, like any other shortfall", async () => {
+    const seeds: FactSeed[] = [];
+    for (let i = 0; i < 12; i += 1) {
+      seeds.push({
+        id: `pinned-pref-${i}`,
+        text: `pinned preference number ${i}`,
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: `2026-01-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`,
+        status: "pinned",
+      });
+    }
+    seedFacts(dbPath, seeds);
+
+    const result = await buildHint({ root, dbPath });
+    // 12 eligible, 10 emitted (2 reserved + 8 capped), so the footer must disclose the 2 it dropped.
+    expect(result.lines.at(-1)).toContain("2 more in scope, not sent");
+  });
+
   it("emits a well-formed TGMEM/1 line whose display field is valid JSON", async () => {
     seedFacts(dbPath, [
       {
@@ -1046,6 +1194,38 @@ describe("buildHintFormat", () => {
     expect(emittedIds(partial)).toEqual(["fact-b"]);
   });
 
+  it("a pinned fact is re-sent by --delta after it was already surfaced, while an unpinned one beside it stays suppressed", async () => {
+    // Suppressing a pin after one send would make PINNED_RESERVE a first-prompt-only guarantee.
+    // The unpinned fact in the same call is the control: it proves delta suppression is still on,
+    // so the pin's re-send is an exemption rather than the filter having stopped working.
+    seedFacts(dbPath, [
+      {
+        id: "pinned-standing",
+        text: "deployments require a signed changelog entry",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "pinned",
+      },
+      {
+        id: "active-ordinary",
+        text: "the staging database resets every friday",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "active",
+      },
+    ]);
+
+    const first = await buildHint({ root, dbPath, sessionId: "sess-pin", query: "unrelated tooling question" });
+    expect(emittedIds(first).sort()).toEqual(["active-ordinary", "pinned-standing"]);
+
+    const repeat = await buildHint({ root, dbPath, sessionId: "sess-pin", delta: true, query: "unrelated tooling question" });
+    expect(emittedIds(repeat)).toEqual(["pinned-standing"]);
+  });
+
   it("the SessionStart recency dump (no query) is still fully suppressible: every score is zero", async () => {
     seedFacts(dbPath, [
       { id: "pref-1", text: "prefers pnpm", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-01-04T00:00:00.000Z", status: "active" },
@@ -1283,7 +1463,17 @@ describe("the footer discloses what the payload withheld", () => {
     seedDecisions(6);
     const result = await buildHint({ root, dbPath, query: "deploy" });
     expect(factLines(result)).toHaveLength(4);
-    expect(footerOf(result)).toBe("footer  mem show <id> for detail; 2 more matched, not sent");
+    expect(footerOf(result)).toBe("footer  mem show <id> for detail; 2 more in scope, not sent");
+  });
+
+  it("does not claim a dropped fact 'matched' when the query matched nothing at all", async () => {
+    // `retrieve()` ranks every scoped fact; it does not filter by the query. A query with no lexical
+    // overlap at all still ranks (and caps) the full set, so the footer's cut-count names facts that
+    // were merely in scope and unsent -- never facts the query actually matched.
+    seedDecisions(6);
+    const result = await buildHint({ root, dbPath, query: "zzzznomatchwhatsoever" });
+    expect(footerOf(result)).toContain("more in scope, not sent");
+    expect(footerOf(result)).not.toContain("matched");
   });
 
   it("reports a review queue even when it has no fact-lines to attach it to", async () => {

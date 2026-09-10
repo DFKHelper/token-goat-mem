@@ -20,9 +20,10 @@
  * `{ filePath, outcomes }`, so both import modes render through the same summary/line formatting.
  */
 
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
+import { anchorPathWithinRoot } from "./anchors.js";
 import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactFieldsOrThrow } from "./capture.js";
 import { insertAuditLog } from "./db.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
@@ -35,7 +36,7 @@ import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } f
 export const JSON_EXPORT_SCHEMA_VERSION = 1;
 
 /** Maximum JSON export file size (50 MB). Files larger than this are rejected as DoS protection. */
-const MAX_IMPORT_FILE_SIZE_BYTES = 50_000_000;
+export const MAX_IMPORT_FILE_SIZE_BYTES = 50_000_000;
 
 const FACT_SOURCE_TYPES: readonly FactSourceType[] = ["user", "derived"];
 
@@ -80,12 +81,14 @@ function textGuess(obj: Record<string, unknown> | null, index: number): string {
  * insert-ready `NewFact` (including the JSON `embedding: number[] | null` -> `Float32Array | null`
  * conversion, the exact inverse of `mem export`'s `Array.from(embedding)` in cli.ts). Pure: does not
  * touch the DB or screen for secrets (that is `importFromJson`'s job, since it needs `root` for
- * `.mem/allowlist`).
+ * `.mem/allowlist`). `root` is used here only to bound a non-global fact's `scopeRoot`
+ * (`undefined` when the caller has no root -- e.g. `planImportFromJson`'s dry run -- in which case
+ * only the absolute-path shape is checked, not containment).
  */
 /** Generous ceiling on an imported fact id: a uuid is 36 characters, so this leaves room for any reasonable external id scheme while refusing an unbounded string as a primary key. */
 const MAX_IMPORTED_ID_LENGTH = 128;
 
-function validateJsonFact(raw: unknown, index: number): ParsedEntry {
+function validateJsonFact(raw: unknown, index: number, root: string | undefined): ParsedEntry {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     const candidate: ImportCandidate = { text: textGuess(null, index), line: index + 1, sourceRef: `#${index}` };
     return { candidate, newFact: null, reason: `facts[${index}] is not an object` };
@@ -127,6 +130,21 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
     return fail(
       `facts[${index}] has scope ${JSON.stringify(scopeForBindingCheck)} but no "scopeRoot" binding (expected an absolute path)`
     );
+  }
+  if (scopeForBindingCheck !== "global" && hasBoundScopeRoot) {
+    // `anchorRootFor` (src/retrieval.ts) uses a project-scoped fact's `scopeRoot` verbatim as the
+    // anchor-evaluation root, so an imported row that smuggles in an arbitrary directory becomes a
+    // file-existence/content-substring oracle against any path on disk, not just the caller's
+    // `--root`. Reject at import time rather than let it reach storage.
+    const scopeRootValue = obj["scopeRoot"] as string;
+    if (!isAbsolute(scopeRootValue)) {
+      return fail(`facts[${index}] has a "scopeRoot" that is not an absolute path: ${JSON.stringify(scopeRootValue)}`);
+    }
+    if (root !== undefined && anchorPathWithinRoot(root, scopeRootValue) === null) {
+      return fail(
+        `facts[${index}] has a "scopeRoot" ${JSON.stringify(scopeRootValue)} outside the import root ${JSON.stringify(root)}`
+      );
+    }
   }
   if (!FACT_SOURCE_TYPES.includes(obj["source_type"] as FactSourceType)) {
     return fail(`facts[${index}] has invalid "source_type" ${JSON.stringify(obj["source_type"])}`);
@@ -282,7 +300,10 @@ function validateJsonFact(raw: unknown, index: number): ParsedEntry {
  * one place. Throws `JsonImportError` for a whole-file problem (bad JSON, wrong `schemaVersion`,
  * missing `facts` array); an individual bad fact is instead reflected per-entry (`newFact: null`).
  */
-function parseJsonFacts(path: string): { readonly filePath: string; readonly entries: readonly ParsedEntry[] } {
+function parseJsonFacts(
+  path: string,
+  root: string | undefined
+): { readonly filePath: string; readonly entries: readonly ParsedEntry[] } {
   const filePath = resolve(path);
 
   // Wrap file operations to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
@@ -317,7 +338,7 @@ function parseJsonFacts(path: string): { readonly filePath: string; readonly ent
     throw new JsonImportError(`${filePath} is missing a "facts" array`);
   }
 
-  const entries = (envelope["facts"] as readonly unknown[]).map((rawFact, index) => validateJsonFact(rawFact, index));
+  const entries = (envelope["facts"] as readonly unknown[]).map((rawFact, index) => validateJsonFact(rawFact, index, root));
   return { filePath, entries };
 }
 
@@ -333,7 +354,7 @@ function parseJsonFacts(path: string): { readonly filePath: string; readonly ent
  * either.
  */
 export function planImportFromJson(options: { readonly path: string }): ImportResult {
-  const { filePath, entries } = parseJsonFacts(options.path);
+  const { filePath, entries } = parseJsonFacts(options.path, undefined);
   const candidates = entries.map((entry) => entry.candidate);
   const outcomes: ImportOutcome[] = entries.map((entry) =>
     entry.newFact === null
@@ -346,7 +367,7 @@ export function planImportFromJson(options: { readonly path: string }): ImportRe
 export interface ImportFromJsonOptions {
   /** Path to the JSON export file to import. Resolved to an absolute path before reading. */
   readonly path: string;
-  /** Project root used only to resolve `.mem/allowlist` for secret screening (full-fidelity import preserves each fact's original `scopeRoot` verbatim, so `root` is never used to derive it). Defaults to the current working directory. */
+  /** Project root used to resolve `.mem/allowlist` for secret screening, and to bound every non-global fact's `scopeRoot`: an entry whose `scopeRoot` does not resolve inside `root` is rejected as `skipped_error` rather than imported verbatim (an unbounded `scopeRoot` would let a later `mem recall`/`mem review` evaluate that fact's anchor predicate against an attacker-chosen directory outside `root`). Defaults to the current working directory. */
   readonly root?: string;
   /** When true, behaves exactly like `planImportFromJson` (no DB access, nothing written). */
   readonly dryRun?: boolean;
@@ -382,9 +403,9 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
   if (options.dryRun === true) {
     return planImportFromJson(options);
   }
-  const { filePath, entries } = parseJsonFacts(options.path);
-
   const root = resolve(options.root ?? process.cwd());
+  const { filePath, entries } = parseJsonFacts(options.path, root);
+
   const allowlist = loadAllowlist(root);
 
   const candidates = entries.map((entry) => entry.candidate);

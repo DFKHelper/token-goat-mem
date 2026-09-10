@@ -37,6 +37,31 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { _clearAnchorMemoForTests, evaluateAnchor } from "../src/anchors.js";
 
+/**
+ * `node:fs`'s ESM module namespace is not configurable, so `vi.spyOn` cannot patch its exports
+ * directly (see the "a throwing .git/index read" tests below). `vi.hoisted` lets the mock factory
+ * (itself hoisted above every import, including `node:fs`'s own) and the test bodies share one
+ * mutable override slot that defaults to passing through to the real implementation.
+ */
+type FsOverride = ((real: (...args: unknown[]) => unknown, ...args: unknown[]) => unknown) | null;
+const fsOverrides = vi.hoisted(() => ({
+  statSync: null as FsOverride,
+  readFileSync: null as FsOverride,
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    statSync: (...args: unknown[]) =>
+      fsOverrides.statSync ? fsOverrides.statSync(actual.statSync as (...a: unknown[]) => unknown, ...args) : (actual.statSync as (...a: unknown[]) => unknown)(...args),
+    readFileSync: (...args: unknown[]) =>
+      fsOverrides.readFileSync
+        ? fsOverrides.readFileSync(actual.readFileSync as (...a: unknown[]) => unknown, ...args)
+        : (actual.readFileSync as (...a: unknown[]) => unknown)(...args),
+  };
+});
+
 const isWindows = process.platform === "win32";
 
 let root: string;
@@ -48,6 +73,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  fsOverrides.statSync = null;
+  fsOverrides.readFileSync = null;
   _clearAnchorMemoForTests();
   rmSync(root, { recursive: true, force: true });
 });
@@ -232,6 +259,43 @@ describe("a corrupt .git/index yields unverified, never a partial path set", () 
     // added -- and only then does the 8-byte-aligned offset for the next entry land past the end.
     // Dropping more than this trips the earlier NUL check instead and never reaches here.
     writeIndex({ entryCount: 1, entries: [entry.subarray(0, entry.length - 1)] });
+    expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("unverified");
+  });
+});
+
+/**
+ * A `statSync`/`readFileSync` failure on `.git/index` is not the same fact as "no index file
+ * exists". ENOENT means the repo is freshly initialized and genuinely tracks nothing; any other
+ * error (permission denied, a transient Windows file lock from a git GUI or antivirus scan) means
+ * mem cannot tell -- and must not report that as "contradicted", which would silently withhold a
+ * correctly-tracked fact from ground truth by claiming the opposite of the truth.
+ */
+describe("a throwing .git/index read is unverified, never treated as an empty index", () => {
+  it("is unverified when statSync throws something other than ENOENT", () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "index"), Buffer.alloc(20), "utf8");
+    const indexPath = join(root, ".git", "index");
+    const err = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    fsOverrides.statSync = (real, ...args) => {
+      if (args[0] === indexPath) {
+        throw err;
+      }
+      return real(...args);
+    };
+    expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("unverified");
+  });
+
+  it("is unverified when readFileSync throws something other than ENOENT", () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "index"), Buffer.alloc(20), "utf8");
+    const indexPath = join(root, ".git", "index");
+    const err = Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+    fsOverrides.readFileSync = (real, ...args) => {
+      if (args[0] === indexPath) {
+        throw err;
+      }
+      return real(...args);
+    };
     expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("unverified");
   });
 });

@@ -35,17 +35,20 @@
  */
 
 import { Command } from "commander";
+import { existsSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
-import { evaluateAnchor, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
+import { anchorPathWithinRoot, evaluateAnchor, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
 import type { FactStatusUpdate } from "./contradiction.js";
 import {
   captureExplicit,
   captureSuggested,
   CaptureValidationError,
+  loadAllowlist,
   parseCapturedAtOrThrow,
   InvalidAnchorError,
+  screenForSecrets,
   screenInputOrThrow,
   SecretDetectedError,
   validateFactEditOrThrow,
@@ -100,7 +103,14 @@ import {
   type WiringPlan,
   type WiringResult,
 } from "./wiring.js";
-import { buildHintFormat, FOLLOW_UP_REVIEW, FOLLOW_UP_SHOW_DETAIL, type HintFormatOptions } from "./integration-seam.js";
+import {
+  buildHintFormat,
+  FOLLOW_UP_REVIEW,
+  FOLLOW_UP_SHOW_DETAIL,
+  HINT_LINE_CEILING,
+  HINT_PINNED_RESERVE,
+  type HintFormatOptions,
+} from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { scanTranscript } from "./sessionScan.js";
 import { anchorRootFor, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
@@ -227,7 +237,46 @@ function isEditableFactField(field: string): field is EditableFactField {
   return (EDITABLE_FACT_FIELDS as readonly string[]).includes(field);
 }
 
-function describeEdit(before: Fact, after: Fact, patch: FactUpdate): string {
+/**
+ * Free-text editable fields a secret pattern could plausibly hide in -- the same set
+ * `screenInputOrThrow` screens on capture/edit of the *new* value. `scope`/`status` are fixed
+ * enums, `scopeRoot`/`scopeRepo` are filesystem paths, and `confidence` is a number: none of those
+ * are worth running through pattern/entropy screening.
+ */
+const AUDIT_SCREENED_FIELDS: ReadonlySet<EditableFactField> = new Set(["text", "subject", "value", "anchor"]);
+
+/**
+ * Prefix stamped onto a prior value that tripped secret screening on its way into the audit log.
+ * `undoEdit` matches on it: a redacted prior value is not a value, and restoring it would write the
+ * marker itself in as the fact's text while reporting success.
+ */
+const REDACTED_PRIOR_VALUE_PREFIX = "[redacted: possible secret -- ";
+
+/**
+ * Screens a field's *prior* value -- the one an edit is about to duplicate into the audit
+ * `detail`/`prior_json` -- with the same heuristic `screenInputOrThrow` runs on the *new* value.
+ * Capture screening is deny-by-default but not a guarantee (S7): a secret that slipped past it once
+ * must not gain a second, unforgettable at-rest copy just because it happened to be the value an
+ * edit is replacing, one `mem forget` of the fact does not touch. Never throws -- the fact's own
+ * text already passed or failed screening at capture time; this only decides what may travel into
+ * the audit log.
+ */
+function redactPriorValueIfSecret(
+  field: EditableFactField,
+  value: string | number | null | undefined,
+  allowlist: readonly string[]
+): string | number | null | undefined {
+  if (!AUDIT_SCREENED_FIELDS.has(field) || typeof value !== "string" || value.length === 0) {
+    return value;
+  }
+  const matches = screenForSecrets({ [field]: value }, allowlist);
+  if (matches.length === 0) {
+    return value;
+  }
+  return `${REDACTED_PRIOR_VALUE_PREFIX}${matches.map((match) => match.patternName).join(", ")}]`;
+}
+
+function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: readonly string[]): string {
   const changes = Object.keys(patch)
     .map((field) => {
       if (!isEditableFactField(field)) {
@@ -236,8 +285,11 @@ function describeEdit(before: Fact, after: Fact, patch: FactUpdate): string {
       const old = before[field];
       const now = after[field];
       // A field named in the patch whose value did not actually move is still worth recording as
-      // touched, but without a misleading "X -> X" arrow.
-      return old === now ? `${field} (unchanged)` : `${field}: ${auditValueWhole(old)} -> ${auditValuePreview(now)}`;
+      // touched, but without a misleading "X -> X" arrow. Compared before redaction: redacting
+      // `old` but not `now` would otherwise make an unchanged secret-bearing field look "changed".
+      return old === now
+        ? `${field} (unchanged)`
+        : `${field}: ${auditValueWhole(redactPriorValueIfSecret(field, old, allowlist))} -> ${auditValuePreview(now)}`;
     })
     .join("; ");
   return `edited ${changes}`;
@@ -249,11 +301,11 @@ function describeEdit(before: Fact, after: Fact, patch: FactUpdate): string {
  * every editable field on the fact so an edit that only ever set `--text` cannot be undone into
  * clobbering a `--scope` no one asked to change back.
  */
-function buildEditPriorPayload(before: Fact, patch: FactUpdate): string {
+function buildEditPriorPayload(before: Fact, patch: FactUpdate, allowlist: readonly string[]): string {
   const prior: Partial<Record<EditableFactField, unknown>> = {};
   for (const field of EDITABLE_FACT_FIELDS) {
     if (field in patch) {
-      prior[field] = before[field];
+      prior[field] = redactPriorValueIfSecret(field, before[field], allowlist);
     }
   }
   return JSON.stringify(prior);
@@ -307,6 +359,19 @@ function undoEdit(db: Database.Database, id: string): string {
     throw new UsageError(`fact ${fact.id}'s last edit has no recoverable prior value recorded -- nothing to undo`);
   }
   const patch = JSON.parse(last.priorJson) as FactUpdate;
+  // A prior value that tripped secret screening was never stored -- the marker was stored in its
+  // place. Restoring it would write "[redacted: possible secret -- ...]" in as the fact's text and
+  // report success, which is worse than refusing: the original is gone either way, but a refusal
+  // says so. The fact's current value is untouched and still settable by hand with `mem edit`.
+  const redactedFields = Object.entries(patch)
+    .filter(([, value]) => typeof value === "string" && value.startsWith(REDACTED_PRIOR_VALUE_PREFIX))
+    .map(([field]) => field);
+  if (redactedFields.length > 0) {
+    throw new UsageError(
+      `fact ${fact.id}'s prior ${redactedFields.join(", ")} tripped secret screening at edit time and was ` +
+        "redacted rather than recorded, so there is nothing safe to restore -- set the field explicitly with `mem edit`"
+    );
+  }
   const tx = db.transaction((): Fact => {
     const restored = updateFact(db, fact.id, patch);
     if (restored === undefined) {
@@ -477,9 +542,58 @@ function describeFacets(factsWithTerms: number, totalFacts: number): string {
 }
 
 /**
+ * `mem doctor`'s hint-budget line: how much of what a store holds can actually reach a session.
+ *
+ * Worth a line because the ceiling is otherwise invisible from every command a user has. `mem list`
+ * shows every fact, `mem doctor`'s own status counts show how many are active, and neither hints
+ * that a single `--hint-format` block carries at most `HINT_LINE_CEILING` of them -- so a store that
+ * has grown past the cap looks healthy right until someone notices a fact they can plainly see in
+ * `mem list` is never in context. The fix is not a bigger cap (the cap is what keeps the block from
+ * becoming filler); it is pinning the handful that must always arrive, so the remediation named here
+ * is `mem pin`.
+ *
+ * Pins are reported against the reserve rather than the ceiling because over-pinning is the failure
+ * on the other side: past `HINT_PINNED_RESERVE`, extra pins compete on relevance like anything else,
+ * so a store with twenty pins has not bought twenty guaranteed slots and should not believe it has.
+ */
+function describeHintBudget(recallable: number, pinned: number): string {
+  const line = `hint budget: ${recallable} recallable fact${recallable === 1 ? "" : "s"}, at most ${HINT_LINE_CEILING} per recall; ${pinned} pinned of ${HINT_PINNED_RESERVE} reserved slots`;
+  if (pinned > HINT_PINNED_RESERVE) {
+    return `${line} (only ${HINT_PINNED_RESERVE} pins are guaranteed a slot -- the rest compete on relevance)`;
+  }
+  if (recallable > HINT_LINE_CEILING) {
+    return `${line} (pin the facts that must always arrive: \`mem pin <id>\`)`;
+  }
+  return line;
+}
+
+/**
+ * `mem doctor`'s scope-placement line: project- and path-scoped facts whose `scope_root` is gone.
+ *
+ * These are the one fact class that fails silently and permanently. Scope is matched by root, so a
+ * fact bound to a directory that has since been renamed, moved, or deleted is not stale, contested,
+ * or decayed -- every status column calls it healthy -- it is simply unreachable from anywhere,
+ * because no session will ever run with that root again. Nothing else in `doctor` would show it: the
+ * status counts include it as active, and term coverage and embedding coverage both count it as
+ * covered. Re-scoping is a human decision (the fact may belong to the moved directory's new path or
+ * may have been about the old one), so this names `mem list --scope` to find them and leaves the
+ * call to the user rather than guessing a root.
+ */
+function describeScopePlacement(orphanedRoots: number, orphanedFacts: number): string {
+  if (orphanedFacts === 0) {
+    return "scope placement: every project/path-scoped fact's root still exists";
+  }
+  return (
+    `scope placement: ${orphanedFacts} fact${orphanedFacts === 1 ? "" : "s"} bound to ${orphanedRoots} missing ` +
+    `root${orphanedRoots === 1 ? "" : "s"} -- unreachable from any session ` +
+    "(`mem list --scope project` / `--scope path` to review, then re-capture or `mem forget`)"
+  );
+}
+
+/**
  * One `doctor` line for `mem dream`, mirroring the embeddings line above.
  *
- * Reported here because dreaming is the only command that sends fact text off this machine, and its
+ * Reported here because both `mem dream` and `mem embed` send fact text off this machine, and their
  * configuration lives in environment variables -- so a URL exported once in a shell profile is
  * otherwise invisible to the person whose facts would be sent. `doctor` is where someone checks
  * what the tool is currently set up to do, and "is anything configured to leave this machine" is
@@ -1813,7 +1927,11 @@ export function buildProgram(): Command {
     .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/contradicted facts are never subject to this cap)", (v) => parseInt(v, 10))
     .option("--root <path>", "Project root for anchor evaluation")
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
-    .option("--hint-style <full|terse>", "Display verbosity: full (default, unchanged) or terse (no CTA, short kind labels)", "full")
+    .option(
+      "--hint-style <full|terse>",
+      "Display verbosity: full (default, unchanged) or terse (no CTA, short kind labels, long bodies elided with a `mem show <id>` marker)",
+      "full"
+    )
     .option("--since-epoch <n>", "Only include facts with epoch greater than n (see `mem epoch`)", (v) => parseInt(v, 10))
     .option("--hook-stdin", "Read a coding-tool hook's JSON envelope from stdin: its session_id becomes the session id and its prompt the query (--hint-format only; fails open to no query)")
     .option("--session-id <id>", "Session id to log surfaced facts under, and for --delta to filter against (--hint-format only; overrides the envelope's session_id)")
@@ -2147,7 +2265,7 @@ export function buildProgram(): Command {
       "Scan a session transcript for durable-statement sentences and file them as pending suggestions " +
         "-- deterministic sentence matching, no model; nothing reaches active without `mem review --promote`"
     )
-    .option("--hook-stdin", "Read a Stop hook's JSON envelope from stdin and take transcript_path from it")
+    .option("--hook-stdin", "Read a Stop or PreCompact hook's JSON envelope from stdin and take transcript_path from it")
     .option("--transcript <path>", "Scan this transcript file instead of one named by a hook envelope")
     .option("--root <path>", "Project root the captured facts bind to (default: current directory)")
     .option("--scope <scope>", "global, project, or path", "project")
@@ -2338,6 +2456,14 @@ export function buildProgram(): Command {
         validateScopePathPairing(options.scope, options.path);
         const root = resolveRoot(options.root);
         const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
+        let pathScopeRoot: string | null = null;
+        if (scope === "path") {
+          const bound = anchorPathWithinRoot(root, options.path as string);
+          if (bound === null) {
+            throw new UsageError(`--path ${JSON.stringify(options.path)} resolves outside --root ${JSON.stringify(root)}`);
+          }
+          pathScopeRoot = bound;
+        }
         const patch: FactUpdate = {
           ...(options.text !== undefined ? { text: options.text } : {}),
           ...(hasSubject ? { subject: options.subject } : {}),
@@ -2345,7 +2471,7 @@ export function buildProgram(): Command {
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(scope !== undefined ? { scope } : {}),
           ...(scope !== undefined
-            ? { scopeRoot: scope === "global" ? null : scope === "path" ? resolvePath(root, options.path as string) : root }
+            ? { scopeRoot: scope === "global" ? null : scope === "path" ? pathScopeRoot : root }
             : {}),
         };
         if (Object.keys(patch).length === 0) {
@@ -2370,6 +2496,7 @@ export function buildProgram(): Command {
             "edit",
             existing.id
           );
+          const allowlist = loadAllowlist(root);
           const tx = db.transaction((): Fact => {
             const fact = updateFact(db, existing.id, patch);
             if (fact === undefined) {
@@ -2377,13 +2504,13 @@ export function buildProgram(): Command {
             }
             const detail =
               existing.source_type === "user"
-                ? `${describeEdit(existing, fact, patch)} (--force override of a source_type=user fact)`
-                : describeEdit(existing, fact, patch);
+                ? `${describeEdit(existing, fact, patch, allowlist)} (--force override of a source_type=user fact)`
+                : describeEdit(existing, fact, patch, allowlist);
             insertAuditLog(db, {
               event: "edit",
               factId: existing.id,
               detail,
-              priorJson: buildEditPriorPayload(existing, patch),
+              priorJson: buildEditPriorPayload(existing, patch, allowlist),
             });
             return fact;
           });
@@ -2450,7 +2577,7 @@ export function buildProgram(): Command {
     .description(
       "Report facts a configured model thinks follow from several stored facts together -- an evaluation " +
         "surface: it writes nothing, and there is no flag that makes it. Off unless " +
-        `${DREAM_URL_ENV}/${DREAM_MODEL_ENV} are set, and the only command that sends fact text off this machine`
+        `${DREAM_URL_ENV}/${DREAM_MODEL_ENV} are set. Note: \`mem dream\` and \`mem embed\` both send fact text off this machine`
     )
     // Deliberately no --root. Dreaming reasons over the whole live store, and a --root that changed
     // nothing would repeat the sharpest edge on `mem recall`: a flag the user reads as scoping and
@@ -2617,9 +2744,9 @@ export function buildProgram(): Command {
         // Each mode answers a different question and they do not compose: `--fact` inspects one
         // fact, `--list-entities` reads the whole index, `--all` writes. Silently letting one win
         // would make the ignored flag look honoured.
-        const modes = [options.all === true, options.fact !== undefined, options.listEntities === true].filter(Boolean).length;
+        const modes = [options.all === true, options.fact !== undefined, options.listEntities === true, options.backfill === true].filter(Boolean).length;
         if (modes > 1) {
-          throw new UsageError("--all, --fact, and --list-entities are mutually exclusive");
+          throw new UsageError("--all, --backfill, --fact, and --list-entities are mutually exclusive");
         }
 
         if (options.fact !== undefined) {
@@ -2678,7 +2805,7 @@ export function buildProgram(): Command {
 
   program
     .command("doctor")
-    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage")
+    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how much of the store fits in one recall block, and project/path-scoped facts whose root is gone")
     .action(
       guard(async () => {
         const dbPath = resolveDbPath();
@@ -2695,6 +2822,19 @@ export function buildProgram(): Command {
           const sourceRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM sources").get()?.c ?? 0;
           const auditRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM audit_log").get()?.c ?? 0;
           const epoch = getEpoch(db);
+          // The same status pair the hint-format recall pool loads (see `--hint-format`'s
+          // `listFacts` call): anything else is withheld, so counting it here would overstate
+          // what a session can actually receive.
+          const pinnedFacts = countFacts(db, { status: "pinned" });
+          const recallableFacts = countFacts(db, { status: "active" }) + pinnedFacts;
+          // Grouped by root so one renamed directory holding forty facts reports as one missing
+          // root, not forty -- and so each root is stat'd once however many facts hang off it.
+          const scopedRoots = db
+            .prepare<[], { scope_root: string; c: number }>(
+              "SELECT scope_root, COUNT(*) AS c FROM facts WHERE scope IN ('project','path') AND scope_root IS NOT NULL GROUP BY scope_root"
+            )
+            .all();
+          const orphaned = scopedRoots.filter((row) => !existsSync(row.scope_root));
           return [
             `db: ${dbPath}`,
             `journal_mode: ${journalMode}`,
@@ -2707,6 +2847,8 @@ export function buildProgram(): Command {
             ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db), totalFacts),
             describeDream(),
             describeFacets(countFactsWithTerms(db), totalFacts),
+            describeHintBudget(recallableFacts, pinnedFacts),
+            describeScopePlacement(orphaned.length, orphaned.reduce((sum, row) => sum + row.c, 0)),
           ].join("\n");
         });
         process.stdout.write(`${output}\n`);

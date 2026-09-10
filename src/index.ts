@@ -100,6 +100,7 @@ export {
   type CaptureResult,
   type CaptureSuggestedInput,
   type SecretMatch,
+  type SecretMatchSummary,
 } from "./capture.js";
 
 export {

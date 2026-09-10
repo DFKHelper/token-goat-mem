@@ -711,9 +711,14 @@ function readGitIndexPathsUncached(gitDir: string): GitIndexParseResult | null {
   let size: number;
   try {
     size = statSync(indexPath).size;
-  } catch {
-    // No index file yet (freshly initialized, empty repo) — correctly "nothing tracked", not an error.
-    return { paths: new Set(), complete: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      // No index file yet (freshly initialized, empty repo) — correctly "nothing tracked", not an error.
+      return { paths: new Set(), complete: true };
+    }
+    // Any other stat failure (permission denied, transient lock) means we cannot tell, not that
+    // the index is definitively empty.
+    return null;
   }
   if (size > MAX_GIT_INDEX_READ_BYTES) {
     return null;
@@ -721,8 +726,11 @@ function readGitIndexPathsUncached(gitDir: string): GitIndexParseResult | null {
   let buf: Buffer;
   try {
     buf = readFileSync(indexPath);
-  } catch {
-    return { paths: new Set(), complete: true };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { paths: new Set(), complete: true };
+    }
+    return null;
   }
   if (buf.length < 12 || buf.toString("ascii", 0, 4) !== "DIRC") {
     return null;

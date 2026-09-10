@@ -121,7 +121,10 @@ export interface RetrievalOptions {
    * allows it, the trailing CTA. `"terse"` drops the CTA unconditionally (the caller is assumed to
    * already know the follow-up commands) and shortens every kind label to its 4-character wire tag
    * (`pref`/`dec`/`fact`/`corr`, matching integration-seam.ts's `PROTOCOL_KIND_TAG`) for a
-   * single-line-per-fact recall a human can scan quickly.
+   * single-line-per-fact recall a human can scan quickly. It also elides a body past
+   * `TERSE_TEXT_BUDGET`, marking the elision and naming `mem show <id>` -- without that, a
+   * `MAX_TEXT_LENGTH` fact made a 500-character "terse" line and the style delivered nothing it
+   * promised. `"full"` never elides.
    */
   readonly hintStyle?: "full" | "terse";
   /**
@@ -855,6 +858,54 @@ const TERSE_KIND_LABEL: Record<FactKind, string> = {
 };
 
 /**
+ * Longest fact body `hintStyle: "terse"` emits before eliding, in characters.
+ *
+ * Terse shortened the kind label and dropped the CTA, and then emitted the body whole -- so a
+ * 500-character fact (`MAX_TEXT_LENGTH`, src/capture.ts) produced a 500-character "terse" line.
+ * The style's own docstring promises "single-line-per-fact recall a human can scan quickly", which
+ * a paragraph is not, and the four characters saved on the label were rounding error against it.
+ *
+ * 140 rather than something larger because the number has to be short enough that a reader takes
+ * the line in at a glance, which is the only thing terse is for; the full text is one indexed
+ * lookup away and the elision marker names the command.
+ */
+const TERSE_TEXT_BUDGET = 140;
+
+/**
+ * Elides an over-long body for `hintStyle: "terse"`, marking the elision and naming the recovery.
+ *
+ * The marker is not decoration. A silently shortened fact is the same failure class as a silently
+ * capped payload: an agent handed half a constraint acts on half a constraint, and is worse off
+ * than one handed none, because nothing on the line says a clause is missing. So the marker states
+ * that text was dropped, how much, and the command that returns it -- an agent reading a truncated
+ * line can tell it is truncated without comparing against anything.
+ *
+ * `<id>` stays a literal placeholder rather than the fact's own id, which is the wording the
+ * TGMEM footer already uses. Both surfaces that render a terse display carry the id on the same
+ * line already (`--hint-format`'s `id=` field, plain `mem recall`'s leading short id), so
+ * interpolating the real 36-character UUID here spent 45 characters to save 85 -- a net 40 in the
+ * one mode whose entire purpose is brevity. Measured on a real store before this was changed.
+ *
+ * The surrogate back-off is not theoretical: a fact body containing an emoji or any other
+ * astral-plane character can put a surrogate pair across the budget boundary, and `slice` alone
+ * would keep the high half. That survives `JSON.stringify` (it escapes to `\udXXX`) and is valid
+ * JSON, so no parser would complain -- it would just render as a replacement character in the one
+ * surface a user reads. Backing off one unit costs a character and cannot produce a lone half.
+ */
+function elideForTerse(text: string): string {
+  if (text.length <= TERSE_TEXT_BUDGET) {
+    return text;
+  }
+  const boundary = isHighSurrogate(text.charCodeAt(TERSE_TEXT_BUDGET - 1)) ? TERSE_TEXT_BUDGET - 1 : TERSE_TEXT_BUDGET;
+  const kept = text.slice(0, boundary).trimEnd();
+  return `${kept}... (+${text.length - kept.length} chars: mem show <id>)`;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+/**
  * Builds the self-caveating `display` string for a fact (S3). Preferences and corrections always
  * carry a "(verify)"-style caveat regardless of trust level (P6 — under-recall is unsafe for these
  * kinds, so they are always presented as hints-to-verify, never as a bald assertion) — decisions and
@@ -868,31 +919,34 @@ function buildDisplay(
   terse: boolean = false
 ): string {
   const label = terse ? TERSE_KIND_LABEL[fact.kind] : KIND_LABEL[fact.kind];
+  // Once, above every branch: the body is the same string in all seven of them, and eliding at each
+  // return would leave the next branch added here the one that quietly emits 500 characters.
+  const body = terse ? elideForTerse(fact.text) : fact.text;
   const showCommand = `mem show ${fact.id}`;
-  const withCta = (body: string, cta: string): string => (includeCta ? `${body} — ${cta}` : body);
+  const withCta = (text: string, cta: string): string => (includeCta ? `${text} — ${cta}` : text);
 
   if (fact.status === "pending") {
-    return withCta(`${label} (pending, unconfirmed): ${fact.text}`, "confirm via mem review");
+    return withCta(`${label} (pending, unconfirmed): ${body}`, "confirm via mem review");
   }
   if (contradiction === "superseded") {
-    return withCta(`${label} (superseded, excluded): ${fact.text}`, "see mem review for history");
+    return withCta(`${label} (superseded, excluded): ${body}`, "see mem review for history");
   }
   if (contradiction === "contested") {
-    return withCta(`${label} (contested, excluded): ${fact.text}`, "resolve via mem review");
+    return withCta(`${label} (contested, excluded): ${body}`, "resolve via mem review");
   }
   if (freshness === "contradicted") {
     const tag = fact.status === "pinned" ? "pinned but contradicted" : "contradicted, excluded";
-    return withCta(`${label} (${tag}): ${fact.text}`, "resolve via mem review");
+    return withCta(`${label} (${tag}): ${body}`, "resolve via mem review");
   }
 
   const alwaysCaveat = fact.kind === "preference" || fact.kind === "correction";
 
   if (freshness === "affirmed") {
-    return alwaysCaveat ? withCta(`stored ${label} (verify): ${fact.text}`, showCommand) : withCta(`${label}: ${fact.text}`, showCommand);
+    return alwaysCaveat ? withCta(`stored ${label} (verify): ${body}`, showCommand) : withCta(`${label}: ${body}`, showCommand);
   }
 
   const month = fact.captured_at.slice(0, 7);
-  return withCta(`stored ${label} (unverified, ${month}): ${fact.text}`, `verify; ${showCommand}`);
+  return withCta(`stored ${label} (unverified, ${month}): ${body}`, `verify; ${showCommand}`);
 }
 
 function applyKindBoost(fact: Fact, score: number): number {

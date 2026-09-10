@@ -454,14 +454,24 @@ function upsertMarkedBlock(content: string, tool: string, body: string): string 
   return appendBlock(content, block);
 }
 
-/** Strips a tool-namespaced marked block plus the one separator newline `upsertMarkedBlock` adds, leaving the rest of the file untouched. No-op (returns `content` unchanged) if the marker pair isn't present. */
+/**
+ * Strips every resolvable tool-namespaced marked block plus the one separator newline
+ * `upsertMarkedBlock` adds per block, leaving the rest of the file untouched. No-op (returns
+ * `content` unchanged) if no marker pair is present.
+ *
+ * Loops rather than stopping after the first pair: a committed CLAUDE.md/AGENTS.md can end up with
+ * two complete back-to-back blocks for the same tool -- a realistic git-merge outcome when two
+ * branches each ran `mem init` -- and stopping after one left a full second block, body and all,
+ * behind while uninstall still reported success.
+ */
 function stripMarkedBlock(content: string, tool: string): string {
+  const start = markerStart(tool);
   const end = markerEnd(tool);
-  const found = resolveMarkedBlock(content, markerStart(tool), end);
-  if (found === undefined) {
-    return content;
+  let result = content;
+  for (let found = resolveMarkedBlock(result, start, end); found !== undefined; found = resolveMarkedBlock(result, start, end)) {
+    result = stripBlockSeparators(result, found.startIdx, found.endIdx + end.length);
   }
-  return stripBlockSeparators(content, found.startIdx, found.endIdx + end.length);
+  return result;
 }
 
 function markdownFile(path: string, tool: string, body: string): ManagedFile {
@@ -641,14 +651,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseJsonOrConflict(current: string, label: string): unknown {
-  try {
-    return JSON.parse(current) as unknown;
-  } catch {
-    throw new WiringConflictError(`${label} is not valid JSON; refusing to modify a hand-edited config`);
-  }
-}
-
 // ─────────────────────────────────────────────────────────────────────────── Surgical JSON/JSONC editing ───────────────────────────────────────────────────────────────────────────
 
 const JSONC_PARSE = { allowTrailingComma: true } as const;
@@ -806,18 +808,30 @@ const CLAUDE_SESSION_START_COMMAND =
 const CLAUDE_USER_PROMPT_SUBMIT_COMMAND =
   'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || true';
 
-// `Stop` is the only event that carries `transcript_path`, and the only one that fires after the
-// user has actually said something -- the two recall events above run before or instead of that.
+// `Stop` fires after the user has actually said something -- the two recall events above run
+// before or instead of that -- and carries `transcript_path`, so a scan has a transcript to read.
 // Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block. Runs
 // `--quiet` so a scan never writes into the session it just scanned.
 const CLAUDE_STOP_COMMAND =
   'command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || true';
+
+// `PreCompact` is the same scan under a different trigger, and it is not redundant with `Stop`:
+// `Stop` fires when a turn ends, so a session that runs long enough to be compacted mid-task has
+// had everything before the compaction boundary summarized away -- and if that session is later
+// killed, closed, or interrupted rather than ending a turn cleanly, `Stop` never fires at all and
+// the whole transcript is captured by nothing. `PreCompact` is the one event guaranteed to fire
+// while the pre-compaction transcript still exists on disk, and it carries `transcript_path` for
+// the same reason `Stop` does. Identical command: the scan is idempotent -- every candidate whose
+// text is already stored is skipped by `factWithTextExists` before capture -- so re-scanning the
+// turns both events see costs a read and files nothing twice.
+const CLAUDE_PRE_COMPACT_COMMAND = CLAUDE_STOP_COMMAND;
 
 /** The hook events mem installs, in the order they are written, each with the one command mem stamps under it. */
 const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
   { event: "SessionStart", command: CLAUDE_SESSION_START_COMMAND },
   { event: "UserPromptSubmit", command: CLAUDE_USER_PROMPT_SUBMIT_COMMAND },
   { event: "Stop", command: CLAUDE_STOP_COMMAND },
+  { event: "PreCompact", command: CLAUDE_PRE_COMPACT_COMMAND },
 ];
 
 interface ClaudeHook {
@@ -837,7 +851,10 @@ interface ClaudeSettings {
 }
 
 function installClaudeSettings(current: string | undefined, path: string): string | undefined {
-  const rawParsed: unknown = isBlank(current) ? {} : parseJsonOrConflict(current as string, path);
+  // JSONC, not strict JSON: Claude Code's own settings.json commonly carries `//`/`/* */` comments
+  // and trailing commas, and this file already depends on jsonc-parser to preserve exactly that
+  // formatting -- rejecting the file here defeated the point for the users it matters most to.
+  const rawParsed: unknown = isBlank(current) ? {} : parseJsoncOrConflict(current as string, path);
   if (!isPlainObject(rawParsed)) {
     throw new WiringConflictError(`${path} does not contain a JSON object at its root; refusing to modify a hand-edited config`);
   }
@@ -939,11 +956,40 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
   return surgicalJsoncEdit(text, ["hooks", event, -1], group);
 }
 
+/**
+ * Which `hooks.<event>` keys (and whether `hooks` itself) existed before mem ever wrote to `path`,
+ * read from the one-time `.bak` snapshot `writeManagedFile` takes on install's first write.
+ *
+ * The naive test at uninstall time -- "the event array is empty, so mem must have created it" -- is
+ * wrong: a user's own pre-existing `"hooks": {"SessionStart": []}` looks identical, after mem's own
+ * stamped entries are removed, to a container mem created and drained back to empty itself. The two
+ * are indistinguishable from the current file content alone, so this reads the pre-install snapshot
+ * instead of guessing from emptiness. `undefined` return means the snapshot is missing or unreadable
+ * (e.g. mem created the file itself and took no backup, or the backup is corrupt) -- callers must
+ * treat that as "assume everything pre-existed" so pruning stays a no-op rather than risking deletion
+ * of content mem cannot prove it owns.
+ */
+function preInstallHooks(path: string): { readonly hooksExisted: boolean; readonly hooks: Record<string, unknown> } | undefined {
+  const bakPath = `${path}.token-goat-mem.bak`;
+  if (!existsSync(bakPath)) {
+    // No backup was taken because the file did not exist before mem's first write -- there was no
+    // pre-existing `hooks` for it to have written into.
+    return { hooksExisted: false, hooks: {} };
+  }
+  try {
+    const parsed: unknown = parseJsonc(readFileSync(bakPath, "utf8"), [], JSONC_PARSE);
+    const hooks = isPlainObject(parsed) ? parsed["hooks"] : undefined;
+    return { hooksExisted: isPlainObject(hooks), hooks: isPlainObject(hooks) ? hooks : {} };
+  } catch {
+    return undefined;
+  }
+}
+
 function uninstallClaudeSettings(current: string | undefined, path: string): string | undefined {
   if (isBlank(current)) {
     return undefined;
   }
-  const rawParsed: unknown = parseJsonOrConflict(current as string, path);
+  const rawParsed: unknown = parseJsoncOrConflict(current as string, path);
   if (!isPlainObject(rawParsed)) {
     // Nothing mem could have stamped inside a non-object root; leave it untouched rather than crash.
     return current;
@@ -1000,11 +1046,15 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
     }
   }
 
-  // Prune the containers mem's own removals just emptied. Install creates `hooks` and
-  // `hooks.<event>` when a settings.json has neither -- the common case -- so stopping at the
-  // group removal left a `"hooks": { "SessionStart": [] }` husk behind and broke the "uninstall
-  // reverses exactly what init wrote" promise. An empty event array, or a hooks object with
-  // nothing but empty ones, is inert, so pruning one a user happened to have written costs them nothing.
+  // Prune the containers mem's own removals just emptied -- but only the ones mem itself created.
+  // Install creates `hooks` and `hooks.<event>` when a settings.json has neither, and leaving those
+  // behind as an empty husk broke the "uninstall reverses exactly what init wrote" promise. But an
+  // event array that is empty now is not proof mem created it: a user's own pre-existing
+  // `"hooks": {"SessionStart": []}` looks exactly the same once mem's stamped entries are gone,
+  // and deleting that key doesn't restore the file, it destroys hand-written content that predates
+  // mem entirely (the CRITICAL bug this snapshot check exists to close). `preInstallHooks` answers
+  // the question emptiness alone cannot: did this key exist before mem's first write.
+  const pre = preInstallHooks(path);
   for (const { event } of CLAUDE_HOOK_EVENTS) {
     const settingsAfter: unknown = parseJsonc(text, [], JSONC_PARSE);
     const hooksAfter: unknown = isPlainObject(settingsAfter) ? settingsAfter["hooks"] : undefined;
@@ -1012,9 +1062,11 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
       break;
     }
     const eventAfter = hooksAfter[event];
-    if (Array.isArray(eventAfter) && eventAfter.length === 0) {
+    const eventPreExisted = pre === undefined || pre.hooks[event] !== undefined;
+    if (Array.isArray(eventAfter) && eventAfter.length === 0 && !eventPreExisted) {
+      const hooksPreExisted = pre === undefined || pre.hooksExisted;
       text =
-        Object.keys(hooksAfter).length === 1
+        !hooksPreExisted && Object.keys(hooksAfter).length === 1
           ? surgicalJsoncEdit(text, ["hooks"], undefined)
           : surgicalJsoncEdit(text, ["hooks", event], undefined);
     }

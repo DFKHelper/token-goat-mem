@@ -188,7 +188,7 @@ function footerLineFor(counts: { readonly facts: number; readonly cut: number; r
     clauses.push(FOLLOW_UP_SHOW_DETAIL);
   }
   if (counts.cut > 0) {
-    clauses.push(`${counts.cut} more matched, not sent`);
+    clauses.push(`${counts.cut} more in scope, not sent`);
   }
   if (counts.withheld > 0) {
     clauses.push(`${counts.withheld} withheld; ${FOLLOW_UP_REVIEW}`);
@@ -249,6 +249,44 @@ const AGGRESSIVE_CAP = 8;
 const PRECISION_CAP = 4;
 
 /**
+ * Wire slots held for `status="pinned"` facts, taken off the top before the kind caps below see the
+ * ranked list at all.
+ *
+ * A pin is the one status whose whole meaning is "do not lose this", and until this reserve existed
+ * it bought a fact nothing on the surface that runs unprompted. `retrieve()` sorts pinned facts
+ * first *only in the zero-signal case* (src/retrieval.ts, and deliberately so -- letting a pin
+ * outrank a lexical match would make `mem pin` a ranking cheat code). The moment a query carries
+ * any signal, a pin is worth exactly zero: a hard user constraint that happens to share no terms
+ * with the current prompt ranks below twelve facts that do, and falls off the payload entirely.
+ * That is the failure this closes -- not a ranking preference, a floor. Pinned facts are what the
+ * user said must always be in context, so a fixed number of them always are.
+ *
+ * Two, not more: the reserve is subtracted from nothing, so every slot here widens the payload
+ * (2 + 8 + 4 = 14 lines at worst, against 12 before). Held to the smallest count that can carry a
+ * pin on its own terms, because the cost lands on every prompt of every session and the caps above
+ * were sized against a budget this sits on top of. A store with more pins than the reserve still
+ * ranks the rest normally through the caps; nothing is hidden, and the footer discloses the
+ * shortfall like any other cap.
+ */
+const PINNED_RESERVE = 2;
+
+/**
+ * The most fact lines one `--hint-format` block can carry: the reserve plus both kind caps, since
+ * the three sets are disjoint by construction (`reserved`, then `contested` split by kind).
+ *
+ * Exported for `mem doctor`, which is the only place a user can find out that a store holding
+ * hundreds of active facts still sends at most this many per recall. That ceiling is invisible
+ * otherwise -- `mem list` shows everything, so a store whose useful facts sit outside the cap looks
+ * healthy right up to the point someone wonders why a fact they can see is never in context.
+ * Exporting the sum rather than the three parts keeps the arithmetic in one place: a doctor line
+ * that re-added the caps itself would silently drift the day one of them changes.
+ */
+export const HINT_LINE_CEILING = PINNED_RESERVE + AGGRESSIVE_CAP + PRECISION_CAP;
+
+/** Wire slots held for pinned facts, exported for the `mem doctor` line that compares a store's pin count against it. */
+export const HINT_PINNED_RESERVE = PINNED_RESERVE;
+
+/**
  * The recall limit this module passes to `retrieve()`, deliberately unbounded.
  *
  * `retrieve()` defaults to `DEFAULT_RECALL_LIMIT` (20) and applies it as a post-ranking slice of
@@ -258,10 +296,11 @@ const PRECISION_CAP = 4;
  * preference lines and zero decision lines, in a payload byte-indistinguishable from one saying
  * this project has no decisions at all.
  *
- * The default limit could never bound this module's output anyway -- AGGRESSIVE_CAP + PRECISION_CAP
- * is 12, already under 20 -- so it only ever distorted composition. The caps above are what bounds
- * the wire; the recall limit must not silently pre-empt them. Costs nothing: the limit is a slice
- * applied after scoring and anchor evaluation have already run over every scoped fact.
+ * The default limit could never bound this module's output anyway -- PINNED_RESERVE plus
+ * AGGRESSIVE_CAP plus PRECISION_CAP is 14, already under 20 -- so it only ever distorted
+ * composition. The caps above are what bounds the wire; the recall limit must not silently pre-empt
+ * them. Costs nothing: the limit is a slice applied after scoring and anchor evaluation have
+ * already run over every scoped fact.
  */
 const HINT_FORMAT_RECALL_LIMIT = Number.MAX_SAFE_INTEGER;
 
@@ -317,7 +356,8 @@ export interface HintFormatOptions {
    * current query* (retrieval score of exactly zero), and marks the header `delta=1`. A fact that
    * scores non-zero is always sent, however many times this session has seen it: the host may have
    * compacted it out of context since, and a genuine hit belongs in context every time it is asked
-   * for. Requires `sessionId`; the CLI enforces that pairing, and this function treats `delta`
+   * for. A `status="pinned"` fact is never suppressed at all, whatever it scores -- see
+   * `PINNED_RESERVE`. Requires `sessionId`; the CLI enforces that pairing, and this function treats `delta`
    * without a session id as a plain full response (it cannot know what was already sent). Applied
    * before the per-kind caps, so a session drains the next-best unseen facts rather than receiving
    * an empty block as soon as the top-ranked ones have all been sent once. The recall log itself
@@ -497,11 +537,26 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // Turning on usefulness feedback or an embedding backend makes retrieval fuse via RRF, which
   // floors every ranked fact above zero -- so the old predicate would have quietly declared every
   // filler fact a match and disabled delta suppression store-wide, with no test failing to say so.
-  const unseen = delta ? results.filter((result) => result.matchedQuery || !alreadySurfaced.has(result.fact.id)) : results;
-  const aggressive = unseen.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
-  const precision = unseen.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
+  //
+  // A pinned fact is exempt from suppression outright, for the reason stated one paragraph up and
+  // with more force: the compaction argument that re-sends a genuine hit applies to a standing
+  // constraint every time, since a pin is precisely the fact whose absence from context the user
+  // said they will not accept. Suppressing it after one send would make PINNED_RESERVE a
+  // first-prompt-only guarantee, which is not a guarantee.
+  const unseen = delta
+    ? results.filter((result) => isPinned(result) || result.matchedQuery || !alreadySurfaced.has(result.fact.id))
+    : results;
 
-  const ordered = [...aggressive, ...precision];
+  // The reserve is taken before the kind caps see the list, and the reserved facts are then removed
+  // from what the caps rank -- otherwise a pinned preference would consume one of its own eight
+  // aggressive slots and the reserve would guarantee nothing it did not already have.
+  const reserved = unseen.filter(isPinned).slice(0, PINNED_RESERVE);
+  const reservedIds = new Set(reserved.map((result) => result.fact.id));
+  const contested = unseen.filter((result) => !reservedIds.has(result.fact.id));
+  const aggressive = contested.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
+  const precision = contested.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
+
+  const ordered = [...reserved, ...aggressive, ...precision];
   if (stable) {
     ordered.sort((a, b) => a.fact.id.localeCompare(b.fact.id));
   }
@@ -676,6 +731,16 @@ function isWireSafeId(id: string): boolean {
     }
   }
   return true;
+}
+
+/**
+ * Whether a result holds a user pin, the predicate both `PINNED_RESERVE` and the delta exemption
+ * key on. One function rather than two inline `=== "pinned"` comparisons so the two can never
+ * disagree about what a pin is -- a reserve that admitted a status the delta filter still
+ * suppressed would hand out a slot and then drop the fact that was meant to fill it.
+ */
+function isPinned(result: RetrievedFact): boolean {
+  return result.fact.status === "pinned";
 }
 
 function formatLine(result: RetrievedFact): string {

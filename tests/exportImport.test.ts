@@ -367,6 +367,64 @@ describe("importFromJson", () => {
     expect(count).toBe(1);
   });
 
+  it("an imported project-scoped fact with a relative scopeRoot is skipped with a per-item error", () => {
+    const relativeScopeRoot = {
+      ...VALID_FACT,
+      id: "eeeeeeee-ffff-eeee-eeee-eeeeeeeeeeee",
+      scope: "project",
+      scopeRoot: "../elsewhere",
+    };
+    writeFileSync(jsonPath, envelope([VALID_FACT, relativeScopeRoot]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(2);
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(result.outcomes[1]?.status).toBe("skipped_error");
+    expect(result.outcomes[1]?.reason).toContain("not an absolute path");
+
+    const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+    expect(count).toBe(1);
+  });
+
+  it("an imported project-scoped fact whose absolute scopeRoot escapes --root is skipped with a per-item error, not stored as an anchor-evaluation oracle", () => {
+    const outsideDir = mkdtempSync(join(tmpdir(), "mem-exportimport-outside-"));
+    try {
+      const escapingScopeRoot = {
+        ...VALID_FACT,
+        id: "ffffffff-0000-ffff-ffff-ffffffffffff",
+        scope: "project",
+        scopeRoot: outsideDir,
+      };
+      writeFileSync(jsonPath, envelope([VALID_FACT, escapingScopeRoot]), "utf8");
+
+      const result = importFromJson(db, { path: jsonPath, root });
+      expect(result.outcomes).toHaveLength(2);
+      expect(result.outcomes[0]?.status).toBe("imported");
+      expect(result.outcomes[1]?.status).toBe("skipped_error");
+      expect(result.outcomes[1]?.reason).toContain("outside the import root");
+
+      const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
+      expect(count).toBe(1);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("an imported project-scoped fact whose absolute scopeRoot resolves inside --root still imports", () => {
+    const nestedDir = join(root, "nested");
+    const insideScopeRoot = {
+      ...VALID_FACT,
+      id: "01010101-0101-0101-0101-010101010101",
+      scope: "project",
+      scopeRoot: nestedDir,
+    };
+    writeFileSync(jsonPath, envelope([insideScopeRoot]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(1);
+    expect(result.outcomes[0]?.status).toBe("imported");
+  });
+
   it("normalizes a global fact's non-empty scopeRoot to null instead of failing", () => {
     const globalWithScopeRoot = {
       ...VALID_FACT,

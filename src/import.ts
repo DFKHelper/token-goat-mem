@@ -23,7 +23,8 @@ import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { CaptureValidationError, SecretDetectedError, captureSuggested, type CaptureSuggestedInput } from "./capture.js";
-import { readFileWithErrorMapping } from "./fileUtils.js";
+import { MAX_IMPORT_FILE_SIZE_BYTES } from "./exportImport.js";
+import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { listFacts } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
 
@@ -200,9 +201,17 @@ function existingImportKeys(db: Database.Database): Set<string> {
 export function planImportFromMarkdown(options: Pick<ImportFromMarkdownOptions, "path">): ImportResult {
   const filePath = resolve(options.path);
 
-  // Wrap file read to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
+  // Wrap file stat and read to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
   // rather than internal errors: a missing or unreadable file is a user error (bad input path),
   // not a bug.
+  const stat = statFileWithErrorMapping(filePath, MarkdownImportError);
+
+  if (stat.size > MAX_IMPORT_FILE_SIZE_BYTES) {
+    throw new MarkdownImportError(
+      `${filePath} is too large (${stat.size} bytes, max ${MAX_IMPORT_FILE_SIZE_BYTES} bytes)`
+    );
+  }
+
   const markdown = readFileWithErrorMapping(filePath, MarkdownImportError);
 
   const candidates: ImportCandidate[] = extractMarkdownBullets(markdown).map((bullet) => ({
