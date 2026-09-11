@@ -1677,17 +1677,21 @@ describe("mem show --json", () => {
     expect(envelope.supersededBy).toEqual({ id: winnerId, status: "active", text: "node 20 is the floor" });
   });
 
-  it("says so plainly when a superseded fact has no successor", async () => {
+  it("says so plainly, without asserting a specific cause, when a superseded fact has no recorded edge", async () => {
     // `forget` retires a fact without a winner, and so do `review --reject` and consolidate's stale
-    // pass. Silence here would be indistinguishable from the feature not existing, so the absence
-    // is stated rather than omitted.
+    // pass -- but so does a fact superseded before an export/import round trip, whose winner may
+    // still be sitting right there in the store (audit_log, which is where the edge lives, is not
+    // part of the export envelope). Silence here would be indistinguishable from the feature not
+    // existing, so the absence is stated, but the wording must not name a cause it cannot actually
+    // rule out any of the others in favor of.
     const remembered = await runCli(["remember", "retired outright", "--kind", "fact"]);
     const id = extractRememberedId(remembered);
     expect((await runCli(["forget", id])).exitCode).toBe(0);
 
     const shown = await runCli(["show", id]);
     expect(shown.stdout).toContain("status: superseded");
-    expect(shown.stdout).toContain("superseded_by: (nothing -- retired by forget, reject, or staleness)");
+    expect(shown.stdout).toContain("superseded_by: unknown (no supersession edge recorded in this store's audit log");
+    expect(shown.stdout).not.toContain("retired by forget, reject, or staleness");
 
     const envelope = JSON.parse((await runCli(["show", id, "--json"])).stdout) as { supersededBy: unknown };
     expect(envelope.supersededBy).toBeNull();
@@ -1754,6 +1758,43 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
       expect(shown.stdout).toContain("value: pnpm");
       expect(shown.stdout).toContain(`confidence: ${originalFact?.confidence}`);
       expect(shown.stdout).toContain(`captured_at: ${originalFact?.captured_at}`);
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not state a false specific cause for a superseded fact whose winner survived the round trip (supersession edges live only in the audit log, which export does not carry)", async () => {
+    const first = await runCli(["remember", "the database server is postgres", "--kind", "fact", "--subject", "db", "--value", "postgres"]);
+    const loserId = extractRememberedId(first);
+    const second = await runCli(["remember", "the database server is mysql", "--kind", "fact", "--subject", "db", "--value", "mysql"]);
+    const winnerId = extractRememberedId(second);
+    await runCli(["epoch", "--gc"]);
+
+    // Confirm the edge is known pre-round-trip, so the assertion below is actually exercising a
+    // regression rather than a store that never knew the cause to begin with.
+    const before = await runCli(["show", loserId]);
+    expect(before.stdout).toContain(`superseded_by: ${winnerId}`);
+
+    const exported = await runCli(["export"]);
+    expect(exported.exitCode).toBe(0);
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-json", jsonPath]);
+      expect(imported.exitCode).toBe(0);
+
+      const shown = await runCli(["show", loserId]);
+      expect(shown.exitCode).toBe(0);
+      expect(shown.stdout).toContain("status: superseded");
+      // The winner is right there in the imported store -- the old fallback text ("retired by
+      // forget, reject, or staleness") is a specific, false claim in this case, not a hedge.
+      expect(shown.stdout).not.toContain("retired by forget, reject, or staleness");
     } finally {
       process.env["TOKEN_GOAT_MEM_HOME"] = home;
       rmSync(targetHome, { recursive: true, force: true });
@@ -2379,6 +2420,35 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     expect(rejected.exitCode).toBe(0);
     expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
     expect((await runCli(["show", idA])).stdout).toContain("status: active");
+  });
+
+  it("`mem forget` on one side of a contested pair reinstates the rival immediately, the same as `review --reject`", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["epoch", "--gc"]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: contested");
+
+    const forgotten = await runCli(["forget", idB]);
+    expect(forgotten.exitCode).toBe(0);
+    expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
+    // Without reconciling, idA is stranded `contested` forever: `mem list --status active` omits
+    // it, `mem pin` refuses it, yet `mem recall` (which resolves contradictions in memory on every
+    // call) surfaces it with no caveat at all -- commands disagreeing about the same fact.
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+  });
+
+  it("`review --undo` of a contested rejection re-contests the rival too, instead of leaving both sides active", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["epoch", "--gc"]);
+
+    await runCli(["review", "--reject", idB]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+
+    const undone = await runCli(["review", "--undo", idB]);
+    expect(undone.exitCode).toBe(0);
+    expect((await runCli(["show", idB])).stdout).toContain("status: contested");
+    // Without reconciling on the way back in, idA is left `active` alongside idB's restored
+    // `contested` -- two winners for one contradiction bucket.
+    expect((await runCli(["show", idA])).stdout).toContain("status: contested");
   });
 });
 

@@ -6,6 +6,32 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem consolidate --apply` reversed an explicit correction and filed it as a duplicate.** Its
+  comparability key is kind + scope + scope root; subject and value were never consulted. So two facts
+  that share a subject and *differ* in value — the definition of a live contradiction — clustered as
+  near-duplicates as soon as their wording overlapped, and the survivor was then picked by
+  consolidate's own rule (pinned, then confidence, then newest) rather than contradiction's
+  (provenance, then newest, where a pin gets no protection, exactly as `mem pin`'s help says). Tell
+  mem the database is postgres, pin it, later correct yourself to mysql, and one `consolidate --apply`
+  superseded mysql "as a duplicate" and put postgres back as ground truth. Contradiction resolution
+  now owns that pair: a candidate sharing a subject bucket with a different value is skipped by
+  duplicate detection, using contradiction's own bucket function rather than a second normalization
+  that could drift from it. Genuine duplicates — including unkeyed facts, which is what consolidate
+  is actually for — cluster exactly as before.
+- **Three commands disagreed with the commands next to them about the same fact.** Contradiction
+  outcomes are resolved in memory on every recall but persisted by only two paths, so the rest of the
+  CLI read stale statuses. `mem forget` on half of a contested pair left the survivor stranded at
+  `contested`: `mem recall` surfaced it with no caveat while `mem show` called it contested, `mem list
+  --status active` did not list it, and `mem pin` refused it as "contested, not active" — all at once.
+  `mem review --undo` of a contested rejection restored the fact without undoing the rival's promotion
+  that the rejection had performed, leaving two winners where there had been one. Both now reconcile,
+  symmetrically with `mem review --reject`, which already did.
+- **`mem show` named a cause of supersession it could not know.** Supersession edges live in the audit
+  log, which `mem export` does not carry, so after an export/import round trip a superseded fact
+  reported `superseded_by: (nothing -- retired by forget, reject, or staleness)` while the fact that
+  actually superseded it sat in the same store. The line now says the edge is unknown and names both
+  possibilities instead of asserting one; `mem show --json`'s help for `supersededBy` is corrected to
+  match, since `null` there covers three cases and the fact's status separates only the first.
 - **Three anchor predicates said your fact was wrong about a check they never performed.**
   `contradicted` is not a shrug: it tells the user their fact is false and drops it from recall. Three
   paths reached it without ever making the comparison. `package-version` matched the *prefix* of a
