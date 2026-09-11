@@ -230,6 +230,24 @@ export function normalizeFactText(text: string): string {
 }
 
 /**
+ * Whether `fact` is the same statement as `candidate`, for the purposes of an explicit restatement.
+ *
+ * Every part of the identity must match, not just the text: same scope *binding* (a project fact in
+ * one repo is not a restatement of the same sentence in another), and same subject/value. Subject
+ * and value are what contradiction resolution keys on, so identical text carrying a different value
+ * is a correction to be recorded, never a repeat to be collapsed. Kind and status are filtered by
+ * the caller's SQL, not here.
+ */
+function reaffirmMatch(fact: Fact, candidate: NewFact, wanted: string, subject: string | null, candidateScopeRoot: string | null, candidateScopeRepo: string | null): boolean {
+  return (
+    normalizeFactText(fact.text) === wanted &&
+    scopeBindingMatchesCandidate(fact, candidate.scope, candidateScopeRoot, candidateScopeRepo) &&
+    (fact.subject ?? null) === subject &&
+    (fact.value ?? null) === (candidate.value ?? null)
+  );
+}
+
+/**
  * The live fact that `candidate` is a restatement of, if there is one.
  *
  * A user who says the same thing twice means it more, not less -- but with no dedup the second
@@ -237,15 +255,11 @@ export function normalizeFactText(text: string): string {
  * user cared enough to repeat were the ones drifting out of ground truth. This finds the row to
  * reaffirm instead.
  *
- * Every part of the identity must match, not just the text: same kind, same scope *binding* (a
- * project fact in one repo is not a restatement of the same sentence in another), and same
- * subject/value. Subject and value are what contradiction resolution keys on, so identical text
- * carrying a different value is a correction to be recorded, never a repeat to be collapsed.
- *
- * Only `active` and `pinned` facts are candidates. A `pending` match must not be reaffirmed --
- * that would promote a suggested fact to a refreshed clock without review, the side door the
- * capture module exists to keep shut -- and a `superseded` one must not be silently resurrected by
- * a sentence that happens to match.
+ * Only `active` and `pinned` facts are candidates here. A `pending` match must not be reaffirmed by
+ * this function -- that would promote a suggested fact to a refreshed clock without review, the side
+ * door the capture module exists to keep shut -- and a `superseded` one must not be silently
+ * resurrected by a sentence that happens to match. `captureExplicit` resolves a matching `pending`
+ * fact through the separate, explicit path in {@link findReaffirmablePendingFacts} instead.
  */
 export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefined {
   const wanted = normalizeFactText(candidate.text);
@@ -257,15 +271,30 @@ export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefin
       "SELECT * FROM facts WHERE kind = ? AND scope = ? AND status IN ('active', 'pinned')"
     )
     .all(candidate.kind, candidate.scope);
-  return rows
-    .map(rowToFact)
-    .find(
-      (fact) =>
-        normalizeFactText(fact.text) === wanted &&
-        scopeBindingMatchesCandidate(fact, candidate.scope, candidateScopeRoot, candidateScopeRepo) &&
-        (fact.subject ?? null) === subject &&
-        (fact.value ?? null) === (candidate.value ?? null)
-    );
+  return rows.map(rowToFact).find((fact) => reaffirmMatch(fact, candidate, wanted, subject, candidateScopeRoot, candidateScopeRepo));
+}
+
+/**
+ * Every `pending` fact that an explicit restatement of `candidate` would resolve -- plural, because
+ * `mem suggest` (or a JSON import) can file the identical sentence more than once before any of it
+ * is reviewed. `captureExplicit` only reaffirms the single live (active/pinned) match above; without
+ * this, an explicit restatement resolved at most one of several duplicate pending rows and left the
+ * rest sitting in the review queue asking about a sentence the user had already answered.
+ *
+ * Ordered oldest-`captured_at`-first (ties broken by id) so promotion is deterministic: the
+ * earliest-suggested duplicate is the one kept and promoted, later duplicates are superseded.
+ */
+export function findReaffirmablePendingFacts(db: Db, candidate: NewFact): Fact[] {
+  const wanted = normalizeFactText(candidate.text);
+  const subject = candidate.subject === undefined || candidate.subject === null ? null : normalizeSubject(candidate.subject);
+  const candidateScopeRoot = candidate.scopeRoot ?? null;
+  const candidateScopeRepo = candidate.scopeRepo ?? null;
+  const rows = db
+    .prepare<[string, string], FactRow>(
+      "SELECT * FROM facts WHERE kind = ? AND scope = ? AND status = 'pending' ORDER BY captured_at ASC, id ASC"
+    )
+    .all(candidate.kind, candidate.scope);
+  return rows.map(rowToFact).filter((fact) => reaffirmMatch(fact, candidate, wanted, subject, candidateScopeRoot, candidateScopeRepo));
 }
 
 /**
