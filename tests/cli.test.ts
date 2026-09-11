@@ -3717,6 +3717,24 @@ describe("scan-session", () => {
     expect((JSON.parse(review.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
   });
 
+  it("does not store a differently-cased restatement as a second copy once the original scrolls out of the scan window", async () => {
+    // `factWithTextExists` compares case-sensitively (storage.ts). In-scan dedup collapses a
+    // differently-cased repeat within the same window via a lowercased key, but once the original
+    // occurrence ages out of MAX_SCANNED_TURNS, the cross-scan check is all that stands between a
+    // later, differently-cased restatement of the same rule and a second stored copy of it.
+    const original = "Never commit generated files to the repository.";
+    const restated = "never commit generated files to the repository.";
+    await runCli(["scan-session", "--transcript", writeTranscript([original]), "--root", "."]);
+
+    const filler = Array.from({ length: 205 }, (_, i) => `filler turn number ${i} about nothing durable`);
+    const laterTranscript = writeTranscript([original, ...filler, restated]);
+    await runCli(["scan-session", "--transcript", laterTranscript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const pending = JSON.parse(review.stdout) as { facts: { text: string }[] };
+    expect(pending.facts.map((f) => f.text.toLowerCase())).toEqual([original.toLowerCase()]);
+  });
+
   it("never stores text that arrived as a tool result", async () => {
     const path = join(home, "transcript.jsonl");
     writeFileSync(

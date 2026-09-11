@@ -177,6 +177,14 @@ export function ensureStorageSchema(db: Db): void {
   // fix, wearing a different hat. NULL is exactly "this edit predates undo", and `undoEdit` refuses
   // cleanly on it rather than treating a stale row as reversible.
   applyIdempotentAlter(db, "ALTER TABLE audit_log ADD COLUMN prior_json TEXT");
+  // Marks that facet extraction has run for a fact at all, independent of whether it found
+  // anything to store. Nullable with no backfill, same NULL-means-unknown convention as the
+  // columns above: a fact this predates has genuinely never been checked and belongs in the
+  // backfill queue, same as today. Without this column, `listFactsNeedingTerms` had to infer
+  // "never extracted" from "no row in fact_terms" -- indistinguishable from "extracted, and its
+  // text is entirely stopwords", so a fact of that shape was re-offered by `mem facets --backfill`
+  // forever: the command runs, finds nothing to write, and the shortfall never closes.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN terms_checked_at TEXT");
 }
 
 /**
@@ -386,6 +394,7 @@ interface FactRow {
   status_changed_at: string | null;
   prior_status: string | null;
   last_surfaced_at: string | null;
+  terms_checked_at: string | null;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -410,6 +419,7 @@ function rowToFact(row: FactRow): Fact {
     status_changed_at: row.status_changed_at,
     prior_status: row.prior_status as FactStatus | null,
     last_surfaced_at: row.last_surfaced_at,
+    terms_checked_at: row.terms_checked_at,
   };
 }
 
@@ -441,8 +451,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
@@ -486,7 +496,12 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // Preserved verbatim for the same reason: an export that dropped this made a restored fact
       // look never-surfaced (see `Fact.last_surfaced_at`), so the stale-supersede pass would
       // re-supersede a fact that was in daily use on the source store.
-      fact.last_surfaced_at ?? null
+      fact.last_surfaced_at ?? null,
+      // Always NULL here, whatever the caller passed: the `replaceFactTerms` call just below runs
+      // in this same transaction and stamps the real value, so a value threaded through this
+      // parameter would only ever be immediately overwritten -- see that function's own extraction
+      // rationale.
+      null
     );
     replaceFactTerms(db, id, extractFacets(fact.text));
   });
@@ -517,12 +532,14 @@ export function insertFact(db: Db, fact: NewFact): Fact {
  * still in the store as `superseded`, so re-filing it would resurrect a decision the user already
  * made, which is the one thing a review queue must not do.
  *
- * Comparison is `text = ?`, exact and case-sensitive: SQLite's `NOCASE` applies to ASCII only, so a
- * looser match would be inconsistent across alphabets for no benefit here, where both sides come
- * from the same whitespace-collapsing extractor.
+ * Comparison folds case via SQL `LOWER()`, matching {@link extractCandidates}'s own in-scan dedup
+ * key (`sentence.toLowerCase()`). The two dedup layers have to agree on this: in-scan dedup collapses
+ * a differently-cased repeat only while both occurrences are in the same scan's window, and once the
+ * earlier one ages out of `MAX_SCANNED_TURNS`, this check is the only thing standing between a later
+ * restatement of the same rule in different case and a second stored copy of it.
  */
 export function factWithTextExists(db: Db, text: string): boolean {
-  return db.prepare<[string], { one: number }>("SELECT 1 AS one FROM facts WHERE text = ? LIMIT 1").get(text) !== undefined;
+  return db.prepare<[string], { one: number }>("SELECT 1 AS one FROM facts WHERE LOWER(text) = LOWER(?) LIMIT 1").get(text) !== undefined;
 }
 
 export function getFactById(db: Db, id: string): Fact | undefined {
@@ -984,12 +1001,18 @@ export type FactTermKind = "entity" | "topic";
  * Does not bump the write epoch, for the reason this module's header gives for `sources`: terms are
  * derived from `facts.text` and change nothing about a fact's content, status, or freshness -- only
  * which `--entity` queries reach it.
+ *
+ * Always stamps `terms_checked_at`, whether or not `facets` yields anything to insert: that is what
+ * lets `listFactsNeedingTerms` and `countFactsWithTerms` tell "never extracted" apart from
+ * "extracted, text is entirely stopwords" -- both look like zero rows in `fact_terms` on their own.
  */
 export function replaceFactTerms(db: Db, factId: string, facets: FactFacets): void {
   const remove = db.prepare("DELETE FROM fact_terms WHERE fact_id = ?");
   const insert = db.prepare("INSERT INTO fact_terms (fact_id, term, term_key, kind) VALUES (?, ?, ?, ?)");
+  const markChecked = db.prepare("UPDATE facts SET terms_checked_at = ? WHERE id = ?");
   const tx = db.transaction((): void => {
     remove.run(factId);
+    markChecked.run(new Date().toISOString(), factId);
     for (const entity of facets.entities) {
       insert.run(factId, entity, normalizeTermKey(entity), "entity");
     }
@@ -1100,12 +1123,13 @@ export function listEntityCounts(db: Db): Array<{ term: string; termKey: string;
  * Oldest first and `all`-gated for the same reasons as `listFactsNeedingEmbedding`: a bounded
  * re-run should chip away at the arrears deterministically, and `--all` is the path after an
  * extraction-rule change, when facts that already have terms are exactly the ones that need new
- * ones. "Needs extraction" is the absence of any row, not the absence of an entity row: a fact
- * whose text contains no identifier legitimately has zero entities and would otherwise be re-offered
- * on every run forever.
+ * ones. "Needs extraction" is `terms_checked_at IS NULL`, not the absence of a `fact_terms` row: a
+ * fact whose text is entirely stopwords legitimately extracts zero terms, and keying off row
+ * absence would re-offer that fact on every run forever (`replaceFactTerms` stamps the column
+ * whether or not it has anything to insert).
  */
 export function listFactsNeedingTerms(db: Db, options: { readonly all?: boolean } = {}): Array<{ id: string; text: string }> {
-  const where = options.all === true ? "" : "WHERE NOT EXISTS (SELECT 1 FROM fact_terms WHERE fact_terms.fact_id = facts.id)";
+  const where = options.all === true ? "" : "WHERE terms_checked_at IS NULL";
   return db
     .prepare<[], { id: string; text: string }>(`SELECT id, text FROM facts ${where} ORDER BY captured_at ASC, id ASC`)
     .all();
@@ -1170,7 +1194,9 @@ function setMetaValue(db: Db, key: string, value: string): void {
  *
  * Recorded at all because `cosineSimilarity` compares over the shorter of two vectors and therefore
  * cannot tell a genuine similarity from one computed across two different models' vector spaces --
- * see `planEmbeddingRanking` in embeddings.ts, which is this value's only consumer.
+ * see `planEmbeddingRanking` in embeddings.ts, which is the reason this exists. Also read by
+ * cli.ts (doctor, export, embed status), exportImport.ts (import compatibility), and
+ * integration-seam.ts (recall ranking), so it is not that function's only consumer.
  */
 export function getEmbeddingMeta(db: Db): EmbeddingMeta | undefined {
   const model = getMetaValue(db, EMBEDDING_MODEL_KEY);
@@ -1187,14 +1213,32 @@ export function setEmbeddingMeta(db: Db, meta: EmbeddingMeta): void {
   setMetaValue(db, EMBEDDING_DIMENSION_KEY, String(meta.dimension));
 }
 
-/** Counts facts that currently carry an embedding vector, for `mem doctor`'s coverage line. */
-export function countEmbeddedFacts(db: Db): number {
-  return db.prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM facts WHERE embedding IS NOT NULL").get()?.count ?? 0;
+/**
+ * Counts facts that currently carry an embedding vector.
+ *
+ * `excludeSuperseded` narrows this to the same scope `listFactsNeedingEmbedding` backfills:
+ * without it, `mem doctor`'s coverage line pairs a numerator that (rightly) never counts a
+ * superseded fact's vector against a denominator that (wrongly) counts the fact itself, so a
+ * store that has ever superseded an unembedded fact could never show 100% coverage -- no command
+ * would ever close that gap. Other callers check only "does any vector exist at all" and want the
+ * unnarrowed count.
+ */
+export function countEmbeddedFacts(db: Db, options: { readonly excludeSuperseded?: boolean } = {}): number {
+  const where = options.excludeSuperseded === true
+    ? "WHERE embedding IS NOT NULL AND status != 'superseded'"
+    : "WHERE embedding IS NOT NULL";
+  return db.prepare<[], { count: number }>(`SELECT COUNT(*) AS count FROM facts ${where}`).get()?.count ?? 0;
 }
 
-/** Counts facts that carry at least one extracted term, for `mem doctor`'s coverage line. Counts distinct facts rather than rows in `fact_terms`, which holds many terms per fact. */
+/**
+ * Counts facts that have been through facet extraction, for `mem doctor`'s coverage line.
+ *
+ * `terms_checked_at IS NOT NULL`, not "carries a `fact_terms` row": a fact whose text is entirely
+ * stopwords is checked and legitimately has no row, and counting only rows would report it as an
+ * unclosable shortfall (see `listFactsNeedingTerms`).
+ */
 export function countFactsWithTerms(db: Db): number {
-  return db.prepare<[], { count: number }>("SELECT COUNT(DISTINCT fact_id) AS count FROM fact_terms").get()?.count ?? 0;
+  return db.prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM facts WHERE terms_checked_at IS NOT NULL").get()?.count ?? 0;
 }
 
 /**

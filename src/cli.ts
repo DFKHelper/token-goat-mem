@@ -2984,6 +2984,9 @@ export function buildProgram(): Command {
             .filter((name) => !name.startsWith("sqlite_"));
           const statusCounts = FACT_STATUSES.map((status) => `${status}=${countFacts(db, { status })}`).join("  ");
           const totalFacts = countFacts(db, {});
+          // Same scope as `listFactsNeedingEmbedding`: a superseded fact is never backfilled, so it
+          // must not count against the coverage denominator either -- see `countEmbeddedFacts`.
+          const embeddableFacts = totalFacts - countFacts(db, { status: "superseded" });
           const sourceRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM sources").get()?.c ?? 0;
           const auditRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM audit_log").get()?.c ?? 0;
           const epoch = getEpoch(db);
@@ -3014,7 +3017,7 @@ export function buildProgram(): Command {
             `facts: ${statusCounts}  (total ${totalFacts})`,
             `sources: ${sourceRows}`,
             `audit_log rows: ${auditRows}`,
-            ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db), totalFacts),
+            ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db, { excludeSuperseded: true }), embeddableFacts),
             describeDream(),
             describeFacets(countFactsWithTerms(db), totalFacts),
             describeHintBudget(recallableFacts, pinnedFacts),
