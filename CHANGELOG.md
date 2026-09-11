@@ -6,6 +6,27 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem uninstall` left husks of its own making, and two paths read the same snapshot by different
+  rules.** Init takes a one-time `<file>.token-goat-mem.bak` before its first write, and that snapshot
+  is the only evidence of what existed beforehand. `writeManagedFile` treats a snapshot holding only
+  mem's own content as no snapshot at all, so a file mem created gets deleted rather than left empty;
+  `preInstallHooks` read the same file and counted any parseable `hooks` object as the user's. Two
+  ordinary sequences fell through the gap. Re-running `mem init claude-code` after an upgrade that
+  changed a hook command snapshotted mem's *own* settings and uninstalled to
+  `{"hooks": {"SessionStart": []}}` plus a stale `.bak`. And an install/uninstall cycle, followed by
+  the user deleting the files and installing again, uninstalled to `{}` and a zero-byte `CLAUDE.md` —
+  which Claude Code loads as a real instruction file — because the first cycle's snapshot was still
+  sitting there describing an era that had ended. Both now end with the file gone, which is what
+  README's "removes exactly what `mem init` wrote" says. No user content was ever at risk in either
+  sequence; what was left behind was mem's own residue, reported as a clean removal. The snapshot is
+  also now discarded once uninstall has deleted the file or written it back with no mem markers left:
+  at that point the file itself is the baseline, and keeping the old snapshot is what made the second
+  sequence possible.
+- **`mem uninstall --user` was documented as doing something broader than it does.** The help read
+  "Also target the tool's user-level config", while the code targets only that level — so after
+  installing at both, `--user` removed the user-level file and left the project's hooks firing.
+  `mem init --user` already says "instead of" and means it; the help now matches the code on both
+  commands rather than inviting a user to expect one command to clear both levels.
 - **A `--path`-scoped fact could never reach the agent.** On the hook path a `path` fact was in scope
   only when the caller passed `--context-files` naming a file at or under it — and every hook and
   command `mem init` installs calls `mem recall --hint-format --root <dir>` with no context files at

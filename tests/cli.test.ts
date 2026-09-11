@@ -2121,6 +2121,28 @@ describe("mem init/uninstall", () => {
     expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(false);
   });
 
+  it("uninstall --user only targets the user-level config, leaving project-level wiring untouched -- and its help text says so", async () => {
+    // Regression: uninstall's `--user` help text read "Also target the tool's user-level config",
+    // implying it widens uninstall to both levels at once. The code has always targeted the
+    // user-level file *instead of* the project one (matching `init --user`, whose help already says
+    // "instead of"), so the wording was the bug, not the behavior -- fixed to match what actually runs.
+    await runCli(["init", "claude-code", "--root", toolRoot]);
+    await runCli(["init", "claude-code", "--root", toolRoot, "--user"]);
+
+    const uninstallUser = await runCli(["uninstall", "claude-code", "--root", toolRoot, "--user"]);
+    expect(uninstallUser.exitCode).toBe(0);
+    expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(false);
+    // Project-level wiring is untouched by `--user`.
+    expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(true);
+    expect(existsSync(join(toolRoot, "CLAUDE.md"))).toBe(true);
+
+    const help = await runCli(["uninstall", "--help"]);
+    expect(help.exitCode).toBe(0);
+    const flowed = help.stdout.replace(/\s+/g, " ");
+    expect(flowed).toMatch(/instead of project-level/i);
+    expect(flowed).not.toMatch(/also target/i);
+  });
+
   it("uninstall --all removes every tool's wiring in one call", async () => {
     for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
       const result = await runCli(["init", tool, "--root", toolRoot]);

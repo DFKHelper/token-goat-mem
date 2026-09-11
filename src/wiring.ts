@@ -31,9 +31,11 @@
  *   matching against a remembered snapshot).
  *
  * Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot
- * of the pre-existing file on its first-ever write (never overwritten by a later re-init), and
- * re-reads + recomputes once if the file changed underneath the read used to compute the new
- * content.
+ * of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes
+ * that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a
+ * stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and
+ * mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read
+ * used to compute the new content.
  */
 
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -188,6 +190,12 @@ function looksMemAuthored(content: string): boolean {
  * `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the
  * uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by
  * uninstall rather than left behind empty.
+ *
+ * Whenever `!backup` (the uninstall path) and the write leaves `path` deleted or holding no mem
+ * markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the
+ * authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is
+ * both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks`
+ * / delete-if-empty checks.
  */
 export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfEmpty?: boolean } = {}): WiringChange {
   const backup = opts.backup ?? true;
@@ -225,6 +233,13 @@ export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfE
     const bakContent = existsSync(bakPath) ? readFileSync(bakPath, "utf8") : undefined;
     if (bakContent === undefined || looksMemAuthored(bakContent)) {
       rmSync(op.path, { force: true });
+      // The file is gone and held nothing but mem's own content, so the snapshot that distinguished
+      // "mem created this" from "the user's own empty file" has nothing left to disambiguate.
+      // Leaving it behind is what let a `.bak` from one install/uninstall cycle survive to mislead
+      // the next one after the user deleted the file by hand and reinstalled from scratch.
+      if (!backup) {
+        rmSync(bakPath, { force: true });
+      }
       return { path: op.path, action: "delete", detail: "removed file that held only mem's own content" };
     }
   }
@@ -253,6 +268,15 @@ export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfE
       // Best-effort cleanup only: never mask the original failure with a cleanup failure.
     }
   }
+  // Uninstall that leaves the file holding no mem markers has fully restored it to its pre-mem
+  // state -- the file itself is now the authoritative record of that state, so a `.bak` snapshot
+  // taken during some earlier install/uninstall era is no longer needed to disambiguate anything,
+  // and keeping it around is what let it outlive the content it snapshotted (see the `deleteIfEmpty`
+  // branch above for the file-removed half of the same fix).
+  if (!backup && !looksMemAuthored(after)) {
+    rmSync(`${op.path}.token-goat-mem.bak`, { force: true });
+  }
+
   return {
     path: op.path,
     action: existedBefore ? "update" : "create",
@@ -992,11 +1016,14 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
  * wrong: a user's own pre-existing `"hooks": {"SessionStart": []}` looks identical, after mem's own
  * stamped entries are removed, to a container mem created and drained back to empty itself. The two
  * are indistinguishable from the current file content alone, so this reads the pre-install snapshot
- * instead of guessing from emptiness. Three outcomes: missing `.bak` returns `{hooksExisted: false, hooks: {}}`,
+ * instead of guessing from emptiness. Four outcomes: missing `.bak` returns `{hooksExisted: false, hooks: {}}`,
  * because no backup is taken unless the file pre-existed, so mem created it and pruning is safe;
- * present and parseable returns the snapshot's own `hooks`; present but unparseable returns `undefined`,
- * which callers must read as "assume everything pre-existed" so pruning fails closed. Note: if a user
- * deletes the `.bak` by hand, that is indistinguishable from mem having created the file.
+ * a `.bak` that `looksMemAuthored` (see that function's own doc for why the snapshot can be mem's own
+ * writing rather than real pre-existing content) is treated the same as no `.bak` at all, for the same
+ * reason `writeManagedFile`'s delete-if-empty check does; present, parseable, and not mem-authored
+ * returns the snapshot's own `hooks`; present but unparseable returns `undefined`, which callers must
+ * read as "assume everything pre-existed" so pruning fails closed. Note: if a user deletes the `.bak`
+ * by hand, that is indistinguishable from mem having created the file.
  */
 function preInstallHooks(path: string): { readonly hooksExisted: boolean; readonly hooks: Record<string, unknown> } | undefined {
   const bakPath = `${path}.token-goat-mem.bak`;
@@ -1006,7 +1033,14 @@ function preInstallHooks(path: string): { readonly hooksExisted: boolean; readon
     return { hooksExisted: false, hooks: {} };
   }
   try {
-    const parsed: unknown = parseJsonc(readFileSync(bakPath, "utf8"), [], JSONC_PARSE);
+    const bakContent = readFileSync(bakPath, "utf8");
+    if (looksMemAuthored(bakContent)) {
+      // The snapshot is mem's own earlier write (e.g. a stamped hook seeded before a `.bak` existed,
+      // then backed up on the next install), not real pre-existing content -- there was no genuine
+      // pre-existing `hooks` for it to have written into either.
+      return { hooksExisted: false, hooks: {} };
+    }
+    const parsed: unknown = parseJsonc(bakContent, [], JSONC_PARSE);
     const hooks = isPlainObject(parsed) ? parsed["hooks"] : undefined;
     return { hooksExisted: isPlainObject(hooks), hooks: isPlainObject(hooks) ? hooks : {} };
   } catch {
