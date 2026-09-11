@@ -114,7 +114,15 @@ import {
 } from "./integration-seam.js";
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { scanTranscript } from "./sessionScan.js";
-import { evaluateFactFreshness, isBoundToRoot, isDecayedBelowGroundTruth, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type RetrievalOptions } from "./retrieval.js";
+import {
+  evaluateFactFreshness,
+  isBoundToRoot,
+  isDecayedBelowGroundTruth,
+  retrieve,
+  selectVerifiedFacts,
+  DEFAULT_EMBEDDING_TIMEOUT_MS,
+  type RetrievalOptions,
+} from "./retrieval.js";
 import {
   clearAllEmbeddings,
   countEmbeddedFacts,
@@ -1691,9 +1699,14 @@ async function runDream(db: Database.Database, options: DreamCliOptions): Promis
         `you would not paste into a hosted API.`
     );
   }
-  // Live facts only. A superseded fact is a fact the store has already decided is wrong, and
-  // reasoning over it would produce inferences grounded in retracted premises.
-  const facts = listFacts(db, { status: ["active", "pinned"] });
+  // The same correctness gate `retrieve()` applies before ranking: contradiction resolution runs
+  // over the whole live store, its losers and anything still `contested`/`pending` are dropped, and
+  // an anchor-`contradicted` fact is dropped too. A superseded or contradiction-losing fact is a
+  // fact the store has already decided is wrong, and reasoning over it would produce inferences
+  // grounded in retracted premises -- one step removed, the same P3 failure `retrieve()` guards
+  // against directly. No `--root` flag exists on this command (see the option below), so freshness
+  // evaluates against the current working directory, `resolveRoot`'s own default with no root given.
+  const facts = selectVerifiedFacts(listFacts(db, {}), resolveRoot(undefined));
   const result = await dream(facts, config, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {});
 
   if (options.json === true) {
@@ -2673,11 +2686,17 @@ export function buildProgram(): Command {
     .description(
       "Report facts a configured model thinks follow from several stored facts together -- an evaluation " +
         "surface: it writes nothing, and there is no flag that makes it. Off unless " +
-        `${DREAM_URL_ENV}/${DREAM_MODEL_ENV} are set. Note: \`mem dream\` and \`mem embed\` both send fact text off this machine`
+        `${DREAM_URL_ENV}/${DREAM_MODEL_ENV} are set. Note: \`mem dream\` and \`mem embed\` both send fact text off this machine. ` +
+        "Premises are gated the same way `mem recall` gates ground truth: contradiction losers, pending/contested " +
+        "facts, and anchor-contradicted facts are never sent. Freshness re-checks against the current working " +
+        "directory (this command takes no root option -- see below), same as any other mem command given none."
     )
     // Deliberately no --root. Dreaming reasons over the whole live store, and a --root that changed
     // nothing would repeat the sharpest edge on `mem recall`: a flag the user reads as scoping and
     // that quietly is not. When per-project dreaming is wanted it should filter facts and say so.
+    // Freshness re-verification (see selectVerifiedFacts) still needs *a* root, so it uses
+    // `resolveRoot`'s own default of process.cwd() -- the same default every other command falls
+    // back to when its own --root is omitted, not a value picked for this command alone.
     .option("--timeout <ms>", "Wall clock for the request (default 60000)", (v) => parseInt(v, 10))
     .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(

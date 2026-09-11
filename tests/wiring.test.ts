@@ -798,6 +798,25 @@ describe("regression: a single tool's install then uninstall on a fresh root lea
     assertNoArtifacts(join(root, "CLAUDE.md"));
   });
 
+  it("claude-code: a pre-existing empty settings.json and empty CLAUDE.md survive install then uninstall unremoved", () => {
+    // Regression: `isEmptyManagedContent` cannot tell "mem created this file" from "the user's file
+    // was already empty (or `{}`) before mem ever touched it" -- both look identical once mem's own
+    // block is stripped back out. Deleting in the second case removes a file that pre-existed mem,
+    // which is a different failure from the no-op-round-trip case the describe block above covers.
+    const settingsPath = join(root, ".claude", "settings.json");
+    const claudeMdPath = join(root, "CLAUDE.md");
+    seed(settingsPath, "{}");
+    seed(claudeMdPath, "");
+
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+
+    expect(existsSync(settingsPath)).toBe(true);
+    expect(JSON.parse(read(settingsPath)) as unknown).toEqual({});
+    expect(existsSync(claudeMdPath)).toBe(true);
+    expect(read(claudeMdPath)).toBe("");
+  });
+
   it("codex: AGENTS.md is absent, with no .bak, after install then uninstall", () => {
     codex.install({ root, homeDir: home });
     codex.uninstall({ root, homeDir: home });

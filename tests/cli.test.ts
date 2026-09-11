@@ -4751,6 +4751,61 @@ describe("mem dream", () => {
     );
   });
 
+  it("withholds contested premises, same as `mem recall` -- reasoning over a live contradiction is the P3 failure one step removed", async () => {
+    // Two active facts, same subject+scope, conflicting value, tied precedence: contradiction.ts
+    // resolves this to `contested` in memory (never persisted), and `retrieve()` withholds both from
+    // ground truth for exactly that reason. Neither is `superseded`, so the old `status: ["active",
+    // "pinned"]` filter let both through to the model as premises.
+    let sentToModel = "";
+    await withFakeEndpoint(
+      (received) => {
+        const messages = (received as { messages: { content: string }[] }).messages;
+        sentToModel = messages.map((message) => message.content).join("\n");
+        return { candidates: [] };
+      },
+      async (url) => {
+        process.env[URL_ENV] = url;
+        process.env[MODEL_ENV] = "test-model";
+        const first = await runCli([
+          "remember",
+          "uses pnpm",
+          "--kind",
+          "preference",
+          "--subject",
+          "package-manager",
+          "--value",
+          "pnpm",
+        ]);
+        const idA = extractRememberedId(first);
+        const second = await runCli([
+          "remember",
+          "uses npm",
+          "--kind",
+          "preference",
+          "--subject",
+          "package-manager",
+          "--value",
+          "npm",
+        ]);
+        const idB = extractRememberedId(second);
+        const db = openDb(resolveDbPath());
+        const tiedTimestamp = "2026-01-01T00:00:00.000Z";
+        db.prepare("UPDATE facts SET captured_at = ? WHERE id IN (?, ?)").run(tiedTimestamp, idA, idB);
+        db.close();
+        await runCli(["remember", "the runtime is node 20", "--kind", "fact"]);
+        await runCli(["remember", "the lockfile is package-lock.json", "--kind", "fact"]);
+
+        const result = await runCli(["dream", "--json"]);
+        expect(result.exitCode).toBe(0);
+        const parsed = JSON.parse(result.stdout) as { factsSent: number };
+        expect(sentToModel).not.toContain("pnpm");
+        expect(sentToModel).not.toContain("npm");
+        expect(sentToModel).toContain("node 20");
+        expect(parsed.factsSent).toBe(2);
+      }
+    );
+  });
+
   it("emits machine-readable JSON under --json", async () => {
     await withFakeEndpoint(
       () => ({ candidates: [{ text: "everything is manual", kind: "fact", supports: [1, 2] }] }),
