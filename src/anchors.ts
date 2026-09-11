@@ -99,9 +99,15 @@ const MAX_GIT_INDEX_ENTRIES = 2_000_000;
  * from ground truth entirely: a casing typo became silent fact suppression, on the platform this
  * project is developed on.
  *
- * win32 only, deliberately. macOS is case-insensitive by default but supports case-sensitive APFS
- * volumes, so folding there would trade a false `contradicted` for a false `affirmed` -- the worse
- * error, because P3 forbids fabricating a verdict but permits declining to give one.
+ * The blanket case-insensitive regex/index-lookup fold below is win32 only, deliberately: macOS is
+ * case-insensitive by default but supports case-sensitive APFS volumes, and this process cannot
+ * tell which kind of volume it's looking at, so folding unconditionally there would trade a false
+ * `contradicted` for a false `affirmed` -- the worse error, because P3 forbids fabricating a verdict
+ * but permits declining to give one. That is not the only option, though: `evaluateGitTracked` and
+ * the literal-segment path of `evaluateGlobExists` additionally fall back to `unverified` -- not
+ * `affirmed` -- when an exact-bytes miss on a non-win32 platform would still hit under case folding,
+ * since a miss that is explainable purely by casing is honestly "can't confirm or deny" on either
+ * kind of APFS volume, not "confirmed absent".
  */
 const FS_CASE_INSENSITIVE = process.platform === "win32";
 
@@ -164,12 +170,39 @@ function isSymlink(path: string): boolean {
   }
 }
 
-/** Returns the file's mtime in ms, or `null` if it does not exist / cannot be stat'd. */
-function mtimeOrNull(path: string): number | null {
+/**
+ * Distinguishes a genuine absence from every other `statSync`/`readdirSync` failure (permission
+ * denied, an I/O error, a path component that isn't a directory when one is expected, ...).
+ * `ENOENT`/`ENOTDIR` are the only codes those calls raise that actually mean "nothing is there";
+ * anything else means the check was never actually performed, and every caller of this module's
+ * stat helpers must report that as `unverified`, not as absence -- reporting an unrun check as
+ * absence is exactly the "returns `contradicted` from a check that never happened" defect P3
+ * forbids (an unreadable subtree would otherwise `contradicted` `file-exists`, `affirmed`
+ * `file-absent`, and `contradicted` `file-newer-than` for the side that couldn't be stat'd).
+ *
+ * Exported as its own function, rather than inlined at each catch site, specifically so the
+ * classification is unit-testable against synthetic errors (`{ code: "EACCES" }`, etc.) independent
+ * of a real unreadable-filesystem fixture -- `chmod`-based permission denial is awkward to reproduce
+ * reliably on Windows.
+ */
+export function isGenuineAbsence(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/** Tri-state result of a `statSync`-based existence/mtime check: see {@link isGenuineAbsence}. */
+type StatOutcome = "absent" | "unknown";
+
+/**
+ * Returns the file's mtime in ms, `"absent"` if it genuinely does not exist, or `"unknown"` if it
+ * could not be stat'd for any other reason (permission denied, I/O error, ...) -- see
+ * {@link isGenuineAbsence}. Callers must treat `"unknown"` as `unverified`, never as absence.
+ */
+function mtimeOrNull(path: string): number | StatOutcome {
   try {
     return statSync(path).mtimeMs;
-  } catch {
-    return null;
+  } catch (error) {
+    return isGenuineAbsence(error) ? "absent" : "unknown";
   }
 }
 
@@ -212,14 +245,16 @@ function containsSymlink(root: string, target: string): boolean {
  * as a plain entity reachable through `root` alone. Symlink refusal is handled by the caller
  * ({@link evaluateTokens}), which checks {@link containsSymlink} *before* calling this function and
  * returns `unverified` rather than treating the path as absent — this function is never reached for a
- * symlinked path or intermediate directory, so it performs a plain `statSync`.
+ * symlinked path or intermediate directory, so it performs a plain `statSync`. Returns `"unknown"`,
+ * never `"absent"`, for a permission or I/O error -- see {@link isGenuineAbsence}: a check that
+ * couldn't run must not read as a positive presence/absence verdict either predicate can act on.
  */
-function existsFile(path: string): boolean {
+function existsFile(path: string): "exists" | StatOutcome {
   try {
     statSync(path);
-    return true;
-  } catch {
-    return false;
+    return "exists";
+  } catch (error) {
+    return isGenuineAbsence(error) ? "absent" : "unknown";
   }
 }
 
@@ -253,11 +288,17 @@ interface BudgetState {
  * exactly the moment the fact stops being true, and silently reporting "b does not exist" as "a is
  * newer" would hide the staleness this anchor exists to catch.
  */
-function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): AnchorVerdict {
-  if (mtimeB === null) {
+function evaluateFileNewerThan(mtimeA: number | StatOutcome, mtimeB: number | StatOutcome): AnchorVerdict {
+  // Either side's mtime couldn't be confidently determined (permission/I/O error, not genuine
+  // absence) -- see isGenuineAbsence. `contradicted` would assert a comparison that was never
+  // actually performed, on either side.
+  if (mtimeA === "unknown" || mtimeB === "unknown") {
     return "unverified";
   }
-  if (mtimeA === null) {
+  if (mtimeB === "absent") {
+    return "unverified";
+  }
+  if (mtimeA === "absent") {
     return "contradicted";
   }
   if (mtimeA === mtimeB) {
@@ -519,7 +560,14 @@ function evaluateGlobExists(
     let entries: Dirent[];
     try {
       entries = readdirSync(top.dir, { withFileTypes: true });
-    } catch {
+    } catch (error) {
+      // A directory that genuinely no longer exists (e.g. removed mid-walk) contributes nothing to
+      // look at, so skipping it is a real "nothing here". Anything else (permission denied, an I/O
+      // error) means this directory was never actually looked inside -- the walk cannot positively
+      // deny a match lives there, so it must not silently contribute to a final `contradicted`.
+      if (!isGenuineAbsence(error)) {
+        skippedPotentialMatch = true;
+      }
       continue;
     }
 
@@ -571,6 +619,15 @@ function evaluateGlobExists(
         break walk;
       }
       if (!regex.test(entry.name)) {
+        // Item 4 (see FS_CASE_INSENSITIVE): a literal segment's case-sensitive miss here doesn't
+        // prove absence on a case-insensitive APFS volume this process cannot distinguish from a
+        // case-sensitive one -- unlike FS_CASE_INSENSITIVE's known-win32 case, folding here must not
+        // silently affirm, so it falls back to "can't confirm or deny" instead of treating the entry
+        // as irrelevant. A wildcard segment is exempt: `*`/`?` already match by shape, not by a
+        // literal name this ambiguity could apply to.
+        if (!FS_CASE_INSENSITIVE && !segmentIsWildcard && entry.name.toLowerCase() === segment.toLowerCase()) {
+          skippedPotentialMatch = true;
+        }
         continue;
       }
       if (entry.isSymbolicLink()) {
@@ -870,16 +927,40 @@ function readGitIndexPaths(gitDir: string): GitIndexParseResult | null {
 }
 
 /**
- * `git-tracked <path>` — parses `.git/index` directly (no `git` subprocess). Affirmed if `path`
- * (relative to `root`) appears in the index's entry table; unverified if `root` is not a git working
- * tree, the index cannot be confidently parsed (e.g. index format version 4, corrupt header), or
- * `path` is absent from the entry table but the index carries a mandatory extension this parser
- * cannot account for ({@link GitIndexParseResult.complete}) — a split index's `link` extension means
- * the main index's entry table omits paths unchanged since the last split, and a sparse index's
- * `sdir` extension means an entire directory outside the sparse-checkout cone collapses into one
- * entry, so a path under it never appears individually; either way, "not listed" is not "not
- * tracked" and asserting `contradicted` here would be exactly the fabrication P3 forbids. Only when
- * the entry table is the *complete* set of tracked paths does an absence become `contradicted`.
+ * Whether `relPath` names a tracked file or directory according to `paths` — the index stores files
+ * only, never directories, so a directory target is never itself an index entry; it is "tracked" in
+ * the sense the README promises whenever some entry lives under it (`relPath/anything`). Checked as
+ * an exact-path hit first (the common case, and the only shape a file target can match) and only then
+ * as a directory-prefix scan, so a file lookup pays no extra cost.
+ */
+function pathTrackedIn(paths: ReadonlySet<string>, relPath: string): boolean {
+  if (paths.has(relPath)) {
+    return true;
+  }
+  const dirPrefix = `${relPath}/`;
+  for (const path of paths) {
+    if (path.startsWith(dirPrefix)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `git-tracked <path>` — parses `.git/index` directly (no `git` subprocess). `path` may name a
+ * tracked file directly, or a directory that contains at least one tracked path — the index has no
+ * entry for a directory itself, so treating a directory target as "never tracked" would contradict
+ * the README's own promise that `git-tracked <dir>` works. Affirmed if `path` (relative to `root`)
+ * appears in the index's entry table, or some entry lives under it as a directory; unverified if
+ * `root` is not a git working tree, the index cannot be confidently parsed (e.g. index format
+ * version 4, corrupt header), or `path` is absent from the entry table but the index carries a
+ * mandatory extension this parser cannot account for ({@link GitIndexParseResult.complete}) — a
+ * split index's `link` extension means the main index's entry table omits paths unchanged since the
+ * last split, and a sparse index's `sdir` extension means an entire directory outside the
+ * sparse-checkout cone collapses into one entry, so a path under it never appears individually;
+ * either way, "not listed" is not "not tracked" and asserting `contradicted` here would be exactly
+ * the fabrication P3 forbids. Only when the entry table is the *complete* set of tracked paths does
+ * an absence become `contradicted`.
  */
 function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
   const gitDir = resolveGitDir(root);
@@ -892,14 +973,20 @@ function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
   }
   const { paths, complete } = index;
   const relPath = relative(root, resolvedPath).split(sep).join("/");
-  if (paths.has(relPath)) {
+  if (pathTrackedIn(paths, relPath)) {
     return "affirmed";
   }
-  // See FS_CASE_INSENSITIVE. `.git/index` stores one exact casing per path, but on Windows the
-  // anchor's casing and the index's casing both resolve to the same file, so an exact-bytes miss is
-  // not evidence the path is untracked.
-  if (FS_CASE_INSENSITIVE && foldedGitIndexPaths(gitDir, paths).has(relPath.toLowerCase())) {
-    return "affirmed";
+  // `.git/index` stores one exact casing per path. On Windows (FS_CASE_INSENSITIVE) the anchor's
+  // casing and the index's casing both resolve to the same file, so an exact-bytes miss is not
+  // evidence the path is untracked -- affirmed outright. Elsewhere (macOS, whose APFS volumes may be
+  // case-sensitive or case-insensitive per-volume; the two cannot be told apart from here) a
+  // case-folded hit means the index disagrees with the anchor only in casing -- "can't confirm or
+  // deny" is the honest verdict, not "confirmed untracked" (a false `contradicted`) and not
+  // "confirmed tracked" (a false `affirmed`, the trade the previous version of this comment argued
+  // against without naming this third option).
+  const folded = foldedGitIndexPaths(gitDir, paths);
+  if (pathTrackedIn(folded, relPath.toLowerCase())) {
+    return FS_CASE_INSENSITIVE ? "affirmed" : "unverified";
   }
   return complete ? "contradicted" : "unverified";
 }
@@ -925,18 +1012,34 @@ function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): Readon
  * this they had no anchor at all and stayed permanently `unverified` — caveated forever, and never
  * surfaced in `mem review` as something to resolve.
  *
- * A bare `YYYY-MM-DD` is read as the *end* of that day rather than its midnight start, so an anchor
- * written `valid-until 2026-12-31` is still affirmed during 2026-12-31 instead of expiring the
- * instant the day begins — the reading anyone writing that date intends. A timestamp with an
- * explicit time is taken exactly as written.
+ * A bare `YYYY-MM-DD` is read as the *end* of that day in the machine's own local time zone, rather
+ * than its midnight start or UTC end-of-day, so an anchor written `valid-until 2026-12-31` is still
+ * affirmed during 2026-12-31 wherever `mem` runs, instead of expiring the instant the day begins or
+ * flipping hours before local midnight for anyone west of UTC. Building the deadline from a `Z`
+ * literal instead would contradict a fact still true by the user's own clock (P3: expiring early
+ * destroys a fact the user was promised; expiring late merely caveats one a few hours longer, the
+ * harmless direction). A timestamp with an explicit time is taken exactly as written.
  *
  * An unparseable date is `unverified`, matching every other malformed-argument path here: a typo
  * must not silently read as "this fact has expired" and suppress a true fact.
  */
 function evaluateValidUntil(raw: string): AnchorVerdict {
-  const dateOnly = /^\d{4}-\d{2}-\d{2}$/u.test(raw);
-  const parsed = new Date(dateOnly ? `${raw}T23:59:59.999Z` : raw);
-  const deadline = parsed.getTime();
+  const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(raw);
+  let deadline: number;
+  if (dateOnlyMatch) {
+    const [, yearStr, monthStr, dayStr] = dateOnlyMatch;
+    // Local-time Date constructor overload (year, monthIndex, day, ...), not the UTC `Z`-literal
+    // parse: this is what makes "end of day" mean the user's own local day rather than UTC's.
+    const local = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr), 23, 59, 59, 999);
+    deadline = local.getTime();
+    // Guards against an out-of-range calendar date (e.g. 2026-13-45) that `Date` would otherwise
+    // silently roll into a neighboring month/day instead of rejecting.
+    if (local.getMonth() !== Number(monthStr) - 1 || local.getDate() !== Number(dayStr)) {
+      return "unverified";
+    }
+  } else {
+    deadline = new Date(raw).getTime();
+  }
   if (Number.isNaN(deadline)) {
     return "unverified";
   }
@@ -991,7 +1094,13 @@ function evaluateTokens(
       if (containsSymlink(resolvedRoot, a)) {
         return "unverified";
       }
-      return existsFile(a) ? "affirmed" : "contradicted";
+      {
+        const outcome = existsFile(a);
+        if (outcome === "unknown") {
+          return "unverified";
+        }
+        return outcome === "exists" ? "affirmed" : "contradicted";
+      }
     }
     case "file-absent": {
       const [rawA] = args;
@@ -1005,7 +1114,13 @@ function evaluateTokens(
       if (containsSymlink(resolvedRoot, a)) {
         return "unverified";
       }
-      return existsFile(a) ? "contradicted" : "affirmed";
+      {
+        const outcome = existsFile(a);
+        if (outcome === "unknown") {
+          return "unverified";
+        }
+        return outcome === "exists" ? "contradicted" : "affirmed";
+      }
     }
     case "newest-of": {
       if (args.length < 2) {
@@ -1027,7 +1142,13 @@ function evaluateTokens(
       }
       const mtimes = new Map<string, number>();
       const expMtime = mtimeOrNull(expectedResolved);
-      if (expMtime !== null) {
+      if (expMtime === "unknown") {
+        // Couldn't confirm or deny the expected file's own mtime (permission/I/O error) -- silently
+        // excluding it, as if it didn't exist, could report a different candidate as "the newest"
+        // over a file that in fact still exists and might genuinely be newer.
+        return "unverified";
+      }
+      if (expMtime !== "absent") {
         mtimes.set(expectedResolved, expMtime);
       }
       for (const rawCandidate of restRaw) {
@@ -1042,7 +1163,12 @@ function evaluateTokens(
           return "unverified";
         }
         const mtime = mtimeOrNull(resolved);
-        if (mtime !== null) {
+        if (mtime === "unknown") {
+          // Same rationale as the expected-file check above: an unreadable candidate could in fact
+          // be the newest, so it cannot simply be dropped from the comparison as if absent.
+          return "unverified";
+        }
+        if (mtime !== "absent") {
           mtimes.set(resolved, mtime);
         }
       }

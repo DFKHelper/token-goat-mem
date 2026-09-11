@@ -6,6 +6,30 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Four anchor predicates called a fact false from a check they never performed.** Each is the same
+  P3 violation: `contradicted` is a positive claim that a fact has stopped being true, and reaching it
+  by any route other than actually evaluating the predicate silently deletes knowledge the user
+  stated.
+  - `git-tracked <dir>` contradicted every directory. The git index stores files, never directories,
+    so a directory target matched no entry and fell through to "not tracked" — while a sibling fact
+    anchored to a file inside it was affirmed in the same repository. The README documents
+    `git-tracked <path>`, with no file-only restriction. A directory is now affirmed when any tracked
+    path lives under it, and `contradicted` stays reachable only for a directory that genuinely holds
+    none.
+  - `valid-until 2026-12-31` expired at UTC end-of-day. West of UTC the fact was withheld from
+    16:00 local on the very day the anchor promised it would hold; the README says "still affirmed
+    during the 31st" and meant it. The date is now read as the end of the machine's own local day,
+    and both the README and the doc comment say so rather than leaving it to be inferred. Expiring
+    late merely caveats a fact for a few more hours; expiring early destroys it.
+  - A permission or I/O error read as "the file is not there". An unreadable subtree made
+    `file-exists` contradict, `file-absent` affirm, and `file-newer-than` contradict for whichever
+    side could not be stat'ed — and an unreadable directory mid-walk let `glob-exists` reach
+    `contradicted` while skipping the one place a match could have been. Only `ENOENT`/`ENOTDIR` mean
+    absence now; every other errno is `unverified`.
+  - A casing-only mismatch contradicted off Windows. macOS supports both case-sensitive and
+    case-insensitive APFS volumes and this process cannot tell which it is looking at, so neither
+    `affirmed` nor `contradicted` is honest — a miss explainable purely by casing is now `unverified`
+    on both `git-tracked` and the literal segments of `glob-exists`.
 - **Three commands kept asking for work no command would ever do.** `mem doctor`'s embedding
   coverage counted every fact in its denominator while `mem embed` refuses to embed a `superseded`
   one, so a store that had ever superseded an unembedded fact reported a permanent shortfall that no
