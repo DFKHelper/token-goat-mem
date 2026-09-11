@@ -2472,6 +2472,34 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     // `contested` -- two winners for one contradiction bucket.
     expect((await runCli(["show", idA])).stdout).toContain("status: contested");
   });
+
+  it("`review --promote` resolves a tied pair `mem review` already shows as contested, before any `epoch --gc` persists the status", async () => {
+    const [idA, idB] = await seedTiedPair();
+
+    // Deliberately no `epoch --gc` here: both facts are still persisted `active`. `mem review`
+    // derives its contested bucket live and already lists this pair -- confirmed by the sibling
+    // test above ("...report contested contradiction... withheld from ground truth") -- so
+    // `--promote` must accept the same fact `mem review` just told the user to resolve, not refuse
+    // it as "status=active".
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+    expect((await runCli(["show", idB])).stdout).toContain("status: active");
+
+    const promoted = await runCli(["review", "--promote", idA]);
+    expect(promoted.exitCode).toBe(0);
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+    expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
+  });
+
+  it("`review --reject` resolves a tied pair `mem review` already shows as contested, before any `epoch --gc` persists the status", async () => {
+    const [idA, idB] = await seedTiedPair();
+
+    const rejected = await runCli(["review", "--reject", idB]);
+    expect(rejected.exitCode).toBe(0);
+    expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
+    // The rival was never persisted `contested` either, so it needs no reinstatement -- it should
+    // simply remain the surviving active fact.
+    expect((await runCli(["show", idA])).stdout).toContain("status: active");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── regression: `mem pin` is not a side door around review ───────────────────────────────────────────────────────────────────────────
@@ -4391,15 +4419,36 @@ describe("mem remember reaffirms rather than duplicating", () => {
     }
   });
 
-  it("does not reaffirm a pending fact, which would promote it without review", async () => {
-    // `mem suggest` files a candidate as pending, and a pending fact never auto-promotes. Reaffirming
-    // one would refresh its clock through a side door the capture module exists to keep shut.
-    await runCli(["suggest", "we cache the build", "--kind", "decision", "--scope", "global"]);
+  it("resolves a matching pending suggestion by promoting it, instead of leaving it queued behind a duplicate", async () => {
+    // `mem suggest` files a candidate as pending. Passive promotion (time, repetition, or a
+    // confidence number alone) must never happen -- that invariant is unchanged and is exercised
+    // separately below ("does not let a suggested candidate reaffirm a user-stated fact", which
+    // covers the opposite direction: a *suggestion* must never refresh a fact the user stated).
+    //
+    // But an explicit `mem remember` of the identical sentence is not a passive signal: it is the
+    // human directly answering the suggestion `mem review` is holding open. This test used to
+    // assert the pending row stayed queued and a duplicate active row was written alongside it --
+    // that was the defect (S9 misapplied to the wrong direction): the user's restatement answered
+    // the queue, and the queue kept asking, while `mem consolidate` went on to report the resulting
+    // pair as a 1.00 duplicate cluster.
+    const suggested = await runCli(["suggest", "we cache the build", "--kind", "decision", "--scope", "global"]);
+    const suggestedMatch = /suggested (?:\S+ )?fact (\S+) \(pending\)/u.exec(suggested.stdout);
+    if (suggestedMatch?.[1] === undefined) {
+      throw new Error(`could not extract fact id from stdout: ${JSON.stringify(suggested.stdout)}`);
+    }
+    const suggestedId = suggestedMatch[1];
+
     const result = await runCli(["remember", "we cache the build", "--kind", "decision", "--scope", "global"]);
-    expect(result.stdout).toContain("remembered");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("resolved pending suggestion");
+    expect(extractRememberedId(result)).toBe(suggestedId);
+
     const all = await facts();
-    expect(all).toHaveLength(2);
-    expect(all.filter((fact) => fact["status"] === "pending")).toHaveLength(1);
+    expect(all).toHaveLength(1);
+    expect(all[0]?.["status"]).toBe("active");
+
+    const review = await runCli(["review"]);
+    expect(review.stdout).not.toContain(suggestedId);
   });
 
   it("does not let a suggested candidate reaffirm a user-stated fact", async () => {

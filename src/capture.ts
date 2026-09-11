@@ -40,9 +40,9 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot } from "./anchors.js";
-import { insertAuditLog } from "./db.js";
+import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
-import { findReaffirmableFact, insertFact as storageInsertFact, reaffirmFact } from "./storage.js";
+import { findReaffirmableFact, findReaffirmablePendingFacts, insertFact as storageInsertFact, reaffirmFact, setFactStatus } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
@@ -616,6 +616,10 @@ export interface CaptureResult {
   readonly fact: Fact;
   /** True when the capture matched a live fact and refreshed it instead of writing a second row. See {@link captureExplicit}. */
   readonly reaffirmed?: boolean;
+  /** True when the matched fact was a queued `pending` suggestion, promoted to `active` by this restatement rather than left queued. See {@link captureExplicit}. */
+  readonly promotedFromPending?: boolean;
+  /** Count of additional `pending` duplicates of the same restated sentence superseded alongside the promotion. See {@link captureExplicit}. */
+  readonly supersededPendingDuplicateCount?: number;
 }
 
 function validateCommonInput(input: CaptureExplicitInput): { text: string; root: string } {
@@ -881,6 +885,67 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
       });
       return { fact: refreshed, reaffirmed: true };
     }
+
+    // No live fact to reaffirm -- but the same sentence may already be sitting in the review queue
+    // as one or more `pending` suggestions (`mem suggest`, or a JSON import, can file the identical
+    // sentence more than once; that non-dedup is a separate, deliberately untouched concern). Stating
+    // it explicitly answers the queue for this sentence, not just for one row of it: the
+    // earliest-suggested match is promoted to `active` -- the only place a `pending` fact turns
+    // `active` other than an explicit `mem review --promote`, since restating it *is* that explicit
+    // confirmation -- and every other matching pending duplicate is superseded through the same
+    // status machinery `mem review`/`mem consolidate` use, so each carries a proper `prior_status`,
+    // `status_changed_at`, and audit entry rather than being silently left stranded in the queue.
+    const [primary, ...duplicates] = findReaffirmablePendingFacts(db, newFact);
+    if (primary !== undefined) {
+      const anchorChanged = newFact.anchor !== undefined && newFact.anchor !== primary.anchor;
+      const sourceRefChanged = newFact.source_ref !== undefined && newFact.source_ref !== primary.source_ref;
+      const refreshed = reaffirmFact(db, primary.id, new Date(), {
+        ...(newFact.anchor !== undefined && newFact.anchor !== null ? { anchor: newFact.anchor } : {}),
+        ...(newFact.source_ref !== undefined && newFact.source_ref !== null ? { sourceRef: newFact.source_ref } : {}),
+      });
+      if (refreshed === undefined) {
+        throw new CaptureValidationError(`fact ${primary.id} vanished while being reaffirmed`);
+      }
+      const promoted = setFactStatus(db, primary.id, "active");
+      if (promoted === undefined) {
+        throw new CaptureValidationError(`fact ${primary.id} vanished while being promoted from pending`);
+      }
+      for (const duplicate of duplicates) {
+        const superseded = setFactStatus(db, duplicate.id, "superseded");
+        if (superseded === undefined) {
+          throw new CaptureValidationError(`fact ${duplicate.id} vanished while being superseded as a duplicate pending suggestion`);
+        }
+        insertAuditLog(db, {
+          event: "capture_reaffirmed_pending_duplicate_superseded",
+          factId: duplicate.id,
+          detail:
+            `${SUPERSEDED_AS_DUPLICATE_PREFIX}${promoted.id}: duplicate pending suggestion of the same restated ` +
+            "sentence, superseded when the primary was promoted via explicit restatement.",
+        });
+      }
+      const refreshedFields = ["captured_at and confidence refreshed", "promoted from pending to active"];
+      if (anchorChanged) {
+        refreshedFields.push("anchor updated");
+      }
+      if (sourceRefChanged) {
+        refreshedFields.push("source ref updated");
+      }
+      if (duplicates.length > 0) {
+        refreshedFields.push(`${duplicates.length} duplicate pending suggestion${duplicates.length === 1 ? "" : "s"} superseded`);
+      }
+      insertAuditLog(db, {
+        event: "capture_reaffirmed_pending_promoted",
+        factId: promoted.id,
+        detail: `restated ${promoted.kind} fact (scope=${promoted.scope}); ${refreshedFields.join("; ")}`,
+      });
+      return {
+        fact: promoted,
+        reaffirmed: true,
+        promotedFromPending: true,
+        supersededPendingDuplicateCount: duplicates.length,
+      };
+    }
+
     return { fact: writeFact(db, newFact, "capture_explicit", (f) => `stored active ${f.kind} fact (scope=${f.scope})`) };
   });
   // BEGIN IMMEDIATE, for the same reason as `writeFact`: this reads (`findReaffirmableFact`) before

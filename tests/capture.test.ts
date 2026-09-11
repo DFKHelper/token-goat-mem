@@ -380,6 +380,120 @@ describe("regression: a reaffirmable fact inserted between the read and the writ
   });
 });
 
+describe("regression: stating a fact explicitly resolves the pending suggestion that proposed it", () => {
+  /**
+   * `captureSuggested` files a pending suggestion; then `captureExplicit` restates the identical
+   * text/kind/scope/subject/value. Before the fix, `findReaffirmableFact` only queried
+   * `status IN ('active', 'pinned')`, so the pending row was invisible to it: the restatement wrote
+   * a second, active row and left the suggestion queued forever, waiting on a confirmation the user
+   * had already given by saying the thing outright.
+   */
+  it("promotes the matching pending suggestion to active instead of inserting a duplicate row", () => {
+    const suggested = captureSuggested(db, {
+      text: "always run lint before commit",
+      kind: "preference",
+      scope: "project",
+      root,
+    });
+    expect(suggested.fact.status).toBe("pending");
+
+    const result = captureExplicit(db, {
+      text: "always run lint before commit",
+      kind: "preference",
+      scope: "project",
+      root,
+    });
+
+    // Same id: the pending row was promoted in place, not superseded by a fresh insert.
+    expect(result.fact.id).toBe(suggested.fact.id);
+    expect(result.fact.status).toBe("active");
+    expect(result.promotedFromPending).toBe(true);
+    expect(result.reaffirmed).toBe(true);
+
+    const rows = db.prepare<[], { id: string; status: string }>("SELECT id, status FROM facts").all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("active");
+
+    expect(auditEvents(suggested.fact.id)).toContain("capture_reaffirmed_pending_promoted");
+  });
+
+  it("resolves every matching pending duplicate, not just the first, when more than one was suggested", () => {
+    // `mem suggest` (and JSON import) does not dedup against an existing identical pending row --
+    // that is a separate, deliberately untouched defect -- so two identical suggestions can both
+    // land as `pending`. An explicit restatement must still answer the queue for the whole sentence:
+    // promoting only one and leaving the other queued is the same complaint the defect was about,
+    // one row down.
+    const first = captureSuggested(db, {
+      text: "always tag releases before publishing",
+      kind: "preference",
+      scope: "project",
+      root,
+    });
+    const second = captureSuggested(db, {
+      text: "always tag releases before publishing",
+      kind: "preference",
+      scope: "project",
+      root,
+    });
+    expect(first.fact.status).toBe("pending");
+    expect(second.fact.status).toBe("pending");
+
+    const result = captureExplicit(db, {
+      text: "always tag releases before publishing",
+      kind: "preference",
+      scope: "project",
+      root,
+    });
+
+    // The earlier-suggested row is the one promoted (deterministic, not arbitrary).
+    expect(result.fact.id).toBe(first.fact.id);
+    expect(result.fact.status).toBe("active");
+    expect(result.promotedFromPending).toBe(true);
+    expect(result.supersededPendingDuplicateCount).toBe(1);
+
+    const rows = db.prepare<[], { id: string; status: string }>("SELECT id, status FROM facts").all();
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.id === first.fact.id)?.status).toBe("active");
+    expect(rows.find((row) => row.id === second.fact.id)?.status).toBe("superseded");
+
+    // No pending row of this sentence survives for `mem review` to keep asking about.
+    expect(rows.filter((row) => row.status === "pending")).toHaveLength(0);
+    expect(auditEvents(second.fact.id)).toContain("capture_reaffirmed_pending_duplicate_superseded");
+  });
+
+  it("does not absorb a pending suggestion bound to a different project root", () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "mem-capture-test-other-"));
+    try {
+      const suggested = captureSuggested(db, {
+        text: "always run lint before commit",
+        kind: "preference",
+        scope: "project",
+        root: otherRoot,
+      });
+      expect(suggested.fact.status).toBe("pending");
+
+      const result = captureExplicit(db, {
+        text: "always run lint before commit",
+        kind: "preference",
+        scope: "project",
+        root,
+      });
+
+      // Different project binding: this must be a fresh active row, not a promotion of the other
+      // project's queued suggestion.
+      expect(result.fact.id).not.toBe(suggested.fact.id);
+      expect(result.promotedFromPending).toBeUndefined();
+      expect(result.reaffirmed).toBeUndefined();
+
+      const rows = db.prepare<[], { status: string }>("SELECT status FROM facts").all();
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.status).sort()).toEqual(["active", "pending"]);
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("captureSuggested -- derived-source facts never auto-promote (design plan Section 3 / S9)", () => {
   it("always stores pending regardless of the requested confidence, and clamps confidence below the trust cap", () => {
     const { fact } = captureSuggested(db, {

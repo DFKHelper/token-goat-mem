@@ -56,7 +56,7 @@ import {
   type CaptureExplicitInput,
   type CaptureSuggestedInput,
 } from "./capture.js";
-import { computeContradictionBucketGroups, detectContradictions, sameContradictionBucket } from "./contradiction.js";
+import { detectContradictions } from "./contradiction.js";
 import {
   dream,
   DreamConfigError,
@@ -1115,22 +1115,34 @@ function reconcileContradictions(db: Database.Database, event: string): readonly
  */
 function promotePending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
-  if (!REVIEW_RESOLVABLE_STATUSES.includes(fact.status)) {
+  // `detectContradictions` is run over the same pool `formatReview` derives its `contested` bucket
+  // from -- active/pinned/contested -- and read before any status is written below, for the same
+  // reason the old contested-only read had to come first: `fact` must still be part of the
+  // population its rivals are drawn from. A precedence tie that ties on `captured_at` and
+  // provenance is *shown* as contested by `formatReview` without ever persisting `contested` on
+  // either side (nothing between detection and display writes it), so gating this solely on
+  // `fact.status` left the exact facts `mem review` told the user to resolve unreachable by the
+  // command it told them to resolve them with. Deriving live, the way `formatReview` does, is the
+  // one-source-of-truth fix rather than a second definition of "contested" that could drift from it.
+  const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"] });
+  const { groups } = detectContradictions(detectionPool);
+  const liveContestedGroup = groups.find(
+    (group) => group.resolution === "contested" && group.factIds.includes(fact.id)
+  );
+  const isContested = fact.status === "contested" || liveContestedGroup !== undefined;
+  if (!REVIEW_RESOLVABLE_STATUSES.includes(fact.status) && !isContested) {
     throw new UsageError(
       `fact ${fact.id} is not pending or contested (status=${fact.status}) -- only withheld facts can be promoted`
     );
   }
-  if (fact.status === "contested") {
-    // Read the contested pool -- and compute bucket groups over it -- before restoring `fact`'s own
-    // status: `fact` is still `contested` at this read, so it is part of the same population its
-    // rivals are drawn from, which is what lets a rival bridged to it only transitively (see
-    // computeProjectIdentityGroups, src/contradiction.ts) still be found. Querying after the
-    // restore would drop `fact` out of that population and could miss such a rival.
-    const contestedFacts = listFacts(db, { status: "contested" });
-    const bucketGroups = computeContradictionBucketGroups(contestedFacts);
-    const rivals = contestedFacts.filter(
-      (other) => other.id !== fact.id && sameContradictionBucket(other, fact, bucketGroups)
-    );
+  if (isContested) {
+    // A fact whose persisted status is still `contested` but which no longer sits in a live
+    // contested group (its rival was forgotten or edited away) has no rivals to supersede here --
+    // that reinstatement is `reconcileContradictions`'s job, not this command's.
+    const rivals =
+      liveContestedGroup !== undefined
+        ? detectionPool.filter((other) => other.id !== fact.id && liveContestedGroup.factIds.includes(other.id))
+        : [];
     const restored: FactStatus = fact.prior_status === "pinned" ? "pinned" : "active";
     setStatusWithAudit(
       db,
@@ -1163,12 +1175,18 @@ function promotePending(db: Database.Database, id: string): string {
  */
 function rejectPending(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
-  if (!REVIEW_RESOLVABLE_STATUSES.includes(fact.status)) {
+  // Same live-derived definition of "contested" as `promotePending`, and for the same reason: a
+  // precedence tie `formatReview` already shows as contested may not have persisted that status yet.
+  const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"] });
+  const { groups } = detectContradictions(detectionPool);
+  const isContested =
+    fact.status === "contested" ||
+    groups.some((group) => group.resolution === "contested" && group.factIds.includes(fact.id));
+  if (!REVIEW_RESOLVABLE_STATUSES.includes(fact.status) && !isContested) {
     throw new UsageError(
       `fact ${fact.id} is not pending or contested (status=${fact.status}) -- only withheld facts can be rejected`
     );
   }
-  const wasContested = fact.status === "contested";
   setStatusWithAudit(
     db,
     fact.id,
@@ -1176,7 +1194,7 @@ function rejectPending(db: Database.Database, id: string): string {
     "review_reject",
     `rejected ${fact.status} fact (superseded) via explicit review`
   );
-  if (wasContested) {
+  if (isContested) {
     reconcileContradictions(db, "review_reject");
   }
   return fact.id;
@@ -1858,13 +1876,22 @@ export function buildProgram(): Command {
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
-        const { fact, reaffirmed } = await withDb((db) => captureExplicit(db, input));
+        const { fact, reaffirmed, promotedFromPending, supersededPendingDuplicateCount } = await withDb((db) =>
+          captureExplicit(db, input)
+        );
+        const duplicateCount = supersededPendingDuplicateCount ?? 0;
         process.stdout.write(
-          reaffirmed === true
-            ? `reaffirmed ${factNounPhrase(fact.kind)} ${fact.id} (already stored; refreshed rather than duplicated` +
-                (fact.anchor !== null ? `; anchor: ${fact.anchor}` : "") +
-                `)\n`
-            : `remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`
+          promotedFromPending === true
+            ? duplicateCount > 0
+              ? `remembered ${factNounPhrase(fact.kind)} ${fact.id} (resolved ${duplicateCount + 1} pending suggestions ` +
+                  `for this sentence; promoted this one to active, superseded ${duplicateCount} duplicate` +
+                  `${duplicateCount === 1 ? "" : "s"})\n`
+              : `remembered ${factNounPhrase(fact.kind)} ${fact.id} (resolved pending suggestion; promoted to active)\n`
+            : reaffirmed === true
+              ? `reaffirmed ${factNounPhrase(fact.kind)} ${fact.id} (already stored; refreshed rather than duplicated` +
+                  (fact.anchor !== null ? `; anchor: ${fact.anchor}` : "") +
+                  `)\n`
+              : `remembered ${factNounPhrase(fact.kind)} ${fact.id}\n`
         );
         await attachEmbeddingBestEffort(fact);
       })

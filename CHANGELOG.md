@@ -6,6 +6,27 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem review` named a resolution neither of its own commands would perform.** A pair of facts that
+  tie on provenance and capture time is detected as contested live, in memory, while both rows are
+  still persisted `active`. `mem review` listed them as contested and said "resolve with
+  `--promote`/`--reject`"; `mem recall` withheld both as "contested, excluded" and said "mem review to
+  resolve"; and both of those commands then exited 1 with "is not pending or contested
+  (status=active)". Every instruction the tool gave led to a refusal, and the facts stayed
+  unreachable, until an unrelated `mem epoch --gc` happened to persist the detection. `--promote` and
+  `--reject` now ask the same question `mem review` asks, the same way -- one answer to "is this
+  contested" instead of two. A fact that is contested by neither measure still gets the original
+  refusal.
+- **Stating a fact explicitly did not answer the suggestion that proposed it.** `mem suggest` files a
+  candidate as `pending`; stating the same sentence with `mem remember` wrote a second row and left
+  the suggestion queued, so `mem review` kept asking a question the user had already answered -- and
+  the obvious response, `--promote`, then produced two identical active facts that `mem consolidate`
+  went on to report as a duplicate cluster. An explicit restatement now resolves the queue for that
+  sentence: the earliest matching suggestion is promoted in place (same id), and any further
+  duplicates of it are superseded through the same status machinery, with audit entries, rather than
+  stranded. Scope binding is respected -- an identical suggestion pending in another project is
+  untouched. The invariant that a `pending` fact never promotes on its own is unchanged: passive
+  signals (time, repetition, confidence) still cannot promote one, `mem suggest` and `mem
+  scan-session` still cannot, and this path requires the user to state the fact themselves.
 - **A UTF-8 BOM made `mem init` and `mem uninstall` refuse, and blame the user for it.** A
   `settings.json` (or VS Code `tasks.json` / `keybindings.json`) beginning with a byte-order mark --
   what Windows editors and PowerShell's default `Out-File`/`Set-Content` write, and what Claude Code
