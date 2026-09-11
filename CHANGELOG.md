@@ -6,6 +6,30 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem dream` reasoned from premises mem itself refuses to state.** Its pool was every `active` and
+  `pinned` fact, with no correctness gate — no contradiction resolution, no freshness check. Because
+  contradiction outcomes are resolved in memory on each recall but persisted only by `mem epoch --gc`
+  and `mem review --reject`, two conflicting facts captured with `mem remember` are both still
+  `active`, so both went to the model as premises while `mem recall` correctly withheld the loser;
+  anchor-`contradicted` facts went too. The code comment claimed otherwise, describing the store as it
+  would be after a gc rather than as it is. That is P3's failure one step removed: mem does not state
+  the false thing itself, it asks a model to reason from it and reports the conclusion. The gate
+  `retrieve()` already applies is now extracted as `selectVerifiedFacts` and shared by both, rather
+  than reimplemented beside it — this codebase has been bitten repeatedly by a second hand-maintained
+  copy drifting from the first. `unverified` is still not grounds for exclusion; only `contradicted`
+  is. Freshness evaluates against the working directory, which is what every other command defaults
+  to without `--root`, and the help text now says so instead of leaving it to be inferred.
+- **`mem uninstall` deleted files that existed before `mem init` and said they held only mem's own
+  content.** Uninstall removes a file rather than leaving it empty, which is right when mem created
+  it — but emptiness alone cannot tell that from a file the user already had as empty or `{}`. A
+  project with a hand-made empty `CLAUDE.md` and a `.claude/settings.json` containing `{}` lost both,
+  against this repository's own stated guarantee that uninstall reverses only what init wrote. The
+  evidence was already on disk: init snapshots any pre-existing file to `<file>.token-goat-mem.bak`
+  before its first write, so a snapshot holding real outside content now blocks the delete and the
+  emptied file stays. One wrinkle is handled deliberately: on a shared file like `AGENTS.md`, a
+  second tool's install can be the write that first sees "existing content" and snapshots it — but
+  that content is the first tool's own marker block, not user data, so a snapshot containing only
+  mem's markers is read as no snapshot at all. A file mem created is still removed.
 - **`mem consolidate --apply` reversed an explicit correction and filed it as a duplicate.** Its
   comparability key is kind + scope + scope root; subject and value were never consulted. So two facts
   that share a subject and *differ* in value — the definition of a live contradiction — clustered as

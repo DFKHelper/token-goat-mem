@@ -1203,6 +1203,31 @@ export interface RetrieveOutcome {
 }
 
 /**
+ * The correctness gate `retrieve()` applies before ranking, extracted so another consumer of the
+ * live store -- today only `mem dream`'s premise pool -- can filter to facts mem would actually
+ * assert without reimplementing contradiction resolution and freshness evaluation by hand. `facts`
+ * may be the full store contents (this does its own status filtering, same as `retrieve()`).
+ *
+ * Excludes: `superseded`, `pending`, `contested`, and contradiction losers (mirrors
+ * `contradictionFromStatus`'s "withheld" outcomes), plus anything anchor-`contradicted` against
+ * `root`. `unverified` is not grounds for exclusion here either -- only `contradicted` is.
+ */
+export function selectVerifiedFacts(
+  facts: readonly Fact[],
+  root: string,
+  anchorDeadline?: number
+): readonly Fact[] {
+  const liveCandidates = facts.filter((fact) => fact.status !== "superseded");
+  const { facts: resolved } = resolveContradictions(liveCandidates);
+  return resolved.filter((fact) => {
+    if (fact.status !== "active" && fact.status !== "pinned") {
+      return false;
+    }
+    return evaluateFactFreshness(fact, root, anchorDeadline) !== "contradicted";
+  });
+}
+
+/**
  * Runs the full hybrid-retrieval + correctness-gate pipeline over `facts` and returns ranked,
  * trust-annotated, self-caveating results. `facts` may be the full store contents — this function
  * does its own status filtering (never surfacing `superseded` facts, recomputing contradictions

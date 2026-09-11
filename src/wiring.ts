@@ -161,6 +161,20 @@ function isEmptyManagedContent(content: string): boolean {
 }
 
 /**
+ * Whether `content` carries nothing but mem's own marker: the `<!-- token-goat-mem:` comment on
+ * markdown files (per-tool or shared), or the `__token_goat_mem` JSON stamp key on structured ones.
+ *
+ * Used only to read a `.bak` snapshot, not live content -- see its call site in `writeManagedFile`.
+ * A shared file (`AGENTS.md`) can pick up a `.bak` from a *second* tool's install finding the file
+ * already there with the *first* tool's own block already in it; that `.bak` is not evidence of real
+ * pre-existing content, it is mem's own writing caught mid-sequence. This check tells the two apart
+ * without needing to know which of the several marker formats produced it.
+ */
+function looksMemAuthored(content: string): boolean {
+  return content.includes("<!-- token-goat-mem:") || content.includes(`"${STAMP_KEY}"`);
+}
+
+/**
  * Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the
  * transform once if the file changed between the initial read and the pre-write check. Exported for
  * direct unit testing of the retry path.
@@ -197,8 +211,22 @@ export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfE
   }
 
   if (deleteIfEmpty && before !== undefined && isEmptyManagedContent(after)) {
-    rmSync(op.path, { force: true });
-    return { path: op.path, action: "delete", detail: "removed file that held only mem's own content" };
+    // Emptiness alone cannot tell "mem created this file" from "the user's file was already empty
+    // (or `{}`) before mem ever touched it" -- both look identical once mem's own block is stripped
+    // back out. The `.bak` snapshot `backupIfNeeded` takes on the first write it sees existing
+    // content (see `preInstallHooks` for the same distinction, scoped to hooks) is the record of
+    // which case this is -- with one wrinkle on a shared file (`AGENTS.md`): a *second* tool's
+    // install can be the write that finds "existing content" and takes the `.bak`, but that content
+    // is the *first* tool's own marker block, not real pre-existing data. `looksMemAuthored` reads
+    // that case as equivalent to no `.bak` at all. Only a `.bak` holding genuine outside content
+    // blocks the delete and falls through to the ordinary write path below, keeping its (now
+    // emptied) content.
+    const bakPath = `${op.path}.token-goat-mem.bak`;
+    const bakContent = existsSync(bakPath) ? readFileSync(bakPath, "utf8") : undefined;
+    if (bakContent === undefined || looksMemAuthored(bakContent)) {
+      rmSync(op.path, { force: true });
+      return { path: op.path, action: "delete", detail: "removed file that held only mem's own content" };
+    }
   }
 
   if (before !== undefined && backup) {
