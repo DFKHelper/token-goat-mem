@@ -35,7 +35,7 @@
  */
 
 import { Command } from "commander";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
@@ -131,7 +131,8 @@ import {
   deleteFact,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
-  factWithTextExists,
+  factsByNormalizedText,
+  normalizeFactText,
   getEmbeddingMeta,
   getEntityKeysByFact,
   getEntityOverlapForQuery,
@@ -2391,6 +2392,18 @@ export function buildProgram(): Command {
         if (transcriptPath === undefined) {
           throw new UsageError("scan-session needs a transcript: pass --transcript <path> or --hook-stdin");
         }
+        // Only when the caller named the transcript explicitly: a missing/unreadable file is then a
+        // typo in *this* invocation, not the Stop/PreCompact hook's background convenience, which
+        // must stay silent and fail open (scanTranscript below swallows the same error for that path,
+        // deliberately). Reported here rather than left to scanTranscript's catch-and-return-[] so
+        // that "no new durable statements found" cannot stand in for a scan that never ran.
+        if (options.transcript !== undefined) {
+          try {
+            readFileSync(transcriptPath, "utf8");
+          } catch (error) {
+            throw new UsageError(`scan-session: cannot read transcript "${transcriptPath}" (${extractErrorMessage(error)})`);
+          }
+        }
         const scope = parseFactScope(options.scope ?? "project");
         if (scope === "path") {
           throw new UsageError("scan-session cannot bind facts to a file: use `mem remember --scope path --path <file>` instead");
@@ -2399,8 +2412,17 @@ export function buildProgram(): Command {
         const candidates = scanTranscript(transcriptPath);
         const stored = await withDb((db) => {
           const kept: string[] = [];
+          // Built once: the duplicate check below runs per candidate, and rebuilding this inside
+          // the loop would read the whole facts table once per sentence on a hook that fires at
+          // the end of every session.
+          const storedByText = factsByNormalizedText(db);
           for (const candidate of candidates) {
-            if (factWithTextExists(db, candidate.text)) {
+            // Scoped to this project (or globally, for a global-scope match) via `isBoundToRoot` --
+            // the same rule `retrieval.ts` uses to decide what recall may surface -- rather than a
+            // second copy of "does this apply here" re-implemented against `scope_root` directly.
+            // A text match with an unrelated project's `scope_root` does not count: that
+            // project's suggestion (or rejection) must not suppress this one's.
+            if ((storedByText.get(normalizeFactText(candidate.text)) ?? []).some((fact) => isBoundToRoot(fact, root))) {
               continue;
             }
             try {

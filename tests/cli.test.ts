@@ -3773,9 +3773,69 @@ describe("scan-session", () => {
     expect((JSON.parse(review.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
   });
 
+  it("files a project-scoped candidate for a second project even though the same text is already pending for a first", async () => {
+    // The old `factWithTextExists` matched on text alone, with no `scope_root` filter, against a
+    // store shared across every project the user works in -- so a statement filed for project A
+    // silently suppressed it from ever reaching project B's review queue, with no indication to the
+    // user that anything was lost. `isBoundToRoot` (retrieval.ts) is now the arbiter of "does an
+    // existing match apply here", the same rule recall already uses.
+    let projectA = "";
+    let projectB = "";
+    try {
+      projectA = mkdtempSync(join(tmpdir(), "mem-cli-test-projA-"));
+      projectB = mkdtempSync(join(tmpdir(), "mem-cli-test-projB-"));
+      const text = "Always run the linter before committing anything.";
+      const first = await runCli(["scan-session", "--transcript", writeTranscript([text]), "--root", projectA]);
+      expect(first.stdout).toContain("filed 1 pending suggestion");
+
+      const second = await runCli(["scan-session", "--transcript", writeTranscript([text]), "--root", projectB]);
+      expect(second.stdout).toContain("filed 1 pending suggestion");
+
+      const review = await runCli(["list", "--status", "pending", "--json"]);
+      const pending = JSON.parse(review.stdout) as { facts: { scope_root?: string | null }[] };
+      expect(pending.facts).toHaveLength(2);
+    } finally {
+      if (projectA !== "") {
+        rmSync(projectA, { recursive: true, force: true });
+      }
+      if (projectB !== "") {
+        rmSync(projectB, { recursive: true, force: true });
+      }
+    }
+  });
+
+  it("dedupes a global-scoped candidate across projects, since a global fact is true everywhere", async () => {
+    // Chosen deliberately the other way from project scope: a `global` fact has no `scope_root` at
+    // all and `isBoundToRoot` treats it as in scope for every root, so re-filing the same statement
+    // from a second project would just be a duplicate of a truth the store already holds -- not a
+    // second project's own knowledge being lost the way project-scoped text was.
+    let projectA = "";
+    let projectB = "";
+    try {
+      projectA = mkdtempSync(join(tmpdir(), "mem-cli-test-projA-"));
+      projectB = mkdtempSync(join(tmpdir(), "mem-cli-test-projB-"));
+      const text = "Always use two-space indentation.";
+      const first = await runCli(["scan-session", "--transcript", writeTranscript([text]), "--root", projectA, "--scope", "global"]);
+      expect(first.stdout).toContain("filed 1 pending suggestion");
+
+      const second = await runCli(["scan-session", "--transcript", writeTranscript([text]), "--root", projectB, "--scope", "global"]);
+      expect(second.stdout).toContain("no new durable statements found");
+
+      const review = await runCli(["list", "--status", "pending", "--json"]);
+      expect((JSON.parse(review.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
+    } finally {
+      if (projectA !== "") {
+        rmSync(projectA, { recursive: true, force: true });
+      }
+      if (projectB !== "") {
+        rmSync(projectB, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("does not store a differently-cased restatement as a second copy once the original scrolls out of the scan window", async () => {
-    // `factWithTextExists` compares case-sensitively (storage.ts). In-scan dedup collapses a
-    // differently-cased repeat within the same window via a lowercased key, but once the original
+    // `factsByNormalizedText` (storage.ts) backs the cross-scan check. In-scan dedup collapses a
+    // differently-cased repeat within the same window via a normalized key, but once the original
     // occurrence ages out of MAX_SCANNED_TURNS, the cross-scan check is all that stands between a
     // later, differently-cased restatement of the same rule and a second stored copy of it.
     const original = "Never commit generated files to the repository.";
@@ -3789,6 +3849,22 @@ describe("scan-session", () => {
     const review = await runCli(["list", "--status", "pending", "--json"]);
     const pending = JSON.parse(review.stdout) as { facts: { text: string }[] };
     expect(pending.facts.map((f) => f.text.toLowerCase())).toEqual([original.toLowerCase()]);
+  });
+
+  it("dedupes a cross-scan restatement that differs only in the case of a non-ASCII letter", async () => {
+    // SQL `LOWER()` folds ASCII only: "Émacs" (stored) and "émacs" (queried) compared unequal in
+    // the old `factWithTextExists`, even though `extractCandidates`'s own Unicode-aware in-scan key
+    // already treated them as the same sentence -- so the two dedup layers disagreed and a second
+    // pending copy was filed on the second scan. No window-aging needed to reproduce this: it is a
+    // cross-scan (two separate invocations) mismatch, not an in-scan one.
+    const original = "Always use Émacs keybindings in this project.";
+    const restated = "always use émacs keybindings in this project.";
+    await runCli(["scan-session", "--transcript", writeTranscript([original]), "--root", "."]);
+    const second = await runCli(["scan-session", "--transcript", writeTranscript([restated]), "--root", "."]);
+    expect(second.stdout).toContain("no new durable statements found");
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    expect((JSON.parse(review.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
   });
 
   it("never stores text that arrived as a tool result", async () => {
@@ -3831,11 +3907,17 @@ describe("scan-session", () => {
     expect((JSON.parse(review.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
   });
 
-  it("exits 0 with no candidates for a transcript that does not exist", async () => {
-    // Fail-open: the hook host must never see a non-zero exit from a background convenience.
+  it("fails loudly rather than reporting success when an explicit --transcript cannot be read", async () => {
+    // Was "exits 0 with no candidates for a transcript that does not exist", asserting the exact
+    // defect being fixed: a typo'd --transcript path silently produced the same reassuring
+    // "no new durable statements found" as a scan that ran and genuinely found nothing. The
+    // hook-envelope path (`--hook-stdin`, no explicit --transcript) still must stay silent and
+    // fail open -- `scanTranscript` swallows that read error unconditionally, unchanged here --
+    // but a path the user typed themselves deserves to know it was never scanned.
     const result = await runCli(["scan-session", "--transcript", join(home, "nope.jsonl"), "--root", "."]);
-    expect(result.exitCode ?? 0).toBe(0);
-    expect(result.stdout).toContain("no new durable statements found");
+    expect(result.exitCode).toBe(1);
+    expect(result.stdout).not.toContain("no new durable statements found");
+    expect(result.stderr).toContain("cannot read transcript");
   });
 
   it("rejects an invocation that names no transcript", async () => {
