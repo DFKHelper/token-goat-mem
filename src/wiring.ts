@@ -1225,7 +1225,13 @@ function removeStampedJsoncArrayEntries(text: string, arrayPath: JSONPath, exist
 
 function parseJsoncOrConflict(current: string, path: string): unknown {
   const errors: import("jsonc-parser").ParseError[] = [];
-  const parsed: unknown = parseJsonc(current, errors, { allowTrailingComma: true });
+  // A leading UTF-8 BOM (U+FEFF) is a valid, common encoding marker -- Windows editors and
+  // PowerShell's default `Out-File`/`Set-Content` write it routinely -- but jsonc-parser treats it
+  // as an invalid token at offset 0. Stripping it only for this validation pass (never from the
+  // text mem actually edits/writes) avoids a false "not valid JSON/JSONC" refusal on a file that is
+  // perfectly valid to every other consumer.
+  const withoutBom = current.startsWith("\uFEFF") ? current.slice(1) : current;
+  const parsed: unknown = parseJsonc(withoutBom, errors, { allowTrailingComma: true });
   if (errors.length > 0) {
     throw new WiringConflictError(`${path} is not valid JSON/JSONC; refusing to modify a hand-edited config`);
   }
