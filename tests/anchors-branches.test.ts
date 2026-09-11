@@ -504,14 +504,26 @@ describe("glob-exists does not descend into .git or node_modules", () => {
     mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
     writeFileSync(join(root, "node_modules", "pkg", "target.txt"), "x", "utf8");
     // `*` matches the directory name, but the traversal refuses to enter it, so the file inside is
-    // never reached -- contradicted, and specifically not affirmed.
-    expect(evaluateAnchor("glob-exists */pkg/target.txt", root)).toBe("contradicted");
+    // never reached. This is unverified, not contradicted (Fix 2): the walk never actually looked
+    // inside node_modules, so it cannot positively deny a match exists there -- it merely declined
+    // to check, and "the file plainly doesn't exist" would be a fabrication.
+    expect(evaluateAnchor("glob-exists */pkg/target.txt", root)).toBe("unverified");
   });
 
   it("will not match through a .git directory", () => {
     mkdirSync(join(root, ".git", "objects"), { recursive: true });
     writeFileSync(join(root, ".git", "objects", "target.txt"), "x", "utf8");
-    expect(evaluateAnchor("glob-exists */objects/target.txt", root)).toBe("contradicted");
+    expect(evaluateAnchor("glob-exists */objects/target.txt", root)).toBe("unverified");
+  });
+
+  it("is unverified, not contradicted, when the only match sits under a skipped .git directory reached by **", () => {
+    // Reproduction from the task: `.git/HEAD` always exists in a git working tree, and a `**`
+    // wildcard walk skips `.git` for cost/safety reasons (module header comment), so the only
+    // thing that would have matched was never looked at. Reporting `contradicted` here tells the
+    // caller "no such file" about a file that is plainly there -- exactly the P3 violation.
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/main\n", "utf8");
+    expect(evaluateAnchor("glob-exists **/HEAD", root)).toBe("unverified");
   });
 
   it("skips them during a ** wildcard walk, but a literal node_modules segment before ** still descends", () => {
@@ -690,8 +702,10 @@ describe("git metadata reached through a symlink is refused", () => {
       writeFileSync(join(outside, "hit.txt"), "x", "utf8");
       symlinkSync(outside, join(root, "src", "linked"), "dir");
 
-      // Following it would let a link inside the root affirm a fact about a file outside it.
-      expect(evaluateAnchor("glob-exists src/**/hit.txt", root)).toBe("contradicted");
+      // Following it would let a link inside the root affirm a fact about a file outside it. The
+      // walk never looked past the symlink, so it cannot positively deny a match exists there
+      // either -- unverified, not contradicted (Fix 2).
+      expect(evaluateAnchor("glob-exists src/**/hit.txt", root)).toBe("unverified");
     } finally {
       rmSync(outside, { recursive: true, force: true });
     }
