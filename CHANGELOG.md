@@ -6,6 +6,28 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem export` dropped which model wrote the vectors, so an import silently compared two vector
+  spaces.** The `facts.embedding` blobs were exported; the `embedding_model`/`embedding_dimension`
+  pair that says what they mean was not. A store restored from that export held vectors it could not
+  attribute, and the one guard against comparing incomparable spaces — `planEmbeddingRanking`, which
+  refuses to rank when the configured model differs from the recorded one — has nothing to compare
+  against when the recording is missing, so it permitted ranking under whatever model the destination
+  happened to configure. Cosine distance between two models' vectors is a number, not an error: recall
+  came back ordered, plausible, and wrong. The envelope now carries `embeddingMeta`, validated on the
+  way in; a fresh store adopts it, a store that already has one keeps its own and strips arriving
+  vectors it cannot attribute rather than mixing them. Unlabelled vectors from an interrupted
+  `mem embed` or an export written before this release are treated as incomparable and named as such,
+  with `mem embed --all` as the stated way to relabel the store. `mem embed --all` now clears the
+  recorded meta unconditionally instead of leaving the old model's name over the new model's vectors.
+- **The hook path decided the embedding question differently from the CLI, for the fifth time.**
+  `src/integration-seam.ts` keeps its own copy of the ranking decision, and that copy did not know
+  about unlabelled vectors: `mem recall` skipped the endpoint and said why, while the same store
+  behind `mem recall --hint-format` — the path that runs on every prompt — called out to the
+  configured model and ranked against vectors of unknown provenance. Same store, same question, two
+  answers, and only the silent one is on the hot path. This is the fifth column or decision the seam's
+  hand-maintained copy has dropped; `tests/guards/fact-columns.test.ts` catches the column shape of
+  the drift, and this one is now pinned by a test that drives the seam directly and asserts the
+  endpoint is untouched.
 - **`mem dream` reasoned from premises mem itself refuses to state.** Its pool was every `active` and
   `pinned` fact, with no correctness gate — no contradiction resolution, no freshness check. Because
   contradiction outcomes are resolved in memory on each recall but persisted only by `mem epoch --gc`

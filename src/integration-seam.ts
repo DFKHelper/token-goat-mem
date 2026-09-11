@@ -45,6 +45,7 @@ import { resolve as resolvePath, sep } from "node:path";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
 import { loadAllowlist } from "./capture.js";
 import {
+  countEmbeddedFacts,
   getEmbeddingMeta,
   getEntityOverlapForQuery,
   getUsefulnessCounts,
@@ -457,9 +458,17 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   try {
     // Silent either way: a stale-model store or an unreachable endpoint is a ranking-quality
     // matter, and this seam's contract is to fail open rather than editorialize on a wire protocol.
+    // The unrecorded-vector check is passed here too, not skipped for budget: `mem recall` and this
+    // path must reach the same ranking decision about the same store, and this seam's hand-maintained
+    // divergences from the rest of the CLI are exactly how three columns went missing from its SELECT.
+    // The cost is one `SELECT COUNT(*)` on the connection already open, and only when no model is
+    // recorded at all -- cheaper than `getUsefulnessCounts` a few lines below, which this budget
+    // already affords.
+    const recordedMeta = getEmbeddingMeta(db) ?? null;
     embeddingBackend =
       embeddingBudgetMs >= MIN_EMBEDDING_BUDGET_MS
-        ? planEmbeddingRanking(getEmbeddingMeta(db) ?? null, process.env, { timeoutMs: embeddingBudgetMs }).backend
+        ? planEmbeddingRanking(recordedMeta, process.env, { timeoutMs: embeddingBudgetMs }, recordedMeta === null && countEmbeddedFacts(db) > 0)
+            .backend
         : null;
     allFacts = queryAllFacts(db, embeddingBackend !== null);
     // One grouped query on the connection already open, not a second `openStorage`: this path runs

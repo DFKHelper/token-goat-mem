@@ -12,14 +12,20 @@
  * is exactly the byte-identical-when-unconfigured property the first block below exists to pin.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { run } from "../src/cli.js";
-import { openStorage, getEmbeddingMeta, listFacts } from "../src/storage.js";
+import { insertFact, openStorage, getEmbeddingMeta, listFacts } from "../src/storage.js";
+import type { NewFact } from "../src/types.js";
 import { EMBED_API_KEY_ENV, EMBED_MODEL_ENV, EMBED_URL_ENV } from "../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer, type StubEmbeddingServerOptions } from "./support/embedding-server.js";
+import { buildHintFormat } from "../src/integration-seam.js";
+
+
+/** A budget no runner can exceed, so a slow machine cannot empty the hint set and pass the assertion vacuously. */
+const NO_TRUNCATION_BUDGET_MS = 3_600_000;
 
 interface CliResult {
   readonly stdout: string;
@@ -367,6 +373,50 @@ describe("mem embed", () => {
     expect(result.stderr).toMatch(/HTTP 503/u);
     expect(storedFacts().every((fact) => fact.embedding === null)).toBe(true);
   });
+
+  it("--all recovers when the same model name now answers a different dimension, instead of skipping every fact and blaming 'no vector returned'", async () => {
+    await seed(1);
+    await configureEmbeddings({ model: "m", embedFor: () => [1, 2, 3, 4] });
+    await runCli(["embed"]);
+    expect(storedMeta()).toEqual({ model: "m", dimension: 4 });
+
+    // A repointed LiteLLM/Ollama alias, or a provider that changed its output size: same model
+    // name, different dimension.
+    await configureEmbeddings({ model: "m", embedFor: () => [1, 2, 3, 4, 5, 6, 7, 8] });
+
+    const plain = await runCli(["embed"]);
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout).toBe("no facts need embedding\n");
+
+    const result = await runCli(["embed", "--all"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/^embedded 1, skipped 0, failed 0 \(model m, dim 8\)\n$/u);
+    expect(storedMeta()).toEqual({ model: "m", dimension: 8 });
+    expect(storedFacts().every((fact) => fact.embedding !== null)).toBe(true);
+  });
+
+  it("names the dimension mismatch as the cause instead of 'no vector returned' when every fact is skipped for it", async () => {
+    await seed(2);
+    await configureEmbeddings({ model: "m", embedFor: () => [1, 2, 3, 4] });
+    await runCli(["embed"]);
+    expect(storedMeta()).toEqual({ model: "m", dimension: 4 });
+
+    // Same model, same recorded dimension seed (no --all), but the endpoint now answers a different
+    // dimension. Reconfigured before this fact is captured so the post-capture best-effort embed
+    // (which also checks recorded.dimension) leaves it unembedded rather than quietly picking it up.
+    await configureEmbeddings({ model: "m", embedFor: () => [1, 2, 3, 4, 5, 6, 7, 8] });
+    await runCli(["remember", "a third fact", "--kind", "fact", "--root", root]);
+
+    const result = await runCli(["embed"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/^mem: \S/u);
+    expect(result.stderr).toContain("embedded 0 facts");
+    expect(result.stderr).toContain("1 skipped");
+    expect(result.stderr).toMatch(/endpoint returned 8-dimension vectors, but the store holds 4-dimension vectors/u);
+    expect(result.stderr).not.toContain("no vector returned");
+  });
 });
 
 describe("dimension and model safety at recall", () => {
@@ -449,5 +499,102 @@ describe("dimension and model safety at recall", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(new RegExp(`embeddings: misconfigured -- .*${EMBED_MODEL_ENV}`, "u"));
+  });
+
+  it("doctor does not say 'nothing embedded yet' directly above a coverage line that says otherwise, when a vector exists with no recorded model", async () => {
+    // Simulates the state an interrupted `mem embed` (or an import of unknown provenance) leaves
+    // behind: a vector on disk, and no meta row naming the model that produced it.
+    const db = openStorage(join(home, "mem.db"));
+    insertFact(db, { text: "unlabelled fact", kind: "fact", scope: "global", source_type: "user", embedding: new Float32Array([1, 2, 3, 4]) } as unknown as NewFact);
+    expect(getEmbeddingMeta(db)).toBeUndefined();
+    db.close();
+
+    const result = await runCli(["doctor"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toContain("embedding store: nothing embedded yet");
+    expect(result.stdout).toMatch(/embedding store: 1 vector\(s\) with no recorded model/u);
+    expect(result.stdout).toMatch(/embedding coverage: 1\/1 facts/u);
+  });
+
+  it("recall on a store with an unlabelled vector (an interrupted mem embed, or an import of unknown provenance) skips ranking and touches the endpoint zero times", async () => {
+    const db = openStorage(join(home, "mem.db"));
+    insertFact(db, { text: "uses vitest for tests", kind: "fact", scope: "project", scopeRoot: root, source_type: "user", embedding: new Float32Array([1, 2, 3, 4]) } as unknown as NewFact);
+    db.close();
+
+    const server = await configureEmbeddings();
+    const result = await runCli(["recall", "vitest", "--root", root]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/note: embedding search skipped -- stored vectors have no recorded model/u);
+    expect(result.stdout).toMatch(/uses vitest for tests/u);
+    expect(server.requests).toEqual([]);
+  });
+
+  it("reaches the same decision about unlabelled vectors on the hook path as on the recall path", async () => {
+    // The seam keeps its own call into `planEmbeddingRanking`, and hand-maintained divergences
+    // between it and the rest of the CLI are this codebase's most repeated defect -- three columns
+    // have gone missing from its own SELECT on three separate occasions. Skipping the
+    // unrecorded-vector check here to save a `SELECT COUNT(*)` would make the hook rank against
+    // vectors of unknown provenance on every prompt while `mem recall` declines to: the same store
+    // answering the same question two ways.
+    //
+    // Driven through `buildHintFormat` rather than the CLI because the query has to come from
+    // somewhere: the hook path takes one from its stdin envelope's `prompt` and from nowhere else,
+    // and with no query nothing is embedded on any code path -- a `recall --hint-format` with no
+    // envelope passes whether the guard is there or not. The seam says nothing about the decision
+    // either way (its contract is to fail open, not to editorialize on ranking quality), so the
+    // observable is that it never reaches the endpoint.
+    const db = openStorage(join(home, "mem.db"));
+    insertFact(db, { text: "uses vitest for tests", kind: "fact", scope: "project", scopeRoot: root, source_type: "user", embedding: new Float32Array([1, 2, 3, 4]) } as unknown as NewFact);
+    expect(getEmbeddingMeta(db)).toBeUndefined();
+    db.close();
+
+    const server = await configureEmbeddings();
+    const hint = await buildHintFormat({
+      root,
+      query: "what do we use for tests?",
+      dbPath: join(home, "mem.db"),
+      retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS,
+    });
+
+    expect(hint.lines.join(" ")).toContain("uses vitest for tests");
+    expect(server.requests).toEqual([]);
+  });
+
+  it("import from an export whose store recorded a model refuses ranking under a different model on the fresh target, and touches the endpoint zero times", async () => {
+    await seed(1);
+    const server = await configureEmbeddings({ model: "m" });
+    await runCli(["embed"]);
+    expect(storedMeta()).toEqual({ model: "m", dimension: 4 });
+
+    const exported = await runCli(["export"]);
+    expect(exported.exitCode).toBe(0);
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-embed-export-"));
+    const jsonPath = join(exportDir, "export.json");
+    writeFileSync(jsonPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-embed-import-target-"));
+    try {
+      process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+      const imported = await runCli(["import", "--from-json", jsonPath, "--root", root]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+
+      // The fresh target has no vectors of its own; it adopts the envelope's recorded model, so a
+      // query under a third model must decline ranking exactly as a store embedded natively would.
+      process.env[EMBED_MODEL_ENV] = "other";
+      const requestsBeforeRecall = server.requests.length;
+      const result = await runCli(["recall", "vitest", "--root", root]);
+
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toMatch(/note: embedding search skipped -- stored vectors were produced by m, not other/u);
+      expect(result.stdout).toMatch(/uses vitest for tests/u);
+      expect(server.requests.length).toBe(requestsBeforeRecall);
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
   });
 });
