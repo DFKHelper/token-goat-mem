@@ -874,7 +874,7 @@ const CLAUDE_STOP_COMMAND =
 // the whole transcript is captured by nothing. `PreCompact` is the one event guaranteed to fire
 // while the pre-compaction transcript still exists on disk, and it carries `transcript_path` for
 // the same reason `Stop` does. Identical command: the scan is idempotent -- every candidate whose
-// text is already stored is skipped by `factWithTextExists` before capture -- so re-scanning the
+// text is already stored, and bound to this project, is skipped before capture -- so re-scanning the
 // turns both events see costs a read and files nothing twice.
 const CLAUDE_PRE_COMPACT_COMMAND = CLAUDE_STOP_COMMAND;
 

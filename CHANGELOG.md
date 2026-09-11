@@ -6,6 +6,32 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem scan-session` threw away another project's knowledge and called it nothing new.** Its
+  cross-scan duplicate check asked only "is this exact sentence already stored", across the whole
+  store, with no regard for which project the stored copy belongs to. State a rule in project A,
+  review it there, then state the same rule in project B, and B's scan silently skipped it --
+  reporting "no new durable statements found", which is the one thing it must not say about a
+  candidate it chose to drop. Worse with a rejection: a candidate rejected in A stays in the store
+  as `superseded`, so A's decision about A suppressed the suggestion in B permanently. The check
+  now narrows to facts bound to the scanning root via `isBoundToRoot` -- the same rule recall uses
+  to decide what a root may surface -- so a global-scope fact still dedupes everywhere (it applies
+  everywhere) while a project fact only dedupes within its own project.
+- **The two dedup layers disagreed about case outside ASCII.** In-scan dedup keyed on
+  `sentence.toLowerCase()` (Unicode-aware) while the cross-scan store check used SQL `LOWER()`
+  (ASCII-only), so a sentence containing an uppercase non-ASCII letter -- "Émacs is the editor
+  here" -- collapsed to one candidate within a scan but stored a second copy once the earlier
+  occurrence aged out of the scan window. Both layers now key on one shared function. The store
+  check reads the table once per scan and matches in JS rather than in SQL, because no
+  `LOWER()`-based prefilter can be trusted not to drop the very row it is meant to find; building
+  that index in a single pass, rather than rescanning per candidate, keeps the Stop hook from
+  re-reading every fact (embedding blobs included) once per sentence -- measured at 2000 stored
+  facts and a 40-sentence transcript, 1.10s per-candidate versus 0.20s indexed.
+- **An unreadable `--transcript` exited 0 and reported success.** `mem scan-session --transcript
+  /typo/path.jsonl` printed "no new durable statements found" and exited clean, which is a positive
+  claim about a file it never opened. An explicitly named transcript that cannot be read is now a
+  usage error (exit 1) naming the path and the reason. The hook path is deliberately unchanged: a
+  `Stop`/`PreCompact` scan that cannot find its transcript still fails open and silently, because
+  it is background convenience and must never interrupt a session.
 - **`mem uninstall` left husks of its own making, and two paths read the same snapshot by different
   rules.** Init takes a one-time `<file>.token-goat-mem.bak` before its first write, and that snapshot
   is the only evidence of what existed beforehand. `writeManagedFile` treats a snapshot holding only

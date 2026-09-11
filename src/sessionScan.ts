@@ -28,6 +28,7 @@
 
 import { readFileSync } from "node:fs";
 
+import { normalizeFactText } from "./storage.js";
 import type { FactKind } from "./types.js";
 
 /**
@@ -256,8 +257,11 @@ export function extractCandidates(turns: readonly string[]): Candidate[] {
         continue;
       }
       // Within one scan the same sentence repeated across turns is one candidate. Cross-scan
-      // duplicates are the caller's problem, since only the caller can see the store.
-      const key = sentence.toLowerCase();
+      // duplicates are the caller's problem, since only the caller can see the store. Normalized
+      // via the same function `storage.ts`'s cross-scan check now uses -- they used to be two
+      // hand-maintained rules (this one Unicode-aware, the store's SQL-`LOWER()`-based) that
+      // silently disagreed on any sentence containing an uppercase non-ASCII letter.
+      const key = normalizeFactText(sentence);
       if (seen.has(key)) {
         continue;
       }

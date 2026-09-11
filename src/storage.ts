@@ -523,26 +523,52 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   return rowToFact(row);
 }
 
-/** Reads one fact by id, or `undefined` if no such fact exists. */
 /**
- * Whether any fact already holds exactly this text, in any status.
+ * Every stored fact, indexed by {@link normalizeFactText} of its text.
  *
- * The idempotency guard for `mem scan-session`: the Stop hook fires at the end of every assistant
- * turn, so the same sentence is re-extracted for the rest of the session. Matching on text rather
- * than on a session marker is what makes a *rejected* candidate stay rejected -- a rejected fact is
- * still in the store as `superseded`, so re-filing it would resurrect a decision the user already
- * made, which is the one thing a review queue must not do.
+ * Feeds the idempotency guard for `mem scan-session`: the Stop hook fires at the end of every
+ * assistant turn, so the same sentence is re-extracted for the rest of the session. Matching on
+ * text rather than on a session marker is what makes a *rejected* candidate stay rejected -- a
+ * rejected fact is still in the store as `superseded`, so re-filing it would resurrect a decision
+ * the user already made, which is the one thing a review queue must not do. Every status is
+ * indexed for that reason.
  *
- * Comparison folds case via SQL `LOWER()`, matching {@link extractCandidates}'s own in-scan dedup
- * key (`sentence.toLowerCase()`). The two dedup layers have to agree on this: in-scan dedup collapses
- * a differently-cased repeat only while both occurrences are in the same scan's window, and once the
- * earlier one ages out of `MAX_SCANNED_TURNS`, this check is the only thing standing between a later
- * restatement of the same rule in different case and a second stored copy of it.
+ * Indexed regardless of the fact's `scope`/`scope_root` -- the caller narrows to "does this apply
+ * here" via `isBoundToRoot` (retrieval.ts), the one place that scoping rule already lives, rather
+ * than a second copy of it re-implemented in SQL here.
+ *
+ * Not a `WHERE` clause, and not one lookup per candidate. SQL `LOWER()` folds ASCII only, so a
+ * clause built on it can miss a stored row outright when the two sides disagree on the case of a
+ * non-ASCII letter ("Émacs" stored, "émacs" queried) -- there is no `LOWER()`-based prefilter
+ * guaranteed not to drop a genuine match, so the comparison has to happen in JS through the same
+ * function {@link extractCandidates} (sessionScan.ts) keys its in-scan dedup on. The two dedup
+ * layers have to agree: in-scan dedup collapses a differently-cased repeat only while both
+ * occurrences are in the same scan's window, and once the earlier one ages out of
+ * `MAX_SCANNED_TURNS`, this check is the only thing standing between a later restatement of the
+ * same rule in different case and a second stored copy of it. They used to be two hand-maintained
+ * rules -- SQL `LOWER()` here, `sentence.toLowerCase()` there -- that silently disagreed on any
+ * sentence containing an uppercase non-ASCII letter; sharing one function is what keeps them from
+ * drifting apart again.
+ *
+ * Returning an index built in one pass, rather than a lookup that rescans per candidate, keeps a
+ * scan of a long transcript from reading the whole table (embedding blobs included) once per
+ * candidate sentence -- this runs on the Stop hook, at the end of every session.
  */
-export function factWithTextExists(db: Db, text: string): boolean {
-  return db.prepare<[string], { one: number }>("SELECT 1 AS one FROM facts WHERE LOWER(text) = LOWER(?) LIMIT 1").get(text) !== undefined;
+export function factsByNormalizedText(db: Db): Map<string, Fact[]> {
+  const index = new Map<string, Fact[]>();
+  for (const row of db.prepare<[], FactRow>("SELECT * FROM facts").all()) {
+    const key = normalizeFactText(row.text);
+    const bucket = index.get(key);
+    if (bucket === undefined) {
+      index.set(key, [rowToFact(row)]);
+    } else {
+      bucket.push(rowToFact(row));
+    }
+  }
+  return index;
 }
 
+/** Reads one fact by id, or `undefined` if no such fact exists. */
 export function getFactById(db: Db, id: string): Fact | undefined {
   const row = getFactRow(db, id);
   return row === undefined ? undefined : rowToFact(row);
