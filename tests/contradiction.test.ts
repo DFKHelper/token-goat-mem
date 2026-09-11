@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   applyContradictionUpdates,
+  computeContradictionBucketGroups,
   detectContradictions,
   getGroundTruthFacts,
   resolveContradictions,
+  sameContradictionBucket,
 } from "../src/contradiction.js";
 import type { Fact } from "../src/types.js";
 
@@ -17,6 +19,7 @@ function makeFact(overrides: Partial<Fact> & Pick<Fact, "id">): Fact {
     value: overrides.value ?? null,
     scope: overrides.scope ?? "project",
     scopeRoot: overrides.scopeRoot ?? null,
+    scopeRepo: overrides.scopeRepo ?? null,
     source_type: overrides.source_type ?? "user",
     source_ref: overrides.source_ref ?? null,
     captured_at: overrides.captured_at ?? "2026-01-01T00:00:00.000Z",
@@ -92,6 +95,149 @@ describe("detectContradictions", () => {
 
     expect(result.groups).toHaveLength(0);
     expect(result.updates).toHaveLength(0);
+  });
+
+  it("resolves a conflict between two clones of the SAME repository (same scope_repo, different scope_root)", () => {
+    // Reproduces the reported defect: two clones/worktrees of one upstream repo share a scope_repo
+    // identity (src/projectIdentity.ts) but have different absolute scopeRoot paths. Recall already
+    // widens a project fact's binding to match on scope_repo (isBoundToRoot/isInScope), so both facts
+    // are served as current from either clone -- contradiction detection must key the same way or the
+    // correction captured in the second clone never supersedes the decision it corrects.
+    const facts = [
+      makeFact({
+        id: "clone-a",
+        subject: "package-manager",
+        value: "pnpm",
+        scope: "project",
+        scopeRoot: "/home/me/worktrees/a",
+        scopeRepo: "github.com/acme/repo#.",
+        captured_at: "2026-01-01T00:00:00.000Z",
+      }),
+      makeFact({
+        id: "clone-b",
+        subject: "package-manager",
+        value: "npm",
+        scope: "project",
+        scopeRoot: "/home/me/worktrees/b",
+        scopeRepo: "github.com/acme/repo#.",
+        captured_at: "2026-03-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.resolution).toBe("resolved");
+    expect(result.groups[0]?.winnerId).toBe("clone-b");
+    expect(result.updates).toEqual([expect.objectContaining({ factId: "clone-a", nextStatus: "superseded" })]);
+  });
+
+  it("keeps two DIFFERENT repositories independent when they share neither root nor repo", () => {
+    // Mirror of "keeps identical subject+scope in different project roots independent" above, but
+    // for the scope_repo-keyed branch: two unrelated repositories, at different roots with
+    // different identities, must never collapse into one bucket.
+    const facts = [
+      makeFact({
+        id: "repo-a",
+        subject: "package-manager",
+        value: "npm",
+        scope: "project",
+        scopeRoot: "/home/me/project-a",
+        scopeRepo: "github.com/acme/repo-a#.",
+      }),
+      makeFact({
+        id: "repo-b",
+        subject: "package-manager",
+        value: "pnpm",
+        scope: "project",
+        scopeRoot: "/home/me/project-b",
+        scopeRepo: "github.com/acme/repo-b#.",
+      }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(0);
+    expect(result.updates).toHaveLength(0);
+  });
+
+  it("resolves a conflict between a legacy fact (scope_repo NULL) and a newer one at the SAME root", () => {
+    // This is the primary, common-case regression a per-fact "scope_repo if present, else
+    // scope_root" key would introduce: scope_repo shipped after this fact shape already existed
+    // (or shipped before the project ever gained a remote), so every fact in an existing store has
+    // scope_repo NULL. A correction captured at the same root after scope_repo starts being written
+    // must still supersede the fact it corrects -- same normalized scope_root always shares a
+    // bucket, independent of scope_repo, per computeProjectIdentityGroups's non-negotiable
+    // invariant (src/contradiction.ts).
+    const facts = [
+      makeFact({
+        id: "legacy",
+        subject: "package-manager",
+        value: "npm",
+        scope: "project",
+        scopeRoot: "/home/me/project",
+        scopeRepo: null,
+        captured_at: "2026-01-01T00:00:00.000Z",
+      }),
+      makeFact({
+        id: "newer",
+        subject: "package-manager",
+        value: "pnpm",
+        scope: "project",
+        scopeRoot: "/home/me/project",
+        scopeRepo: "github.com/acme/repo#.",
+        captured_at: "2026-03-01T00:00:00.000Z",
+      }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.resolution).toBe("resolved");
+    expect(result.groups[0]?.winnerId).toBe("newer");
+    expect(result.updates).toEqual([expect.objectContaining({ factId: "legacy", nextStatus: "superseded" })]);
+  });
+
+  it("bridges two clones that share neither root nor repo directly, through a same-directory fact that has both", () => {
+    // Concrete case from computeProjectIdentityGroups's doc comment: X (root P, repo R) and Y (root
+    // P, repo null) share a root; X and Z (root Q, repo R) share a repo; Y and Z share neither
+    // directly. All three name one project and must resolve as a single three-way contradiction,
+    // bridged through X -- not two separate, unresolved pairs.
+    const x = makeFact({
+      id: "x",
+      subject: "package-manager",
+      value: "pnpm",
+      scope: "project",
+      scopeRoot: "/w/p",
+      scopeRepo: "github.com/acme/repo#.",
+      captured_at: "2026-01-01T00:00:00.000Z",
+    });
+    const y = makeFact({
+      id: "y",
+      subject: "package-manager",
+      value: "npm",
+      scope: "project",
+      scopeRoot: "/w/p",
+      scopeRepo: null,
+      captured_at: "2026-02-01T00:00:00.000Z",
+    });
+    const z = makeFact({
+      id: "z",
+      subject: "package-manager",
+      value: "yarn",
+      scope: "project",
+      scopeRoot: "/w/q",
+      scopeRepo: "github.com/acme/repo#.",
+      captured_at: "2026-03-01T00:00:00.000Z",
+    });
+
+    const result = detectContradictions([x, y, z]);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]?.factIds.slice().sort()).toEqual(["x", "y", "z"]);
+    expect(result.groups[0]?.resolution).toBe("resolved");
+    expect(result.groups[0]?.winnerId).toBe("z");
+    expect(result.updates.map((u) => u.factId).sort()).toEqual(["x", "y"]);
   });
 
   it("still resolves a conflict between two project-scoped facts bound to the SAME root", () => {
@@ -402,6 +548,50 @@ describe("resolveContradictions", () => {
     expect(groups).toHaveLength(1);
     expect(resolved.find((fact) => fact.id === "derived")?.status).toBe("superseded");
     expect(resolved.find((fact) => fact.id === "user")?.status).toBe("active");
+  });
+});
+
+describe("sameContradictionBucket", () => {
+  it("treats two facts with the same scope_repo but different scope_root as the same bucket", () => {
+    const a = makeFact({ id: "a", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: "github.com/acme/repo#." });
+    const b = makeFact({ id: "b", subject: "package-manager", scope: "project", scopeRoot: "/w/b", scopeRepo: "github.com/acme/repo#." });
+    const groups = computeContradictionBucketGroups([a, b]);
+
+    expect(sameContradictionBucket(a, b, groups)).toBe(true);
+  });
+
+  it("DOES bucket a legacy fact (no scope_repo) with a same-directory fact that has a scope_repo", () => {
+    // Non-negotiable: two facts at the same normalized scope_root always share a bucket, whatever
+    // their scope_repo. scope_repo is unreleased at the time of this fix -- every fact in every
+    // existing store has it NULL -- so treating "legacy, no scope_repo" as a rare edge case would in
+    // fact split the ordinary single-checkout case for the entire installed base. A prior version of
+    // this test asserted the opposite (false); that encoded exactly the regression this one pins.
+    const legacy = makeFact({ id: "legacy", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: null });
+    const newer = makeFact({ id: "newer", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: "github.com/acme/repo#." });
+    const groups = computeContradictionBucketGroups([legacy, newer]);
+
+    expect(sameContradictionBucket(legacy, newer, groups)).toBe(true);
+  });
+
+  it("does not bucket a legacy fact (no scope_repo) with a scope_repo fact from a DIFFERENT clone, absent a bridging fact", () => {
+    const legacy = makeFact({ id: "legacy", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: null });
+    const otherClone = makeFact({ id: "other", subject: "package-manager", scope: "project", scopeRoot: "/w/b", scopeRepo: "github.com/acme/repo#." });
+    const groups = computeContradictionBucketGroups([legacy, otherClone]);
+
+    expect(sameContradictionBucket(legacy, otherClone, groups)).toBe(false);
+  });
+
+  it("bridges a legacy fact to a different clone once a same-directory, repo-tagged fact is present in the population", () => {
+    // Same two facts as the "absent a bridging fact" case above, but this time the population also
+    // contains a third fact at legacy's own root that carries the shared scope_repo -- the exact
+    // bridge computeProjectIdentityGroups's doc comment describes. legacy and otherClone still share
+    // neither field directly, but both now resolve to the same connected component through bridge.
+    const legacy = makeFact({ id: "legacy", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: null });
+    const bridge = makeFact({ id: "bridge", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: "github.com/acme/repo#." });
+    const otherClone = makeFact({ id: "other", subject: "package-manager", scope: "project", scopeRoot: "/w/b", scopeRepo: "github.com/acme/repo#." });
+    const groups = computeContradictionBucketGroups([legacy, bridge, otherClone]);
+
+    expect(sameContradictionBucket(legacy, otherClone, groups)).toBe(true);
   });
 });
 

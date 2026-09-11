@@ -20,7 +20,7 @@
  * reports; it never narrows a pool on retrieval's behalf.
  */
 
-import { sameContradictionBucket } from "./contradiction.js";
+import { computeContradictionBucketGroups, computeProjectIdentityGroups, sameContradictionBucket } from "./contradiction.js";
 import { listFacts, listStaleUnsurfacedFacts, listTermsForFact } from "./storage.js";
 import type { Fact } from "./types.js";
 
@@ -102,9 +102,16 @@ export function jaccard(a: ReadonlySet<string>, b: ReadonlySet<string>): number 
  * Which facts may be compared at all. Same kind (a preference and a decision that share vocabulary
  * are two different claims, not one restated) and same scope binding (a global fact and a
  * project-scoped one surface in different places, so neither is redundant given the other).
+ *
+ * The scope-binding component is a precomputed `projectGroups` id (from `contradiction.ts`'s
+ * `computeProjectIdentityGroups`, keyed by `fact.scope` so path/global/project facts never merge)
+ * rather than a raw `scopeRoot` comparison, so a duplicate cluster spans the same "same project"
+ * notion `sameContradictionBucket` below uses to keep a live contradiction out of a cluster -- two
+ * clones or worktrees of one repository compare as the same project here too, via one shared
+ * computation rather than a second, independently-derived definition.
  */
-function comparabilityKey(fact: Fact): string {
-  return [fact.kind, fact.scope, fact.scopeRoot ?? ""].join(" ");
+function comparabilityKey(fact: Fact, projectGroups: ReadonlyMap<string, string>): string {
+  return [fact.kind, projectGroups.get(fact.id) ?? ""].join(" ");
 }
 
 /**
@@ -150,6 +157,10 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
   const terms = new Map<string, Set<string>>(facts.map((fact) => [fact.id, topicKeys(db, fact.id)]));
   const assigned = new Set<string>();
   const clusters: DuplicateCluster[] = [];
+  // Computed once over the whole pool, not per pair: both are connected-component passes, and
+  // `comparabilityKey`/`sameContradictionBucket` below turn into cheap map lookups against them.
+  const projectGroups = computeProjectIdentityGroups(facts, (fact) => fact.scope);
+  const contradictionGroups = computeContradictionBucketGroups(facts);
 
   for (const seed of facts) {
     if (assigned.has(seed.id)) {
@@ -157,17 +168,17 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
     }
     assigned.add(seed.id);
     const seedTerms = terms.get(seed.id) ?? new Set<string>();
-    const seedKey = comparabilityKey(seed);
+    const seedKey = comparabilityKey(seed, projectGroups);
     const members: DuplicateMember[] = [];
     for (const candidate of facts) {
-      if (assigned.has(candidate.id) || comparabilityKey(candidate) !== seedKey) {
+      if (assigned.has(candidate.id) || comparabilityKey(candidate, projectGroups) !== seedKey) {
         continue;
       }
       // Same subject+scope, different value is a live contradiction, not a duplicate --
       // `detectContradictions` owns that resolution (provenance > newest, contested on a genuine
       // tie). Clustering it here as a "duplicate" would let `preferenceOrder` (pinned > confidence
       // > newest) override that outcome and silently resurrect a value the user already corrected.
-      if (sameContradictionBucket(seed, candidate) && seed.value !== candidate.value) {
+      if (sameContradictionBucket(seed, candidate, contradictionGroups) && seed.value !== candidate.value) {
         continue;
       }
       const similarity = jaccard(seedTerms, terms.get(candidate.id) ?? new Set<string>());

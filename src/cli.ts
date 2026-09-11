@@ -56,7 +56,7 @@ import {
   type CaptureExplicitInput,
   type CaptureSuggestedInput,
 } from "./capture.js";
-import { detectContradictions, sameContradictionBucket } from "./contradiction.js";
+import { computeContradictionBucketGroups, detectContradictions, sameContradictionBucket } from "./contradiction.js";
 import {
   dream,
   DreamConfigError,
@@ -1120,6 +1120,16 @@ function promotePending(db: Database.Database, id: string): string {
     );
   }
   if (fact.status === "contested") {
+    // Read the contested pool -- and compute bucket groups over it -- before restoring `fact`'s own
+    // status: `fact` is still `contested` at this read, so it is part of the same population its
+    // rivals are drawn from, which is what lets a rival bridged to it only transitively (see
+    // computeProjectIdentityGroups, src/contradiction.ts) still be found. Querying after the
+    // restore would drop `fact` out of that population and could miss such a rival.
+    const contestedFacts = listFacts(db, { status: "contested" });
+    const bucketGroups = computeContradictionBucketGroups(contestedFacts);
+    const rivals = contestedFacts.filter(
+      (other) => other.id !== fact.id && sameContradictionBucket(other, fact, bucketGroups)
+    );
     const restored: FactStatus = fact.prior_status === "pinned" ? "pinned" : "active";
     setStatusWithAudit(
       db,
@@ -1127,9 +1137,6 @@ function promotePending(db: Database.Database, id: string): string {
       restored,
       "review_promote",
       `resolved contested contradiction in this fact's favor via explicit review (restored to ${restored})`
-    );
-    const rivals = listFacts(db, { status: "contested" }).filter(
-      (other) => other.id !== fact.id && sameContradictionBucket(other, fact)
     );
     for (const rival of rivals) {
       setStatusWithAudit(

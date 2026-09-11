@@ -112,44 +112,145 @@ interface SubjectScopeBucket {
 }
 
 /**
- * Bucket identity for contradiction detection: subject + scope + (for non-global scopes) scope_root.
- *
- * `FactScope` alone ("global"/"project"/"path") is not root-aware, but mem's store is shared across
- * every project a user works in. Without the scope_root component, `subject="package-manager"
- * scope="project"` in project A (value=npm, scope_root=/a) and the same subject/scope in project B
- * (value=pnpm, scope_root=/b) collapse into one bucket and look like a live contradiction -- so
- * `mem epoch --gc` / `mem review` would *persist* a supersede/contested transition, silently
- * clobbering one project's fact because of an unrelated project's, and plain `mem recall` would
- * mislabel them. Including scope_root keeps each project's facts in their own bucket. Global facts
- * always share one bucket (scope_root is null by convention). (The `--hint-format` seam already
- * pre-filters to a single root before calling in, so this only corrects the whole-store callers.)
- *
- * **Deliberately still `scope_root`, not `scope_repo`.** Recall widened its project binding to
- * accept a repository identity as well as a path (src/projectIdentity.ts), so two clones of one
- * repository now surface each other's facts -- but bucketing here did *not* widen with it. The
- * asymmetry is the conservative choice, taken on purpose:
- *
- *  - This key decides what gets marked `superseded`/`contested`, a persisted, destructive
- *    transition. Recall widening only shows more; widening here would start *rewriting* facts
- *    across checkouts on the first `mem epoch --gc` after an upgrade, with no user action.
- *  - There is no honest backfill. Every fact stored before identities existed has `scope_repo`
- *    NULL, so a repo-keyed bucket would put a pre-migration fact and its own successor in different
- *    buckets -- turning a previously-detected contradiction into an undetected one. Path keying has
- *    no such discontinuity.
- *
- * The cost is real and worth stating: two facts on the same subject captured in two clones of one
- * repository are both in scope from either clone and are not detected as rivals, so recall can show
- * both and `mem review` will not flag them. Capturing the correction in the same checkout as the
- * fact it corrects -- the normal case -- is unaffected.
+ * Minimal union-find (disjoint-set) over opaque string labels, path-compressed on `find`. Backs
+ * {@link computeProjectIdentityGroups}: connectivity, not a single derived key per fact, is what
+ * lets a bridging fact join two others that share neither field directly (see that function's doc
+ * comment for the concrete case this exists to handle).
  */
-function bucketKey(subject: string, scope: FactScope, scopeRoot: string | null | undefined): string {
+class LabelUnionFind {
+  private readonly parent = new Map<string, string>();
+
+  /** A label's recorded parent, or itself when never registered -- the union-find "self-root" convention, kept here so `find` never needs an unsafe cast on a `Map.get` result it already knows is present. */
+  private parentOf(label: string): string {
+    return this.parent.get(label) ?? label;
+  }
+
+  find(label: string): string {
+    if (!this.parent.has(label)) {
+      this.parent.set(label, label);
+      return label;
+    }
+    let root = label;
+    while (this.parentOf(root) !== root) {
+      root = this.parentOf(root);
+    }
+    let cursor = label;
+    while (cursor !== root) {
+      const next = this.parentOf(cursor);
+      this.parent.set(cursor, root);
+      cursor = next;
+    }
+    return root;
+  }
+
+  union(a: string, b: string): void {
+    const rootA = this.find(a);
+    const rootB = this.find(b);
+    if (rootA !== rootB) {
+      this.parent.set(rootA, rootB);
+    }
+  }
+}
+
+/**
+ * The label(s) one fact contributes to {@link computeProjectIdentityGroups}'s union-find: always a
+ * path label, plus a repo label when `scopeRepo` is present. `family` scopes the labels so facts
+ * from unrelated families (e.g. a different `subject`, when the caller cares about subject) can
+ * never merge through this fact even if their raw path or repo strings happened to coincide.
+ *
+ * The two labels are added to the same union-find run, never substituted for one another -- that is
+ * what makes a fact with both a path and a repo identity a bridge between two other facts that share
+ * only one of the two with it (see {@link computeProjectIdentityGroups}).
+ */
+function projectIdentityLabels(
+  family: string,
+  scope: FactScope,
+  scopeRoot: string | null | undefined,
+  scopeRepo: string | null | undefined
+): readonly string[] {
   // Case-fold the root component the same way retrieval.ts folds paths for comparison (see
   // pathUtils.ts): `scopeRoot` is `path.resolve(root)` at capture time (src/capture.ts), which on
   // Windows preserves whatever drive-letter/segment case the shell happened to report, so the same
-  // directory captured from a differently-cased cwd would otherwise split into two buckets and
-  // never be detected as a contradiction.
+  // directory captured from a differently-cased cwd would otherwise split into two labels and never
+  // be detected as a contradiction. `global` facts always carry a null scopeRoot, so this collapses
+  // to one fixed path label per family, shared by every global fact in that family.
   const rootComponent = scope === "global" ? "" : normalizePath(scopeRoot ?? "");
-  return JSON.stringify([subject, scope, rootComponent]);
+  const pathLabel = `${family} path:${rootComponent}`;
+  if (scopeRepo === null || scopeRepo === undefined || scopeRepo.trim().length === 0) {
+    return [pathLabel];
+  }
+  // `scopeRepo` is only ever set for scope="project" (src/capture.ts's resolveScopeRepo), so no
+  // extra scope check is needed here to keep this label out of "path"/"global" facts.
+  return [pathLabel, `${family} repo:${scopeRepo}`];
+}
+
+/**
+ * Connected-component grouping of `facts` by project identity, returned as a map from fact id to a
+ * canonical group id (an opaque label, stable only within one call). Two facts land in the same
+ * group when they are connected -- directly, or transitively through other facts in the same call --
+ * by matching `familyOf` output and (equal normalized `scopeRoot`, OR equal non-null `scopeRepo`). A
+ * fact whose `familyOf` returns `null` is omitted from the result entirely.
+ *
+ * **Why connectivity, not a single derived key.** `scopeRoot` and `scopeRepo` are two independent,
+ * non-hierarchical ways two facts can name the same project, and one fact can bridge two others that
+ * share neither field with each other directly. Concretely: X (root P, repo R), Y (root P, repo null
+ * -- a fact captured before this repository had an identity, or with
+ * `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path`), Z (root Q, repo R -- a second clone of the same
+ * repository). X and Y share a root; X and Z share a repo; Y and Z share neither. All three
+ * genuinely name one project, and X is the bridge that makes that provable. A single per-fact key
+ * ("scopeRepo when present, else scopeRoot") cannot express this: Y would key on its path and X/Z
+ * would key on their repo, splitting a group that should be one -- exactly the "no honest backfill"
+ * failure the prior, path-only design was bitten by, reproduced one level down.
+ *
+ * **The non-negotiable invariant this preserves:** two facts with the same normalized `scopeRoot`
+ * are always in the same group, whatever their `scopeRepo` (including differing, non-null values --
+ * a directory whose remote changed between two captures still bucket together, since a value change
+ * at one root is exactly what a contradiction check exists to catch). `scopeRepo` matches only ever
+ * *widen* a group by merging two path-groups together; they never split a path-group apart.
+ *
+ * No filesystem I/O: this reads only the fields already on each `Fact`, so it stays as pure as the
+ * callers below require.
+ */
+export function computeProjectIdentityGroups(facts: readonly Fact[], familyOf: (fact: Fact) => string | null): ReadonlyMap<string, string> {
+  const unionFind = new LabelUnionFind();
+  const labelsById = new Map<string, readonly string[]>();
+
+  for (const fact of facts) {
+    const family = familyOf(fact);
+    if (family === null) {
+      continue;
+    }
+    const labels = projectIdentityLabels(family, fact.scope, fact.scopeRoot, fact.scopeRepo);
+    labelsById.set(fact.id, labels);
+    for (let index = 1; index < labels.length; index += 1) {
+      unionFind.union(labels[0] as string, labels[index] as string);
+    }
+  }
+
+  const groups = new Map<string, string>();
+  for (const [id, labels] of labelsById) {
+    groups.set(id, unionFind.find(labels[0] as string));
+  }
+  return groups;
+}
+
+/**
+ * {@link computeProjectIdentityGroups}'s family for contradiction detection: subject + scope, since
+ * a contradiction is only ever between two facts on the same subject in the same scope. Free-text
+ * facts (no subject) are excluded.
+ */
+function contradictionFamily(fact: Fact): string | null {
+  return fact.subject === null ? null : `${fact.subject} ${fact.scope}`;
+}
+
+/**
+ * {@link computeProjectIdentityGroups} specialized for contradiction bucketing: subject+scope-scoped
+ * groups, per {@link contradictionFamily}. Both {@link detectContradictions} and
+ * {@link sameContradictionBucket} are built on this one function so they can never derive
+ * conflicting notions of "same bucket" from two independent implementations.
+ */
+export function computeContradictionBucketGroups(facts: readonly Fact[]): ReadonlyMap<string, string> {
+  return computeProjectIdentityGroups(facts, contradictionFamily);
 }
 
 /**
@@ -158,12 +259,21 @@ function bucketKey(subject: string, scope: FactScope, scopeRoot: string | null |
  * one fact's favor -- superseding exactly its rivals -- using the same bucket identity the detector
  * itself uses, rather than a second, drifting definition of "same subject". Free-text facts (no
  * `subject`) are never in any bucket.
+ *
+ * Takes a precomputed `groups` map rather than recomputing one from just `a` and `b`: bucket
+ * membership can depend on a third fact bridging the two (see
+ * {@link computeProjectIdentityGroups}'s doc comment), which a two-fact-only signature cannot see.
+ * Callers compute `groups` once via {@link computeContradictionBucketGroups} over the full
+ * population `a` and `b` are drawn from, then call this cheaply per pair -- both correct (one shared
+ * computation, not two facts re-deriving membership in isolation) and efficient (the union-find pass
+ * runs once per population, not once per pair).
  */
-export function sameContradictionBucket(a: Fact, b: Fact): boolean {
+export function sameContradictionBucket(a: Fact, b: Fact, groups: ReadonlyMap<string, string>): boolean {
   if (a.subject === null || b.subject === null) {
     return false;
   }
-  return bucketKey(a.subject, a.scope, a.scopeRoot) === bucketKey(b.subject, b.scope, b.scopeRoot);
+  const groupA = groups.get(a.id);
+  return groupA !== undefined && groupA === groups.get(b.id);
 }
 
 /**
@@ -172,18 +282,22 @@ export function sameContradictionBucket(a: Fact, b: Fact): boolean {
  * Callers (e.g. a store module) are responsible for persisting `updates`.
  */
 export function detectContradictions(facts: readonly Fact[]): ContradictionDetectionResult {
+  const eligibleFacts = facts.filter(isKeyedDetectionFact);
+  const groupIds = computeContradictionBucketGroups(eligibleFacts);
   const buckets = new Map<string, SubjectScopeBucket>();
 
-  for (const fact of facts) {
-    if (!isKeyedDetectionFact(fact)) {
+  for (const fact of eligibleFacts) {
+    // Every eligible fact has a non-null subject, so computeContradictionBucketGroups always
+    // assigns it a group id -- the `undefined` case cannot happen here, only the type is optional.
+    const groupId = groupIds.get(fact.id);
+    if (groupId === undefined) {
       continue;
     }
-    const key = bucketKey(fact.subject, fact.scope, fact.scopeRoot);
-    const existing = buckets.get(key);
+    const existing = buckets.get(groupId);
     if (existing) {
       existing.facts.push(fact);
     } else {
-      buckets.set(key, { subject: fact.subject, scope: fact.scope, facts: [fact] });
+      buckets.set(groupId, { subject: fact.subject, scope: fact.scope, facts: [fact] });
     }
   }
 

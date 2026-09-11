@@ -277,9 +277,9 @@ export function findReaffirmableFact(db: Db, candidate: NewFact): Fact | undefin
  * identity) stays the same, and the AND check failed that match and inserted a duplicate row
  * instead of reaffirming. Recall's own `isBoundToRoot` (src/retrieval.ts) treats a project fact's
  * `scopeRoot`/`scopeRepo` as an OR for exactly this reason, and AGENTS.md documents reaffirm's own
- * match as "scope binding" -- reserving the stricter "keys on scope_root alone" wording specifically
- * for contradiction bucketing (`sameContradictionBucket`, src/contradiction.ts), a deliberate,
- * separate exception this does not extend to.
+ * match as "scope binding" -- the same widening contradiction bucketing now uses too
+ * (`computeProjectIdentityGroups`, src/contradiction.ts), so this is no longer a stricter, separate
+ * rule from that one.
  *
  * `path` scope carries no identity (`scopeRepo` is always null there), so exact `scopeRoot`
  * equality is already "the same binding" for it; `global` has no binding to compare at all, and
