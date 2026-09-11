@@ -517,6 +517,23 @@ describe("dimension and model safety at recall", () => {
     expect(result.stdout).toMatch(/embedding coverage: 1\/1 facts/u);
   });
 
+  it("doctor's embedding coverage reaches 100% in a store holding a superseded fact, since backfill will never embed one", async () => {
+    // `listFactsNeedingEmbedding` excludes status='superseded' by design (superseding a fact is not
+    // a reason to spend an embedding call on it), so a superseded fact with no vector must not count
+    // against the coverage denominator -- otherwise doctor reports a shortfall no command can close.
+    await seed(1);
+    const db = openStorage(join(home, "mem.db"));
+    insertFact(db, { text: "stale fact nobody will embed", kind: "fact", scope: "global", source_type: "user", status: "superseded" } as unknown as NewFact);
+    db.close();
+    await configureEmbeddings();
+    await runCli(["embed"]);
+
+    const result = await runCli(["doctor"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/embedding coverage: 1\/1 facts/u);
+  });
+
   it("recall on a store with an unlabelled vector (an interrupted mem embed, or an import of unknown provenance) skips ranking and touches the endpoint zero times", async () => {
     const db = openStorage(join(home, "mem.db"));
     insertFact(db, { text: "uses vitest for tests", kind: "fact", scope: "project", scopeRoot: root, source_type: "user", embedding: new Float32Array([1, 2, 3, 4]) } as unknown as NewFact);

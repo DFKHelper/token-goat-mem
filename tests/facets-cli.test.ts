@@ -232,10 +232,12 @@ describe("fact_terms write path", () => {
 describe("mem facets", () => {
   it("backfills facts that have no terms and reports what it did", async () => {
     const id = await remember("the ranking lives in src/retrieval.ts");
-    // Simulate a store written before the facet layer existed: drop the rows the write path added.
+    // Simulate a store written before the facet layer existed: drop the rows the write path added,
+    // and the extraction record with them (terms_checked_at predates the facet layer too).
     const db = openStorage(resolveDbPath());
     try {
       db.prepare("DELETE FROM fact_terms").run();
+      db.prepare("UPDATE facts SET terms_checked_at = NULL").run();
     } finally {
       db.close();
     }
@@ -332,10 +334,12 @@ describe("mem facets", () => {
     await remember("the ranking lives in src/retrieval.ts");
     await remember("the delta filter lives in src/integration-seam.ts");
 
-    // Exactly the shape of an upgraded store: facts predating the feature, so no terms.
+    // Exactly the shape of an upgraded store: facts predating the feature, so no terms and no
+    // extraction ever recorded (terms_checked_at is added by an ALTER with no backfill).
     const db = openStorage(resolveDbPath());
     try {
       db.exec("DELETE FROM fact_terms");
+      db.exec("UPDATE facts SET terms_checked_at = NULL");
     } finally {
       db.close();
     }
@@ -353,6 +357,25 @@ describe("mem facets", () => {
     expect(healthy.stdout).toContain("term coverage: 2/2 facts");
     // Non-firing half: a fully-covered store must not nag.
     expect(healthy.stdout).not.toContain("mem facets --backfill");
+  });
+
+  it("does not re-offer `mem facets --backfill` forever for a fact whose text is entirely stopwords", async () => {
+    // A fact this shape legitimately extracts zero entities and zero topics, so it writes zero
+    // `fact_terms` rows on capture -- indistinguishable, to `listFactsNeedingTerms`'s "no row exists"
+    // check, from a fact nobody has ever backfilled. Without a fix, doctor asks for `--backfill`
+    // forever: the command runs, writes nothing (there is nothing to write), and the shortfall
+    // doctor reports never closes.
+    await remember("it is what it is");
+
+    const before = await runCli(["doctor"]);
+    expect(before.exitCode).toBe(0);
+
+    expect((await runCli(["facets", "--backfill"])).exitCode).toBe(0);
+
+    const after = await runCli(["doctor"]);
+    expect(after.exitCode).toBe(0);
+    expect(after.stdout).toContain("term coverage: 1/1 facts");
+    expect(after.stdout).not.toContain("mem facets --backfill");
   });
 
   it("keeps terms for facts written by `mem import --from-json`, which bypasses the capture path", async () => {

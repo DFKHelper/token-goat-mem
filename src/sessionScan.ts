@@ -235,11 +235,24 @@ export function extractCandidates(turns: readonly string[]): Candidate[] {
     }
     for (const sentence of sentences(turn)) {
       const claim = sentence.replace(DISCOURSE_PREFIX, "");
-      const trigger = TRIGGERS.find((candidate) => candidate.pattern.test(claim));
-      if (trigger === undefined) {
+      let trigger: Trigger | undefined;
+      let triggerMatch: RegExpExecArray | null = null;
+      for (const candidate of TRIGGERS) {
+        const match = candidate.pattern.exec(claim);
+        if (match !== null) {
+          trigger = candidate;
+          triggerMatch = match;
+          break;
+        }
+      }
+      if (trigger === undefined || triggerMatch === null) {
         continue;
       }
-      if (sentence.length < MIN_CANDIDATE_LENGTH || sentence.length > MAX_CANDIDATE_LENGTH) {
+      // Measured past the matched trigger, not the raw sentence -- "Remember that." and "We have
+      // decided." both clear a floor measured against the whole sentence while carrying zero claim
+      // content past the trigger word, which is exactly what this floor exists to reject.
+      const residualLength = claim.length - triggerMatch[0].length;
+      if (residualLength < MIN_CANDIDATE_LENGTH || sentence.length > MAX_CANDIDATE_LENGTH) {
         continue;
       }
       // Within one scan the same sentence repeated across turns is one candidate. Cross-scan

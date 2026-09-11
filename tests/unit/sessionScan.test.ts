@@ -152,6 +152,12 @@ describe("extractCandidates", () => {
     expect(extractCandidates(["never.", long])).toEqual([]);
   });
 
+  it("drops a candidate that clears the length floor only by counting the trigger word itself", () => {
+    // Both sentences are long enough to pass a floor measured against the raw sentence, but carry
+    // no claim content past the matched trigger -- the floor must reject them anyway.
+    expect(extractCandidates(["Remember that.", "We have decided."])).toEqual([]);
+  });
+
   it("collapses a repeated sentence to one candidate and records the turn it came from", () => {
     const candidates = extractCandidates(["never commit generated files", "unrelated", "Never commit generated files"]);
     expect(candidates).toHaveLength(1);

@@ -134,6 +134,15 @@ export interface Fact {
    * predate the column keep typechecking.
    */
   readonly last_surfaced_at?: string | null;
+  /**
+   * ISO 8601 timestamp of the most recent facet extraction pass over this fact, or null/absent if
+   * it predates the column. Backing field for `listFactsNeedingTerms`/`countFactsWithTerms`: a fact
+   * whose text is entirely stopwords legitimately extracts zero `fact_terms` rows, and keying
+   * "needs extraction" off row absence instead of this column would re-offer it to
+   * `mem facets --backfill` forever. Set by `replaceFactTerms` whether or not it has anything to
+   * insert -- never by the user, and untouched by `mem edit` unless the edit rewrites the text.
+   */
+  readonly terms_checked_at?: string | null;
 }
 
 /**

@@ -6,6 +6,26 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Three commands kept asking for work no command would ever do.** `mem doctor`'s embedding
+  coverage counted every fact in its denominator while `mem embed` refuses to embed a `superseded`
+  one, so a store that had ever superseded an unembedded fact reported a permanent shortfall that no
+  amount of backfilling could close. Facet coverage had the same shape for a different reason: "needs
+  extraction" was inferred from the absence of a `fact_terms` row, which cannot be told apart from
+  "extracted, and the text is entirely stopwords" -- so `mem facets --backfill` ran, found nothing to
+  write, and doctor asked again forever. A `facts.terms_checked_at` column now records that
+  extraction happened rather than leaving it to be inferred from its output. Both denominators now
+  describe work that exists.
+- **`scan-session` stored the same rule twice when the restatement changed case.** Within one scan,
+  duplicate sentences collapse on a lowercased key. Across scans the only guard is
+  `factWithTextExists`, which compared `text = ?` under SQLite's binary collation -- so once the
+  original turn aged past the 200-turn scan window, "Never commit generated files." came back as a
+  second pending candidate alongside "never commit generated files." The two dedup layers now
+  normalise the same way.
+- **The session scanner's length floor measured the trigger word it was supposed to look past.** The
+  constant is documented as the shortest candidate kept *past the trigger*, and the check read the
+  whole sentence, so `"Remember that."` and `"We have decided."` cleared a floor that exists to reject
+  exactly that: a matched trigger with no claim behind it. Both became pending candidates carrying no
+  content, for a user to read and reject by hand.
 - **`mem export` dropped which model wrote the vectors, so an import silently compared two vector
   spaces.** The `facts.embedding` blobs were exported; the `embedding_model`/`embedding_dimension`
   pair that says what they mean was not. A store restored from that export held vectors it could not

@@ -80,7 +80,7 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
     // Deliberate omissions: the hook path has no reader for these, and `embedding` is appended
     // conditionally by the same SELECT because pulling the blob on a path that runs at every prompt
     // costs more than it returns when no embedding backend is configured.
-    const notNeededOnHookPath = new Set(["epoch", "status_changed_at", "last_surfaced_at", "embedding"]);
+    const notNeededOnHookPath = new Set(["epoch", "status_changed_at", "last_surfaced_at", "embedding", "terms_checked_at"]);
     const seam = src("integration-seam.ts");
     const select = /SELECT id, text[\s\S]*?FROM facts/u.exec(seam)?.[0] ?? "";
     expect(select).not.toBe("");
@@ -107,6 +107,7 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
       "prior_status",
       "last_surfaced_at",
       "embedding",
+      "terms_checked_at",
     ]);
     const editable = /const EDITABLE_FACT_FIELDS = \[([^\]]*)\]/u.exec(src("cli.ts"))?.[1] ?? "";
     expect(editable).not.toBe("");
@@ -125,7 +126,7 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
   it("survives an export/import round trip, or is deliberately local to one store", () => {
     // `epoch` and `status_changed_at` are this store's own clocks: a restored row's status is new
     // news to the destination store, so both start fresh there rather than arriving from elsewhere.
-    const localToThisStore = new Set(["epoch", "status_changed_at"]);
+    const localToThisStore = new Set(["epoch", "status_changed_at", "terms_checked_at"]);
     const exporter = /function factToExportJson[\s\S]*?\n\}/u.exec(src("cli.ts"))?.[0] ?? "";
     expect(exporter).not.toBe("");
     for (const column of columns) {
