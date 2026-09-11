@@ -1307,6 +1307,100 @@ describe("regression: Claude settings.json accepts JSONC (comments, trailing com
   });
 });
 
+// ──────────────────────────────────────────────────────────────────────────────── config files authored with a leading UTF-8 BOM ─────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A leading U+FEFF is what Windows editors and PowerShell's default `Out-File`/`Set-Content`
+ * write for UTF-8 -- Claude Code itself reads such a file fine. `parseJsoncOrConflict` used to
+ * hand jsonc-parser the BOM byte along with the rest of the file, which jsonc-parser reports as an
+ * invalid token at offset 0, so every managed JSON target aborted with "is not valid JSON/JSONC;
+ * refusing to modify a hand-edited config" -- a false accusation against a file that was never
+ * hand-broken. The BOM is stripped only for that validation parse; the text mem actually edits and
+ * writes back still carries it untouched, so a file that had one keeps it and a file that didn't
+ * does not gain one.
+ */
+describe("regression: config files authored with a leading UTF-8 BOM are accepted, not falsely rejected", () => {
+  const BOM = "﻿";
+
+  it("installs into a BOM-prefixed settings.json instead of refusing it as invalid JSON/JSONC", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const original = `${BOM}{\n  "model": "opus"\n}\n`;
+    seed(settingsPath, original);
+
+    expect(() => claudeCode.install({ root, homeDir: home })).not.toThrow();
+
+    const after = read(settingsPath);
+    expect(after).toContain('"SessionStart"');
+  });
+
+  it("preserves the BOM byte-for-byte through install and uninstall on settings.json", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const original = `${BOM}{\n  "model": "opus"\n}\n`;
+    seed(settingsPath, original);
+
+    claudeCode.install({ root, homeDir: home });
+    const afterInstall = read(settingsPath);
+    expect(afterInstall.charCodeAt(0)).toBe(0xfeff);
+    expect(afterInstall).toContain('"model": "opus"');
+
+    claudeCode.uninstall({ root, homeDir: home });
+    // Byte-for-byte, including the BOM: a parsed-object comparison would not notice the encoding
+    // marker silently disappearing.
+    expect(read(settingsPath)).toBe(original);
+  });
+
+  it("does not add a BOM to a settings.json that never had one", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const original = '{\n  "model": "opus"\n}\n';
+    seed(settingsPath, original);
+
+    claudeCode.install({ root, homeDir: home });
+    expect(read(settingsPath).charCodeAt(0)).not.toBe(0xfeff);
+  });
+
+  it("installs into a BOM-prefixed tasks.json and keybindings.json and preserves the BOM on both", () => {
+    const tasksPath = join(root, ".vscode", "tasks.json");
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    const tasksOriginal = `${BOM}{\n  "version": "2.0.0",\n  "tasks": [\n    { "label": "Build", "type": "shell", "command": "make" }\n  ]\n}\n`;
+    const keybindingsOriginal = `${BOM}[]\n`;
+    seed(tasksPath, tasksOriginal);
+    seed(keybindingsPath, keybindingsOriginal);
+
+    expect(() => copilotVscode.install({ root, homeDir: home })).not.toThrow();
+
+    const tasksAfter = read(tasksPath);
+    const keybindingsAfter = read(keybindingsPath);
+    expect(tasksAfter.charCodeAt(0)).toBe(0xfeff);
+    expect(keybindingsAfter.charCodeAt(0)).toBe(0xfeff);
+    expect(JSON.parse(tasksAfter.slice(1)).tasks).toHaveLength(4);
+    expect(JSON.parse(keybindingsAfter.slice(1))).toHaveLength(2);
+
+    copilotVscode.uninstall({ root, homeDir: home });
+    expect(read(tasksPath)).toBe(tasksOriginal);
+    expect(read(keybindingsPath)).toBe(keybindingsOriginal);
+  });
+
+  it("still refuses a genuinely malformed settings.json (BOM or not) with the same conflict error", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    // Unbalanced brace: invalid JSON on its own merits, independent of any BOM.
+    seed(settingsPath, `${BOM}{\n  "model": "opus"\n`);
+
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
+    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/is not valid JSON\/JSONC/u);
+  });
+
+  it("a BOM in the middle of a value is content, not an encoding marker, and does not get stripped", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const original = `{\n  "model": "op${BOM}us"\n}\n`;
+    seed(settingsPath, original);
+
+    claudeCode.install({ root, homeDir: home });
+    const after = read(settingsPath);
+    expect(after.charCodeAt(0)).not.toBe(0xfeff);
+    expect(after).toContain(`op${BOM}us`);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────── CRLF-authored config files ───────────────────────────────────────────────────────────────────────────
 
 /**

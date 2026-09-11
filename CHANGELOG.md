@@ -6,6 +6,17 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A UTF-8 BOM made `mem init` and `mem uninstall` refuse, and blame the user for it.** A
+  `settings.json` (or VS Code `tasks.json` / `keybindings.json`) beginning with a byte-order mark --
+  what Windows editors and PowerShell's default `Out-File`/`Set-Content` write, and what Claude Code
+  itself reads without complaint -- was reported as "is not valid JSON/JSONC; refusing to modify a
+  hand-edited config". The file was valid; the refusal named a cause that was not true, and there was
+  no flag or workaround, so on an affected machine mem could neither install nor cleanly remove
+  itself. The mark is now stripped for the validation parse only. The text mem edits and writes back
+  still carries it, so a file that had a BOM keeps it byte-for-byte through an install/uninstall
+  round trip and a file that never had one does not acquire one. A genuinely malformed config still
+  gets the same refusal, with or without a BOM: this narrows a false positive rather than relaxing
+  the guard.
 - **`mem scan-session` threw away another project's knowledge and called it nothing new.** Its
   cross-scan duplicate check asked only "is this exact sentence already stored", across the whole
   store, with no regard for which project the stored copy belongs to. State a rule in project A,
