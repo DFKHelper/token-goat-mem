@@ -24,9 +24,10 @@
  *
  * **Store content is data, not instruction.** Facts reach the store from files and transcripts via
  * `mem import`/`mem scan-session`, so a fact's text can contain anything -- including text aimed at
- * whatever model reads it next. Two things bound that: the response is accepted only as a strict
- * JSON array whose every element is shape-checked and range-checked here, so the model cannot make
- * this module do anything other than emit candidates; and no candidate is written anywhere, so the
+ * whatever model reads it next. Two things bound that: nothing in the reply is used except a
+ * `candidates` array, and every element of it is shape-checked and range-checked here before it
+ * becomes a candidate -- any other key, and any prose around the JSON, is discarded, so the model
+ * cannot make this module do anything other than emit candidates; and no candidate is written anywhere, so the
  * worst a hostile fact achieves is a bad suggestion in a list a human is already reading critically.
  */
 

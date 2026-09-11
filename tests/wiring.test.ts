@@ -142,10 +142,12 @@ describe("claudeCode wiring", () => {
         claudeCode.install({ root, homeDir: home });
         const settingsPath = join(root, ".claude", "settings.json");
         const settings = JSON.parse(read(settingsPath));
-        const commands: string[] = ["SessionStart", "UserPromptSubmit"].map(
-          (event) => settings.hooks[event][0].hooks[0].command,
-        );
-        expect(commands).toHaveLength(2);
+        // Enumerated from the file rather than named here: hardcoding the event list quietly left
+        // `Stop`/`PreCompact` -- the scan-session commands, whose whole contract is to fail open and
+        // say nothing -- outside a test whose name claims every guarded hook command.
+        const events: string[] = Object.keys(settings.hooks);
+        const commands: string[] = events.map((event) => settings.hooks[event][0].hooks[0].command);
+        expect(events).toEqual(expect.arrayContaining(["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]));
 
         for (const command of commands) {
           // stdin is a closed pipe, as it would be for a hook host that wrote nothing.

@@ -18,8 +18,9 @@
  *   per-tool blocks they share one reference-counted block,
  *   `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see
  *   `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool
- *   to install and just adds each subsequent tool's name to the `tools=` list (rewriting only the
- *   marker line); the block body is written once and never touched again by a later tool's install.
+ *   to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole
+ *   block as it goes -- the body comes from one constant shared by every tool that writes here, so
+ *   a later tool's install is also what upgrades a body left behind by an older mem.
  *   Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other
  *   tool remains listed, and only removes the whole block once the last listed tool uninstalls.
  * - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object
