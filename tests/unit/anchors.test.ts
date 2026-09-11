@@ -1,10 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { _clearAnchorMemoForTests, clearAnchorCaches, evaluateAnchor } from "../../src/anchors.js";
+import { _clearAnchorMemoForTests, clearAnchorCaches, evaluateAnchor, isGenuineAbsence } from "../../src/anchors.js";
 
 let root: string;
 
@@ -199,10 +199,15 @@ describe("case sensitivity of glob-exists / git-tracked", () => {
    */
   const foldsCase = process.platform === "win32";
 
-  it("glob-exists matches a differently-cased filename exactly where the filesystem does", () => {
+  it("glob-exists matches a differently-cased filename exactly where the filesystem does, and is unverified rather than contradicted elsewhere (Item 4)", () => {
+    // Item 4: an exact-bytes miss on a literal segment doesn't prove absence on a platform whose
+    // filesystem this process cannot confirm is case-sensitive (macOS ships both case-sensitive and
+    // case-insensitive APFS volumes) -- "can't confirm or deny" is the honest verdict there, not
+    // "confirmed untracked" (the old `contradicted`, a fabrication on a case-insensitive volume) or
+    // "confirmed present" (a false `affirmed`, the other extreme this must not swing to either).
     writeFileSync(join(root, "README.md"), "x");
     _clearAnchorMemoForTests();
-    expect(evaluateAnchor("glob-exists readme.md", root)).toBe(foldsCase ? "affirmed" : "contradicted");
+    expect(evaluateAnchor("glob-exists readme.md", root)).toBe(foldsCase ? "affirmed" : "unverified");
   });
 
   it("glob-exists is unaffected for an exactly-cased target on every platform", () => {
@@ -217,7 +222,7 @@ describe("case sensitivity of glob-exists / git-tracked", () => {
     expect(evaluateAnchor("glob-exists CHANGELOG.md", root)).toBe("contradicted");
   });
 
-  it("git-tracked matches a differently-cased path exactly where the filesystem does", () => {
+  it("git-tracked matches a differently-cased path exactly where the filesystem does, and is unverified rather than contradicted elsewhere (Item 4)", () => {
     writeFileSync(join(root, "Tracked.ts"), "x");
     runGit(["init"], root);
     runGit(["add", "Tracked.ts"], root);
@@ -225,7 +230,11 @@ describe("case sensitivity of glob-exists / git-tracked", () => {
 
     expect(evaluateAnchor("git-tracked Tracked.ts", root)).toBe("affirmed");
     _clearAnchorMemoForTests();
-    expect(evaluateAnchor("git-tracked tracked.ts", root)).toBe(foldsCase ? "affirmed" : "contradicted");
+    // Item 4: `.git/index` stores one exact casing per path. A case-folded hit on a non-win32
+    // platform means the index disagrees with the anchor only in casing -- honestly unverified, not
+    // a fabricated `contradicted` (the file is right there under a different case) nor a fabricated
+    // `affirmed` (this process cannot tell a case-sensitive APFS volume from a case-insensitive one).
+    expect(evaluateAnchor("git-tracked tracked.ts", root)).toBe(foldsCase ? "affirmed" : "unverified");
   });
 
   it("git-tracked still contradicts a path that is in the tree but not in the index", () => {
@@ -366,4 +375,145 @@ describe("valid-until", () => {
     // not exist, since there is nothing for it to look at there or anywhere else.
     expect(evaluateAnchor(`valid-until ${yearsFromNow(5)}`, join(root, "no", "such", "dir"))).toBe("affirmed");
   });
+
+  describe("Item 2: a bare date expires at the end of the user's local day, not UTC end-of-day", () => {
+    const originalTZ = process.env.TZ;
+
+    beforeEach(() => {
+      // UTC-8 (UTC-7 during DST). A user here reaches local 4pm on the target date at 23:59:59.999Z
+      // -- exactly the moment the old `${raw}T23:59:59.999Z` construction expired the fact, hours
+      // before this user's own day was over.
+      process.env.TZ = "America/Los_Angeles";
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+      process.env.TZ = originalTZ;
+    });
+
+    it("is still affirmed after UTC end-of-day has passed, while it is still the 15th locally", () => {
+      // 2026-06-16T05:00:00.000Z is already past UTC end-of-day for the 15th
+      // (2026-06-15T23:59:59.999Z), but only 2026-06-15T22:00:00 local (America/Los_Angeles is
+      // UTC-7 in June, DST) -- still squarely inside the local day the anchor promises to hold
+      // through. The old `${raw}T23:59:59.999Z` construction would have contradicted here, hours
+      // before this user's own day was over.
+      vi.setSystemTime(new Date("2026-06-16T05:00:00.000Z"));
+      expect(evaluateAnchor("valid-until 2026-06-15", root)).toBe("affirmed");
+    });
+
+    it("contradicts only once local end-of-day has actually passed", () => {
+      // Local midnight starting the 16th is 07:00:00.000Z (UTC-7 DST offset) -- one second past
+      // local end-of-day for the 15th.
+      vi.setSystemTime(new Date("2026-06-16T07:00:00.001Z"));
+      expect(evaluateAnchor("valid-until 2026-06-15", root)).toBe("contradicted");
+    });
+
+    it("is unverified for an out-of-range calendar date rather than silently rolling into a neighboring day", () => {
+      expect(evaluateAnchor("valid-until 2026-02-30", root)).toBe("unverified");
+    });
+  });
+});
+
+/**
+ * Item 3: `existsFile`/`mtimeOrNull`/the `glob-exists` directory walk used to catch *every*
+ * `statSync`/`readdirSync` error -- permission denied, an I/O error, anything -- and report it as
+ * absence, turning a check that never ran into a fabricated `contradicted` (or, for `file-absent`,
+ * a fabricated `affirmed`). `isGenuineAbsence` is the classification that fix depends on: only
+ * `ENOENT`/`ENOTDIR` actually mean "nothing is there".
+ *
+ * Unit-testing the classification directly against synthetic errors is this task's stated first
+ * preference over a real unreadable-filesystem fixture: `chmod 000` does not deny read access on
+ * Windows the way it does on POSIX, so a real-permissions test can only ever run on POSIX CI.
+ */
+describe("isGenuineAbsence (Item 3: errno classification)", () => {
+  it("treats ENOENT and ENOTDIR as genuine absence", () => {
+    expect(isGenuineAbsence(Object.assign(new Error("no such file"), { code: "ENOENT" }))).toBe(true);
+    expect(isGenuineAbsence(Object.assign(new Error("not a directory"), { code: "ENOTDIR" }))).toBe(true);
+  });
+
+  it("treats every other errno as unknown, not absence", () => {
+    expect(isGenuineAbsence(Object.assign(new Error("permission denied"), { code: "EACCES" }))).toBe(false);
+    expect(isGenuineAbsence(Object.assign(new Error("operation not permitted"), { code: "EPERM" }))).toBe(false);
+    expect(isGenuineAbsence(Object.assign(new Error("i/o error"), { code: "EIO" }))).toBe(false);
+    expect(isGenuineAbsence(Object.assign(new Error("too many symlinks"), { code: "ELOOP" }))).toBe(false);
+  });
+
+  it("treats a codeless error, or a non-error value, as unknown rather than absence", () => {
+    expect(isGenuineAbsence(new Error("something went wrong"))).toBe(false);
+    expect(isGenuineAbsence("a plain string")).toBe(false);
+    expect(isGenuineAbsence(undefined)).toBe(false);
+    expect(isGenuineAbsence(null)).toBe(false);
+  });
+});
+
+/**
+ * Real-permissions counterpart to the unit tests above, gated `skipIf(isWindows)` per this file's own
+ * `git anchors: untrusted .git machinery` precedent: `chmod` on Windows only toggles the read-only
+ * bit and carries no read-permission meaning, so it cannot reproduce EACCES there. CI runs
+ * ubuntu-latest, so this executes on every push despite the local dev machine being Windows.
+ */
+describe("Item 3: a permission error is unverified, not fabricated absence", () => {
+  const isWindows = process.platform === "win32";
+  const isRoot = process.getuid?.() === 0;
+
+  // Root ignores directory permission bits entirely, so this suite is also meaningless (and would
+  // false-negative) under a root-run CI container.
+  it.skipIf(isWindows || isRoot)(
+    "file-exists / file-absent are unverified, not contradicted/affirmed, for a file behind an unreadable directory",
+    () => {
+      const blocked = join(root, "blocked");
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, "target.txt"), "x");
+      chmodSync(blocked, 0o000);
+      try {
+        clearAnchorCaches();
+        // Neither predicate ever actually ran the check -- both must decline, not assert opposite
+        // fabricated verdicts.
+        expect(evaluateAnchor("file-exists blocked/target.txt", root)).toBe("unverified");
+        clearAnchorCaches();
+        expect(evaluateAnchor("file-absent blocked/target.txt", root)).toBe("unverified");
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(isWindows || isRoot)(
+    "file-newer-than is unverified, not contradicted, when one side is behind an unreadable directory",
+    () => {
+      const blocked = join(root, "blocked");
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, "a.txt"), "a");
+      writeFileSync(join(root, "b.txt"), "b");
+      chmodSync(blocked, 0o000);
+      try {
+        clearAnchorCaches();
+        // The old behaviour treated a's unreadable mtime as `null` (same as "does not exist"), which
+        // `evaluateFileNewerThan` turns into `contradicted` -- a comparison mem never performed.
+        expect(evaluateAnchor("file-newer-than blocked/a.txt b.txt", root)).toBe("unverified");
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(isWindows || isRoot)(
+    "glob-exists is unverified, not contradicted, when the walk cannot read a directory it must descend into",
+    () => {
+      const blocked = join(root, "blocked");
+      mkdirSync(blocked);
+      writeFileSync(join(blocked, "widget.test.ts"), "x");
+      chmodSync(blocked, 0o000);
+      try {
+        clearAnchorCaches();
+        // The walk never actually looked inside `blocked`, so it cannot positively deny a match
+        // lives there -- the same "skipped, so unverified" rule this file's `.git`/`node_modules`
+        // test already covers for a different reason (Fix 2).
+        expect(evaluateAnchor("glob-exists **/*.test.ts", root)).toBe("unverified");
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    },
+  );
 });

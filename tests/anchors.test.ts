@@ -266,6 +266,31 @@ describe("evaluateAnchor", () => {
 
       expect(evaluateAnchor("git-tracked tracked.txt", root, Date.now() - 1)).toBe("unverified");
     });
+
+    it("affirms a directory anchor when every file under it is tracked (Item 1: a directory is never itself an index entry)", () => {
+      // Before the fix, `paths.has(relPath)` looked `src` up exactly against the index's *file*
+      // entries -- a directory is never itself an entry, so this fell straight through to
+      // `contradicted` even though `src/auth.ts` was the fixture's only file and was fully tracked.
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "auth.ts"), "x");
+      runGit(["init", "-q"], root);
+      runGit(["add", "src/auth.ts"], root);
+      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+
+      expect(evaluateAnchor("git-tracked src", root)).toBe("affirmed");
+      expect(evaluateAnchor("git-tracked src/auth.ts", root)).toBe("affirmed");
+    });
+
+    it("still contradicts a directory anchor when nothing under it is tracked", () => {
+      mkdirSync(join(root, "untracked-dir"), { recursive: true });
+      writeFileSync(join(root, "untracked-dir", "f.txt"), "x");
+      writeFileSync(join(root, "tracked.txt"), "x");
+      runGit(["init", "-q"], root);
+      runGit(["add", "tracked.txt"], root);
+      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+
+      expect(evaluateAnchor("git-tracked untracked-dir", root)).toBe("contradicted");
+    });
   });
 
   describe("package-version (declared-manifest check only)", () => {
