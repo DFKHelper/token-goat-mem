@@ -90,8 +90,9 @@ CREATE INDEX IF NOT EXISTS idx_fact_terms_lookup ON fact_terms(term_key, kind);
  * only owns `sources`/`meta`. `CREATE TABLE IF NOT EXISTS` (STORAGE_SCHEMA
  * above) already covers the common case of a brand-new table; this covers
  * the rarer case of a column added to an existing one in a future release.
- * Unused today (the schema is at its first version); exported so the first
- * such migration has an obvious, already-tested home.
+ * Every column added to an existing table since the first release goes
+ * through here; exported so a migration owned outside this module has the
+ * same already-tested home.
  */
 export function applyIdempotentAlter(db: Db, sql: string): void {
   try {

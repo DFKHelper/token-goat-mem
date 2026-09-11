@@ -3073,7 +3073,7 @@ export function buildProgram(): Command {
     )
     .option("--all", "Uninstall from every supported tool")
     .option("--root <path>", "Project root the project-level config lives under (default: current directory)")
-    .option("--user", "Also target the tool's user-level config, where the tool has both")
+    .option("--user", "Remove from the tool's user-level config instead of project-level, where the tool has both")
     .option("--dry-run", "Print what would be removed without touching disk")
     .action(
       guard((tool: string | undefined, options: UninstallCliOptions) => {

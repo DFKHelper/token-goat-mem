@@ -832,6 +832,73 @@ describe("regression: a single tool's install then uninstall on a fresh root lea
   });
 });
 
+describe("regression: a stale .bak snapshot from a bygone install era no longer masks the current uninstall", () => {
+  /**
+   * Before this fix, `preInstallHooks` read a `.bak` snapshot's `hooks` object as proof of real
+   * pre-existing content without checking whether the snapshot itself `looksMemAuthored` -- unlike
+   * `writeManagedFile`'s own delete-if-empty check, which already applies that filter to the same
+   * kind of snapshot. A `.claude/settings.json` seeded by hand with mem's own (out-of-date) stamped
+   * hook and no `.bak` yet triggers exactly this: `mem init` takes a `.bak` of that mem-authored
+   * content on its first write, and `mem uninstall` then reads the snapshot's `SessionStart` array as
+   * a pre-existing event to preserve, leaving `{"hooks":{"SessionStart":[]}}` behind instead of
+   * deleting the file outright.
+   */
+  it("claude-code: a settings.json seeded with mem's own stamped hook (no .bak yet) is fully removed by install then uninstall, not left as a husk", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(
+      settingsPath,
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [{ hooks: [{ type: "command", command: "OLD", __token_goat_mem: true }] }],
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+
+    expect(existsSync(settingsPath)).toBe(false);
+    expect(existsSync(`${settingsPath}.token-goat-mem.bak`)).toBe(false);
+  });
+
+  /**
+   * Before this fix, a `.bak` snapshot was never removed once taken, so a genuine pre-existing
+   * snapshot from one install/uninstall cycle survived to mislead a later cycle after the user
+   * deleted the files by hand in between. Cycle 1's `.bak` (holding the user's real `{"model":"opus"}`
+   * and real `CLAUDE.md` prose) stuck around after cycle 1's uninstall fully restored both files;
+   * once the user deleted them and `mem init` created brand-new mem-only files from scratch, cycle
+   * 2's uninstall found the old `.bak`, read it as "real content exists", and left `{}` and a
+   * 0-byte `CLAUDE.md` behind -- an empty `CLAUDE.md` that Claude Code loads as a real (if inert)
+   * instruction file, not an absent one.
+   */
+  it("claude-code: a stale .bak surviving a delete-and-reinstall cycle no longer blocks the second uninstall's cleanup", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const claudeMdPath = join(root, "CLAUDE.md");
+    seed(settingsPath, JSON.stringify({ model: "opus" }));
+    seed(claudeMdPath, "# my project notes\n");
+
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+    expect(JSON.parse(read(settingsPath)) as unknown).toEqual({ model: "opus" });
+    expect(read(claudeMdPath)).toBe("# my project notes\n");
+
+    rmSync(settingsPath, { force: true });
+    rmSync(claudeMdPath, { force: true });
+
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.uninstall({ root, homeDir: home });
+
+    expect(existsSync(settingsPath)).toBe(false);
+    expect(existsSync(claudeMdPath)).toBe(false);
+    expect(existsSync(`${settingsPath}.token-goat-mem.bak`)).toBe(false);
+    expect(existsSync(`${claudeMdPath}.token-goat-mem.bak`)).toBe(false);
+  });
+});
+
 describe("writeManagedFile retry", () => {
   it("retries the transform once against fresh content if the file changed between the initial read and the pre-write check", () => {
     const filePath = join(root, "concurrent.txt");
