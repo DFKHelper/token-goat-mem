@@ -6,6 +6,31 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Two clones of one repository never contradicted each other, so mem served both answers as
+  current.** Recall widens a `project` fact into scope by repository identity — that is how a fact
+  captured in the main checkout reaches a worktree — but contradiction bucketing keyed on `scope_root`
+  alone, so facts from two checkouts of the same repository were never compared. `--subject
+  package-manager --value pnpm` captured in one clone and `--value npm` in the other left both
+  `active`: recall from either root listed both as current, `mem review --summary` reported
+  `contested: 0`, and `mem epoch --gc` resolved nothing, so no correction captured in a worktree ever
+  superseded the decision it corrected. That is the failure P3 exists to prevent, in its sharpest
+  form — not a caveated answer, but two mutually exclusive answers asserted at once with nothing
+  marking the disagreement.
+
+  Bucket membership is now a relation rather than a derived key: two facts share a bucket when they
+  share a repository identity **or** a normalized root. Keying on the repository *instead of* the path
+  was the obvious fix and is wrong — `scope_repo` has never shipped, so every fact in every existing
+  store has it NULL, and a key that prefers it would put a fact captured before this release and its
+  correction captured after it in different buckets **in the same directory**, breaking the ordinary
+  single-checkout case for every upgrading store in order to fix a worktree one. Widening detection is
+  safe; splitting it is not. `mem consolidate` now clusters through the same relation instead of its
+  own copy of the rule.
+
+  **On upgrade:** the first `mem epoch --gc` after installing this will supersede facts across clones
+  and worktrees of one repository that were previously treated as independent. That is the correction
+  this fixes, but it is a change to stored status that happens without being asked for. Nothing is
+  deleted — a superseded fact keeps its `prior_status` and stays visible to `mem show` — so a
+  resolution you disagree with can be inspected and reversed.
 - **Four anchor predicates called a fact false from a check they never performed.** Each is the same
   P3 violation: `contradicted` is a positive claim that a fact has stopped being true, and reaching it
   by any route other than actually evaluating the predicate silently deletes knowledge the user
