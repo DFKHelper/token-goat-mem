@@ -20,6 +20,7 @@
  * reports; it never narrows a pool on retrieval's behalf.
  */
 
+import { sameContradictionBucket } from "./contradiction.js";
 import { listFacts, listStaleUnsurfacedFacts, listTermsForFact } from "./storage.js";
 import type { Fact } from "./types.js";
 
@@ -160,6 +161,13 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
     const members: DuplicateMember[] = [];
     for (const candidate of facts) {
       if (assigned.has(candidate.id) || comparabilityKey(candidate) !== seedKey) {
+        continue;
+      }
+      // Same subject+scope, different value is a live contradiction, not a duplicate --
+      // `detectContradictions` owns that resolution (provenance > newest, contested on a genuine
+      // tie). Clustering it here as a "duplicate" would let `preferenceOrder` (pinned > confidence
+      // > newest) override that outcome and silently resurrect a value the user already corrected.
+      if (sameContradictionBucket(seed, candidate) && seed.value !== candidate.value) {
         continue;
       }
       const similarity = jaccard(seedTerms, terms.get(candidate.id) ?? new Set<string>());

@@ -43,6 +43,8 @@ interface SeedOptions {
   readonly confidence?: number;
   readonly capturedAt?: string;
   readonly id?: string;
+  readonly subject?: string | null;
+  readonly value?: string | null;
 }
 
 function seed(db: Database.Database, text: string, options: SeedOptions = {}): Fact {
@@ -56,6 +58,8 @@ function seed(db: Database.Database, text: string, options: SeedOptions = {}): F
     ...(options.confidence !== undefined ? { confidence: options.confidence } : {}),
     ...(options.capturedAt !== undefined ? { captured_at: options.capturedAt } : {}),
     ...(options.id !== undefined ? { id: options.id } : {}),
+    ...(options.subject !== undefined ? { subject: options.subject } : {}),
+    ...(options.value !== undefined ? { value: options.value } : {}),
   });
 }
 
@@ -160,6 +164,15 @@ describe("findDuplicateClusters", () => {
   it("drops a cluster whose only other member is pinned -- there is nothing to propose", () => {
     seed(db, PNPM_RESTATEMENTS[0], { status: "pinned" });
     seed(db, PNPM_RESTATEMENTS[1], { status: "pinned" });
+    expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toEqual([]);
+  });
+
+  it("never clusters same-subject/same-scope facts with different values -- that is a live contradiction, not a duplicate", () => {
+    // Wording is similar enough to clear the Jaccard threshold, but the pinned "postgres" answer
+    // and the newer "mysql" answer disagree on the same subject: `detectContradictions` must own
+    // resolving that, not `preferenceOrder`, or a pinned fact can outrank a later correction.
+    seed(db, "the database server is postgres", { status: "pinned", subject: "db", value: "postgres" });
+    seed(db, "the database server is mysql", { subject: "db", value: "mysql" });
     expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toEqual([]);
   });
 

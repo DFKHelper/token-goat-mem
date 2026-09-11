@@ -798,16 +798,33 @@ interface SupersessionEdge {
 /**
  * Renders the supersession edge, or nothing when the fact was not superseded.
  *
- * A superseded fact with no named winner is stated rather than omitted: "retired, and nothing
- * replaced it" is a different and equally useful answer to "what happened to this?" than silence,
- * which the reader would otherwise have to disambiguate from a missing feature.
+ * A superseded fact with no known edge is stated rather than omitted: "retired, cause unknown" is
+ * a different and equally useful answer to "what happened to this?" than silence, which the reader
+ * would otherwise have to disambiguate from a missing feature.
+ *
+ * `edge === null` means only "no supersession edge was found in this store's audit log" -- it does
+ * NOT mean "nothing superseded this fact". `findSupersedingFactId` (src/db.ts) reads the edge out
+ * of `audit_log`, and `mem export`/`mem import --from-json` do not carry that table at all, so a
+ * fact superseded before an export/import round trip lands here with its winner very possibly
+ * still present in the very same store. Two fixes were considered: carrying the edge through the
+ * export envelope as a new optional field on the fact (validated the way `validateJsonFact`
+ * validates every other optional field -- reject a malformed value rather than coerce it), or
+ * wording this fallback so it never enumerates specific causes it cannot actually distinguish from
+ * "unknown". The former also needs a way to make the restored edge visible to
+ * `findSupersedingFactId` post-import (e.g. a synthetic audit row), which is a second piece of
+ * surface for a support case (`mem show` right after an offline export/import) most stores hit
+ * rarely if ever; the latter is a one-line, provably-correct fix that satisfies the actual
+ * requirement -- never assert a false cause -- without adding an export schema field or an import
+ * validation path to maintain. Reword chosen.
  */
 function formatSupersessionLine(fact: Fact, edge: SupersessionEdge | null): string | null {
   if (fact.status !== "superseded") {
     return null;
   }
   if (edge === null) {
-    return "superseded_by: (nothing -- retired by forget, reject, or staleness)";
+    return "superseded_by: unknown (no supersession edge recorded in this store's audit log -- " +
+      "could be a genuine terminal retirement (forget/reject/staleness), or an edge lost to an " +
+      "operation that does not carry audit history, e.g. export/import)";
   }
   if (edge.winner === undefined) {
     return `superseded_by: ${edge.winnerId} (no longer in the store -- pruned by mem gc)`;
@@ -1175,6 +1192,9 @@ function undoReject(db: Database.Database, id: string): string {
   }
   const restored = fact.prior_status ?? "pending";
   setStatusWithAudit(db, fact.id, restored, "review_undo", `undid review rejection, restored to ${restored}`);
+  if (restored === "contested") {
+    reconcileContradictions(db, "review_undo");
+  }
   return fact.id;
 }
 
@@ -2265,7 +2285,7 @@ export function buildProgram(): Command {
     .option("--root <path>", "Project root for anchor freshness evaluation (default: a project-scoped fact's own scope root, else the current directory)")
     .option(
       "--json",
-      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none. Carries supersededBy: the fact that replaced this one, or null when nothing did -- the fact's own status distinguishes 'not superseded' from 'superseded with no successor'. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it."
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none. Carries supersededBy: the fact that replaced this one, or null when no supersession edge is recorded -- which covers 'not superseded', 'superseded with no successor', and 'superseded by something no longer traceable in this store's audit log (e.g. after an export/import round trip)'; the fact's own status distinguishes the first from the other two, but not the other two from each other. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it."
     )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
@@ -2382,7 +2402,11 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
+          const wasContested = existing.status === "contested";
           setStatusWithAudit(db, existing.id, "superseded", "forget", `forgot fact (was ${existing.status})`);
+          if (wasContested) {
+            reconcileContradictions(db, "forget");
+          }
           return existing.id;
         });
         process.stdout.write(`forgot ${resolved}\n`);
