@@ -644,7 +644,15 @@ function describeDream(): string {
 
 function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: number, totalFacts: number): string[] {
   const coverage = `embedding coverage: ${embeddedFacts}/${totalFacts} facts`;
-  const stored = recorded === null ? "embedding store: nothing embedded yet" : `embedding store: model ${recorded.model}, dim ${recorded.dimension}`;
+  // `recorded === null` alone does not mean nothing is embedded: an interrupted `mem embed` or an
+  // import of unknown provenance can leave vectors on disk with no recorded model, and that state
+  // must not read as "nothing embedded yet" right above a coverage line reporting otherwise.
+  const stored =
+    recorded !== null
+      ? `embedding store: model ${recorded.model}, dim ${recorded.dimension}`
+      : embeddedFacts > 0
+        ? `embedding store: ${embeddedFacts} vector(s) with no recorded model -- provenance unknown; run \`mem embed --all\` to relabel`
+        : "embedding store: nothing embedded yet";
   let config;
   try {
     config = readEmbeddingConfig();
@@ -661,6 +669,8 @@ function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: numbe
   ];
   if (recorded !== null && recorded.model !== config.model) {
     lines.push(`embedding ranking: disabled -- stored vectors are ${recorded.model}'s; run \`mem embed --all\` to re-embed`);
+  } else if (recorded === null && embeddedFacts > 0) {
+    lines.push("embedding ranking: disabled -- stored vectors have no recorded model; run `mem embed --all` to relabel");
   }
   lines.push(coverage);
   return lines;
@@ -1904,10 +1914,14 @@ export function buildProgram(): Command {
           ...(options.subject !== undefined ? { subject: options.subject } : {}),
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
         };
-        const facts = await withDb((db) => listFacts(db, filter));
+        const { facts, embeddingMeta } = await withDb((db) => ({
+          facts: listFacts(db, filter),
+          embeddingMeta: getEmbeddingMeta(db) ?? null,
+        }));
         const envelope = {
           schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
           exportedAt: new Date().toISOString(),
+          embeddingMeta,
           facts: facts.map((fact) => factToExportJson(fact)),
         };
         process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
@@ -2137,7 +2151,15 @@ export function buildProgram(): Command {
         // dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's
         // vectors came from a different model, because `cosineSimilarity` would compare the two
         // vector spaces without complaint and rank on noise.
-        const embeddingPlan = planEmbeddingRanking(embeddingMeta, process.env, { timeoutMs: DEFAULT_EMBEDDING_TIMEOUT_MS });
+        const embeddingPlan = planEmbeddingRanking(
+          embeddingMeta,
+          process.env,
+          { timeoutMs: DEFAULT_EMBEDDING_TIMEOUT_MS },
+          // Already-fetched `facts` carry `embedding`, so this costs nothing extra: a store with
+          // vectors but no recorded model (an interrupted `mem embed`, or an import of unknown
+          // provenance) is exactly as incomparable as one from a named different model.
+          embeddingMeta === null && facts.some((fact) => fact.embedding !== null)
+        );
         const retrievalOptions: RetrievalOptions = {
           // Past `mem used` confirmations, fused as a third RRF rank list (see
           // RetrievalOptions.usefulness). Empty on a store nobody has ever run `mem used` against,
@@ -2764,15 +2786,18 @@ export function buildProgram(): Command {
         }
         const summary = await withDb(async (db) => {
           const recorded = getEmbeddingMeta(db);
-          if (recorded !== undefined && recorded.model !== config.model) {
-            if (options.all !== true) {
-              throw new UsageError(
-                `stored vectors were produced by ${recorded.model}, not ${config.model}; run \`mem embed --all\` to re-embed the store under the new model`
-              );
-            }
+          if (recorded !== undefined && recorded.model !== config.model && options.all !== true) {
+            throw new UsageError(
+              `stored vectors were produced by ${recorded.model}, not ${config.model}; run \`mem embed --all\` to re-embed the store under the new model`
+            );
+          }
+          if (options.all === true) {
+            // Unconditional under --all, not just when the recorded model name differs: the same
+            // model name does not guarantee the same dimension (a repointed LiteLLM/Ollama alias, or
+            // a provider that changed its output size), so leaving same-named vectors in place risks
+            // two dimensions under one recorded model, which nothing downstream could tell apart.
             // Cleared before the first new vector is written, not after the last: an interrupted
-            // migration then leaves facts with no vector rather than a store holding two models'
-            // vectors under one recorded model, which nothing downstream could tell apart.
+            // migration then leaves facts with no vector rather than a mixed-dimension store.
             clearAllEmbeddings(db);
           }
           const pending = listFactsNeedingEmbedding(db, {
@@ -2780,13 +2805,29 @@ export function buildProgram(): Command {
             ...(options.limit !== undefined ? { limit: options.limit } : {}),
           });
           if (pending.length === 0) {
-            return { embedded: 0, skipped: 0, failed: 0, dimension: null as number | null, firstFailure: null as string | null, empty: true };
+            return {
+              embedded: 0,
+              skipped: 0,
+              failed: 0,
+              dimension: null as number | null,
+              firstFailure: null as string | null,
+              firstSkip: null as string | null,
+              empty: true,
+            };
           }
           let embedded = 0;
           let skipped = 0;
           let failed = 0;
-          let dimension: number | null = recorded !== undefined && recorded.model === config.model ? recorded.dimension : null;
+          // Seeded from the recorded dimension only when continuing under the same model and NOT
+          // migrating: under --all the store was just cleared above, so the dimension is unknown
+          // until the endpoint actually answers, not assumed from whatever the old model produced.
+          let dimension: number | null = options.all !== true && recorded !== undefined && recorded.model === config.model ? recorded.dimension : null;
+          // Meta is written as soon as `dimension` is first learned, before that vector is written --
+          // see the write site below -- so an interrupted run leaves a labelled store rather than
+          // vectors with no recorded model.
+          let metaWritten = dimension !== null;
           let firstFailure: string | null = null;
+          let firstSkip: string | null = null;
           for (let offset = 0; offset < pending.length; offset += EMBED_BATCH_SIZE) {
             const batch = pending.slice(offset, offset + EMBED_BATCH_SIZE);
             let vectors: Float32Array[];
@@ -2807,19 +2848,24 @@ export function buildProgram(): Command {
               }
               dimension ??= vector.length;
               if (vector.length !== dimension) {
-                // An endpoint that changed dimension mid-run. Writing it would put two vector
-                // spaces in one store, which is the corruption this command exists to undo.
+                // An endpoint that changed dimension mid-run (or, under a plain non---all run, an
+                // endpoint that now answers a different dimension than the store already holds).
+                // Writing it would put two vector spaces in one store, which is the corruption this
+                // command exists to undo.
                 skipped += 1;
+                firstSkip ??= `the endpoint returned ${vector.length}-dimension vectors, but the store holds ${dimension}-dimension vectors`;
                 continue;
+              }
+              // Before the write, not after the loop: see `metaWritten`'s declaration above.
+              if (!metaWritten) {
+                setEmbeddingMeta(db, { model: config.model, dimension });
+                metaWritten = true;
               }
               updateFact(db, row.id, { embedding: vector });
               embedded += 1;
             }
           }
-          if (embedded > 0 && dimension !== null) {
-            setEmbeddingMeta(db, { model: config.model, dimension });
-          }
-          return { embedded, skipped, failed, dimension, firstFailure, empty: false };
+          return { embedded, skipped, failed, dimension, firstFailure, firstSkip, empty: false };
         });
 
         if (summary.empty) {
@@ -2829,13 +2875,17 @@ export function buildProgram(): Command {
         if (summary.embedded === 0) {
           // Total failure: nothing was written, so this is not a success with a zero count. The
           // message names the first cause rather than a bare count, which on its own would leave a
-          // user with no idea whether the endpoint was down, wrong, or answering nonsense.
+          // user with no idea whether the endpoint was down, wrong, or answering nonsense. A
+          // dimension mismatch (`firstSkip`) is itself a real, nameable cause -- distinct from "no
+          // vector returned", which now means only that the batch produced fewer vectors than texts.
           //
           // `UsageError` (exit 1), not a bare `Error` (exit 2): every way this is reached is
           // something about the user's environment -- an endpoint that is down, wrong, or answering
           // a shape mem cannot read -- rather than a bug inside mem, and exit 2 is reserved for the
           // latter.
-          throw new UsageError(`embedded 0 facts; ${summary.failed} failed, ${summary.skipped} skipped -- ${summary.firstFailure ?? "no vector returned"}`);
+          throw new UsageError(
+            `embedded 0 facts; ${summary.failed} failed, ${summary.skipped} skipped -- ${summary.firstFailure ?? summary.firstSkip ?? "no vector returned"}`
+          );
         }
         const dimensionNote = summary.dimension === null ? "" : `, dim ${summary.dimension}`;
         process.stdout.write(

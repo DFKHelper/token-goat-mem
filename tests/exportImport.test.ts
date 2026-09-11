@@ -5,15 +5,23 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import type Database from "better-sqlite3";
 
-import { getFactById, insertFact, openStorage } from "../src/storage.js";
+import { countEmbeddedFacts, getEmbeddingMeta, getFactById, insertFact, openStorage, setEmbeddingMeta } from "../src/storage.js";
 import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
 
 // ─────────────────────────────────────────────────────────────────────────── planImportFromJson (dry-run, DB-free) ───────────────────────────────────────────────────────────────────────────
 
-function envelope(facts: readonly Record<string, unknown>[]): string {
-  return JSON.stringify({ schemaVersion: 1, exportedAt: new Date().toISOString(), facts });
+function envelope(facts: readonly Record<string, unknown>[], embeddingMeta?: { model: string; dimension: number } | null): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    exportedAt: new Date().toISOString(),
+    // Omitted (not even `null`) unless a caller asks for it, matching every envelope written
+    // before `embeddingMeta` existed -- the "unknown provenance" case `exportImport.ts` must treat
+    // as incomparable rather than adopt.
+    ...(embeddingMeta !== undefined ? { embeddingMeta } : {}),
+    facts,
+  });
 }
 
 const VALID_FACT: Record<string, unknown> = {
@@ -187,7 +195,10 @@ describe("importFromJson", () => {
 
   it("round-trips a Float32Array embedding through the JSON number[] <-> Float32Array conversion", () => {
     const withEmbedding = { ...VALID_FACT, id: "22222222-2222-2222-2222-222222222222", embedding: [0.5, -0.25, 1] };
-    writeFileSync(jsonPath, envelope([withEmbedding]), "utf8");
+    // Provenance must be known and adoptable by a fresh (no-meta) target, or this import's own
+    // fix (unknown-provenance vectors are stripped, not silently trusted) would null it out --
+    // see the dedicated "unknown provenance" tests below for that behavior.
+    writeFileSync(jsonPath, envelope([withEmbedding], { model: "test-model", dimension: 3 }), "utf8");
 
     const result = importFromJson(db, { path: jsonPath, root });
     const outcome = result.outcomes[0];
@@ -664,6 +675,96 @@ describe("importFromJson", () => {
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(3);
+  });
+});
+
+describe("embedding provenance on import", () => {
+  it("strips an imported vector when the envelope carries no embeddingMeta at all (an export written before the field existed)", () => {
+    const withEmbedding = { ...VALID_FACT, id: "aaaaaaaa-1111-1111-1111-111111111111", embedding: [0.5, -0.25, 1] };
+    // `envelope()` omits `embeddingMeta` unless asked for -- exactly what every pre-fix export produced.
+    writeFileSync(jsonPath, envelope([withEmbedding]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    const outcome = result.outcomes[0];
+    expect(outcome?.status).toBe("imported");
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.embedding).toBeNull();
+    expect(getEmbeddingMeta(db)).toBeUndefined();
+  });
+
+  it("strips an imported vector when the envelope explicitly records no model", () => {
+    const withEmbedding = { ...VALID_FACT, id: "aaaaaaaa-2222-2222-2222-222222222222", embedding: [0.5, -0.25, 1] };
+    writeFileSync(jsonPath, envelope([withEmbedding], null), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    const outcome = result.outcomes[0];
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.embedding).toBeNull();
+  });
+
+  it("adopts the envelope's model when the target store has never recorded one", () => {
+    const withEmbedding = { ...VALID_FACT, id: "aaaaaaaa-3333-3333-3333-333333333333", embedding: [0.5, -0.25, 1] };
+    writeFileSync(jsonPath, envelope([withEmbedding], { model: "export-model", dimension: 3 }), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    const outcome = result.outcomes[0];
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.embedding).not.toBeNull();
+    expect(getEmbeddingMeta(db)).toEqual({ model: "export-model", dimension: 3 });
+  });
+
+  it("keeps the vector when the envelope's model/dimension match what the target already recorded", () => {
+    setEmbeddingMeta(db, { model: "shared-model", dimension: 3 });
+    const withEmbedding = { ...VALID_FACT, id: "aaaaaaaa-4444-4444-4444-444444444444", embedding: [0.5, -0.25, 1] };
+    writeFileSync(jsonPath, envelope([withEmbedding], { model: "shared-model", dimension: 3 }), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    const outcome = result.outcomes[0];
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.embedding).not.toBeNull();
+    expect(getEmbeddingMeta(db)).toEqual({ model: "shared-model", dimension: 3 });
+  });
+
+  it("strips the vector when the envelope's model differs from what the target already recorded, and does not touch the target's recorded meta", () => {
+    setEmbeddingMeta(db, { model: "target-model", dimension: 4 });
+    const withEmbedding = { ...VALID_FACT, id: "aaaaaaaa-5555-5555-5555-555555555555", embedding: [0.5, -0.25, 1] };
+    writeFileSync(jsonPath, envelope([withEmbedding], { model: "export-model", dimension: 3 }), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    const outcome = result.outcomes[0];
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.embedding).toBeNull();
+    expect(getEmbeddingMeta(db)).toEqual({ model: "target-model", dimension: 4 });
+  });
+
+  it("does not adopt the envelope's model onto a target that already holds vectors with no recorded model", () => {
+    // Simulate the unlabelled state directly: a vector on disk with no meta row, as an interrupted
+    // `mem embed` or an earlier unfixed import would leave behind.
+    insertFact(db, { ...VALID_FACT, id: "aaaaaaaa-6666-6666-6666-666666666666", embedding: new Float32Array([9, 9, 9]) } as unknown as NewFact);
+    expect(countEmbeddedFacts(db)).toBe(1);
+    expect(getEmbeddingMeta(db)).toBeUndefined();
+
+    const withEmbedding = { ...VALID_FACT, id: "aaaaaaaa-7777-7777-7777-777777777777", embedding: [0.5, -0.25, 1] };
+    writeFileSync(jsonPath, envelope([withEmbedding], { model: "export-model", dimension: 3 }), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    const outcome = result.outcomes[0];
+    if (outcome?.status !== "imported") {
+      throw new Error("expected imported outcome");
+    }
+    expect(outcome.fact.embedding).toBeNull();
+    // Untouched: adopting here would mislabel the already-existing unlabelled vector as this model.
+    expect(getEmbeddingMeta(db)).toBeUndefined();
   });
 });
 

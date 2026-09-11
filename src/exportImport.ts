@@ -26,10 +26,11 @@ import type Database from "better-sqlite3";
 import { anchorPathWithinRoot } from "./anchors.js";
 import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactFieldsOrThrow } from "./capture.js";
 import { insertAuditLog } from "./db.js";
+import type { EmbeddingMeta } from "./embeddings.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { identityMatches } from "./projectIdentity.js";
-import { getFactById, ID_PREFIX_PATTERN, insertFact } from "./storage.js";
+import { countEmbeddedFacts, getEmbeddingMeta, getFactById, ID_PREFIX_PATTERN, insertFact, setEmbeddingMeta } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
 
@@ -392,10 +393,49 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
  * one place. Throws `JsonImportError` for a whole-file problem (bad JSON, wrong `schemaVersion`,
  * missing `facts` array); an individual bad fact is instead reflected per-entry (`newFact: null`).
  */
+/**
+ * Validates the envelope-level `embeddingMeta` field written by `mem export` (the model/dimension
+ * `facts[].embedding` vectors were produced by, or `null` when the exporting store never recorded
+ * one). Distinguishes three states, matching `EmbeddingMeta | null`'s own null-is-meaningful shape
+ * plus "the field does not exist at all":
+ *  - absent (`undefined`): an envelope written before this field existed. The vectors it carries,
+ *    if any, have unknown provenance -- never treated as if they came from the model importing them.
+ *  - `null`: the exporting store had no recorded model (nothing was ever embedded there, or that
+ *    store was itself already in the unlabelled state) -- also unknown provenance.
+ *  - `{ model, dimension }`: known provenance, importable as-is into a store recorded under the same
+ *    model/dimension, or adoptable by a store that has never recorded one of its own.
+ * A malformed value is rejected outright, same discipline as every per-fact field in
+ * `validateJsonFact`: never coerced into a shape that would make an unknown-provenance vector look
+ * labelled.
+ */
+function validateEmbeddingMetaField(envelope: Record<string, unknown>, filePath: string): EmbeddingMeta | null | undefined {
+  const raw = envelope["embeddingMeta"];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    throw new JsonImportError(`${filePath} has an invalid "embeddingMeta" (expected { model: string, dimension: number } or null)`);
+  }
+  const obj = raw as Record<string, unknown>;
+  if (
+    typeof obj["model"] !== "string" ||
+    obj["model"].length === 0 ||
+    typeof obj["dimension"] !== "number" ||
+    !Number.isInteger(obj["dimension"]) ||
+    obj["dimension"] <= 0
+  ) {
+    throw new JsonImportError(`${filePath} has an invalid "embeddingMeta" (expected { model: string, dimension: number } or null)`);
+  }
+  return { model: obj["model"], dimension: obj["dimension"] };
+}
+
 function parseJsonFacts(
   path: string,
   root: string | undefined
-): { readonly filePath: string; readonly entries: readonly ParsedEntry[] } {
+): { readonly filePath: string; readonly entries: readonly ParsedEntry[]; readonly embeddingMeta: EmbeddingMeta | null | undefined } {
   const filePath = resolve(path);
 
   // Wrap file operations to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
@@ -431,7 +471,8 @@ function parseJsonFacts(
   }
 
   const entries = (envelope["facts"] as readonly unknown[]).map((rawFact, index) => validateJsonFact(rawFact, index, root));
-  return { filePath, entries };
+  const embeddingMeta = validateEmbeddingMetaField(envelope, filePath);
+  return { filePath, entries, embeddingMeta };
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Import orchestration ───────────────────────────────────────────────────────────────────────────
@@ -496,9 +537,32 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
     return planImportFromJson(options);
   }
   const root = resolve(options.root ?? process.cwd());
-  const { filePath, entries } = parseJsonFacts(options.path, root);
+  const { filePath, entries, embeddingMeta: envelopeEmbeddingMeta } = parseJsonFacts(options.path, root);
 
   const allowlist = loadAllowlist(root);
+
+  // Vectors are only ever carried into the target store when their provenance is known AND
+  // comparable to whatever is already there -- P3 (mem may decline, never assert the opposite of
+  // what it knows). An envelope with no `embeddingMeta` (written before this field existed) or an
+  // explicit `null` (the exporting store never recorded one) both count as unknown provenance, same
+  // as a target store that already holds vectors nobody recorded a model for
+  // (`targetHasUnlabelledVectors`): none of these may be treated as compatible with anything.
+  const targetEmbeddingMeta = getEmbeddingMeta(db) ?? null;
+  const targetHasUnlabelledVectors = targetEmbeddingMeta === null && countEmbeddedFacts(db) > 0;
+  const importCompatibleWithTarget =
+    envelopeEmbeddingMeta !== undefined &&
+    envelopeEmbeddingMeta !== null &&
+    targetEmbeddingMeta !== null &&
+    targetEmbeddingMeta.model === envelopeEmbeddingMeta.model &&
+    targetEmbeddingMeta.dimension === envelopeEmbeddingMeta.dimension;
+  // A target with no recorded model at all -- and none of its own unlabelled vectors to protect --
+  // adopts the envelope's model rather than discarding vectors that would otherwise be perfectly
+  // usable, e.g. restoring an export onto a fresh machine.
+  const adoptableEmbeddingMeta: EmbeddingMeta | null =
+    envelopeEmbeddingMeta !== undefined && envelopeEmbeddingMeta !== null && targetEmbeddingMeta === null && !targetHasUnlabelledVectors
+      ? envelopeEmbeddingMeta
+      : null;
+  const stripImportedEmbeddings = !importCompatibleWithTarget && adoptableEmbeddingMeta === null;
 
   const candidates = entries.map((entry) => entry.candidate);
   const outcomes: (ImportOutcome | undefined)[] = Array.from({ length: entries.length }, () => undefined);
@@ -555,7 +619,13 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
       });
       return;
     }
-    toInsert.push({ index, newFact: entry.newFact });
+    toInsert.push({
+      index,
+      newFact:
+        stripImportedEmbeddings && entry.newFact.embedding !== null
+          ? { ...entry.newFact, embedding: null }
+          : entry.newFact,
+    });
   });
 
   const insertedFacts = new Map<number, Fact>();
@@ -567,6 +637,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
     for (const skip of skips) {
       insertAuditLog(db, { event: skip.event, factId: skip.factId, detail: skip.detail });
     }
+    let insertedAnyEmbedding = false;
     for (const { index, newFact } of toInsert) {
       // The dedupe check in the classification pass ran before this transaction took the write lock,
       // so a concurrent import can have inserted the same id in between. Re-checking under the lock
@@ -583,12 +654,21 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
         continue;
       }
       const fact = insertFact(db, newFact);
+      if (fact.embedding !== null) {
+        insertedAnyEmbedding = true;
+      }
       insertedFacts.set(index, fact);
       insertAuditLog(db, {
         event: "json_import",
         factId: fact.id,
         detail: `imported ${fact.status} ${fact.kind} fact from JSON export (id preserved)`,
       });
+    }
+    // Adopting the envelope's model only when a fact carrying one of its vectors actually landed:
+    // recording a model for a store that ended up with zero vectors from this import would claim
+    // provenance for nothing.
+    if (adoptableEmbeddingMeta !== null && insertedAnyEmbedding) {
+      setEmbeddingMeta(db, adoptableEmbeddingMeta);
     }
   });
   // BEGIN IMMEDIATE: `insertFact` reads the epoch before writing and degrades to a savepoint inside

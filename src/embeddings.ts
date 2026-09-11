@@ -318,7 +318,14 @@ export interface EmbeddingRankingPlan {
 export function planEmbeddingRanking(
   recorded: EmbeddingMeta | null,
   env: NodeJS.ProcessEnv = process.env,
-  options: EmbeddingBackendOptions = {}
+  options: EmbeddingBackendOptions = {},
+  // Set when the store holds one or more vectors (`countEmbeddedFacts(db) > 0`) but `recorded` is
+  // `null` -- an interrupted `mem embed`, or an import of an envelope with unknown embedding
+  // provenance. Those vectors are exactly as incomparable as ones from a named different model:
+  // nothing recorded which model produced them, so `cosineSimilarity` would rank on noise without
+  // complaint. Defaults to `false` for callers that cannot afford the extra count (see
+  // integration-seam.ts's budget-gated call).
+  hasUnrecordedVectors: boolean = false
 ): EmbeddingRankingPlan {
   const backend = resolveConfiguredEmbeddingBackend(env, options);
   if (backend === null) {
@@ -328,6 +335,12 @@ export function planEmbeddingRanking(
     return {
       backend: null,
       incomparable: `stored vectors were produced by ${recorded.model}, not ${backend.model}; run \`mem embed --all\` to re-embed the store`,
+    };
+  }
+  if (recorded === null && hasUnrecordedVectors) {
+    return {
+      backend: null,
+      incomparable: "stored vectors have no recorded model (an interrupted `mem embed` or an import of unknown provenance); run `mem embed --all` to relabel the store",
     };
   }
   return { backend, incomparable: null };
