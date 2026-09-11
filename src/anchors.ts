@@ -25,13 +25,19 @@
  * `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check
  * before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived`
  * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified. A detected
- * symlink escape is *not* uniformly `contradicted`: `file-exists`/`file-absent` and
- * `file-contains`/`file-not-contains` return `unverified` (a symlink means mem cannot safely resolve
- * or read the path, so it can assert neither presence/absence nor the substring's presence/absence —
- * `contradicted` would be a lie for whichever of each pair asserts absence, per P3), while
- * `file-newer-than`/`newest-of`/`package-version` still return `contradicted` for a symlinked
- * comparison target — none of those three has a negated counterpart that would turn `contradicted`
- * into exactly the lie the first group avoids.
+ * symlink escape is uniformly `unverified` across every path-based predicate — `file-exists`,
+ * `file-absent`, `file-contains`/`file-not-contains`, `file-newer-than`, `newest-of`, and
+ * `package-version` alike (Fix 3). A symlink means mem cannot safely resolve or read the path, so it
+ * can assert neither presence/absence, the substring's presence/absence, nor the result of a
+ * comparison it never actually performed. An earlier version of this policy returned `contradicted`
+ * for `file-newer-than`/`newest-of`/`package-version` on the reasoning that none of the three has a
+ * negated *predicate name* that `contradicted` could turn into "exactly the lie" the other predicates
+ * avoid — but the absence of a negated predicate name doesn't make a negated *verdict* honest:
+ * `file-newer-than` contradicted still asserts "a is not newer than b", `newest-of` contradicted still
+ * asserts "the expected file is not the newest", and `package-version` contradicted still asserts "the
+ * manifest does not declare that version" — each a positive claim about the filesystem derived from a
+ * comparison mem refused to perform, which is P3's exact prohibition regardless of whether the
+ * predicate has a negated name.
  *
  * Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`,
  * `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`,
@@ -236,16 +242,16 @@ interface BudgetState {
 /**
  * `file-newer-than <a> <b>` — tests whether `a` is the currently-active file relative to `b`.
  * affirmed: `a` exists and is newer than `b`.
- * contradicted: `b` exists and is newer than `a`, or `a` does not exist while `b` does, or `a`/`b`
- * (or a directory component between `root` and either) is a symlink ({@link containsSymlink}) —
- * refused rather than followed, for the same reason as `file-contains`.
- * unverified: neither file exists, both exist with identical mtimes (ambiguous), or `b` does not
+ * contradicted: `b` exists and is newer than `a`, or `a` does not exist while `b` does.
+ * unverified: neither file exists, both exist with identical mtimes (ambiguous), `b` does not
  * exist (whether or not `a` does) — you cannot compare two files when one of them is missing, so
- * this can assert neither "newer" nor "older" (P3: never fabricate a verdict). Concretely: a fact
- * anchored `file-newer-than generated.ts schema.prisma` must not stay `affirmed` forever once
- * `schema.prisma` is deleted or moved — that is exactly the moment the fact stops being true, and
- * silently reporting "b does not exist" as "a is newer" would hide the staleness this anchor exists
- * to catch.
+ * this can assert neither "newer" nor "older" (P3: never fabricate a verdict) — or `a`/`b` (or a
+ * directory component between `root` and either) is a symlink ({@link containsSymlink}), refused
+ * rather than followed: `contradicted` would assert "a is not newer than b", a comparison mem never
+ * actually performed (Fix 3). Concretely: a fact anchored `file-newer-than generated.ts
+ * schema.prisma` must not stay `affirmed` forever once `schema.prisma` is deleted or moved — that is
+ * exactly the moment the fact stops being true, and silently reporting "b does not exist" as "a is
+ * newer" would hide the staleness this anchor exists to catch.
  */
 function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): AnchorVerdict {
   if (mtimeB === null) {
@@ -265,7 +271,7 @@ function evaluateFileNewerThan(mtimeA: number | null, mtimeB: number | null): An
  * exists, is a plain file within the read budget, and does (or does not, for the negated form)
  * contain `substring`. unverified if the file is missing (S1: a moved/renamed file is the exact
  * proxy-anchor trap, don't guess), is not a plain file, exceeds the read budget, or can't be read.
- * contradicted if `path` (or a directory component between `root` and `path`) is a symlink
+ * unverified if `path` (or a directory component between `root` and `path`) is a symlink
  * ({@link containsSymlink}) — refused rather than followed, since a symlink inside `root` could point
  * outside it, and following it here would turn this predicate into a content-read oracle for
  * arbitrary filesystem locations.
@@ -313,20 +319,44 @@ function evaluateFileContains(root: string, path: string, substring: string, neg
  * `18`). This is deliberately **not** a semver-range-satisfaction check and does **not** consult any
  * lockfile — anything the comparison cannot confidently resolve (a range operator other than a bare
  * leading `^`/`~`/exact, a non-numeric expected value, ...) returns `unverified` rather than guess.
- * unverified: path unreadable/oversized, JSON malformed, or the dependency key is missing entirely.
- * contradicted: `path` (or a directory component between `root` and `path`) is a symlink
- * ({@link containsSymlink}) — refused rather than followed, for the same reason as `file-contains`.
+ * unverified: path unreadable/oversized, JSON malformed, the dependency key is missing entirely, or
+ * `path` (or a directory component between `root` and `path`) is a symlink ({@link containsSymlink})
+ * — refused rather than followed: `contradicted` here would assert "the manifest does not declare
+ * that version", a comparison mem never actually performed (Fix 3).
  */
+/**
+ * Matches a *single simple version* only: an optional leading `^`/`~`, a numeric version core (1 to
+ * 3 dot-separated numeric groups), and an optional prerelease (`-...`) and/or build (`+...`) tag --
+ * anchored at both ends. Anything else (whitespace, `||`, a ` - ` range separator, `<`/`>`/`=`
+ * comparators, `x`/`*` wildcards, or any other range syntax) fails to match in full and is therefore
+ * rejected by {@link comparePackageVersion} below, rather than accidentally prefix-matched.
+ *
+ * This is a positive allowlist of the shape a confidently-comparable version can take, not a
+ * blocklist of range characters to reject -- a blocklist would silently admit whatever range syntax
+ * npm invents next, while this allowlist unverifies it by default until this comparison is
+ * deliberately extended to understand it.
+ */
+const SIMPLE_VERSION_RE =
+  /^[\^~]?(\d+)(?:\.\d+){0,2}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
+
 function comparePackageVersion(declared: string, expected: string): AnchorVerdict {
   if (declared === expected) {
     return "affirmed";
   }
-  const declaredMajorMatch = /^[\^~]?(\d+)(?:\.|$)/u.exec(declared.trim());
   const expectedMajorMatch = /^(\d+)$/u.exec(expected.trim());
-  if (declaredMajorMatch?.[1] !== undefined && expectedMajorMatch?.[1] !== undefined) {
-    return declaredMajorMatch[1] === expectedMajorMatch[1] ? "affirmed" : "contradicted";
+  if (expectedMajorMatch?.[1] === undefined) {
+    return "unverified";
   }
-  return "unverified";
+  // The previous regex here (`/^[\^~]?(\d+)(?:\.|$)/u`) only anchored the *start* of `declared`, so
+  // it matched the leading term of a compound range ("1.0.0 - 2.0.0", "1.0.0 || 2.0.0") and silently
+  // discarded the rest -- turning a range that plainly includes the expected major into a fabricated
+  // `contradicted`. Requiring a full-string match against a single-simple-version shape means any
+  // compound range falls through to `unverified` instead (Fix 1).
+  const declaredMajorMatch = SIMPLE_VERSION_RE.exec(declared.trim());
+  if (declaredMajorMatch?.[1] === undefined) {
+    return "unverified";
+  }
+  return declaredMajorMatch[1] === expectedMajorMatch[1] ? "affirmed" : "contradicted";
 }
 
 function evaluatePackageVersion(root: string, path: string, expected: string): AnchorVerdict {
@@ -340,7 +370,10 @@ function evaluatePackageVersion(root: string, path: string, expected: string): A
     return "unverified";
   }
   if (containsSymlink(root, path)) {
-    return "contradicted";
+    // Fix 3: uniform symlink policy across every path-based predicate (see the module header
+    // comment) -- `contradicted` here would assert "the manifest does not declare that version", a
+    // comparison mem never actually performed once it refused to follow the symlink.
+    return "unverified";
   }
 
   let stat;
@@ -381,12 +414,13 @@ function evaluatePackageVersion(root: string, path: string, expected: string): A
 /**
  * `newest-of <expected> <candidate...>` — among the full candidate set (`expected` plus every other
  * candidate), affirmed if `expected` is the sole existing candidate with the greatest mtime;
- * contradicted if a different existing candidate is the sole newest, or if `expected` or any
- * candidate (or a directory component between `root` and any of them) is a symlink
- * ({@link containsSymlink}) — refused rather than followed, since trusting a symlinked candidate's
- * mtime (or silently dropping it) could make this predicate affirm based on a file outside `root`;
- * unverified if none of the candidates exist, or two or more candidates tie for newest (ambiguous —
- * P3: never guess). This is the direct implementation of the design plan's headline example (P3):
+ * contradicted if a different existing candidate is the sole newest; unverified if none of the
+ * candidates exist, two or more candidates tie for newest (ambiguous — P3: never guess), or
+ * `expected` or any candidate (or a directory component between `root` and any of them) is a symlink
+ * ({@link containsSymlink}), refused rather than followed: trusting a symlinked candidate's mtime (or
+ * silently dropping it) could make this predicate affirm based on a file outside `root`, and
+ * `contradicted` would assert "the expected file is not the newest", a comparison mem never actually
+ * performed (Fix 3). This is the direct implementation of the design plan's headline example (P3):
  * "the newest lockfile is pnpm-lock.yaml" — unlike a proxy check ("does pnpm-lock.yaml exist"), a
  * stale lockfile left behind after a package-manager switch cannot make this affirm, because it will
  * not be the newest.
@@ -432,15 +466,18 @@ function segmentToRegExp(segment: string): RegExp {
  * platforms, also by `\` — Windows paths are routinely typed with either) and support `*`, `?`, and a
  * recursive `**` segment. A `.` segment (e.g. a leading `./`) is dropped rather than rejected, so
  * `./src/*.ts` and `src/*.ts` are the same pattern. Affirmed if at least one filesystem entry under
- * `root` matches; contradicted if the walk completes with no match; unverified if the walk exceeds its
- * entry-count or time budget before resolving (S4: never guess under a budget cutoff). Symlinks are
- * never followed (root-scoping — a symlink could otherwise point outside `root`). `.git`/`node_modules`
- * are skipped *only* when reached via a wildcard segment (`*`, `?`, or `**`) — that is the S4 cost
- * guard against walking those large, usually-irrelevant trees when the pattern didn't ask for them.
- * A pattern that *literally* names `.git` or `node_modules` as a segment (e.g.
- * `node_modules/pkg/index.js`, or `node_modules/**` to search inside it) is an explicit request to
- * descend there and is honored — contradicting a pattern that plainly names a file that exists is
- * exactly the fabrication P3 forbids.
+ * `root` matches; contradicted if the walk completes with no match *and* never skipped anything that
+ * could have matched; unverified if the walk exceeds its entry-count or time budget before resolving
+ * (S4: never guess under a budget cutoff), or if it completes having skipped a symlink or a
+ * `.git`/`node_modules` directory that could have contained the only match (Fix 2: a walk that never
+ * looked cannot positively deny a match exists there — "no such file" would be a fabrication for a
+ * file the walk simply declined to check). Symlinks are never followed (root-scoping — a symlink
+ * could otherwise point outside `root`). `.git`/`node_modules` are skipped *only* when reached via a
+ * wildcard segment (`*`, `?`, or `**`) — that is the S4 cost guard against walking those large,
+ * usually-irrelevant trees when the pattern didn't ask for them. A pattern that *literally* names
+ * `.git` or `node_modules` as a segment (e.g. `node_modules/pkg/index.js`, or `node_modules/**` to
+ * search inside it) is an explicit request to descend there and is honored — contradicting a pattern
+ * that plainly names a file that exists is exactly the fabrication P3 forbids.
  */
 function evaluateGlobExists(
   root: string,
@@ -457,6 +494,11 @@ function evaluateGlobExists(
 
   let scanned = 0;
   let budgetHit = false;
+  // Fix 2: set whenever the walk skips an entry that *could* have matched (a symlink it refused to
+  // follow, or a `.git`/`node_modules` directory reached only via a wildcard). A completed walk that
+  // found nothing but skipped something like this cannot positively deny a match exists there -- it
+  // simply never looked -- so it must fall back to `unverified` rather than `contradicted`.
+  let skippedPotentialMatch = false;
   const stack: Array<{ dir: string; segIdx: number }> = [{ dir: root, segIdx: 0 }];
 
   walk: while (stack.length > 0) {
@@ -494,9 +536,13 @@ function evaluateGlobExists(
           break walk;
         }
         if (entry.isSymbolicLink()) {
+          // `**` matches everything under this directory, so this entry would have matched (or
+          // led to a match) had it not been a symlink.
+          skippedPotentialMatch = true;
           continue;
         }
         if (entry.name === ".git" || entry.name === "node_modules") {
+          skippedPotentialMatch = true;
           continue;
         }
         if (trailing) {
@@ -524,20 +570,35 @@ function evaluateGlobExists(
         budgetHit = true;
         break walk;
       }
-      if (entry.isSymbolicLink() || !regex.test(entry.name)) {
+      if (!regex.test(entry.name)) {
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
+        // This entry's name matches the segment -- it would have participated in the match (an
+        // immediate affirm if `isLast`, a descent otherwise) had it not been a symlink.
+        skippedPotentialMatch = true;
         continue;
       }
       if (isLast) {
         return "affirmed";
       }
       const skipCostlyDir = segmentIsWildcard && (entry.name === ".git" || entry.name === "node_modules");
-      if (entry.isDirectory() && !skipCostlyDir) {
+      if (skipCostlyDir) {
+        if (entry.isDirectory()) {
+          skippedPotentialMatch = true;
+        }
+        continue;
+      }
+      if (entry.isDirectory()) {
         stack.push({ dir: join(top.dir, entry.name), segIdx: top.segIdx + 1 });
       }
     }
   }
 
-  return budgetHit ? "unverified" : "contradicted";
+  if (budgetHit || skippedPotentialMatch) {
+    return "unverified";
+  }
+  return "contradicted";
 }
 
 /**
@@ -911,7 +972,10 @@ function evaluateTokens(
         return "unverified";
       }
       if (containsSymlink(resolvedRoot, a) || containsSymlink(resolvedRoot, b)) {
-        return "contradicted";
+        // Fix 3: `contradicted` here would assert "a is not newer than b", a comparison mem never
+        // actually performed once it refused to follow the symlink -- uniform with every other
+        // path-based predicate (see the module header comment).
+        return "unverified";
       }
       return evaluateFileNewerThan(mtimeOrNull(a), mtimeOrNull(b));
     }
@@ -956,7 +1020,10 @@ function evaluateTokens(
         return "unverified";
       }
       if (containsSymlink(resolvedRoot, expectedResolved)) {
-        return "contradicted";
+        // Fix 3: `contradicted` here would assert "the expected file is not the newest", a
+        // comparison mem never actually performed once it refused to follow the symlink -- uniform
+        // with every other path-based predicate (see the module header comment).
+        return "unverified";
       }
       const mtimes = new Map<string, number>();
       const expMtime = mtimeOrNull(expectedResolved);
@@ -969,7 +1036,10 @@ function evaluateTokens(
           return "unverified";
         }
         if (containsSymlink(resolvedRoot, resolved)) {
-          return "contradicted";
+          // Fix 3: same rationale as the `expectedResolved` check above -- a candidate's mtime
+          // cannot be safely compared without following the symlink, so this cannot assert the
+          // expected file is not the newest.
+          return "unverified";
         }
         const mtime = mtimeOrNull(resolved);
         if (mtime !== null) {

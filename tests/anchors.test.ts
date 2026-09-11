@@ -203,13 +203,17 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("glob-exists missing-dir/**", root)).toBe("contradicted");
     });
 
-    it("does not let .git/node_modules alone satisfy a trailing ** pattern", () => {
+    it("does not let .git/node_modules alone satisfy a trailing ** pattern, and is unverified rather than contradicted (Fix 2)", () => {
+      // The only entries under `src` are `.git` and `node_modules`, both skipped by the ** wildcard
+      // walk -- the walk never actually looked inside either, so it cannot positively deny a match
+      // exists there. `contradicted` would fabricate "no such file" for files that are plainly
+      // present, just unreached.
       mkdirSync(join(root, "src", "node_modules", "pkg"), { recursive: true });
       writeFileSync(join(root, "src", "node_modules", "pkg", "index.js"), "x");
       mkdirSync(join(root, "src", ".git"), { recursive: true });
       writeFileSync(join(root, "src", ".git", "HEAD"), "x");
 
-      expect(evaluateAnchor("glob-exists src/**", root)).toBe("contradicted");
+      expect(evaluateAnchor("glob-exists src/**", root)).toBe("unverified");
     });
 
     it("still affirms a middle-position ** pattern (regression guard)", () => {
@@ -293,6 +297,27 @@ describe("evaluateAnchor", () => {
     it("is unverified on malformed JSON", () => {
       writeFileSync(join(root, "package.json"), "{ not valid json");
       expect(evaluateAnchor("package-version package.json react@18", root)).toBe("unverified");
+    });
+
+    it("is unverified for a compound range, not a leftmost-major-prefix contradiction", () => {
+      // Regression: the major-prefix regex used to match only the *leading term* of a compound
+      // range (e.g. "1." out of "1.0.0 - 2.0.0"), silently discarding the rest of the range and
+      // asserting a mismatch this comparison never actually resolved. Neither range genuinely
+      // contradicts major 2 -- both include 2.0.0 -- so this must fall through to unverified.
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { foo: "1.0.0 - 2.0.0" } }));
+      expect(evaluateAnchor("package-version package.json foo@2", root)).toBe("unverified");
+
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { foo: "1.0.0 || 2.0.0" } }));
+      expect(evaluateAnchor("package-version package.json foo@2", root)).toBe("unverified");
+    });
+
+    it("still affirms/contradicts a simple version with a prerelease or build tag", () => {
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { foo: "1.2.3-beta.1" } }));
+      expect(evaluateAnchor("package-version package.json foo@1", root)).toBe("affirmed");
+      expect(evaluateAnchor("package-version package.json foo@2", root)).toBe("contradicted");
+
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { foo: "1.2.3+build.5" } }));
+      expect(evaluateAnchor("package-version package.json foo@1", root)).toBe("affirmed");
     });
 
     it("is unverified when the path is outside root", () => {
@@ -390,11 +415,14 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("file-not-contains link.txt super-secret-value", root)).toBe("unverified");
     });
 
-    it("package-version contradicts (does not read through) a symlink to a package.json outside root", () => {
+    it("package-version is unverified (does not read through) a symlink to a package.json outside root", () => {
+      // Fix 3: `contradicted` here would assert "the manifest does not declare that version", a
+      // comparison mem never actually performed once it refused to follow the symlink -- uniform
+      // with the file-exists/file-absent/file-contains policy above (module header comment).
       const target = join(outside, "package.json");
       writeFileSync(target, JSON.stringify({ dependencies: { react: "18.2.0" } }));
       symlinkSync(target, join(root, "package.json"), "file");
-      expect(evaluateAnchor("package-version package.json react@18.2.0", root)).toBe("contradicted");
+      expect(evaluateAnchor("package-version package.json react@18.2.0", root)).toBe("unverified");
     });
 
     it("refuses a symlinked intermediate directory, not just a symlinked final path component", () => {
@@ -422,20 +450,23 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("file-absent node_modules/bar", root)).toBe("affirmed");
     });
 
-    it("file-newer-than contradicts (does not follow) when the first path is a symlink to a file outside root", () => {
+    it("file-newer-than is unverified (does not follow) when the first path is a symlink to a file outside root", () => {
+      // Fix 3: `contradicted` here would assert "a is not newer than b", a comparison mem never
+      // actually performed once it refused to follow the symlink -- uniform symlink policy across
+      // every path-based predicate (module header comment).
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
       writeFileSync(join(root, "b.txt"), "b");
-      expect(evaluateAnchor("file-newer-than link.txt b.txt", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-newer-than link.txt b.txt", root)).toBe("unverified");
     });
 
-    it("file-newer-than contradicts (does not follow) when the second path is a symlink to a file outside root", () => {
+    it("file-newer-than is unverified (does not follow) when the second path is a symlink to a file outside root", () => {
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
       writeFileSync(join(root, "a.txt"), "a");
-      expect(evaluateAnchor("file-newer-than a.txt link.txt", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-newer-than a.txt link.txt", root)).toBe("unverified");
     });
 
     it("file-newer-than refuses a symlinked intermediate directory in either path", () => {
@@ -444,23 +475,25 @@ describe("evaluateAnchor", () => {
       writeFileSync(join(targetDir, "config.json"), "config");
       symlinkSync(targetDir, join(root, "linked-dir"), "junction");
       writeFileSync(join(root, "b.txt"), "b");
-      expect(evaluateAnchor("file-newer-than linked-dir/config.json b.txt", root)).toBe("contradicted");
+      expect(evaluateAnchor("file-newer-than linked-dir/config.json b.txt", root)).toBe("unverified");
     });
 
-    it("newest-of contradicts (does not follow) when the expected candidate is a symlink to a file outside root", () => {
+    it("newest-of is unverified (does not follow) when the expected candidate is a symlink to a file outside root", () => {
+      // Fix 3: `contradicted` here would assert "the expected file is not the newest", a comparison
+      // mem never actually performed once it refused to follow the symlink.
       const target = join(outside, "pnpm-lock.yaml");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "pnpm-lock.yaml"), "file");
       writeFileSync(join(root, "package-lock.json"), "inside content");
-      expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("contradicted");
+      expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("unverified");
     });
 
-    it("newest-of contradicts (does not follow) when a non-expected candidate is a symlink to a file outside root", () => {
+    it("newest-of is unverified (does not follow) when a non-expected candidate is a symlink to a file outside root", () => {
       const target = join(outside, "package-lock.json");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "package-lock.json"), "file");
       writeFileSync(join(root, "pnpm-lock.yaml"), "inside content");
-      expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("contradicted");
+      expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("unverified");
     });
 
     it("newest-of refuses a symlinked intermediate directory among candidates", () => {
@@ -469,7 +502,7 @@ describe("evaluateAnchor", () => {
       writeFileSync(join(targetDir, "lock.yaml"), "outside content");
       symlinkSync(targetDir, join(root, "linked-dir"), "junction");
       writeFileSync(join(root, "package-lock.json"), "inside content");
-      expect(evaluateAnchor("newest-of linked-dir/lock.yaml package-lock.json", root)).toBe("contradicted");
+      expect(evaluateAnchor("newest-of linked-dir/lock.yaml package-lock.json", root)).toBe("unverified");
     });
   });
 

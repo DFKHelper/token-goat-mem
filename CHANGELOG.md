@@ -6,6 +6,26 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Three anchor predicates said your fact was wrong about a check they never performed.**
+  `contradicted` is not a shrug: it tells the user their fact is false and drops it from recall. Three
+  paths reached it without ever making the comparison. `package-version` matched the *prefix* of a
+  compound range, so a manifest declaring `"foo": "1.0.0 - 2.0.0"` contradicted an anchor asking for
+  major 2 — a range that plainly admits it — as did `"1.0.0 || 2.0.0"`, while the equivalent
+  `"^1 || ^2"` correctly declined; the comparison is now gated on a positive allowlist for a single
+  simple version, so any range syntax it does not genuinely understand yields `unverified`, which is
+  what the README already promised. `glob-exists` deliberately skips `.git` and `node_modules` while
+  walking a wildcard segment, then reported `contradicted` when the only thing that would have matched
+  sat inside one — "no such file" about a file that is right there; a skipped candidate now yields
+  `unverified`, and `contradicted` is reserved for a walk that completed and found nothing. And
+  `file-newer-than`, `newest-of` and `package-version` returned `contradicted` when a comparison
+  target turned out to be a symlink, which mem refuses to follow: every path predicate now answers
+  `unverified` there. The old justification was that those three have no negated counterpart to turn
+  the verdict into a lie — but the absence of a negated predicate *name* does not make a negated
+  *verdict* honest. `file-newer-than a b` returning `contradicted` asserts "a is not newer than b",
+  a positive claim about a filesystem mem declined to read. `git-tracked` already answered
+  `unverified` in the same situation, so the policy is now uniform in the direction it already
+  half-held. Simple versions are unaffected: `^1.2.3` still contradicts an anchor asking for major 2,
+  and prerelease and build tags still compare.
 - **The hook path dropped the column that had just been added to fix the anchor-root defect.** The
   recall seam keeps its own hand-written `SELECT` over `facts`, and it has silently omitted a needed
   column three separate times now: `prior_status`, then `scope_repo` (which made every

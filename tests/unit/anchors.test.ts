@@ -107,28 +107,32 @@ describe("evaluateAnchor", () => {
       }
     });
 
-    it("file-newer-than contradicts, does not follow, for a symlink to a file outside root", () => {
+    it("file-newer-than is unverified, does not follow, for a symlink to a file outside root", () => {
+      // `file-newer-than <a> <b>` contradicted asserts a positive comparison result ("a is not
+      // newer than b") that mem refused to actually compute once it detected the symlink -- exactly
+      // the P3 violation the header comment now documents uniformly across all path-based
+      // predicates (Fix 3).
       const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
       try {
         const target = join(outside, "secret.txt");
         writeFileSync(target, "outside content");
         symlinkSync(target, join(root, "link.txt"), "file");
         writeFileSync(join(root, "b.txt"), "b");
-        expect(evaluateAnchor("file-newer-than link.txt b.txt", root)).toBe("contradicted");
-        expect(evaluateAnchor("file-newer-than b.txt link.txt", root)).toBe("contradicted");
+        expect(evaluateAnchor("file-newer-than link.txt b.txt", root)).toBe("unverified");
+        expect(evaluateAnchor("file-newer-than b.txt link.txt", root)).toBe("unverified");
       } finally {
         rmSync(outside, { recursive: true, force: true });
       }
     });
 
-    it("newest-of contradicts, does not follow, for a symlinked candidate outside root", () => {
+    it("newest-of is unverified, does not follow, for a symlinked candidate outside root", () => {
       const outside = mkdtempSync(join(tmpdir(), "mem-anchors-outside-"));
       try {
         const target = join(outside, "pnpm-lock.yaml");
         writeFileSync(target, "outside content");
         symlinkSync(target, join(root, "pnpm-lock.yaml"), "file");
         writeFileSync(join(root, "package-lock.json"), "inside content");
-        expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("contradicted");
+        expect(evaluateAnchor("newest-of pnpm-lock.yaml package-lock.json", root)).toBe("unverified");
       } finally {
         rmSync(outside, { recursive: true, force: true });
       }
