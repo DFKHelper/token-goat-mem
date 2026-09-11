@@ -3307,6 +3307,40 @@ describe("regression: --scope path binds to --path, not --root (previously unrea
     }
   });
 
+  it("a path-scoped fact recalls for its own project root when the caller supplies no --context-files at all -- the shape every hook mem init installs actually calls", async () => {
+    const proj = mkdtempSync(join(tmpdir(), "mem-scope-path-no-context-files-"));
+    try {
+      const remembered = await runCli([
+        "remember",
+        "auth.ts owns migrations",
+        "--kind",
+        "fact",
+        "--scope",
+        "path",
+        "--path",
+        "src/auth.ts",
+        "--root",
+        proj,
+      ]);
+      expect(remembered.exitCode).toBe(0);
+
+      const noContextFiles = await runCli(["recall", "--hint-format", "--root", proj]);
+      expect(noContextFiles.exitCode).toBe(0);
+      expect(noContextFiles.stdout).toContain("auth.ts owns migrations");
+
+      const unrelatedRoot = mkdtempSync(join(tmpdir(), "mem-scope-path-no-context-files-unrelated-"));
+      try {
+        const outsideRoot = await runCli(["recall", "--hint-format", "--root", unrelatedRoot]);
+        expect(outsideRoot.exitCode).toBe(0);
+        expect(outsideRoot.stdout).not.toContain("auth.ts owns migrations");
+      } finally {
+        rmSync(unrelatedRoot, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(proj, { recursive: true, force: true });
+    }
+  });
+
   it("rejects --scope path without --path", async () => {
     const result = await runCli(["remember", "some fact", "--kind", "fact", "--scope", "path"]);
     expect(result.exitCode).toBe(1);

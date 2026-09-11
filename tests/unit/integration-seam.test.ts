@@ -397,7 +397,7 @@ describe("buildHintFormat", () => {
     expect(factLines(result)).toHaveLength(0);
   });
 
-  it("includes a path-scoped fact only when a matching --context-files entry is passed", async () => {
+  it("falls back to root-containment when no --context-files are passed, and narrows to a matching entry once they are", async () => {
     const filePath = join(root, "src", "auth.ts");
     seedFacts(dbPath, [
       {
@@ -412,8 +412,17 @@ describe("buildHintFormat", () => {
       },
     ]);
 
+    // No caller has ever passed --context-files here: every hook/command `mem init` installs calls
+    // `mem recall --hint-format --root <dir>` alone, so a path fact excluded in this branch was
+    // structurally undeliverable to the one consumer that exists. Falls back to isBoundToRoot's rule
+    // (retrieval.ts): in scope when the fact's file sits at or under the caller's root.
     const withoutContext = await buildHint({ root, dbPath });
-    expect(withoutContext.lines).toEqual([]);
+    expect(factLines(withoutContext)).toHaveLength(1);
+
+    // A caller that does pass context files gets the narrower, more precise match: it told mem what
+    // it is looking at, so an unrelated file in the same project must not pull the fact in.
+    const withNonMatchingContext = await buildHint({ root, dbPath, contextFiles: ["src/other.ts"] });
+    expect(withNonMatchingContext.lines).toEqual([]);
 
     const withContext = await buildHint({ root, dbPath, contextFiles: ["src/auth.ts"] });
     expect(factLines(withContext)).toHaveLength(1);

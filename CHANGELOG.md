@@ -6,6 +6,15 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A `--path`-scoped fact could never reach the agent.** On the hook path a `path` fact was in scope
+  only when the caller passed `--context-files` naming a file at or under it — and every hook and
+  command `mem init` installs calls `mem recall --hint-format --root <dir>` with no context files at
+  all. So `mem remember --path` stored facts that plain `mem recall` listed and the agent-facing path
+  structurally could not deliver, for every integration mem ships. With no context files the seam now
+  applies the same root-containment rule `mem recall` already used; a caller that does pass context
+  files still gets the narrower match, because it told mem what it is looking at. The hint ceiling is
+  unchanged, so widening scope changes which facts compete for the same slots rather than how many
+  are emitted.
 - **Two clones of one repository never contradicted each other, so mem served both answers as
   current.** Recall widens a `project` fact into scope by repository identity — that is how a fact
   captured in the main checkout reaches a worktree — but contradiction bucketing keyed on `scope_root`

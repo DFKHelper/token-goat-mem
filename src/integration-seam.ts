@@ -751,6 +751,15 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
   }
 
   // scope === "path"
+  if (contextFiles.length === 0) {
+    // No caller has ever supplied context files here: every hook/command `mem init` installs calls
+    // `mem recall --hint-format --root <dir>` with no `--context-files`, so this branch was the only
+    // one ever exercised and it always excluded path-scoped facts -- structurally undeliverable to
+    // the one consumer that exists. Fall back to isBoundToRoot's rule (retrieval.ts): in scope when
+    // the fact's file sits at or under the caller's root. A caller that *does* pass context files
+    // keeps the narrower, more precise match below -- it told mem what it is looking at.
+    return scopeRoot === normalizePath(root) || scopeRoot.startsWith(normalizePath(root) + sep);
+  }
   return contextFiles.some((file) => {
     const normalizedFile = normalizePath(file);
     return normalizedFile === scopeRoot || normalizedFile.startsWith(scopeRoot + sep);
