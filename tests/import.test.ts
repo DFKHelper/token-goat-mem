@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
+import { captureExplicit } from "../src/capture.js";
 import { openStorage } from "../src/storage.js";
 import { extractMarkdownBullets, importFromMarkdown, MarkdownImportError, planImportFromMarkdown } from "../src/import.js";
 
@@ -13,8 +14,8 @@ describe("extractMarkdownBullets", () => {
   it("extracts top-level `-` and `*` bullets with 1-based line numbers", () => {
     const bullets = extractMarkdownBullets(["# Heading", "- first bullet", "* second bullet", "not a bullet"].join("\n"));
     expect(bullets).toEqual([
-      { text: "first bullet", line: 2 },
-      { text: "second bullet", line: 3 },
+      { text: "first bullet", line: 2, rawLine: "- first bullet" },
+      { text: "second bullet", line: 3, rawLine: "* second bullet" },
     ]);
   });
 
@@ -220,6 +221,35 @@ describe("importFromMarkdown", () => {
       if (outcome.status !== "imported") {continue;}
       expect(outcome.fact.status).toBe("pending");
     }
+  });
+
+  it("skips a bullet matching an already-known active fact in the same project (skipped_known, not imported)", () => {
+    captureExplicit(db, { text: "Always use pnpm, never npm.", kind: "preference", scope: "project", root });
+
+    const result = importFromMarkdown(db, { path: mdPath, root });
+    const known = result.outcomes.find((o) => o.candidate.text === "Always use pnpm, never npm.");
+    expect(known?.status).toBe("skipped_known");
+    const imported = result.outcomes.filter((o) => o.status === "imported");
+    expect(imported.map((o) => o.candidate.text)).toEqual(["Prefer tabs over spaces in this repo."]);
+  });
+
+  it("does not skip a bullet matching a fact bound to an unrelated project root", () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "mem-import-other-root-"));
+    try {
+      captureExplicit(db, { text: "Always use pnpm, never npm.", kind: "preference", scope: "project", root: otherRoot });
+
+      const result = importFromMarkdown(db, { path: mdPath, root });
+      const outcome = result.outcomes.find((o) => o.candidate.text === "Always use pnpm, never npm.");
+      expect(outcome?.status).toBe("imported");
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("re-importing an unchanged file still reports skipped_duplicate, not skipped_known", () => {
+    importFromMarkdown(db, { path: mdPath, root });
+    const second = importFromMarkdown(db, { path: mdPath, root });
+    expect(second.outcomes.every((o) => o.status === "skipped_duplicate")).toBe(true);
   });
 
   // Defect 5: --from-md path has no file size cap

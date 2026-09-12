@@ -236,9 +236,9 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
     expect(findStaleFacts(db, staleCutoff(DEFAULT_STALE_AGE_DAYS, new Date()))).toEqual([]);
   });
 
-  it("excludes a fact that recall has surfaced", () => {
+  it("excludes a fact that recall has surfaced inside the stale window", () => {
     const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) });
-    insertRecallLog(db, "session-1", [fact.id], daysAgo(300));
+    insertRecallLog(db, "session-1", [fact.id], daysAgo(10));
     expect(findStaleFacts(db, staleCutoff(DEFAULT_STALE_AGE_DAYS, new Date()))).toEqual([]);
   });
 
@@ -249,15 +249,32 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
     expect(findStaleFacts(db, staleCutoff(DEFAULT_STALE_AGE_DAYS, new Date()))).toEqual([]);
   });
 
-  it("still excludes a surfaced fact after its recall_log rows have been rotated away", () => {
-    // The regression this column exists for. `mem epoch --gc` deletes recall_log rows older than 30
-    // days, so a fact surfaced months ago has no row left; without the durable mark on `facts` it
-    // would read as never-surfaced and the stale pass would propose superseding it.
+  it("proposes a fact whose last surfacing predates the stale window, even with no recall_log row left", () => {
+    // `last_surfaced_at` answers "has this gone unread for the window", not "was it ever read at
+    // all" -- a fact surfaced once and then ignored for 300 days is exactly as stale as one that
+    // was never surfaced. (`--stale-days` here is the default, 90; recall_log is cleared to also
+    // prove this doesn't depend on a surviving row, e.g. after `mem epoch --gc` rotation.)
     const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) });
     insertRecallLog(db, "session-1", [fact.id], daysAgo(300));
     db.prepare("DELETE FROM recall_log").run();
     expect(db.prepare("SELECT COUNT(*) AS c FROM recall_log").get()).toEqual({ c: 0 });
 
+    expect(findStaleFacts(db, staleCutoff(DEFAULT_STALE_AGE_DAYS, new Date())).map((f) => f.id)).toEqual([fact.id]);
+  });
+
+  it("still excludes a fact surfaced inside the window even after its recall_log row rotates away", () => {
+    // Rotation itself must not manufacture false staleness: the durable `last_surfaced_at` mark
+    // still says "recent" even once the row that produced it is gone.
+    const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) });
+    insertRecallLog(db, "session-1", [fact.id], daysAgo(10));
+    db.prepare("DELETE FROM recall_log").run();
+    expect(findStaleFacts(db, staleCutoff(DEFAULT_STALE_AGE_DAYS, new Date()))).toEqual([]);
+  });
+
+  it("never proposes a fact marked useful, no matter how old, as long as the used_at row survives", () => {
+    const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(900) });
+    insertRecallLog(db, "session-1", [fact.id], daysAgo(800));
+    expect(markRecallUsed(db, [fact.id], "session-1", daysAgo(799))).toBe(1);
     expect(findStaleFacts(db, staleCutoff(DEFAULT_STALE_AGE_DAYS, new Date()))).toEqual([]);
   });
 
@@ -434,7 +451,7 @@ describe("mem consolidate (end to end)", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("1 stale fact: active, captured before ");
-    expect(result.stdout).toContain("never surfaced by recall, never marked used (dry run, nothing changed)");
+    expect(result.stdout).toContain("unsurfaced by recall since then, never marked used (dry run, nothing changed)");
     expect(result.stdout).toContain(stale);
     expect(result.stdout).not.toContain(fresh);
     // Singular: the count pluralizes, so the sentence that follows it has to agree.
@@ -471,7 +488,7 @@ describe("mem consolidate (end to end)", () => {
     expect(statusOf(stale)).toBe("superseded");
     const rows = auditFor(stale).filter((row) => row.event === "consolidate_stale");
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.detail).toContain("never surfaced by recall, never marked used");
+    expect(rows[0]?.detail).toContain("unsurfaced by recall since");
   });
 
   it("--stale-days moves the window", async () => {

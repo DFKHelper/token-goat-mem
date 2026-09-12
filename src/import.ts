@@ -19,13 +19,14 @@
  * `mem review --promote`), not from pre-filtering cleverness.
  */
 
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { CaptureValidationError, SecretDetectedError, captureSuggested, type CaptureSuggestedInput } from "./capture.js";
+import { buildScreenedExcerpt, CaptureValidationError, SecretDetectedError, captureSuggested, type CaptureSuggestedInput } from "./capture.js";
 import { MAX_IMPORT_FILE_SIZE_BYTES } from "./exportImport.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
-import { listFacts } from "./storage.js";
+import { isBoundToRoot } from "./retrieval.js";
+import { factsByNormalizedText, listFacts, normalizeFactText } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
 
 /**
@@ -48,6 +49,8 @@ export interface MarkdownBullet {
   readonly text: string;
   /** 1-based line number within the source file, for provenance (`source_ref`). */
   readonly line: number;
+  /** The untouched source line, marker and whitespace intact -- the raw material for this bullet's `sources` excerpt. */
+  readonly rawLine: string;
 }
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/u;
@@ -112,7 +115,7 @@ export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
     if (indent > 0 && NON_PREFERENCE_HEADING_RE.test(currentHeading)) {
       continue;
     }
-    bullets.push({ text, line: i + 1 });
+    bullets.push({ text, line: i + 1, rawLine: line });
   }
 
   return bullets;
@@ -156,11 +159,18 @@ export interface ImportCandidate {
   readonly line: number;
   /** `<resolved file path>:<line>` -- stored verbatim as the imported fact's `source_ref` for provenance. */
   readonly sourceRef: string;
+  /**
+   * The untouched source line this candidate was extracted from -- the raw material for this
+   * candidate's `sources` excerpt. Optional because `ImportCandidate` is shared with
+   * `exportImport.ts`'s `--from-json` path, which has no markdown line to point at.
+   */
+  readonly rawLine?: string;
 }
 
 export type ImportOutcome =
   | { readonly status: "imported"; readonly candidate: ImportCandidate; readonly fact: Fact }
   | { readonly status: "skipped_duplicate"; readonly candidate: ImportCandidate }
+  | { readonly status: "skipped_known"; readonly candidate: ImportCandidate }
   | { readonly status: "skipped_error"; readonly candidate: ImportCandidate; readonly reason: string }
   | { readonly status: "dry_run"; readonly candidate: ImportCandidate };
 
@@ -170,7 +180,7 @@ export interface ImportResult {
   readonly outcomes: readonly ImportOutcome[];
 }
 
-/** Dedup key: same source location *and* same text. A file edited between imports (bullet text changed at that line, or line numbers shifted) is treated as a new candidate rather than silently dropped -- only an exact re-import of unchanged content is a duplicate. */
+/** Dedup key: same source location *and* same text. A file edited between imports (bullet text changed at that line, or line numbers shifted) is treated as a new candidate rather than silently dropped -- only an exact re-import of unchanged content is a duplicate. Answers a different question than the store-wide `factsByNormalizedText` check below: this catches "this exact line was already imported"; that one catches "this text is already known to the store", e.g. as a fact the user captured themselves via `mem remember`. */
 function dedupKey(sourceRef: string, text: string): string {
   return `${sourceRef}::${text}`;
 }
@@ -218,6 +228,7 @@ export function planImportFromMarkdown(options: Pick<ImportFromMarkdownOptions, 
     text: bullet.text,
     line: bullet.line,
     sourceRef: `${filePath}:${bullet.line}`,
+    rawLine: bullet.rawLine,
   }));
   return { filePath, candidates, outcomes: candidates.map((candidate) => ({ status: "dry_run", candidate })) };
 }
@@ -239,6 +250,14 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
   const seen = existingImportKeys(db);
   const kind = options.kind ?? IMPORT_KIND;
   const scope = options.scope ?? IMPORT_SCOPE_DEFAULT;
+  // Relative to root, not the resolved absolute path in candidate.sourceRef -- an excerpt is
+  // audit-facing text a human reads, and an absolute path is noise a fact's own scopeRoot already
+  // carries.
+  const relativePath = relative(options.root, filePath);
+  // Built once: same rationale as `scan-session`'s own `storedByText` -- the check runs per
+  // candidate, and rebuilding this inside the loop would read the whole facts table once per
+  // bullet in a file with many of them.
+  const storedByText = factsByNormalizedText(db);
 
   const outcomes: ImportOutcome[] = [];
   for (const candidate of candidates) {
@@ -247,7 +266,18 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       outcomes.push({ status: "skipped_duplicate", candidate });
       continue;
     }
+    // Same rule `scan-session` and `retrieval.ts` use for what recall may surface: a text match
+    // bound to an unrelated project's scope_root must not suppress this candidate, so `isBoundToRoot`
+    // gates it rather than a bare text-index hit.
+    if ((storedByText.get(normalizeFactText(candidate.text)) ?? []).some((fact) => isBoundToRoot(fact, options.root))) {
+      outcomes.push({ status: "skipped_known", candidate });
+      continue;
+    }
 
+    // Screened separately from candidate.text: a bullet's own line can carry a secret the
+    // heuristic-trimmed candidate text did not (e.g. a trailing inline token past where the bullet
+    // parser stopped). `null` (screened positive) means no source row, never a blocked import.
+    const sourceExcerpt = buildScreenedExcerpt(`${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root);
     const input: CaptureSuggestedInput = {
       text: candidate.text,
       kind,
@@ -257,6 +287,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       root: options.root,
       ...(options.boundPath !== undefined ? { path: options.boundPath } : {}),
       ...(options.capturedAt !== undefined ? { capturedAt: options.capturedAt } : {}),
+      ...(sourceExcerpt !== null ? { sourceExcerpt } : {}),
     };
     try {
       const { fact } = captureSuggested(db, input);

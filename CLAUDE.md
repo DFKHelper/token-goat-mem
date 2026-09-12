@@ -30,7 +30,7 @@ Token-Goat Mem preserves durable conversational knowledge across AI coding sessi
 ### Storage
 
 - **facts** table — the primary store. Columns: id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding.
-- **sources** table — schema, storage API (`insertSource`/`listSourcesForFact`/`deleteSourcesOlderThan`), `mem show --json` surfacing, and gc pruning all exist and are tested, but **nothing in the capture path writes a row yet**, so the table is empty in practice. Redacted previews only; full content is never persisted. Treat it as a wired-but-unfed seam, not a live audit trail.
+- **sources** table — schema, storage API (`insertSource`/`listSourcesForFact`/`deleteSourcesOlderThan`), `mem show --json` surfacing, and gc pruning all exist and are tested. Fed from exactly two capture paths where the raw material is genuinely larger than the fact -- `mem scan-session` (excerpt = the whole user turn) and `mem import --from-md` (excerpt = `<path>:<line>: <raw bullet line>`) -- each writing its source row in the same transaction as the fact. `mem remember`/`mem suggest <text>` never write one: there the caller's text is the fact, so a source row would just echo it back. Excerpts are truncated to `MAX_SOURCE_EXCERPT_LENGTH` and secret-screened before storage (`capture.ts`'s `buildScreenedExcerpt`); a screened-positive excerpt is dropped and the fact is still captured. Never the full source content.
 - SQLite WAL mode for durability. Short-lived CLI processes + transactional single-writer.
 
 ### Testing

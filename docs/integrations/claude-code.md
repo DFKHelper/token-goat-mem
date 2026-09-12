@@ -12,7 +12,7 @@ mem init claude-code --user            # writes ~/.claude/settings.json instead 
 mem init claude-code --dry-run         # preview what would be written, without touching disk
 ```
 
-This writes exactly the `SessionStart`, `UserPromptSubmit`, `Stop`, and `PreCompact` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
+This writes exactly the `SessionStart`, `UserPromptSubmit`, `Stop`, and `PreCompact` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten -- except a hook whose command matches mem's own invocation shape for that event, an orphan left by an install that predates stamping, which is adopted in place and stamped instead of treated as a conflict. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
 
 The rest of this doc is the manual version -- what `mem init claude-code` does under the hood, and useful if you want to wire it by hand or understand exactly what changed.
 
@@ -145,9 +145,11 @@ of staying caveated forever, e.g. `--anchor "file-exists pnpm-lock.yaml"`.
 Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
 newest-of. The anchor path must stay inside --root (no "..", no absolute path).
 
-When a fact you recalled actually informed the work, mark it:
-`mem used <id>... --session-id <session>`, using the session id you recalled
-under. Recall ranks partly on this, and nothing else produces the signal.
+When a fact you recalled actually informed the work, mark it: a recall's
+footer line carries a ready-to-run `mem used ... --session-id ...`
+invocation naming exactly the facts and session that recall logged under --
+run that line verbatim rather than composing your own. Recall ranks partly
+on this signal, and nothing else produces it.
 ```
 
 ## Embedding memory into Claude Code

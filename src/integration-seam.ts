@@ -185,7 +185,19 @@ export const TGMEM_FOOTER_LINE = `${FOOTER_PREFIX}${FOLLOW_UP_SHOW_DETAIL}`;
  * report -- including with zero fact-lines, which is the only way case 2 can be told from silence.
  * An empty response with an empty queue still emits no footer: nothing withheld, nothing to follow up.
  */
-function footerLineFor(counts: { readonly facts: number; readonly cut: number; readonly withheld: number }): string | undefined {
+function footerLineFor(counts: {
+  readonly facts: number;
+  readonly cut: number;
+  readonly withheld: number;
+  /**
+   * Ready-to-run `mem used ...` invocation, when this response is logged under a session id and
+   * actually emitted at least one fact-line -- see `usefulnessInvocation`. Threaded through as a
+   * pre-built clause, not a session id and a fact list, because the caller (`buildHintFormatUnsafe`)
+   * already knows whether `recordSurfaced` will write a row and this function has no business
+   * re-deriving that.
+   */
+  readonly usefulness?: string;
+}): string | undefined {
   const clauses: string[] = [];
   if (counts.facts > 0) {
     clauses.push(FOLLOW_UP_SHOW_DETAIL);
@@ -196,7 +208,24 @@ function footerLineFor(counts: { readonly facts: number; readonly cut: number; r
   if (counts.withheld > 0) {
     clauses.push(`${counts.withheld} withheld; ${FOLLOW_UP_REVIEW}`);
   }
+  if (counts.usefulness !== undefined) {
+    clauses.push(counts.usefulness);
+  }
   return clauses.length > 0 ? `${FOOTER_PREFIX}${clauses.join("; ")}` : undefined;
+}
+
+/**
+ * Builds the `mem used ...` clause naming the session this response logs under and the fact ids it
+ * actually emitted, so the agent has something to copy rather than an id it was never shown a
+ * session for.
+ *
+ * `footer-text` is documented free prose outside the version-bump set (see the wire-grammar doc
+ * comment above `TGMEM_PROTOCOL_VERSION`) precisely so a clause like this can be added without
+ * bumping the version and orphaning every consumer that hasn't upgraded -- an unknown header
+ * version fails open to no hints at all, which would cost every fact-line to add one footer clause.
+ */
+function usefulnessInvocation(sessionId: string, factIds: readonly string[]): string {
+  return `mem used ${factIds.join(" ")} --session-id ${sessionId} to mark what helped`;
 }
 
 function tgmemHeaderFor(protocolVersion: number, delta = false): string {
@@ -347,12 +376,12 @@ export interface HintFormatOptions {
   /** Threaded straight through to `retrieve()`'s `RetrievalOptions.hintStyle` -- see retrieval.ts's doc comment. Defaults to `"full"`. */
   readonly hintStyle?: "full" | "terse" | undefined;
   /**
-   * Identifier of the consumer session this response is for (a hook's `session_id`). When set and
-   * not `stable`, the ids of the facts actually emitted are recorded in `recall_log` best-effort --
-   * a failure to log never fails the recall -- so a later `delta` call for the same session can
-   * leave them out. `facts.last_surfaced_at` is stamped for the emitted ids regardless of whether
-   * `sessionId` is set or `stable` is true (only `recall_log` cares about either): a fact does not
-   * need a session id or a `recall_log` row to count as having been surfaced. Nothing is stamped
+   * Identifier of the consumer session this response is for (a hook's `session_id`). When set, the
+   * ids of the facts actually emitted are recorded in `recall_log` best-effort -- a failure to log
+   * never fails the recall -- so a later `delta` call for the same session can leave them out.
+   * `stable` has no bearing on this: it only reorders output. `facts.last_surfaced_at` is stamped
+   * for the emitted ids regardless of whether `sessionId` is set (only `recall_log` cares): a fact
+   * does not need a session id or a `recall_log` row to count as having been surfaced. Nothing is stamped
    * when the budget blew (an empty response surfaced nothing).
    */
   readonly sessionId?: string | undefined;
@@ -587,22 +616,37 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   });
 
   const lines = emittable.map(formatLine);
+  const emittedIds = emittable.map((result) => result.fact.id);
+  // Only when a `recall_log` row will actually exist to mark: `recordSurfaced` below is a no-op on
+  // an empty id list even when `sessionId` is set, and printing an invocation for a row that was
+  // never written would earn the exact "was never surfaced in session ... -- nothing to mark" reply
+  // this fix exists to stop producing.
+  const usefulnessClause = sessionId !== undefined && emittedIds.length > 0 ? usefulnessInvocation(sessionId, emittedIds) : undefined;
   // `unseen`, not `results`: a fact the caps dropped was withheld from this payload, but one the
   // delta filter dropped was already sent and the consumer still has it. Counting the latter as
   // "not sent" would report a shortfall that does not exist on a `--delta` call.
-  const footer = protocolVersion === 2 ? footerLineFor({ facts: emittable.length, cut: unseen.length - emittable.length, withheld: withheldCount }) : undefined;
+  const footer =
+    protocolVersion === 2
+      ? footerLineFor({
+          facts: emittable.length,
+          cut: unseen.length - emittable.length,
+          withheld: withheldCount,
+          ...(usefulnessClause !== undefined ? { usefulness: usefulnessClause } : {}),
+        })
+      : undefined;
   if (footer !== undefined) {
     lines.push(footer);
   }
 
-  const emittedIds = emittable.map((result) => result.fact.id);
-  if (sessionId !== undefined && !stable) {
+  if (sessionId !== undefined) {
     // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction.
+    // `stable` is deliberately not consulted here: it is an output-ordering override, and a fact
+    // emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the
+    // consumer already holds and make `mem used` report them as never surfaced.
     recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittedIds, now);
   } else {
-    // No session id to log against, or `--stable` (which only affects output ordering, not
-    // whether a fact was actually surfaced): still stamp the durable mark so stale-supersede
-    // never treats an emitted fact as never-surfaced.
+    // No session id to log a `recall_log` row against: still stamp the durable mark so
+    // stale-supersede never treats an emitted fact as never-surfaced.
     markSurfaced(options.dbPath ?? resolveDbPath(), emittedIds, now);
   }
 
@@ -632,7 +676,7 @@ function recordSurfaced(dbPath: string, sessionId: string, factIds: readonly str
 
 /**
  * Best-effort stamp of `facts.last_surfaced_at` for the emitted fact ids, with no `recall_log`
- * row -- used when there is no session id to log against, or under `--stable`. Same fail-open
+ * row -- used when there is no session id to log against. Same fail-open
  * contract as `recordSurfaced`: a bookkeeping failure must not turn a successful recall into one.
  */
 function markSurfaced(dbPath: string, factIds: readonly string[], now: Date): void {

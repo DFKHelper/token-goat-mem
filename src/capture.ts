@@ -42,7 +42,7 @@ import type Database from "better-sqlite3";
 import { anchorPathWithinRoot } from "./anchors.js";
 import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
-import { findReaffirmableFact, findReaffirmablePendingFacts, insertFact as storageInsertFact, reaffirmFact, setFactStatus } from "./storage.js";
+import { findReaffirmableFact, findReaffirmablePendingFacts, insertFact as storageInsertFact, insertSource, reaffirmFact, setFactStatus } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
@@ -52,6 +52,16 @@ const MAX_TEXT_LENGTH = 500;
 const MAX_SUBJECT_LENGTH = 100;
 const MAX_VALUE_LENGTH = 500;
 const MAX_SOURCE_REF_LENGTH = 500;
+
+/**
+ * Longest excerpt persisted to `sources.excerpt` (see storage.ts's Source doc: "Never the full
+ * source content -- callers are responsible for redacting/truncating"). ~600 chars covers a full
+ * user turn or markdown bullet line's causal context without the audit trail becoming a second copy
+ * of the transcript/file it was pulled from.
+ */
+export const MAX_SOURCE_EXCERPT_LENGTH = 600;
+
+const EXCERPT_TRUNCATION_MARKER = "…";
 
 /** Suggested facts are never fully trusted by confidence number alone, no matter what a caller requests (S9): the stored value is clamped below this even if the caller asks for more. */
 const SUGGESTED_CONFIDENCE_CAP = 0.6;
@@ -266,6 +276,35 @@ function isPathShapedToken(token: string): boolean {
   return segments.length >= 2 && segments.every(isPathSegment);
 }
 
+/** One `[._-]`-delimited word of a prose-shaped identifier: pure lowercase letters, no digits, no separators of its own -- deliberately narrower than `PATH_SEGMENT` (which allows digits and internal `[._-]` runs), because a slash-less token has no directory-name convention to lean on and so gets no benefit of the doubt beyond plain English words. */
+const PROSE_WORD = /^[a-z]+$/;
+
+/**
+ * Whether a slash-free token is shaped like a kebab/snake/dotted-case prose identifier --
+ * `subagent-git-discard-prohibition`, the kind of descriptive `mem remember --subject`/`--value`
+ * key this project's own CLAUDE.md tells agents to pass -- which the generic entropy heuristic must
+ * not flag. `isPathShapedToken` above already exempts this shape when it contains a slash; a
+ * slash-less kebab identifier never reaches that check (it returns early on `!token.includes("/")`)
+ * and so falls straight through to `generic-high-entropy-token` once it clears 32 characters, which
+ * a descriptive multi-word subject key does routinely.
+ *
+ * Every named `SECRET_PATTERNS` entry (aws-access-key-id, github-token, slack-token, jwt, ...) runs
+ * unconditionally before this; this exemption only ever reaches the *unlabeled, prefix-less*
+ * entropy fallback. A real prefix-less secret is essentially always drawn from a base64/hex
+ * alphabet or carries digits/mixed case, so requiring every `[._-]`-delimited word to be pure
+ * lowercase letters -- no digits, no uppercase -- excludes it outright: it is what keeps a
+ * Slack-style `xoxb-1234567890-...` shape (or any base64 `+`/`=`/mixed-case blob) out of the
+ * exemption even if its named pattern were ever loosened. Two or more words are required so a
+ * single long lowercase run can never buy the exemption on its own, and each word is still capped
+ * at `MAX_UNBROKEN_SEGMENT_RUN` (the same bound `isPathSegment` uses for a path segment's internal
+ * runs) -- a real English word doesn't reach that length, whereas an unbroken lowercase run that
+ * long is the shape of a random token, not prose.
+ */
+function isProseShapedToken(token: string): boolean {
+  const words = token.split(/[._-]/).filter((word) => word.length > 0);
+  return words.length >= 2 && words.every((word) => PROSE_WORD.test(word) && word.length <= MAX_UNBROKEN_SEGMENT_RUN);
+}
+
 function scanField(field: string, value: string): SecretMatch[] {
   const matches: SecretMatch[] = [];
 
@@ -289,6 +328,7 @@ function scanField(field: string, value: string): SecretMatch[] {
     if (
       !(exemptField && token.includes("/")) &&
       !isPathShapedToken(token) &&
+      !isProseShapedToken(token) &&
       !isCanonicalHexHash(token) &&
       !DIGITS_ONLY.test(token) &&
       shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD
@@ -353,6 +393,24 @@ export function loadAllowlist(root: string): string[] {
     .split(/\r?\n/u)
     .map((line) => line.trim())
     .filter((line) => line.length > 0 && !line.startsWith("#"));
+}
+
+/**
+ * Builds a `sources.excerpt` for a derived-capture fact (scan-session, `mem import --from-md`), or
+ * `null` when `raw` carries a secret the extracted fact text did not -- the raw material (a whole
+ * user turn, a whole file line) is a larger surface than the sentence pulled from it, so screening
+ * the sentence alone (already done by `screenInputOrThrow`) is not enough to trust the excerpt.
+ * Screened against the *untruncated* text so a secret sitting past `MAX_SOURCE_EXCERPT_LENGTH`
+ * cannot slip through by being cut off before the check runs; only a confirmed-clean excerpt is
+ * then truncated for storage. Never called for `mem remember`/`mem suggest`: there the user's own
+ * text *is* the fact, and a source row echoing it back would be provenance noise, not evidence.
+ */
+export function buildScreenedExcerpt(raw: string, root: string): string | null {
+  const allowlist = loadAllowlist(root);
+  if (screenForSecrets({ excerpt: raw }, allowlist).length > 0) {
+    return null;
+  }
+  return raw.length <= MAX_SOURCE_EXCERPT_LENGTH ? raw : `${raw.slice(0, MAX_SOURCE_EXCERPT_LENGTH)}${EXCERPT_TRUNCATION_MARKER}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Anchor syntax ───────────────────────────────────────────────────────────────────────────
@@ -610,6 +668,15 @@ export interface CaptureSuggestedInput extends CaptureExplicitInput {
   readonly sourceType?: FactSourceType;
   /** Advisory only: always clamped to `[0, SUGGESTED_CONFIDENCE_CAP]` regardless of what is requested, since a pending/suggested fact can never carry full trust (S9). */
   readonly confidence?: number;
+  /**
+   * A pre-screened, pre-truncated excerpt of the raw material the candidate was pulled from (see
+   * `buildScreenedExcerpt`), stored as one `sources` row alongside the fact in the same transaction.
+   * Only `mem scan-session` and `mem import --from-md` set this -- both extract a short candidate
+   * from raw material genuinely larger than the fact (a whole user turn, a whole file line), which is
+   * exactly the provenance gap the `sources` table exists to close. `mem suggest <text>` must never
+   * set this: there the caller's text *is* the fact, so a source row would just echo it back.
+   */
+  readonly sourceExcerpt?: string;
 }
 
 export interface CaptureResult {
@@ -800,20 +867,24 @@ export function resolveScopeRepo(scope: FactScope, root: string): string | null 
 }
 
 /**
- * Inserts a fact and writes its capture audit row atomically -- both run inside a single
- * `db.transaction()` (nesting `storageInsertFact`'s own transaction via savepoint, the same pattern
- * exportImport.ts's `importFromJson` uses) so a crash between the two can never leave a fact with no
- * corresponding audit entry, mirroring 008f60b's json_import fix.
+ * Inserts a fact, its capture audit row, and (when given) its one source excerpt atomically -- all
+ * run inside a single `db.transaction()` (nesting `storageInsertFact`'s own transaction via
+ * savepoint, the same pattern exportImport.ts's `importFromJson` uses) so a crash partway through can
+ * never leave a fact with no audit entry, or a source row pointing at a fact that was rolled back.
  */
 function writeFact(
   db: Database.Database,
   newFact: NewFact,
   auditEvent: string,
-  detail: (fact: Fact) => string
+  detail: (fact: Fact) => string,
+  sourceExcerpt?: string
 ): Fact {
   const tx = db.transaction((): Fact => {
     const fact = storageInsertFact(db, newFact);
     insertAuditLog(db, { event: auditEvent, factId: fact.id, detail: detail(fact) });
+    if (sourceExcerpt !== undefined) {
+      insertSource(db, { factId: fact.id, excerpt: sourceExcerpt });
+    }
     return fact;
   });
   // BEGIN IMMEDIATE: the inner `storageInsertFact` reads the epoch before writing, and once this
@@ -995,7 +1066,8 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
     db,
     newFact,
     "capture_suggested",
-    (f) => `stored pending ${f.kind} fact (source_type=${f.source_type}, scope=${f.scope})`
+    (f) => `stored pending ${f.kind} fact (source_type=${f.source_type}, scope=${f.scope})`,
+    input.sourceExcerpt
   );
   return { fact };
 }

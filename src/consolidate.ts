@@ -211,8 +211,9 @@ export function staleCutoff(ageDays: number, now: Date): string {
 }
 
 /**
- * The facts `--stale` proposes: live, captured before `cutoffIso`, never surfaced by recall, never
- * marked useful, never pinned. Oldest first.
+ * The facts `--stale` proposes: live, captured before `cutoffIso`, unsurfaced by recall since
+ * `cutoffIso`, never marked useful, never pinned. Oldest first. See `listStaleUnsurfacedFacts` for
+ * why "unsurfaced since the cutoff" and "never marked useful" are governed differently.
  */
 export function findStaleFacts(db: Db, cutoffIso: string): Fact[] {
   return listStaleUnsurfacedFacts(db, cutoffIso);

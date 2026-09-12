@@ -25,6 +25,7 @@ import {
   insertRecallLog,
   listFactsNeedingEmbedding,
   markRecallUsed,
+  replaceFactTerms,
   resolveFactIdOrPrefix,
 } from "../src/storage.js";
 import { openDb } from "../src/db.js";
@@ -627,16 +628,6 @@ describe("markRecallUsed / getUsefulnessCounts", () => {
     expect(getUsefulnessCounts(db).get(fact.id)).toEqual({ surfaced: 1, used: 0 });
   });
 
-  it("does not bump the write epoch: a usefulness stamp changes no fact a cached recall could go stale on", () => {
-    const fact = insertFact(db, baseFact());
-    insertRecallLog(db, "session-1", [fact.id], "2026-01-01T00:00:00.000Z");
-    const before = getEpoch(db);
-
-    markRecallUsed(db, [fact.id], "session-1", "2026-01-03T00:00:00.000Z");
-
-    expect(getEpoch(db)).toBe(before);
-  });
-
   it("groups per fact across sessions in one pass, and omits facts with no recall_log row entirely", () => {
     const used = insertFact(db, baseFact({ text: "the useful one" }));
     const surfacedOnly = insertFact(db, baseFact({ text: "surfaced but never confirmed" }));
@@ -658,5 +649,53 @@ describe("markRecallUsed / getUsefulnessCounts", () => {
 
   it("no-ops on an empty id list rather than issuing a statement", () => {
     expect(markRecallUsed(db, [], "session-1", "2026-01-03T00:00:00.000Z")).toBe(0);
+  });
+
+  it("bumps the write epoch when it stamps a row, so a cache keyed on the epoch cannot serve pre-stamp recall order", () => {
+    const fact = insertFact(db, baseFact());
+    insertRecallLog(db, "session-1", [fact.id], "2026-01-01T00:00:00.000Z");
+    const epochBefore = getEpoch(db);
+
+    expect(markRecallUsed(db, [fact.id], "session-1", "2026-01-03T00:00:00.000Z")).toBe(1);
+    expect(getEpoch(db)).toBeGreaterThan(epochBefore);
+
+    // Non-firing guard: a call that stamps nothing must not move the epoch either -- the bump
+    // tracks an actual change, it is not an unconditional side effect of calling the function.
+    const epochAfterFirst = getEpoch(db);
+    const noOpCalls: readonly (readonly [readonly string[], string])[] = [
+      [[fact.id], "session-1"], // already stamped
+      [[fact.id], "unknown-session"], // no row for that session
+      [[], "session-1"], // nothing asked for
+    ];
+    expect(noOpCalls.length).toBeGreaterThan(0);
+    for (const [ids, sessionId] of noOpCalls) {
+      expect(markRecallUsed(db, ids, sessionId, "2026-01-04T00:00:00.000Z")).toBe(0);
+    }
+    expect(getEpoch(db)).toBe(epochAfterFirst);
+  });
+});
+
+describe("replaceFactTerms epoch accounting", () => {
+  it("bumps the write epoch on a standalone term write, because terms decide which recalls reach the fact", () => {
+    const fact = insertFact(db, baseFact());
+    const epochBefore = getEpoch(db);
+
+    replaceFactTerms(db, fact.id, { entities: ["pnpm"], topics: ["packaging"] });
+    expect(getEpoch(db)).toBeGreaterThan(epochBefore);
+
+    // Non-firing guard: the write itself still landed, so the epoch assertion above is about a
+    // real term replacement and not an empty transaction.
+    const terms = db.prepare<[string], { term: string }>("SELECT term FROM fact_terms WHERE fact_id = ?").all(fact.id);
+    expect(terms.length).toBeGreaterThan(0);
+    for (const row of terms) {
+      expect(typeof row.term).toBe("string");
+    }
+    expect(terms.map((row) => row.term).sort()).toEqual(["packaging", "pnpm"]);
+  });
+
+  it("does not double-bump when insertFact re-extracts terms inside its own transaction", () => {
+    const epochBefore = getEpoch(db);
+    insertFact(db, baseFact());
+    expect(getEpoch(db)).toBe(epochBefore + 1);
   });
 });

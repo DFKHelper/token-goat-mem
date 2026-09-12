@@ -2,8 +2,9 @@
  * Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes
  * exactly the config snippets those guides document (Claude Code's `settings.json` hook +
  * `CLAUDE.md` instructions, Codex/Copilot CLI's `AGENTS.md` instructions, Copilot VS Code's
- * `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`); `uninstall()` reverses exactly
- * what `install()` wrote, and only that.
+ * `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's
+ * `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and
+ * only that.
  *
  * Two idempotency/authorship mechanisms, chosen per file format:
  *
@@ -13,16 +14,20 @@
  *   replaces everything between an existing pair (upgrade in place) or appends a new marked block at
  *   end of file; uninstall strips the marked block plus the one separator newline install adds,
  *   leaving everything else untouched.
- * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, and `copilot-vscode`): all
- *   three tools want the same "## Memory" prose in the same file, so instead of near-duplicate
- *   per-tool blocks they share one reference-counted block,
+ * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, and `copilot-vscode`;
+ *   `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` --
+ *   neither reads `AGENTS.md`, so they share a block in their own file instead of joining the
+ *   `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of
+ *   near-duplicate per-tool blocks they share one reference-counted block,
  *   `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see
  *   `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool
  *   to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole
  *   block as it goes -- the body comes from one constant shared by every tool that writes here, so
  *   a later tool's install is also what upgrades a body left behind by an older mem.
  *   Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other
- *   tool remains listed, and only removes the whole block once the last listed tool uninstalls.
+ *   tool remains listed, and only removes the whole block once the last listed tool uninstalls. A
+ *   project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block
+ *   in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens.
  * - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object
  *   mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install
  *   upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped*
@@ -90,6 +95,14 @@ export class WiringConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WiringConflictError";
+  }
+}
+
+/** Thrown when `--user` is passed to a tool with no user-level config target -- writing project-level config anyway would silently ignore the flag instead of telling the caller it did nothing. */
+export class WiringUserUnsupportedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WiringUserUnsupportedError";
   }
 }
 
@@ -198,7 +211,10 @@ function looksMemAuthored(content: string): boolean {
  * both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks`
  * / delete-if-empty checks.
  */
-export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfEmpty?: boolean } = {}): WiringChange {
+export function writeManagedFile(
+  op: FileOp,
+  opts: { backup?: boolean; deleteIfEmpty?: boolean; detailFor?: (before: string, after: string) => string | undefined } = {}
+): WiringChange {
   const backup = opts.backup ?? true;
   const deleteIfEmpty = opts.deleteIfEmpty ?? false;
 
@@ -281,7 +297,7 @@ export function writeManagedFile(op: FileOp, opts: { backup?: boolean; deleteIfE
   return {
     path: op.path,
     action: existedBefore ? "update" : "create",
-    detail: existedBefore ? "updated existing file" : "created new file",
+    detail: existedBefore ? (opts.detailFor?.(before as string, after) ?? "updated existing file") : "created new file",
   };
 }
 
@@ -301,6 +317,13 @@ interface ManagedFile {
    * shared block entirely".
    */
   readonly describeDetail?: (current: string | undefined, installAction: WiringFileAction, uninstallAction: WiringFileAction) => string | undefined;
+  /**
+   * Optional override for install()'s reported `detail` when the file already existed, consulted
+   * with the pre- and post-install content. Returns `undefined` to fall back to the generic
+   * "updated existing file" wording. Used by Claude Code's settings.json to call out an unstamped
+   * hook adopted from an older mem install, rather than reporting it as an ordinary update.
+   */
+  readonly installDetail?: (before: string, after: string) => string | undefined;
 }
 
 /**
@@ -318,7 +341,11 @@ function validateAll(files: readonly ManagedFile[], transformOf: (file: ManagedF
 
 function runInstall(files: readonly ManagedFile[]): WiringResult {
   validateAll(files, (file) => file.install);
-  return { changes: files.map((file) => writeManagedFile({ path: file.path, transform: file.install })) };
+  return {
+    changes: files.map((file) =>
+      writeManagedFile({ path: file.path, transform: file.install }, file.installDetail === undefined ? {} : { detailFor: file.installDetail })
+    ),
+  };
 }
 
 function runUninstall(files: readonly ManagedFile[]): WiringResult {
@@ -879,6 +906,26 @@ const CLAUDE_STOP_COMMAND =
 // turns both events see costs a read and files nothing twice.
 const CLAUDE_PRE_COMPACT_COMMAND = CLAUDE_STOP_COMMAND;
 
+// Every command above shares this guard/subcommand/root wrapper; only the flags between the
+// subcommand and `--root` vary across events and across mem versions (`--hook-stdin` was added to
+// SessionStart after its first release). Matching the wrapper -- not the full literal string --
+// is what lets `looksLikeMemHookCommand` recognise an older or newer mem install's hook as its own.
+const MEM_HOOK_INVOCATION_RE = /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u;
+
+/**
+ * Whether `command` is mem's own invocation shape for `event` -- same wrapper, same subcommand as
+ * `CLAUDE_HOOK_EVENTS` currently writes for that event, allowing for flags that have been added or
+ * dropped since. Used to recognise an unstamped hook left behind by a pre-STAMP_KEY (or otherwise
+ * older) mem install as mem's own, rather than a stranger's hand-written entry that merely mentions
+ * `mem`.
+ */
+function looksLikeMemHookCommand(command: string, event: string): boolean {
+  const canonical = CLAUDE_HOOK_EVENTS.find((entry) => entry.event === event)?.command;
+  const canonicalMatch = canonical === undefined ? null : MEM_HOOK_INVOCATION_RE.exec(canonical);
+  const actualMatch = MEM_HOOK_INVOCATION_RE.exec(command);
+  return canonicalMatch !== null && actualMatch !== null && canonicalMatch[1] === actualMatch[1];
+}
+
 /** The hook events mem installs, in the order they are written, each with the one command mem stamps under it. */
 const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
   { event: "SessionStart", command: CLAUDE_SESSION_START_COMMAND },
@@ -934,6 +981,55 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   return changed ? text : current;
 }
 
+/**
+ * Events for which `installClaudeSettings` adopted a pre-existing unstamped hook rather than
+ * inserting a fresh one -- `before` is un-parseable or has no such hook: an empty list. Read against
+ * `before` alone (an event already has a stamped hook, so nothing needed adopting) rather than
+ * diffing `before`/`after`, since the adopted hook's stamp is otherwise indistinguishable from one
+ * `installClaudeHookEvent` inserted from scratch. Surfaced by `claudeCode`'s `installDetail` so an
+ * install that quietly absorbs an older install's hook is reported, not silent.
+ */
+function claudeHookAdoptions(before: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = parseJsonc(before, [], JSONC_PARSE);
+  } catch {
+    return [];
+  }
+  if (!isPlainObject(parsed) || !isPlainObject(parsed["hooks"])) {
+    return [];
+  }
+  const hooks = parsed["hooks"] as { [key: string]: unknown };
+  const adopted: string[] = [];
+  for (const { event } of CLAUDE_HOOK_EVENTS) {
+    const eventValue = hooks[event];
+    if (!Array.isArray(eventValue)) {
+      continue;
+    }
+    let hasStamped = false;
+    let hasAdoptable = false;
+    for (const group of eventValue) {
+      if (!isPlainObject(group) || !Array.isArray(group["hooks"])) {
+        continue;
+      }
+      for (const hook of group["hooks"] as unknown[]) {
+        if (!isPlainObject(hook)) {
+          continue;
+        }
+        if (isStamped(hook)) {
+          hasStamped = true;
+        } else if (typeof hook["command"] === "string" && looksLikeMemHookCommand(hook["command"], event)) {
+          hasAdoptable = true;
+        }
+      }
+    }
+    if (hasAdoptable && !hasStamped) {
+      adopted.push(event);
+    }
+  }
+  return adopted;
+}
+
 /** Installs mem's stamped `command` under `hooks.<event>` in `text`, returning `text` unchanged when it is already there verbatim. */
 function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: string, command: string, path: string): string {
   // Which containers the file actually has decides where the single surgical insert lands below.
@@ -981,19 +1077,34 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
   }
   const stampedHook: ClaudeHook | undefined = stampedGroupIdx === -1 ? undefined : groups[stampedGroupIdx]?.hooks?.[stampedHookIdx];
 
-  const hasUnstampedConflict = groups.some((group) =>
-    (group.hooks ?? []).some((hook) => isPlainObject(hook) && !isStamped(hook) && hook.command === command)
-  );
-  if (hasUnstampedConflict && stampedHook === undefined) {
-    throw new WiringConflictError(`a ${event} hook with command "${command}" already exists in ${path} and was not created by mem; refusing to duplicate it`);
-  }
-
   if (stampedHook !== undefined) {
     if (stampedHook.type === "command" && stampedHook.command === command) {
       return text;
     }
     const hookPath: JSONPath = ["hooks", event, stampedGroupIdx, "hooks", stampedHookIdx];
     const retyped = surgicalJsoncEdit(text, [...hookPath, "type"], "command");
+    return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
+  }
+
+  // An unstamped hook whose command matches mem's own invocation shape for this event is an orphan
+  // left by an install that predates STAMP_KEY (or whose flags have since changed) -- adopt it in
+  // place rather than leaving it to run forever alongside the stamped hook this function would
+  // otherwise insert, or refusing outright and stranding every older install behind a manual edit.
+  let adoptGroupIdx = -1;
+  let adoptHookIdx = -1;
+  for (let index = 0; index < groups.length && adoptGroupIdx === -1; index += 1) {
+    const hookIdx = (groups[index]?.hooks ?? []).findIndex(
+      (hook) => isPlainObject(hook) && !isStamped(hook) && looksLikeMemHookCommand(hook.command, event)
+    );
+    if (hookIdx !== -1) {
+      adoptGroupIdx = index;
+      adoptHookIdx = hookIdx;
+    }
+  }
+  if (adoptGroupIdx !== -1) {
+    const hookPath: JSONPath = ["hooks", event, adoptGroupIdx, "hooks", adoptHookIdx];
+    const stamped = surgicalJsoncEdit(text, [...hookPath, STAMP_KEY], true);
+    const retyped = surgicalJsoncEdit(stamped, [...hookPath, "type"], "command");
     return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
   }
 
@@ -1395,9 +1506,11 @@ of staying caveated forever, e.g. \`--anchor "file-exists pnpm-lock.yaml"\`.
 Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
 newest-of. The anchor path must stay inside --root (no "..", no absolute path).
 
-When a fact you recalled actually informed the work, mark it:
-\`mem used <id>... --session-id <session>\`, using the session id you recalled
-under. Recall ranks partly on this, and nothing else produces the signal.`;
+When a fact you recalled actually informed the work, mark it: a recall's
+footer line carries a ready-to-run \`mem used ... --session-id ...\`
+invocation naming exactly the facts and session that recall logged under --
+run that line verbatim rather than composing your own. Recall ranks partly
+on this signal, and nothing else produces it.`;
 
 /**
  * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
@@ -1441,6 +1554,12 @@ export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user }) =
     path: settingsPath,
     install: (current) => installClaudeSettings(current, settingsPath),
     uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
+    installDetail: (before) => {
+      const adopted = claudeHookAdoptions(before);
+      return adopted.length === 0
+        ? undefined
+        : `updated existing file (adopted a pre-existing ${adopted.join(", ")} hook written by an older mem install)`;
+    },
   };
   if (user) {
     return [settingsEntry];
@@ -1449,28 +1568,74 @@ export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user }) =
   return [settingsEntry, markdownFile(claudeMdPath, "claude-code", CLAUDE_CODE_CLAUDE_MD_BODY)];
 });
 
-export const codex: ToolWiring = makeToolWiring(({ root }) => {
+/** Thrown by a project-only tool's `filesFor` when `--user` is passed -- it has no user-level file to redirect to. */
+function rejectUserLevel(user: boolean, toolLabel: string): void {
+  if (user) {
+    throw new WiringUserUnsupportedError(`${toolLabel} has no user-level config; omit --user`);
+  }
+}
+
+export const codex: ToolWiring = makeToolWiring(({ root, user }) => {
+  rejectUserLevel(user, "codex");
   const agentsMdPath = join(root, "AGENTS.md");
   return [sharedMarkdownFile(agentsMdPath, "codex", AGENTS_MD_SHARED_BODY)];
 });
 
-export const copilotCli: ToolWiring = makeToolWiring(({ root }) => {
+export const copilotCli: ToolWiring = makeToolWiring(({ root, user }) => {
+  rejectUserLevel(user, "copilot-cli");
   const agentsMdPath = join(root, "AGENTS.md");
   return [sharedMarkdownFile(agentsMdPath, "copilot-cli", AGENTS_MD_SHARED_BODY)];
 });
 
-export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir }) => {
-  const tasksPath = join(root, ".vscode", "tasks.json");
+export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir, user }) => {
   const keybindingsPath = join(vscodeUserDir(homeDir), "keybindings.json");
+  const keybindingsEntry: ManagedFile = {
+    path: keybindingsPath,
+    install: (current) => installKeybindings(current, keybindingsPath),
+    uninstall: (current) => uninstallKeybindings(current, keybindingsPath),
+  };
+  // Unlike the project-only tools, this one has somewhere real to put a user-level install: the
+  // keybindings live in VS Code's own user directory, so they are the whole of it. The tasks file
+  // and the AGENTS.md block are project artifacts, and writing them under --user would put mem into
+  // a repository the user asked only to configure their editor for.
+  if (user) {
+    return [keybindingsEntry];
+  }
+  const tasksPath = join(root, ".vscode", "tasks.json");
   const agentsMdPath = join(root, "AGENTS.md");
   return [
     { path: tasksPath, install: (current) => installTasksJson(current, tasksPath), uninstall: (current) => uninstallTasksJson(current, tasksPath) },
-    { path: keybindingsPath, install: (current) => installKeybindings(current, keybindingsPath), uninstall: (current) => uninstallKeybindings(current, keybindingsPath) },
+    keybindingsEntry,
     sharedMarkdownFile(agentsMdPath, "copilot-vscode", AGENTS_MD_SHARED_BODY),
   ];
 });
 
-export const TOOL_NAMES = ["claude-code", "codex", "copilot-cli", "copilot-vscode"] as const;
+// Visual Studio never reads AGENTS.md, and JetBrains' local in-IDE chat (as opposed to its cloud
+// agent, which does) reads only .github/copilot-instructions.md -- so both converge on that one
+// file rather than joining the AGENTS.md shared block above. A project that also installs
+// copilot-vscode or copilot-cli gets mem's block in both files, which VS Code and Copilot CLI both
+// read; harmless in meaning, redundant in tokens. Reference counting keeps the two files
+// independent by design (see the module comment), so this overlap is accepted, not fixed here.
+export const copilotVisualStudio: ToolWiring = makeToolWiring(({ root, user }) => {
+  rejectUserLevel(user, "copilot-visual-studio");
+  const instructionsPath = join(root, ".github", "copilot-instructions.md");
+  return [sharedMarkdownFile(instructionsPath, "copilot-visual-studio", AGENTS_MD_SHARED_BODY)];
+});
+
+export const copilotJetbrains: ToolWiring = makeToolWiring(({ root, user }) => {
+  rejectUserLevel(user, "copilot-jetbrains");
+  const instructionsPath = join(root, ".github", "copilot-instructions.md");
+  return [sharedMarkdownFile(instructionsPath, "copilot-jetbrains", AGENTS_MD_SHARED_BODY)];
+});
+
+export const TOOL_NAMES = [
+  "claude-code",
+  "codex",
+  "copilot-cli",
+  "copilot-vscode",
+  "copilot-visual-studio",
+  "copilot-jetbrains",
+] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 export function getToolWiring(name: ToolName): ToolWiring {
@@ -1483,5 +1648,9 @@ export function getToolWiring(name: ToolName): ToolWiring {
       return copilotCli;
     case "copilot-vscode":
       return copilotVscode;
+    case "copilot-visual-studio":
+      return copilotVisualStudio;
+    case "copilot-jetbrains":
+      return copilotJetbrains;
   }
 }

@@ -18,8 +18,8 @@ import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
-import { deleteFact, insertFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
-import { captureSuggested } from "../src/capture.js";
+import { deleteFact, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
+import { captureSuggested, MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 
 interface CliResult {
@@ -416,10 +416,38 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
     // pending fact other than this one.
     const promoted = await runCli(["review", "--promote", fact.id]);
     expect(promoted.exitCode).toBe(0);
-    expect(promoted.stdout).toBe(`promoted ${fact.id}\n`);
+    const [promotedLine, caveatLine] = promoted.stdout.trimEnd().split("\n");
+    expect(promotedLine).toBe(`promoted ${fact.id}`);
+    // A derived candidate carries no subject, so nothing can ever supersede it once active. The
+    // promotion is the only moment the user can act on that, so it is the moment that says so.
+    expect(caveatLine).toContain("has no subject/value");
 
     const activeAfterPromote = await runCli(["list", "--status", "active"]);
     expect(activeAfterPromote.stdout).toContain(fact.id);
+  });
+
+  it("promoting a keyed candidate says nothing extra -- the caveat is about keylessness, not promotion", async () => {
+    const suggested = await runCli([
+      "suggest",
+      "the queue backend is redis",
+      "--kind",
+      "fact",
+      "--subject",
+      "queue-backend",
+      "--value",
+      "redis",
+      "--root",
+      home,
+    ]);
+    expect(suggested.exitCode).toBe(0);
+    const id = /suggested fact (\S+)/u.exec(suggested.stdout)?.[1] ?? "";
+    expect(id).not.toBe("");
+
+    const promoted = await runCli(["review", "--promote", id]);
+    expect(promoted.exitCode).toBe(0);
+    // A keyed fact can be superseded by a later contradicting one, so there is nothing to warn
+    // about -- a caveat printed here would be noise on the common path.
+    expect(promoted.stdout).toBe(`promoted ${id}\n`);
   });
 
   it("refuses to promote a fact that is not in a review-resolvable status", async () => {
@@ -996,6 +1024,169 @@ describe("review unanchored bucket (environment-dependent facts nobody can verif
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────── review unanchored bucket: paste-ready anchor suggestions ───────────────────────────────────────────────────────────────────────────
+
+describe("review unanchored bucket prints a paste-ready `mem edit --anchor` suggestion", () => {
+  it("suggests the exact path for a fact naming a file that exists under its root, and the suggested edit round-trips to affirmed", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-unanchored-suggest-"));
+    try {
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "main.ts"), "x\n", "utf8");
+      const db = openStorage(resolveDbPath());
+      const { fact } = captureSuggested(db, { text: "the entry point is src/main.ts", kind: "fact", root: repo });
+      db.close();
+      await runCli(["review", "--promote", fact.id]);
+
+      const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
+      expect(listing.exitCode).toBe(0);
+      const predicate = "file-exists src/main.ts";
+      expect(listing.stdout).toContain(`mem edit ${fact.id} --anchor "${predicate}"`);
+
+      // The round trip is the point: paste the exact suggested command's argv (the quoted anchor is
+      // one shell word; commander sees it as one `--anchor` value either way) and confirm it
+      // actually resolves the fact to ground truth, not just that a plausible-looking line was printed.
+      const edited = await runCli(["edit", fact.id, "--anchor", predicate, "--root", repo]);
+      expect(edited.stderr, edited.stderr).toBe("");
+      expect(edited.exitCode).toBe(0);
+
+      const shown = JSON.parse((await runCli(["show", fact.id, "--root", repo, "--json"])).stdout) as { freshness: string };
+      expect(shown.freshness).toBe("affirmed");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("carries --force for a user-stated fact, whose edit would otherwise refuse", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-unanchored-user-"));
+    try {
+      mkdirSync(join(repo, "src"), { recursive: true });
+      writeFileSync(join(repo, "src", "main.ts"), "x\n", "utf8");
+      const remembered = await runCli([
+        "remember",
+        "the entry point is src/main.ts",
+        "--kind",
+        "fact",
+        "--scope",
+        "project",
+        "--root",
+        repo,
+      ]);
+      const id = /remembered fact (\S+)/u.exec(remembered.stdout)?.[1] ?? "";
+      expect(id).not.toBe("");
+
+      // Most of a real store is user-stated, and `mem edit` refuses those without --force. A
+      // suggestion that answers with a refusal on the common path is worse than none: it teaches
+      // the user the feature is broken.
+      const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
+      expect(listing.stdout).toContain(`mem edit ${id} --anchor "file-exists src/main.ts" --force`);
+
+      const edited = await runCli(["edit", id, "--anchor", "file-exists src/main.ts", "--root", repo, "--force"]);
+      expect(edited.stderr, edited.stderr).toBe("");
+      expect(edited.exitCode).toBe(0);
+
+      const shown = JSON.parse((await runCli(["show", id, "--root", repo, "--json"])).stdout) as { freshness: string };
+      expect(shown.freshness).toBe("affirmed");
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("prints no suggestion for a fact naming a file that does not exist under its root", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-unanchored-nofile-"));
+    try {
+      const db = openStorage(resolveDbPath());
+      const { fact } = captureSuggested(db, { text: "the entry point is src/missing.ts", kind: "fact", root: repo });
+      db.close();
+      await runCli(["review", "--promote", fact.id]);
+
+      const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
+      expect(listing.exitCode).toBe(0);
+      expect(listing.stdout).toContain("the entry point is src/missing.ts");
+      expect(listing.stdout).not.toContain(`mem edit ${fact.id} --anchor "`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ["a parent-relative escape", "the entry point is ../secrets.txt"],
+    ["an absolute path outside the root", "the entry point is /etc/passwd"],
+  ])("prints no suggestion for %s", async (_label, text) => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-unanchored-outside-"));
+    try {
+      const db = openStorage(resolveDbPath());
+      const { fact } = captureSuggested(db, { text, kind: "fact", root: repo });
+      db.close();
+      await runCli(["review", "--promote", fact.id]);
+
+      const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
+      expect(listing.exitCode).toBe(0);
+      expect(listing.stdout).toContain(text);
+      expect(listing.stdout).not.toContain(`mem edit ${fact.id} --anchor "`);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+
+  it("leaves the unanchored listing for a fact with no viable target byte-identical to before", async () => {
+    const repo = mkdtempSync(join(tmpdir(), "mem-unanchored-byte-identical-"));
+    try {
+      const text = "the entry point is src/main.ts";
+      const db = openStorage(resolveDbPath());
+      const { fact } = captureSuggested(db, { text, kind: "fact", root: repo });
+      db.close();
+      await runCli(["review", "--promote", fact.id]);
+
+      const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
+      expect(listing.exitCode).toBe(0);
+      // Exact reconstruction of pre-feature output: one section header, one fact-summary line, no
+      // suggestion line -- `src/main.ts` genuinely does not exist under this fresh, empty root.
+      const expected =
+        "-- unanchored but checkable (names a path/URL/config file; consider `mem edit <id> --anchor`) (1) --\n" +
+        `${fact.id}  [fact/active]  ${text}\n`;
+      expect(listing.stdout).toBe(expected);
+    } finally {
+      rmSync(repo, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── review shows a pending fact's newest source excerpt ───────────────────────────────────────────────────────────────────────────
+
+describe("review shows a pending fact's newest source excerpt", () => {
+  it("shows the originating turn under a scan-session candidate", async () => {
+    const transcript = join(home, "transcript.jsonl");
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "Unrelated chatter first. Always run the linter before pushing." }] },
+      }),
+      "utf8"
+    );
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain("Always run the linter before pushing.");
+    // The excerpt carries the whole turn, which is the reviewer's evidence for judging the claim --
+    // context the derived sentence alone doesn't carry.
+    expect(review.stdout).toContain("source:");
+    expect(review.stdout).toContain("Unrelated chatter first.");
+  });
+
+  it("shows no source line for a plain mem suggest candidate", async () => {
+    const db = openStorage(resolveDbPath());
+    const { fact } = captureSuggested(db, { text: "internal service X owns migrations", kind: "fact", root: home });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain(fact.id);
+    expect(review.stdout).not.toContain("source:");
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────── recall --since-epoch ───────────────────────────────────────────────────────────────────────────
 
 describe("recall --since-epoch", () => {
@@ -1061,7 +1252,7 @@ describe("short id prefixes (git-style, all 6 id-accepting commands)", () => {
     seedFactWithId("bbbb1111-0000-0000-0000-000000000001", { status: "pending" });
     const promoted = await runCli(["review", "--promote", "bbbb1111"]);
     expect(promoted.exitCode).toBe(0);
-    expect(promoted.stdout).toBe("promoted bbbb1111-0000-0000-0000-000000000001\n");
+    expect(promoted.stdout.trimEnd().split("\n")[0]).toBe("promoted bbbb1111-0000-0000-0000-000000000001");
     const afterPromote = await runCli(["show", "bbbb1111"]);
     expect(afterPromote.stdout).toContain("status: active");
 
@@ -1314,7 +1505,7 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
 
     const result = await runCli(["import", "--from-md", path, "--root", home, "--dry-run"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("would import 1 candidate fact(s)");
+    expect(result.stdout).toContain("would import 1 of 1 candidate fact(s)");
     expect(result.stdout).toContain("nothing written");
 
     // Regression: --dry-run previously routed through openDb (mkdir + schema init) even though it
@@ -1340,6 +1531,29 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
   });
 
+  it("skips a bullet matching a fact the user already remembered themselves (skipped_known, not a new pending duplicate)", async () => {
+    await runCli(["remember", "Backups run nightly at 2am.", "--kind", "fact", "--scope", "project", "--root", home]);
+    const path = writeFixture(["- Backups run nightly at 2am."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("imported 0 of 1 candidate fact(s)");
+    expect(result.stdout).toContain("skipped (already known)");
+
+    const summary = await runCli(["review", "--summary"]);
+    expect(summary.stdout.trim()).toBe("pending: 0, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
+  });
+
+  it("--dry-run cannot predict a skipped_known match and discloses that limitation", async () => {
+    await runCli(["remember", "Backups run nightly at 2am.", "--kind", "fact", "--scope", "project", "--root", home]);
+    const path = writeFixture(["- Backups run nightly at 2am."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home, "--dry-run"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("would import 1 of 1 candidate fact(s)");
+    expect(result.stdout).toContain("note: matches against facts already in the store are not checked in a dry run");
+  });
+
   it("promoting an imported fact goes through the exact same `mem review --promote` path as any other pending fact", async () => {
     const path = writeFixture(["- Always use pnpm, never npm."].join("\n"));
     const imported = await runCli(["import", "--from-md", path, "--root", home]);
@@ -1349,7 +1563,10 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
 
     const promoted = await runCli(["review", "--promote", id]);
     expect(promoted.exitCode).toBe(0);
-    expect(promoted.stdout.trim()).toBe(`promoted ${id}`);
+    expect(promoted.stdout.trimEnd().split("\n")[0]).toBe(`promoted ${id}`);
+    // An imported bullet is text, not a keyed claim, so promotion names the gap and the one command
+    // that closes it rather than leaving the fact quietly unsupersedable.
+    expect(promoted.stdout).toContain(`mem edit ${id} --subject <key> --value <value>`);
 
     const shown = await runCli(["show", id]);
     expect(shown.stdout).toContain("status: active");
@@ -1385,6 +1602,22 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     const both = await runCli(["import", "--from-md", path, "--from-json", path, "--root", home]);
     expect(both.exitCode).toBe(1);
     expect(both.stderr).toContain("requires exactly one of --from-md or --from-json");
+  });
+
+  it("records a source excerpt naming the file, line, and raw bullet text", async () => {
+    const path = writeFixture(["## Preferences", "- Always use pnpm, never npm."].join("\n"));
+
+    const result = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(result.exitCode).toBe(0);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const id = (JSON.parse(review.stdout) as { facts: { id: string }[] }).facts[0]?.id ?? "";
+    const shown = await runCli(["show", id, "--json"]);
+    const envelope = JSON.parse(shown.stdout) as { sources: { excerpt: string }[] };
+    expect(envelope.sources).toHaveLength(1);
+    // `<path relative to root>:<line>: <raw bullet line>` -- the resolved absolute path never
+    // appears, and the marker/whitespace the candidate's own `text` field has stripped is intact.
+    expect(envelope.sources[0]?.excerpt).toBe("CLAUDE.md:2: - Always use pnpm, never npm.");
   });
 });
 
@@ -1507,6 +1740,163 @@ describe("mem export", () => {
     const byId = new Map(envelope.facts.map((fact) => [fact.id, fact]));
     expect(byId.has(activeId)).toBe(true);
     expect(byId.has(pendingId)).toBe(false);
+  });
+});
+
+describe("mem export --format md", () => {
+  it("defaults to json: --format json output is byte-identical to the pre-existing no-flag output (modulo exportedAt)", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+
+    const bare = await runCli(["export"]);
+    const explicit = await runCli(["export", "--format", "json"]);
+    expect(bare.exitCode).toBe(0);
+    expect(explicit.exitCode).toBe(0);
+    // exportedAt is `new Date().toISOString()` at call time -- the one field guaranteed to differ
+    // between two invocations. Blank it out in both before comparing so the rest of the envelope
+    // (including key order, from JSON.stringify(..., null, 2)) is asserted byte-for-byte.
+    const normalize = (stdout: string): string => stdout.replace(/"exportedAt": ".*"/u, '"exportedAt": "<normalized>"');
+    expect(normalize(explicit.stdout)).toBe(normalize(bare.stdout));
+  });
+
+  it("round-trips fact text through `mem import --from-md` into a fresh store", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+    await runCli(["remember", "the database server is postgres", "--kind", "fact"]);
+
+    const exported = await runCli(["export", "--format", "md"]);
+    expect(exported.exitCode).toBe(0);
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-"));
+    const mdPath = join(exportDir, "export.md");
+    writeFileSync(mdPath, exported.stdout, "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-md-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-md", mdPath]);
+      expect(imported.exitCode).toBe(0);
+      expect(imported.stdout).toContain("imported 2 of 2 candidate fact(s)");
+
+      const listed = await runCli(["list", "--status", "pending"]);
+      expect(listed.stdout).toContain("uses pnpm not npm");
+      expect(listed.stdout).toContain("the database server is postgres");
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("collapses an embedded newline to one bullet with no text lost", async () => {
+    await runCli(["remember", "line one\nline two", "--kind", "fact"]);
+
+    const exported = await runCli(["export", "--format", "md"]);
+    expect(exported.exitCode).toBe(0);
+    // The whole fact must appear on a single "- " line -- two separate lines would mean the second
+    // half (BULLET_RE is single-line) is either lost or reads back as unrelated non-bullet content.
+    expect(exported.stdout).toContain("- line one line two");
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-nl-"));
+    const mdPath = join(exportDir, "export.md");
+    writeFileSync(mdPath, exported.stdout, "utf8");
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-md-nl-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-md", mdPath]);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+      const listed = await runCli(["list", "--status", "pending"]);
+      expect(listed.stdout).toContain("line one line two");
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a fact containing a code fence does not swallow the bullets that follow it", async () => {
+    await runCli(["remember", "run ```npm test``` before pushing", "--kind", "preference"]);
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+
+    const exported = await runCli(["export", "--format", "md"]);
+    expect(exported.exitCode).toBe(0);
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-fence-"));
+    const mdPath = join(exportDir, "export.md");
+    writeFileSync(mdPath, exported.stdout, "utf8");
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-md-fence-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-md", mdPath]);
+      // Both bullets must import: if the fence had opened a real code block, extractMarkdownBullets
+      // would have swallowed everything after it, including "uses pnpm not npm".
+      expect(imported.stdout).toContain("imported 2 of 2 candidate fact(s)");
+      const listed = await runCli(["list", "--status", "pending"]);
+      expect(listed.stdout).toContain("uses pnpm not npm");
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a fact whose text starts with `-` imports back with its leading character intact", async () => {
+    // Seeded directly via insertFact rather than `mem remember`: commander parses a leading-dash
+    // argv element as an unknown option, which is a CLI arg-parsing quirk unrelated to the
+    // round-trip behavior this test targets.
+    const seedDb = openStorage(resolveDbPath());
+    insertFact(seedDb, { text: "-1 is the sentinel for 'no result'", kind: "fact", scope: "global", source_type: "user" });
+    seedDb.close();
+
+    const exported = await runCli(["export", "--format", "md"]);
+    expect(exported.exitCode).toBe(0);
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-dash-"));
+    const mdPath = join(exportDir, "export.md");
+    writeFileSync(mdPath, exported.stdout, "utf8");
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-md-dash-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const imported = await runCli(["import", "--from-md", mdPath]);
+      expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
+      const listed = await runCli(["list", "--status", "pending"]);
+      expect(listed.stdout).toContain("-1 is the sentinel for 'no result'");
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("applies --kind and --scope filters identically to json and md output", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+    await runCli(["remember", "the database server is postgres", "--kind", "fact"]);
+
+    const md = await runCli(["export", "--format", "md", "--kind", "fact"]);
+    expect(md.exitCode).toBe(0);
+    expect(md.stdout).toContain("the database server is postgres");
+    expect(md.stdout).not.toContain("uses pnpm not npm");
+    expect(md.stdout).toContain("## Facts");
+    expect(md.stdout).not.toContain("## Preferences");
+  });
+
+  it("an empty result set produces a valid header comment with no dangling heading", async () => {
+    const exported = await runCli(["export", "--format", "md", "--kind", "correction"]);
+    expect(exported.exitCode).toBe(0);
+    expect(exported.stdout).toContain("<!--");
+    expect(exported.stdout).not.toContain("##");
+
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-empty-"));
+    const mdPath = join(exportDir, "export.md");
+    writeFileSync(mdPath, exported.stdout, "utf8");
+    const imported = await runCli(["import", "--from-md", mdPath]);
+    expect(imported.exitCode).toBe(0);
+    expect(imported.stdout).toContain("no qualifying bullets found");
+    rmSync(exportDir, { recursive: true, force: true });
+  });
+
+  it("rejects an unrecognized --format value", async () => {
+    const result = await runCli(["export", "--format", "yaml"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('invalid --format "yaml"');
   });
 });
 
@@ -1715,6 +2105,135 @@ describe("mem show --json", () => {
     expect(() => JSON.parse(result.stdout)).toThrow();
     expect(result.stdout).toContain(`id: ${id}`);
     expect(result.stdout).toContain("freshness=");
+  });
+});
+
+describe("mem show --related", () => {
+  it("ranks a shared-entity neighbour above a shared-topic-only neighbour", async () => {
+    // Chosen so plain (unweighted) shared-topic counts alone would rank topicNeighbour first (4
+    // shared topics vs. entityNeighbour's 2) -- only entity-weighting the one shared entity flips
+    // the order, so this actually exercises RELATED_ENTITY_WEIGHT rather than passing by accident.
+    const target = await runCli(["remember", "the release plan pins the build to v9.9.9 while docs get updated", "--kind", "fact"]);
+    const targetId = extractRememberedId(target);
+    const entityNeighbour = await runCli(["remember", "the changelog also references v9.9.9 explicitly", "--kind", "fact"]);
+    const entityId = extractRememberedId(entityNeighbour);
+    const topicNeighbour = await runCli(["remember", "the docs and the release build plan need one more pass", "--kind", "fact"]);
+    const topicId = extractRememberedId(topicNeighbour);
+
+    const shown = await runCli(["show", targetId, "--related"]);
+    expect(shown.exitCode).toBe(0);
+    const relatedSection = shown.stdout.slice(shown.stdout.indexOf("related:"));
+    expect(relatedSection.indexOf(entityId)).toBeGreaterThanOrEqual(0);
+    expect(relatedSection.indexOf(topicId)).toBeGreaterThanOrEqual(0);
+    expect(relatedSection.indexOf(entityId)).toBeLessThan(relatedSection.indexOf(topicId));
+  });
+
+  it("never lists the target fact itself", async () => {
+    const remembered = await runCli(["remember", "src/cli.ts src/cli.ts src/cli.ts", "--kind", "fact"]);
+    const id = extractRememberedId(remembered);
+
+    const shown = await runCli(["show", id, "--related"]);
+    expect(shown.exitCode).toBe(0);
+    // The only fact carrying this entity is itself, so the honest answer is "none" -- not a related
+    // section that quietly includes the very fact being shown.
+    expect(shown.stdout).toContain("related: none");
+    expect(shown.stdout).not.toContain(`  - ${id}`);
+  });
+
+  it("excludes a superseded fact from the related list", async () => {
+    const first = await runCli([
+      "remember",
+      "src/cli.ts owns the node floor at 18",
+      "--kind",
+      "decision",
+      "--subject",
+      "node-floor",
+      "--value",
+      "18",
+    ]);
+    const loserId = extractRememberedId(first);
+    await runCli([
+      "remember",
+      "src/cli.ts owns the node floor at 20",
+      "--kind",
+      "decision",
+      "--subject",
+      "node-floor",
+      "--value",
+      "20",
+    ]);
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+    const loser = await runCli(["show", loserId]);
+    expect(loser.stdout).toContain("status: superseded");
+
+    const other = await runCli(["remember", "src/cli.ts needs one more review pass", "--kind", "fact"]);
+    const otherId = extractRememberedId(other);
+
+    const shown = await runCli(["show", otherId, "--related"]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).not.toContain(loserId);
+  });
+
+  it("includes a pending fact but labels it consistent with mem recall's own pending caveat", async () => {
+    const active = await runCli(["remember", "src/cli.ts owns argument parsing", "--kind", "fact"]);
+    const activeId = extractRememberedId(active);
+    const suggested = await runCli(["suggest", "src/cli.ts might also own validation", "--kind", "preference"]);
+    const pendingMatch = /suggested \S+ fact (\S+) \(pending\)/u.exec(suggested.stdout);
+    const pendingId = pendingMatch?.[1] as string;
+    expect(pendingId).toBeTruthy();
+
+    const shown = await runCli(["show", activeId, "--related"]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain(pendingId);
+    // Same wording `buildDisplay` already uses for a pending fact in `mem recall` output.
+    expect(shown.stdout).toContain("(pending, unconfirmed)");
+  });
+
+  it("does not leak a related fact across project scope roots", async () => {
+    const rootA = mkdtempSync(join(tmpdir(), "mem-related-a-"));
+    const rootB = mkdtempSync(join(tmpdir(), "mem-related-b-"));
+    const inA = await runCli(["remember", "src/cli.ts drives root a's routing", "--kind", "fact", "--scope", "project", "--root", rootA]);
+    const idA = extractRememberedId(inA);
+    const inB = await runCli(["remember", "src/cli.ts drives root b's routing", "--kind", "fact", "--scope", "project", "--root", rootB]);
+    const idB = extractRememberedId(inB);
+
+    const shown = await runCli(["show", idA, "--related", "--root", rootA]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).not.toContain(idB);
+  });
+
+  it("says plainly when nothing shares a term, rather than printing an empty section", async () => {
+    const remembered = await runCli(["remember", "xqzvthisuniquephraseneverrepeats", "--kind", "fact"]);
+    const id = extractRememberedId(remembered);
+
+    const shown = await runCli(["show", id, "--related"]);
+    expect(shown.exitCode).toBe(0);
+    expect(shown.stdout).toContain("related: none");
+  });
+
+  it("carries related in the --json shape, entity-scored above topic-only, with a caveat on a pending neighbour", async () => {
+    const target = await runCli(["remember", "src/cli.ts handles the routing during testing", "--kind", "fact"]);
+    const targetId = extractRememberedId(target);
+    const entityNeighbour = await runCli(["remember", "src/cli.ts got a follow-up patch", "--kind", "fact"]);
+    const entityId = extractRememberedId(entityNeighbour);
+    const suggested = await runCli(["suggest", "testing should be part of every review", "--kind", "preference"]);
+    const pendingMatch = /suggested \S+ fact (\S+) \(pending\)/u.exec(suggested.stdout);
+    const pendingId = pendingMatch?.[1] as string;
+
+    const shown = await runCli(["show", targetId, "--related", "--json"]);
+    expect(shown.exitCode).toBe(0);
+    const envelope = JSON.parse(shown.stdout) as {
+      related: ReadonlyArray<{ id: string; status: string; sharedTerms: number; caveat: string | null }>;
+    };
+    expect(Array.isArray(envelope.related)).toBe(true);
+    const byId = new Map(envelope.related.map((r) => [r.id, r]));
+    expect(byId.has(entityId)).toBe(true);
+    expect(byId.has(pendingId)).toBe(true);
+    expect(byId.get(pendingId)?.status).toBe("pending");
+    expect(byId.get(pendingId)?.caveat).toBe("pending, unconfirmed");
+    const entityScore = byId.get(entityId)?.sharedTerms ?? 0;
+    const pendingScore = byId.get(pendingId)?.sharedTerms ?? 0;
+    expect(entityScore).toBeGreaterThan(pendingScore);
   });
 });
 
@@ -1930,13 +2449,68 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
     try {
       const result = await runCli(["import", "--from-json", jsonPath, "--dry-run"]);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toContain("would import 1 candidate fact(s)");
+      expect(result.stdout).toContain("would import 1 of 1 candidate fact(s)");
       expect(result.stdout).toContain("nothing written");
       expect(existsSync(join(targetHome, "mem.db"))).toBe(false);
     } finally {
       process.env["TOKEN_GOAT_MEM_HOME"] = home;
       rmSync(targetHome, { recursive: true, force: true });
       rmSync(exportDir, { recursive: true, force: true });
+    }
+  });
+
+  it("--dry-run applies the same root-bounding and secret screening the real import does, and says what it cannot check", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "mem-import-root-"));
+    await runCli(["remember", "ordinary fact one", "--kind", "fact", "--scope", "project", "--root", projectRoot]);
+    const exported = await runCli(["export"]);
+    const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
+    const jsonPath = join(exportDir, "import.json");
+
+    const envelope = JSON.parse(exported.stdout) as { facts: Record<string, unknown>[] };
+    const base = envelope.facts[0] as Record<string, unknown>;
+    envelope.facts = [
+      base,
+      { ...base, id: "33333333-3333-4333-8333-333333333333", text: "fact bound outside the import root", scopeRoot: join(tmpdir(), "some-other-root-xyz") },
+      { ...base, id: "44444444-4444-4444-8444-444444444444", text: "the key is AKIAIOSFODNN7EXAMPLE and sk-abcdefghijklmnopqrstuvwxyz012345" },
+    ];
+    writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
+
+    const targetHome = mkdtempSync(join(tmpdir(), "mem-import-target-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
+    try {
+      const result = await runCli(["import", "--from-json", jsonPath, "--root", projectRoot, "--dry-run"]);
+      expect(result.exitCode).toBe(0);
+
+      const lines = result.stdout.split("\n");
+      const outsideLine = lines.find((line) => line.includes("fact bound outside the import root"));
+      const secretLine = lines.find((line) => line.includes("AKIAIOSFODNN7EXAMPLE"));
+      const ordinaryLine = lines.find((line) => line.includes('"ordinary fact one"'));
+
+      // Non-firing guard: a valid candidate is still reported as importable, so the screening above
+      // is not just refusing everything.
+      expect(ordinaryLine).toBeDefined();
+      expect(ordinaryLine).toContain("would-import");
+
+      expect(outsideLine).toBeDefined();
+      expect(outsideLine).toContain("would-skip");
+      expect(outsideLine).toContain('has a "scopeRoot"');
+      expect(outsideLine).toContain("outside the import root");
+
+      expect(secretLine).toBeDefined();
+      expect(secretLine).toContain("would-skip");
+      expect(secretLine).toContain("refusing to import fact: possible secret detected");
+      expect(secretLine).toContain("text: aws-access-key-id");
+
+      expect(result.stdout).toContain("would import 1 of 3 candidate fact(s)");
+      // The one refusal a dry run genuinely cannot predict is disclosed rather than implied away.
+      expect(result.stdout).toContain("duplicate-id conflicts are not checked in a dry run");
+      // Still no store touched.
+      expect(existsSync(join(targetHome, "mem.db"))).toBe(false);
+    } finally {
+      process.env["TOKEN_GOAT_MEM_HOME"] = home;
+      rmSync(targetHome, { recursive: true, force: true });
+      rmSync(exportDir, { recursive: true, force: true });
+      rmSync(projectRoot, { recursive: true, force: true });
     }
   });
 
@@ -2256,6 +2830,66 @@ describe("mem init/uninstall", () => {
     expect(existsSync(keybindingsPath)).toBe(true);
     const keybindings = JSON.parse(readFileSync(keybindingsPath, "utf8"));
     expect(keybindings).toHaveLength(2);
+  });
+
+  it("copilot-visual-studio init creates .github/copilot-instructions.md with the memory block, even when .github/ does not exist beforehand", async () => {
+    expect(existsSync(join(toolRoot, ".github"))).toBe(false);
+    const result = await runCli(["init", "copilot-visual-studio", "--root", toolRoot]);
+    expect(result.exitCode).toBe(0);
+
+    const content = readFileSync(join(toolRoot, ".github", "copilot-instructions.md"), "utf8");
+    expect(content).toContain("<!-- token-goat-mem:start tools=copilot-visual-studio -->");
+    expect(content).toContain("## Memory");
+  });
+
+  it("installing copilot-visual-studio and copilot-jetbrains then uninstalling one leaves the block intact; uninstalling the second removes it and the file", async () => {
+    const instructionsPath = join(toolRoot, ".github", "copilot-instructions.md");
+
+    for (const tool of ["copilot-visual-studio", "copilot-jetbrains"]) {
+      const result = await runCli(["init", tool, "--root", toolRoot]);
+      expect(result.exitCode).toBe(0);
+    }
+    const afterBothInit = readFileSync(instructionsPath, "utf8");
+    expect(afterBothInit).toContain("<!-- token-goat-mem:start tools=copilot-jetbrains,copilot-visual-studio -->");
+
+    const uninstallOne = await runCli(["uninstall", "copilot-visual-studio", "--root", toolRoot]);
+    expect(uninstallOne.exitCode).toBe(0);
+    const afterOneUninstall = readFileSync(instructionsPath, "utf8");
+    expect(afterOneUninstall).toContain("<!-- token-goat-mem:start tools=copilot-jetbrains -->");
+    expect(afterOneUninstall).toContain("## Memory");
+
+    const uninstallTwo = await runCli(["uninstall", "copilot-jetbrains", "--root", toolRoot]);
+    expect(uninstallTwo.exitCode).toBe(0);
+    expect(existsSync(instructionsPath)).toBe(false);
+  });
+
+  it("--user is rejected for copilot-visual-studio and copilot-jetbrains", async () => {
+    const visualStudioResult = await runCli(["init", "copilot-visual-studio", "--root", toolRoot, "--user"]);
+    expect(visualStudioResult.exitCode).toBe(1);
+    expect(visualStudioResult.stderr).toContain("no user-level config");
+
+    const jetbrainsResult = await runCli(["init", "copilot-jetbrains", "--root", toolRoot, "--user"]);
+    expect(jetbrainsResult.exitCode).toBe(1);
+    expect(jetbrainsResult.stderr).toContain("no user-level config");
+
+    expect(existsSync(join(toolRoot, ".github"))).toBe(false);
+  });
+
+  it("a pre-existing .github/copilot-instructions.md with hand-written content is preserved with a one-time .bak snapshot, and left with only its own content after uninstall", async () => {
+    const instructionsPath = join(toolRoot, ".github", "copilot-instructions.md");
+    mkdirSync(join(toolRoot, ".github"), { recursive: true });
+    const original = "# Repo instructions\n\nUse two-space indentation.\n";
+    writeFileSync(instructionsPath, original, "utf8");
+
+    const initResult = await runCli(["init", "copilot-visual-studio", "--root", toolRoot]);
+    expect(initResult.exitCode).toBe(0);
+    expect(readFileSync(instructionsPath, "utf8")).not.toBe(original);
+    expect(existsSync(`${instructionsPath}.token-goat-mem.bak`)).toBe(true);
+    expect(readFileSync(`${instructionsPath}.token-goat-mem.bak`, "utf8")).toBe(original);
+
+    const uninstallResult = await runCli(["uninstall", "copilot-visual-studio", "--root", toolRoot]);
+    expect(uninstallResult.exitCode).toBe(0);
+    expect(readFileSync(instructionsPath, "utf8")).toBe(original);
   });
 });
 
@@ -3577,12 +4211,23 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     expect(full.stdout.startsWith("TGMEM/2\n")).toBe(true);
   });
 
-  it("--stable writes nothing to recall_log even with a session id", async () => {
-    await runCli(["remember", "a stable fact", "--kind", "fact", "--scope", "global"]);
+  it("--stable writes recall_log rows like any other surfacing, so --delta and mem used still work under it", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a stable fact", "--kind", "fact", "--scope", "global"]));
     const result = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--stable", "--root", home]);
     expect(result.exitCode).toBe(0);
+    // Non-firing guard: the fact really was emitted, so the logging assertion below is not
+    // vacuously satisfied by an empty response.
     expect(result.stdout).toContain("a stable fact");
-    expect(recallLogRows()).toEqual([]);
+    expect(recallLogRows().map(([factId, sessionId]) => [factId, sessionId])).toEqual([[id, "sess-1"]]);
+
+    // The two consumers of that row, end to end.
+    const delta = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--stable", "--delta", "--root", home]);
+    expect(delta.exitCode).toBe(0);
+    expect(delta.stdout).toBe("TGMEM/2  delta=1\n");
+
+    const used = await runCli(["used", id, "--session-id", "sess-1"]);
+    expect(used.exitCode).toBe(0);
+    expect(used.stdout).toContain("marked 1 recall row useful in session sess-1");
   });
 
   it("mem epoch --gc prunes recall_log rows older than 30 days and reports the count, leaving recent rows alone", async () => {
@@ -3992,6 +4637,112 @@ describe("scan-session", () => {
     expect(second.exitCode).not.toBe(0);
     expect(second.stdout).not.toContain("no new durable statements found");
     expect(second.stderr).toContain("store is broken");
+  });
+
+  // ─────────────────────────────────────────────────────────────────────── sources (S9 provenance) ───────────────────────────────────────────────────────────────────────
+
+  it("records a source excerpt carrying the whole turn, which the candidate sentence alone does not", async () => {
+    const transcript = writeTranscript([
+      "Unrelated commentary about the weekend goes here. Always run the linter before pushing.",
+    ]);
+    const result = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    expect(result.stdout).toContain("filed 1 pending suggestion");
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const id = (JSON.parse(review.stdout) as { facts: { id: string; text: string }[] }).facts[0]?.id ?? "";
+    const shown = await runCli(["show", id, "--json"]);
+    const envelope = JSON.parse(shown.stdout) as { fact: { text: string }; sources: { excerpt: string }[] };
+    expect(envelope.fact.text).toBe("Always run the linter before pushing.");
+    expect(envelope.sources).toHaveLength(1);
+    // The excerpt carries the whole turn -- context the candidate sentence itself never included.
+    expect(envelope.sources[0]?.excerpt).toContain("Unrelated commentary about the weekend");
+    expect(envelope.sources[0]?.excerpt).toContain("Always run the linter before pushing.");
+  });
+
+  it("truncates an over-long turn's excerpt at MAX_SOURCE_EXCERPT_LENGTH", async () => {
+    const filler = "x".repeat(MAX_SOURCE_EXCERPT_LENGTH + 200);
+    const transcript = writeTranscript([`Always run the linter before pushing. ${filler}`]);
+    const result = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    expect(result.stdout).toContain("filed 1 pending suggestion");
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const id = (JSON.parse(review.stdout) as { facts: { id: string }[] }).facts[0]?.id ?? "";
+    const shown = await runCli(["show", id, "--json"]);
+    const envelope = JSON.parse(shown.stdout) as { sources: { excerpt: string }[] };
+    const excerpt = envelope.sources[0]?.excerpt ?? "";
+    expect(excerpt.length).toBeLessThan(MAX_SOURCE_EXCERPT_LENGTH + 50);
+    expect(excerpt).not.toContain(filler);
+    expect(excerpt.endsWith("…")).toBe(true);
+  });
+
+  it("captures the fact but writes no source row when the turn (not the candidate sentence) carries a secret", async () => {
+    // The extracted candidate sentence never contains the credential -- it appears elsewhere in the
+    // same turn -- so a screen limited to the candidate text would miss it entirely.
+    const transcript = writeTranscript([
+      "Always run the linter before pushing. Also the deploy key is AKIAIOSFODNN7EXAMPLE for reference.",
+    ]);
+    const result = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    expect(result.stdout).toContain("filed 1 pending suggestion");
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const id = (JSON.parse(review.stdout) as { facts: { id: string; text: string }[] }).facts[0]?.id ?? "";
+    expect((JSON.parse(review.stdout) as { facts: { text: string }[] }).facts[0]?.text).toBe(
+      "Always run the linter before pushing."
+    );
+    const shown = await runCli(["show", id, "--json"]);
+    const envelope = JSON.parse(shown.stdout) as { sources: unknown[] };
+    expect(envelope.sources).toEqual([]);
+  });
+});
+
+describe("sources table (mem remember/mem suggest never feed it; mem epoch --gc still prunes it)", () => {
+  it("mem remember writes zero source rows", async () => {
+    const id = extractRememberedId(await runCli(["remember", "a fact with no source", "--kind", "fact", "--scope", "global"]));
+    const db = openStorage(resolveDbPath());
+    try {
+      expect(listSourcesForFact(db, id)).toEqual([]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("mem epoch --gc prunes source rows older than the retention window and reports the count", async () => {
+    function writeTranscript(turns: readonly string[]): string {
+      const path = join(home, "gc-transcript.jsonl");
+      writeFileSync(
+        path,
+        turns.map((text) => JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text }] } })).join("\n"),
+        "utf8"
+      );
+      return path;
+    }
+    const transcript = writeTranscript(["Always run the linter before pushing, with some extra context in the turn."]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const id = (JSON.parse(review.stdout) as { facts: { id: string }[] }).facts[0]?.id ?? "";
+
+    const db = openStorage(resolveDbPath());
+    const before = listSourcesForFact(db, id);
+    expect(before).toHaveLength(1);
+    // Backdate the source row past the GC retention window, the same way the recall_log gc test
+    // ages its own rows -- gc keys on `stored_at`, which a fresh capture always sets to "now".
+    db.prepare("UPDATE sources SET stored_at = ? WHERE id = ?").run(
+      new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString(),
+      before[0]?.id
+    );
+    db.close();
+
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode).toBe(0);
+    expect(gc.stdout).toMatch(/pruned_sources=1\b/u);
+
+    const after = openStorage(resolveDbPath());
+    try {
+      expect(listSourcesForFact(after, id)).toEqual([]);
+    } finally {
+      after.close();
+    }
   });
 });
 

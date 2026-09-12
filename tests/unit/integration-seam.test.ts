@@ -1047,7 +1047,9 @@ describe("buildHintFormat", () => {
     expect(second.delta).toBe(true);
     expect(second.header).toBe(`${TGMEM_HEADER}  delta=1`);
     expect(emittedIds(second)).toEqual(["fact-d"]);
-    expect(second.lines[second.lines.length - 1]).toBe(TGMEM_FOOTER_LINE);
+    // Not TGMEM_FOOTER_LINE verbatim: this call is logged under a session, so the footer also
+    // carries the `mem used` invocation naming it and the one fact this call emitted.
+    expect(second.lines[second.lines.length - 1]).toBe("footer  mem show <id> for detail; mem used fact-d --session-id sess-1 to mark what helped");
 
     // The delta itself is logged, so a third delta call has nothing left: header only, no footer.
     const third = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });
@@ -1065,7 +1067,11 @@ describe("buildHintFormat", () => {
     expect(fullAgain.lines.length).toBeGreaterThan(0);
     expect(fullAgain.delta).toBe(false);
     expect(fullAgain.header).toBe(TGMEM_HEADER);
-    expect(fullAgain.lines).toEqual(freshSession.lines);
+    // Fact-lines are byte-identical; the footer's `mem used` clause is not, and should not be --
+    // it names the session this call is logging under, and the two calls logged under different ones.
+    expect(factLines(fullAgain)).toEqual(factLines(freshSession));
+    expect(fullAgain.lines[fullAgain.lines.length - 1]).toContain("--session-id sess-1");
+    expect(freshSession.lines[freshSession.lines.length - 1]).toContain("--session-id sess-2");
     expect(emittedIds(fullAgain)).toEqual(["fact-a", "fact-b", "fact-c"]);
   });
 
@@ -1332,7 +1338,10 @@ describe("buildHintFormat", () => {
     const allStop = await buildHint({ root, dbPath, sessionId: "sess-1", query: "is it the one for me" });
     const noQuery = await buildHint({ root, dbPath, sessionId: "sess-2" });
     expect(emittedIds(noQuery)).toEqual(["fact-a", "fact-b", "fact-c"]);
-    expect(allStop.lines).toEqual(noQuery.lines);
+    // Fact-lines match; the footer's `mem used` clause names each call's own session id, so it does not.
+    expect(factLines(allStop)).toEqual(factLines(noQuery));
+    expect(allStop.lines[allStop.lines.length - 1]).toContain("--session-id sess-1");
+    expect(noQuery.lines[noQuery.lines.length - 1]).toContain("--session-id sess-2");
 
     const suppressed = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "is it the one for me" });
     expect(suppressed.header).toBe(`${TGMEM_HEADER}  delta=1`);
@@ -1375,11 +1384,20 @@ describe("buildHintFormat", () => {
     }
   });
 
-  it("--stable never writes to recall_log (it exists to make output deterministic for tests)", async () => {
+  it("--stable still writes to recall_log: it reorders output, it does not un-surface a fact", async () => {
     threeGlobalFacts();
     const stable = await buildHint({ root, dbPath, sessionId: "sess-1", stable: true });
-    expect(factLines(stable)).toHaveLength(3);
-    expect(loggedIds("sess-1")).toEqual([]);
+    const surfaced = factLines(stable);
+    // Non-firing guard: the ordering override did not suppress the facts themselves, so the
+    // logging assertion below is about bookkeeping and not about an empty response.
+    expect(surfaced.length).toBeGreaterThan(0);
+    expect(surfaced).toHaveLength(3);
+    expect(loggedIds("sess-1").slice().sort()).toEqual(["fact-a", "fact-b", "fact-c"]);
+
+    // And because the log was written, the session bookkeeping `--delta` depends on works.
+    const delta = await buildHint({ root, dbPath, sessionId: "sess-1", stable: true, delta: true });
+    expect(delta.delta).toBe(true);
+    expect(factLines(delta)).toEqual([]);
   });
 
   it("delta without a session id is a plain full response (the CLI rejects the pairing; the seam cannot subtract from an unknown session)", async () => {

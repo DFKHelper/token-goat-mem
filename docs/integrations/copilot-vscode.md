@@ -8,10 +8,11 @@ Wires the `tasks.json`, user `keybindings.json`, and `AGENTS.md` snippets docume
 
 ```bash
 mem init copilot-vscode --root .        # writes .vscode/tasks.json, ~/…/Code/User/keybindings.json, AGENTS.md
+mem init copilot-vscode --user          # writes only ~/…/Code/User/keybindings.json (no tasks.json, no AGENTS.md)
 mem init copilot-vscode --dry-run       # preview without touching disk
 ```
 
-Safe to re-run: mem's own tasks/keybinding entries and `AGENTS.md` block are upgraded in place, never duplicated, and a pre-existing hand-written task/keybinding with the same label/key aborts the write with a conflict error instead of being overwritten. `mem uninstall copilot-vscode` removes exactly those entries, preserving any other tasks/keybindings you've added. The rest of this doc is what `mem init copilot-vscode` writes, if you'd rather do it by hand.
+Safe to re-run: mem's own tasks/keybinding entries and `AGENTS.md` block are upgraded in place, never duplicated, and a pre-existing hand-written task/keybinding with the same label/key aborts the write with a conflict error instead of being overwritten. `--user` writes only the user-level `keybindings.json`, since the tasks file and the `AGENTS.md` block are project artifacts and `--user` has nowhere project-scoped to put them. `mem uninstall copilot-vscode` removes exactly those entries, preserving any other tasks/keybindings you've added. The rest of this doc is what `mem init copilot-vscode` writes, if you'd rather do it by hand.
 
 ## Shell invocation
 

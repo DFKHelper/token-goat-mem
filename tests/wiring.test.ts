@@ -15,9 +15,12 @@ import {
   claudeCode,
   codex,
   copilotCli,
+  copilotJetbrains,
+  copilotVisualStudio,
   copilotVscode,
   vscodeUserDir,
   WiringConflictError,
+  WiringUserUnsupportedError,
   writeManagedFile,
 } from "../src/wiring.js";
 
@@ -213,7 +216,7 @@ describe("claudeCode wiring", () => {
     expect(afterUninstall.hooks.SessionStart).toEqual(original.hooks.SessionStart);
   });
 
-  it("aborts with WiringConflictError when an unstamped hook with the same command already exists", () => {
+  it("adopts (stamps in place) an unstamped hook whose command already matches what mem would write", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     const original = {
       hooks: {
@@ -231,8 +234,76 @@ describe("claudeCode wiring", () => {
     };
     seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
 
-    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(WiringConflictError);
-    expect(() => claudeCode.install({ root, homeDir: home })).toThrow(/already exists in .* and was not created by mem/u);
+    const result = claudeCode.install({ root, homeDir: home });
+    const settingsChange = result.changes.find((c) => c.path === settingsPath);
+    expect(settingsChange?.action).toBe("update");
+    expect(settingsChange?.detail).toContain("adopted a pre-existing SessionStart hook");
+
+    const settings = JSON.parse(read(settingsPath));
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.SessionStart[0].hooks[0].__token_goat_mem).toBe(true);
+  });
+
+  it("adopts an orphaned hook from a pre-STAMP_KEY mem install across every event, project- and user-level, with no duplicate", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    // The exact stale settings.json a pre-STAMP_KEY mem install left behind: a bare SessionStart
+    // recall with no --hook-stdin, and none of the other three events mem installs today.
+    const original = {
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+              },
+            ],
+          },
+        ],
+      },
+    };
+    seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
+
+    const result = claudeCode.install({ root, homeDir: home });
+    const settingsChange = result.changes.find((c) => c.path === settingsPath);
+    expect(settingsChange?.detail).toContain("adopted a pre-existing SessionStart hook");
+
+    const settings = JSON.parse(read(settingsPath));
+    expect(settings.hooks.SessionStart).toHaveLength(1);
+    expect(settings.hooks.SessionStart[0].hooks[0].__token_goat_mem).toBe(true);
+    expect(settings.hooks.SessionStart[0].hooks[0].command).toBe(
+      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true'
+    );
+    expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
+    expect(settings.hooks.Stop).toHaveLength(1);
+    expect(settings.hooks.PreCompact).toHaveLength(1);
+  });
+
+  it("does not adopt a mem-shaped command written under the wrong event (conservative shape match)", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    // Mem's own Stop/PreCompact shape (scan-session), planted under SessionStart -- not the shape
+    // SessionStart itself writes, so it must be left alone rather than adopted for SessionStart.
+    const original = {
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: 'command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || true',
+              },
+            ],
+          },
+        ],
+      },
+    };
+    seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
+
+    claudeCode.install({ root, homeDir: home });
+    const settings = JSON.parse(read(settingsPath));
+    expect(settings.hooks.SessionStart).toHaveLength(2);
+    expect(settings.hooks.SessionStart[0].hooks[0].__token_goat_mem).toBeUndefined();
+    expect(settings.hooks.SessionStart[1].hooks[0].__token_goat_mem).toBe(true);
   });
 
   it("aborts when hooks.SessionStart exists but is not an array", () => {
@@ -362,6 +433,22 @@ describe("claudeCode wiring", () => {
 // ─────────────────────────────────────────────────────────────────────────── codex / copilot-cli AGENTS.md shared block ───────────────────────────────────────────────────────────────────────────
 
 describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-counted AGENTS.md block)", () => {
+  it("--user is rejected for codex and copilot-cli: neither has a user-level target", () => {
+    expect(() => codex.install({ root, homeDir: home, user: true })).toThrow(WiringUserUnsupportedError);
+    expect(() => copilotCli.install({ root, homeDir: home, user: true })).toThrow(WiringUserUnsupportedError);
+    expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
+  });
+
+  it("--user installs copilot-vscode's keybindings alone, leaving the project untouched", () => {
+    copilotVscode.install({ root, homeDir: home, user: true });
+
+    // The keybindings are the only artifact VS Code reads from the user directory, so they are the
+    // whole of a user-level install -- and a --user run must not write the project files it skips.
+    expect(existsSync(join(vscodeUserDir(home), "keybindings.json"))).toBe(true);
+    expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
+    expect(existsSync(join(root, ".vscode", "tasks.json"))).toBe(false);
+  });
+
   it("codex install alone creates one shared block with tools=codex", () => {
     codex.install({ root, homeDir: home });
 
@@ -550,6 +637,69 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
       // ...but the unrelated, pre-existing orphaned content is left untouched, not swallowed.
       expect(afterUninstall).toContain("orphaned, no end marker for this one");
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── copilot-visual-studio / copilot-jetbrains .github/copilot-instructions.md shared block ───────────────────────────────────────────────────────────────────────────
+
+describe("copilotVisualStudio, copilotJetbrains wiring (shared, reference-counted .github/copilot-instructions.md block)", () => {
+  const instructionsPath = (): string => join(root, ".github", "copilot-instructions.md");
+
+  it("copilot-visual-studio install alone creates .github/copilot-instructions.md with one shared block, even though .github/ does not exist yet", () => {
+    expect(existsSync(join(root, ".github"))).toBe(false);
+    copilotVisualStudio.install({ root, homeDir: home });
+
+    const content = read(instructionsPath());
+    expect(content).toContain("<!-- token-goat-mem:start tools=copilot-visual-studio -->");
+    expect(content).toContain("<!-- token-goat-mem:end -->");
+    expect(content.split("## Memory").length - 1).toBe(1);
+  });
+
+  it("copilot-jetbrains installing second joins the existing block: tools= gets both, sorted, one \"## Memory\" section", () => {
+    copilotVisualStudio.install({ root, homeDir: home });
+    copilotJetbrains.install({ root, homeDir: home });
+
+    const content = read(instructionsPath());
+    expect(content).toContain("<!-- token-goat-mem:start tools=copilot-jetbrains,copilot-visual-studio -->");
+    expect(content.split("## Memory").length - 1).toBe(1);
+    expect(content.split("<!-- token-goat-mem:start").length - 1).toBe(1);
+  });
+
+  it("uninstalling one of the two leaves the other listed and the block in place; uninstalling the last removes the block and deletes the file it created", () => {
+    copilotVisualStudio.install({ root, homeDir: home });
+    copilotJetbrains.install({ root, homeDir: home });
+
+    copilotVisualStudio.uninstall({ root, homeDir: home });
+    const content = read(instructionsPath());
+    expect(content).toContain("<!-- token-goat-mem:start tools=copilot-jetbrains -->");
+    expect(content).toContain("## Memory");
+
+    copilotJetbrains.uninstall({ root, homeDir: home });
+    // .github/copilot-instructions.md never existed before the first of these two installs created
+    // it, so once the last tool's uninstall empties the shared block, the file itself is removed.
+    expect(existsSync(instructionsPath())).toBe(false);
+  });
+
+  it("a pre-existing hand-written .github/copilot-instructions.md is preserved, backed up once, and restored after uninstall", () => {
+    const path = instructionsPath();
+    const original = "# Repo Copilot instructions\n\nFollow the style guide.\n";
+    seed(path, original);
+
+    copilotVisualStudio.install({ root, homeDir: home });
+    const afterInstall = read(path);
+    expect(afterInstall).not.toBe(original);
+    expect(afterInstall).toContain(original.trimEnd());
+    expect(existsSync(`${path}.token-goat-mem.bak`)).toBe(true);
+    expect(read(`${path}.token-goat-mem.bak`)).toBe(original);
+
+    copilotVisualStudio.uninstall({ root, homeDir: home });
+    expect(read(path)).toBe(original);
+  });
+
+  it("--user is rejected for copilot-visual-studio and copilot-jetbrains: neither has a user-level target", () => {
+    expect(() => copilotVisualStudio.install({ root, homeDir: home, user: true })).toThrow(WiringUserUnsupportedError);
+    expect(() => copilotJetbrains.install({ root, homeDir: home, user: true })).toThrow(WiringUserUnsupportedError);
+    expect(existsSync(instructionsPath())).toBe(false);
   });
 });
 

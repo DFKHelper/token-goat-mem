@@ -92,6 +92,13 @@ export interface Candidate {
   readonly kind: FactKind;
   /** Zero-based index of the user turn it came from, for `source_ref`. */
   readonly turnIndex: number;
+  /**
+   * The whole user turn the candidate sentence was pulled from, whitespace-collapsed the same way
+   * `sentences()` collapses each candidate line. The raw material for this candidate's `sources`
+   * excerpt (cli.ts's scan-session handler) -- deliberately larger than `text`, since a source row
+   * that only ever echoed the fact back would carry no provenance beyond it.
+   */
+  readonly context: string;
 }
 
 /**
@@ -234,6 +241,10 @@ export function extractCandidates(turns: readonly string[]): Candidate[] {
     if (isSlashCommand(turn)) {
       return;
     }
+    // Same collapse `sentences()` applies per line, run once over the whole turn -- so a
+    // multi-line turn's excerpt reads as one normalized block rather than carrying its original
+    // newlines into `sources.excerpt`.
+    const context = turn.replace(/\s+/gu, " ").trim();
     for (const sentence of sentences(turn)) {
       const claim = sentence.replace(DISCOURSE_PREFIX, "");
       let trigger: Trigger | undefined;
@@ -266,7 +277,7 @@ export function extractCandidates(turns: readonly string[]): Candidate[] {
         continue;
       }
       seen.add(key);
-      found.push({ text: sentence, kind: trigger.kind, turnIndex });
+      found.push({ text: sentence, kind: trigger.kind, turnIndex, context });
     }
   });
   return found;
