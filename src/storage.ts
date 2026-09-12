@@ -32,8 +32,10 @@
  *
  * Every fact-table write (`insertFact`, `updateFact`, `setFactStatus`,
  * `deleteFact`) bumps the epoch in the same transaction as the write, so the
- * epoch is never observably out of sync with the data it describes. Writes
- * to `sources` do not bump it: `sources` is audit-only and never feeds the
+ * epoch is never observably out of sync with the data it describes. The same
+ * applies to writes that change what recall would return without touching the
+ * `facts` table itself (`replaceFactTerms`, `markRecallUsed`). Writes to
+ * `sources` do not bump it: `sources` is audit-only and never feeds the
  * `--hint-format` seam output the epoch exists to guard (Section 4).
  */
 
@@ -291,7 +293,14 @@ export function findReaffirmablePendingFacts(db: Db, candidate: NewFact): Fact[]
   const candidateScopeRepo = candidate.scopeRepo ?? null;
   const rows = db
     .prepare<[string, string], FactRow>(
-      "SELECT * FROM facts WHERE kind = ? AND scope = ? AND status = 'pending' ORDER BY captured_at ASC, id ASC"
+      // Use rowid as the tiebreaker instead of id: `id` is a random UUID (no ordering semantics),
+      // so when two facts share a `captured_at` timestamp (routine when captured in the same
+      // millisecond, e.g., during `mem import --from-md` or `mem scan-session`), `id ASC` turns
+      // the documented "earliest-captured fact is promoted" rule into a coin flip. `rowid` increases
+      // with insertion order, making the tiebreaker deterministic: the first-inserted fact wins.
+      // Note: Without AUTOINCREMENT, SQLite may reuse a rowid from a deleted row, but a reused
+      // rowid comes from a row predating both tied captures, so it cannot land between them.
+      "SELECT * FROM facts WHERE kind = ? AND scope = ? AND status = 'pending' ORDER BY captured_at ASC, rowid ASC"
     )
     .all(candidate.kind, candidate.scope);
   return rows.map(rowToFact).filter((fact) => reaffirmMatch(fact, candidate, wanted, subject, candidateScopeRoot, candidateScopeRepo));
@@ -533,7 +542,7 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // rationale.
       null
     );
-    replaceFactTerms(db, id, extractFacets(fact.text));
+    replaceFactTermsInternal(db, id, extractFacets(fact.text), false);
   });
   // BEGIN IMMEDIATE, not the deferred default: this transaction reads (`bumpEpoch` -> `getEpoch`)
   // before it writes, and in WAL mode a deferred transaction that upgrades to a writer after
@@ -817,7 +826,7 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
         // identifier its text no longer mentions -- a stale claim rather than a missing one, and
         // nothing downstream could tell it apart from a correct hit. Trimmed to match what was
         // actually stored above, not the raw patch.
-        replaceFactTerms(db, id, extractFacets(patch.text.trim()));
+        replaceFactTermsInternal(db, id, extractFacets(patch.text.trim()), false);
         // Embedding describes `facts.text` too, and for the same reason cannot be left in place: a
         // vector computed from the old text is a stale claim about the new one, not a missing
         // embedding -- and unlike the terms above, nothing here can cheaply recompute it (that needs
@@ -997,9 +1006,10 @@ export function listSurfacedFactIds(db: Db, sessionId: string): Set<string> {
  * so under WAL a deferred BEGIN could lose its snapshot to a concurrent writer and fail with
  * SQLITE_BUSY_SNAPSHOT, which `busy_timeout` does not retry. See `insertFact` for the same rationale.
  *
- * Does not bump the write epoch, for the reason this module's header gives for `sources`: the epoch
- * exists so a token-goat-side cache can never mask a `forget`/`edit`, and a usefulness stamp changes
- * no fact's text, status, or freshness -- only the order recall would rank them in.
+ * Bumps the write epoch when it actually stamps a row. The epoch exists so a token-goat-side cache
+ * can never serve recall output the store has already moved past, and a usefulness stamp feeds the
+ * usefulness rank list -- so a cached response computed before the stamp is stale in the only sense
+ * the epoch is meant to catch, even though no fact's text, status, or freshness changed.
  */
 export function markRecallUsed(db: Db, factIds: readonly string[], sessionId: string, atIso: string): number {
   if (factIds.length === 0) {
@@ -1010,6 +1020,9 @@ export function markRecallUsed(db: Db, factIds: readonly string[], sessionId: st
     let updated = 0;
     for (const factId of factIds) {
       updated += mark.run(atIso, sessionId, factId).changes;
+    }
+    if (updated > 0) {
+      bumpEpoch(db);
     }
     return updated;
   });
@@ -1054,15 +1067,27 @@ export type FactTermKind = "entity" | "topic";
  * read-modify-write on the same rows and a concurrent writer between them would leave a fact with
  * no terms at all. See `insertFact` for the full SQLITE_BUSY_SNAPSHOT rationale.
  *
- * Does not bump the write epoch, for the reason this module's header gives for `sources`: terms are
- * derived from `facts.text` and change nothing about a fact's content, status, or freshness -- only
- * which `--entity` queries reach it.
+ * Bumps the write epoch. Terms are derived from `facts.text` and change nothing about a fact's
+ * content, status, or freshness, but they decide which `--entity` queries reach it and feed the
+ * entity-overlap rank list -- so recall output changes underneath any cache keyed on the epoch.
  *
  * Always stamps `terms_checked_at`, whether or not `facets` yields anything to insert: that is what
  * lets `listFactsNeedingTerms` and `countFactsWithTerms` tell "never extracted" apart from
  * "extracted, text is entirely stopwords" -- both look like zero rows in `fact_terms` on their own.
  */
 export function replaceFactTerms(db: Db, factId: string, facets: FactFacets): void {
+  replaceFactTermsInternal(db, factId, facets, true);
+}
+
+/**
+ * The term-replacement body, with the epoch bump made optional.
+ *
+ * `insertFact` and `updateFact` re-extract terms inside their own write transaction, which has
+ * already bumped the epoch for the fact write itself. A second bump there would be double-counting
+ * one logical write, and the `facts.epoch` stamp those callers wrote would no longer equal the
+ * store epoch they committed under. Only a standalone term write (`mem facets`) owns the bump.
+ */
+function replaceFactTermsInternal(db: Db, factId: string, facets: FactFacets, bump: boolean): void {
   const remove = db.prepare("DELETE FROM fact_terms WHERE fact_id = ?");
   const insert = db.prepare("INSERT INTO fact_terms (fact_id, term, term_key, kind) VALUES (?, ?, ?, ?)");
   const markChecked = db.prepare("UPDATE facts SET terms_checked_at = ? WHERE id = ?");
@@ -1074,6 +1099,9 @@ export function replaceFactTerms(db: Db, factId: string, facets: FactFacets): vo
     }
     for (const topic of facets.topics) {
       insert.run(factId, topic, normalizeTermKey(topic), "topic");
+    }
+    if (bump) {
+      bumpEpoch(db);
     }
   });
   tx.immediate();
@@ -1101,6 +1129,38 @@ export function listFactIdsForTerm(db: Db, term: string, kind?: FactTermKind): s
       : "SELECT DISTINCT fact_id FROM fact_terms WHERE term_key = ? AND kind = ?";
   const params = kind === undefined ? [key] : [key, kind];
   return db.prepare<unknown[], { fact_id: string }>(sql).all(...params).map((row) => row.fact_id);
+}
+
+/**
+ * For every other fact sharing at least one normalized term key with `factId`, how many entity keys
+ * and how many topic keys it shares -- the raw counts `mem show --related` weights into a single
+ * score. The weighting itself (an entity match outranking a topic match) is a ranking judgment, not
+ * a storage fact, so it stays with the caller rather than living here.
+ *
+ * Self-joins `fact_terms` on `(term_key, kind)`, both sides served by `idx_fact_terms_lookup`: one
+ * indexed scan per term key `factId` carries, not a table scan.
+ */
+export interface SharedTermCounts {
+  readonly entity: number;
+  readonly topic: number;
+}
+
+export function getSharedTermCounts(db: Db, factId: string): Map<string, SharedTermCounts> {
+  const rows = db
+    .prepare<[string], { fact_id: string; kind: FactTermKind; cnt: number }>(
+      `SELECT ft2.fact_id AS fact_id, ft2.kind AS kind, COUNT(*) AS cnt
+       FROM fact_terms ft1
+       JOIN fact_terms ft2 ON ft1.term_key = ft2.term_key AND ft1.kind = ft2.kind
+       WHERE ft1.fact_id = ? AND ft2.fact_id != ft1.fact_id
+       GROUP BY ft2.fact_id, ft2.kind`
+    )
+    .all(factId);
+  const byFact = new Map<string, SharedTermCounts>();
+  for (const row of rows) {
+    const existing = byFact.get(row.fact_id) ?? { entity: 0, topic: 0 };
+    byFact.set(row.fact_id, row.kind === "entity" ? { ...existing, entity: row.cnt } : { ...existing, topic: row.cnt });
+  }
+  return byFact;
 }
 
 /**
@@ -1194,31 +1254,56 @@ export function listFactsNeedingTerms(db: Db, options: { readonly all?: boolean 
 /** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
 /**
  * The population `mem consolidate --stale` proposes: `active` facts captured before `beforeIso`
- * that recall has never surfaced and nobody has ever marked useful, oldest first.
+ * that recall has gone unsurfaced on since `beforeIso` and nobody has ever marked useful, oldest
+ * first.
  *
  * `pinned` facts are excluded by construction, not by a caller-side filter -- a pin is a standing
  * instruction that this fact matters regardless of whether it has been read yet. So are `pending`,
  * `contested`, and `superseded` facts: none of them is live ground truth, and each already has its
  * own resolution path (`mem review`, the retention pass).
  *
- * Three conditions, not one, because no single one is sufficient. `last_surfaced_at` is the durable
- * mark but is NULL for every fact captured before that column existed; the `recall_log` NOT EXISTS
- * covers those, up to the rotation window; and `used_at` lives on `recall_log` rows, so a fact
- * marked useful is already excluded by the row that carries the mark. Keying on `captured_at`
- * (never edited) rather than `status_changed_at` is deliberate: this pass asks how long a fact has
- * gone unread, and a fact that has never changed status has no `status_changed_at` at all.
+ * `COALESCE(last_surfaced_at, '') < beforeIso` is a *windowed* question -- "unsurfaced for at least
+ * this long", not "never surfaced, ever" -- so a fact surfaced once, long before the window, is
+ * eligible again once it goes quiet for the window's length. The empty-string floor treats a NULL
+ * (never surfaced, or captured before the column existed) as older than any real timestamp. The
+ * `recall_log` NOT EXISTS is windowed to the same cutoff for the matching reason: a fact whose
+ * `last_surfaced_at` predates the column but was actually surfaced inside the rotation window still
+ * has a live `recall_log` row saying so.
+ *
+ * The `used_at IS NOT NULL` half of that same NOT EXISTS is deliberately *not* windowed -- a fact
+ * the user explicitly confirmed useful must not lose that protection just because the confirming
+ * surfacing itself falls outside the stale window. This is bounded by `recall_log` retention, not
+ * by this query: `mem epoch --gc` rotates rows past `surfaced_at` regardless of `used_at` (see
+ * `deleteRecallLogOlderThan`), so a usefulness mark old enough to have been rotated away has no
+ * surviving evidence here. When that happens the fact does not silently fall out of protection into
+ * "propose immediately" -- it was surfaced too (every `used_at` row is also a surfacing), so
+ * `last_surfaced_at` is still set to that same date and the COALESCE branch above governs it exactly
+ * like any other surfaced-but-quiet fact. That is the intended end state rather than a gap worked
+ * around: usefulness is a decaying signal everywhere it is read -- `getUsefulnessCounts` ranks from
+ * these same rotating rows -- so granting it permanent retention in this one query would put it at
+ * odds with every other consumer of the same evidence. Permanence has its own mechanism, `mem pin`,
+ * which this query excludes by construction. A fact that must outlive its own recall history should
+ * be pinned, not kept alive indefinitely by a confirmation no surviving row can still attest to.
+ *
+ * Keying on `captured_at` (never edited) rather than `status_changed_at` is deliberate: this pass
+ * asks how long a fact has gone unread, and a fact that has never changed status has no
+ * `status_changed_at` at all.
  */
 export function listStaleUnsurfacedFacts(db: Db, beforeIso: string): Fact[] {
   const rows = db
-    .prepare<[string], FactRow>(
+    .prepare<[string, string, string], FactRow>(
       `SELECT * FROM facts AS f
        WHERE f.status = 'active'
          AND f.captured_at < ?
-         AND f.last_surfaced_at IS NULL
-         AND NOT EXISTS (SELECT 1 FROM recall_log AS r WHERE r.fact_id = f.id)
+         AND COALESCE(f.last_surfaced_at, '') < ?
+         AND NOT EXISTS (
+           SELECT 1 FROM recall_log AS r
+           WHERE r.fact_id = f.id
+             AND (r.surfaced_at >= ? OR r.used_at IS NOT NULL)
+         )
        ORDER BY f.captured_at ASC, f.id ASC`
     )
-    .all(beforeIso);
+    .all(beforeIso, beforeIso, beforeIso);
   return rows.map(rowToFact);
 }
 

@@ -5,6 +5,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { TOOL_NAMES } from "../../src/wiring.js";
 
 const REPO_ROOT = join(import.meta.dirname, "../..");
 
@@ -14,7 +15,10 @@ describe("documentation consistency guards", () => {
     return readFileSync(join(REPO_ROOT, relativePath), "utf8");
   };
 
-  // Get all doc files
+  // Get all doc files. Derived from TOOL_NAMES for the per-tool integration docs, so a new tool
+  // added to that list without a matching docs/integrations/<tool>.md fails this guard instead of
+  // shipping silently undocumented. README.md/AGENTS.md/CLAUDE.md are the fixed, non-per-tool
+  // entries.
   const getAllDocFiles = (): string[] => {
     return [
       "README.md",
@@ -22,10 +26,7 @@ describe("documentation consistency guards", () => {
       // misleads more often than one in README -- they belong inside this guard, not outside it.
       "AGENTS.md",
       "CLAUDE.md",
-      "docs/integrations/claude-code.md",
-      "docs/integrations/codex.md",
-      "docs/integrations/copilot-cli.md",
-      "docs/integrations/copilot-vscode.md",
+      ...TOOL_NAMES.map((tool) => `docs/integrations/${tool}.md`),
     ];
   };
 

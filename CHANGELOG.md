@@ -6,6 +6,72 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Nothing mem ever printed told anyone how to say a fact helped.** `mem used` shipped, `recall_log`
+  carried a `used_at` column for it, and no output on any path named the command -- so in a real store
+  that column is null on every row, and every consumer of the signal was reading evidence that could
+  not be produced. `mem consolidate --stale` gated on "never marked used" against a mark nobody could
+  make; usefulness counts broke ranking ties that were never actually broken. The recall footer now
+  carries a ready-to-run `mem used <ids> --session-id <id>` clause whenever the response is logged
+  under a session and actually emitted a fact -- not when either is missing, since an invocation
+  naming a row that was never written earns the exact "was never surfaced in session" refusal this is
+  meant to stop producing. Footer text is free prose in the wire grammar precisely so a clause can be
+  added here without bumping `TGMEM/2`: an unknown header version fails open to no hints at all, so
+  paying a protocol bump for one footer clause would cost every consumer every fact-line. Separately,
+  `--stable` no longer suppresses `recall_log` writes. It reorders output for reproducible tests,
+  which is no reason for the store to forget what it showed.
+- **`mem init` never upgraded an install that was already there.** It wrote its marker, saw a mem hook
+  already in `settings.json` and left the entry as it found it -- so an install predating a hook flag
+  or a hook event kept the older command string forever, and re-running `mem init` after upgrading mem
+  did nothing to fix it. On this machine a July install carried only `SessionStart`, without
+  `--hook-stdin`: no `recall_log` row had ever been written and `mem scan-session` had never run once,
+  a dead feature that read as a code defect rather than an install-age symptom. `mem init` now
+  recognises an unstamped hook as its own by matching mem's invocation *shape* -- same guard wrapper,
+  same subcommand for that event, any flags in between -- and adopts it, rewriting the command to the
+  current one and stamping it so uninstall still reverses exactly what install wrote. A hand-written
+  entry that merely mentions `mem` does not match the shape and is left alone. An adoption is reported
+  in the install output rather than performed silently, because absorbing another install's hook is
+  the kind of thing a user should hear about from the command that did it.
+- **`mem consolidate --stale` asked a lifetime question of evidence that rotates.** The gate read
+  "never surfaced by recall", over a `recall_log` that `mem epoch --gc` prunes at 30 days. A fact
+  surfaced steadily for a year and last read 31 days ago had no surviving row to prove it, so it
+  qualified as never-read and was proposed for supersession on the strength of a deletion. The query
+  now asks whether the fact was surfaced *since the cutoff*, which is a question the retained window
+  can actually answer, and `--help` and the summary line say "unsurfaced since then" rather than
+  "never surfaced". Usefulness decays with the same rows by the same design, everywhere it is read;
+  permanence has its own mechanism, `mem pin`, which this query excludes by construction.
+- **`mem import --from-md` re-filed facts the store already had.** Its dedup key is source location
+  plus text, which correctly catches re-importing an unchanged file, and catches nothing about the
+  same sentence arriving by another door. A statement captured by `mem scan-session`, or typed with
+  `mem remember`, would be filed again as a fresh `pending` candidate the moment it also appeared in a
+  markdown note -- so the two capture paths disagreed about what the store knew, and `mem review` got
+  a question already answered. Import now also checks the store-wide text index, scope-gated by the
+  same `isBoundToRoot` rule recall and scan-session use, so an identical fact bound to an unrelated
+  project cannot suppress a candidate here. Such a bullet is reported as `skipped (already known)`,
+  distinct from `skipped (duplicate)`, because "you imported this file before" and "mem learned this
+  elsewhere" are different things to tell someone.
+- **`mem init --user` quietly configured a project instead.** For a tool whose only target is a file
+  in the repository -- `codex`, `copilot-cli` -- `--user` was accepted and ignored, and mem's block
+  landed in the working directory's `AGENTS.md`. A user asking to set up their own machine got an
+  edit to a repository they may not own, discovered later by `git status`. Those tools now exit with
+  "has no user-level config; omit --user" and write nothing. `mem init copilot-vscode --user` had the
+  same shape with a real answer available: VS Code's keybindings live in the editor's own user
+  directory, so `--user` now installs those alone and leaves the project's `tasks.json` and
+  `AGENTS.md` untouched.
+- **`mem import --from-json --dry-run` promised imports the real run would refuse.** The plan skipped
+  both the `--root` scope binding and secret screening, so a fact whose `scopeRoot` falls outside the
+  import root, or whose text trips the screener, was reported as `would-import` and then rejected on
+  the real pass. Both checks are pure -- file paths and the on-disk allowlist, no database -- so the
+  dry run now runs them and reproduces the refusal reason verbatim. Duplicate-id detection is the one
+  check it still cannot reproduce, since that needs the store, and the output says so rather than
+  letting a clean-looking plan imply there is nothing left to find.
+- **Promoting an unkeyed fact produced one nothing could ever replace.** Contradiction resolution keys
+  on subject plus value, and its detection pass filters to facts that have a subject -- so a fact
+  promoted without one is not merely unlikely to be superseded, it is structurally exempt from
+  supersession for the rest of its life. `mem suggest`, `mem scan-session` and `mem import --from-md`
+  all extract text and no subject, which makes this the ordinary promotion rather than an exotic one,
+  and `promoted <id>` said nothing about it. `mem review --promote` now prints the consequence and the
+  one command that undoes it, `mem edit <id> --subject <key> --value <value>`. A keyed promotion says
+  nothing extra.
 - **`mem review` named a resolution neither of its own commands would perform.** A pair of facts that
   tie on provenance and capture time is detected as contested live, in memory, while both rows are
   still persisted `active`. `mem review` listed them as contested and said "resolve with
@@ -596,6 +662,60 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   the cap, so a mis-ranked identifier is not a worse ordering but a fact the agent never learns.
 
 ### Added
+
+- **The `sources` table is fed.** Its schema, storage API, `mem show --json` surfacing and gc pruning
+  have all existed and been tested since they were added, against zero rows: no capture path ever
+  wrote one, so `sources: []` meant "mem records no sources at all", and a guard test existed only to
+  keep that admission honest. Two paths now write a source row in the same transaction as the fact
+  they explain -- `mem scan-session`, whose excerpt is the user turn the statement was lifted out of,
+  and `mem import --from-md`, whose excerpt is `<path>:<line>: <raw bullet>`. Both are cases where the
+  raw material is genuinely larger than the fact, so the row answers a question the fact cannot:
+  where did this come from, and did mem read it right. `mem remember` and `mem suggest <text>` still
+  write nothing, because there the caller's text *is* the fact and a source row would echo it back.
+  Excerpts are truncated to 600 characters and secret-screened before storage; a screened-positive
+  excerpt is dropped and the fact is still captured, since refusing to store provenance is not a
+  reason to lose the knowledge. Never the full source content.
+
+- **`mem review` shows where a pending fact came from.** The queue asked for a promote/reject decision
+  while showing only mem's own paraphrase, which is the one thing a reviewer cannot check the
+  paraphrase against. Each pending entry now carries its newest source excerpt, when one exists, under
+  the fact. Facts captured before sources were fed, and those from paths that write none, print as
+  they did -- the line is omitted rather than filled with a placeholder.
+
+- **`mem review` prints a paste-ready `mem edit --anchor` command for facts it can already verify.**
+  The `unanchored` bucket named the problem and left the fix as an exercise: an anchorless fact is
+  caveated as `unverified` forever, and closing that needs a predicate the user has to compose by
+  hand. When a fact's text mentions a path that resolves inside its own root and `file-exists`
+  against it reads `affirmed` right now, the exact command is printed. A suggestion that would read
+  `contradicted` or `unverified` is withheld -- teaching the user the feature is broken is worse than
+  saying nothing -- and only the first viable candidate is offered, so the bucket stays a queue rather
+  than a menu. The command carries `--force` for a user-stated fact, because `mem edit` refuses one
+  without it and most of a real store is user-stated: the guard exists to stop an agent rewriting a
+  user's own words unasked, and this is the user pasting it themselves with the text untouched.
+
+- **`mem export --format md`** renders the store as a shareable, git-reviewable markdown document.
+  `mem import --from-md` already read that shape from hand-written notes; nothing produced it. It is
+  explicitly not a backup, and says so in its own `--help`: a markdown round trip preserves the fact
+  *text* and nothing else -- id, status, confidence, anchor, subject and value are all lost, and
+  every bullet lands back `pending`. `--format json` remains the full-fidelity path and remains the
+  default, so the lossy surface is one a user has to ask for by name.
+
+- **`mem show --related`** lists the facts sharing the most entity and topic terms with the one being
+  shown, entity matches weighted above topic matches. The store already indexed those terms for
+  retrieval and `mem consolidate` already compared them for near-duplicates; nothing let a person
+  walk sideways from one fact to its neighbours. The target itself and superseded facts are excluded,
+  results are scope-contained to `--root`, and it is an association aid rather than a ground-truth
+  channel: pending and contested neighbours do appear, still labelled as such.
+
+- **`mem init copilot-visual-studio` and `mem init copilot-jetbrains`.** Coverage of the Copilot hosts
+  turned on one file rather than one config per IDE. Copilot CLI, Copilot chat in VS Code and Codex
+  all read `AGENTS.md`, which existing writers already produce. Visual Studio does not read it at
+  all, and JetBrains reads it only for the cloud agent -- local IntelliJ chat reads
+  `.github/copilot-instructions.md`. Both new targets write that one shared path, through the same
+  reference-counted markers, atomic temp-file-and-rename and one-time backup as every other target,
+  so installing both and removing one leaves the other's block intact. Each ships its own integration
+  doc, and the docs guard now derives the set of per-tool docs it demands from the tool list itself,
+  so the next target cannot be added without one.
 
 - **`mem dream`** reports what a configured model thinks follows from several stored facts taken
   together -- the one kind of consolidation `mem consolidate` structurally cannot do, since Jaccard

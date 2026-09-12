@@ -486,14 +486,41 @@ function parseJsonFacts(
  * `skipped_error` here (not deferred to the real import), since shape validation needs no DB access
  * either.
  */
-export function planImportFromJson(options: { readonly path: string }): ImportResult {
-  const { filePath, entries } = parseJsonFacts(options.path, undefined);
+export function planImportFromJson(options: { readonly path: string; readonly root?: string | undefined }): ImportResult {
+  const root = resolve(options.root ?? process.cwd());
+  // Same `root` the real import parses under, so the "scopeRoot outside the import root" rejection
+  // runs here too: a dry run that reports `would-import` for a fact the real run refuses is a
+  // promise the command cannot keep.
+  const { filePath, entries } = parseJsonFacts(options.path, root);
+  const allowlist = loadAllowlist(root);
   const candidates = entries.map((entry) => entry.candidate);
-  const outcomes: ImportOutcome[] = entries.map((entry) =>
-    entry.newFact === null
-      ? { status: "skipped_error", candidate: entry.candidate, reason: entry.reason ?? "invalid fact" }
-      : { status: "dry_run", candidate: entry.candidate }
-  );
+  const outcomes: ImportOutcome[] = entries.map((entry) => {
+    if (entry.newFact === null) {
+      return { status: "skipped_error", candidate: entry.candidate, reason: entry.reason ?? "invalid fact" };
+    }
+    // Secret screening is pure (fact text plus the on-disk allowlist, no database), so the dry run
+    // can reproduce the real import's refusal reason verbatim. Duplicate-id detection is the one
+    // check it cannot reproduce -- that needs the store -- and `formatImportResult` says so rather
+    // than letting a clean-looking plan imply there is nothing left to find.
+    const matches = screenForSecrets(
+      {
+        text: entry.newFact.text,
+        subject: entry.newFact.subject,
+        value: entry.newFact.value,
+        anchor: entry.newFact.anchor,
+        sourceRef: entry.newFact.source_ref,
+      },
+      allowlist
+    );
+    if (matches.length > 0) {
+      return {
+        status: "skipped_error",
+        candidate: entry.candidate,
+        reason: `refusing to import fact: possible secret detected -- ${matches.map((match) => `${match.field}: ${match.patternName}`).join("; ")}`,
+      };
+    }
+    return { status: "dry_run", candidate: entry.candidate };
+  });
   return { filePath, candidates, outcomes };
 }
 

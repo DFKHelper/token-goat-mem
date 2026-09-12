@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { openStorage } from "../src/storage.js";
+import { openStorage, insertFact } from "../src/storage.js";
 import {
   captureExplicit,
   captureSuggested,
@@ -297,6 +297,63 @@ describe("captureExplicit (happy path)", () => {
     ).toThrow(SecretDetectedError);
   });
 
+  it("does not false-positive the generic-high-entropy-token secret heuristic on a slash-free kebab subject/value key (regression: subagent-git-discard-prohibition)", () => {
+    // `isPathShapedToken` already exempted this exact word-shape, but only when it contains a
+    // slash -- it returns early on `!token.includes("/")`. A `mem remember --subject`/`--value`
+    // key never has a slash, so a descriptive kebab identifier of 32+ chars (this project's own
+    // CLAUDE.md tells agents to pass exactly this kind of key) fell straight through to the
+    // generic entropy fallback and was refused as a secret. Both fields are exercised because the
+    // reported failure flagged subject and value together.
+    const { fact } = captureExplicit(db, {
+      text: "never run git checkout -- to discard a subagent's uncommitted work",
+      kind: "decision",
+      subject: "subagent-git-discard-prohibition",
+      value: "never-run-git-checkout-dash-dash-on-shared-work",
+      root,
+    });
+    expect(fact.subject).toBe("subagent-git-discard-prohibition");
+    expect(fact.value).toBe("never-run-git-checkout-dash-dash-on-shared-work");
+  });
+
+  it("does not exempt a slash-free lowercase blob whose word carries a run past MAX_UNBROKEN_SEGMENT_RUN", () => {
+    // Two hyphen-delimited words is not sufficient on its own: one word here is a 37-char unbroken
+    // lowercase run, well past a real English word's length and past the same run cap
+    // `isPathSegment` already enforces for a path segment's internal runs -- this must still be
+    // caught by the generic entropy fallback.
+    expect(() =>
+      captureExplicit(db, {
+        text: "value qwertyuiopasdfghjklzxcvbnmqwertyuiop-ab",
+        kind: "fact",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
+  it("does not exempt a slash-free kebab-shaped token whose words carry digits", () => {
+    // The exemption requires every word to be pure lowercase letters. A prefix-less secret drawn
+    // from a base64/hex alphabet essentially always carries digits, so a digit anywhere in a word
+    // must disqualify the whole token from the exemption.
+    expect(() =>
+      captureExplicit(db, {
+        text: "value subagent-git2-discard-prohibition9",
+        kind: "fact",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
+  it("does not exempt a slash-free kebab-shaped token with mixed case", () => {
+    // Mixed case is the other half of "essentially always" for a prefix-less secret; the exemption
+    // must reject it exactly as isPathShapedToken already does for a mixed-case path segment.
+    expect(() =>
+      captureExplicit(db, {
+        text: "value Subagent-Git-Discard-Prohibition",
+        kind: "fact",
+        root,
+      })
+    ).toThrow(SecretDetectedError);
+  });
+
   it("blocks a fact containing a known secret pattern, persists nothing, and audits the block", () => {
     const before = (db.prepare("SELECT COUNT(*) AS n FROM facts").get() as { n: number }).n;
 
@@ -459,6 +516,67 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
     // No pending row of this sentence survives for `mem review` to keep asking about.
     expect(rows.filter((row) => row.status === "pending")).toHaveLength(0);
     expect(auditEvents(second.fact.id)).toContain("capture_reaffirmed_pending_duplicate_superseded");
+  });
+
+  it("when two pending duplicates share a captured_at timestamp, promotes the earlier-inserted (earlier rowid), not the lexicographically-smaller id", () => {
+    // Nondeterminism regression: captured_at can be identical when two facts are captured in the
+    // same millisecond (e.g., `mem import --from-md` and `mem scan-session` in one process loop).
+    // The SQL ORDER BY clause must use rowid as a tiebreaker, not id (a random UUID), to ensure
+    // "the earlier-suggested row" is deterministically the one promoted to active.
+    const sameTimestamp = "2026-01-01T12:00:00.000Z";
+    const firstId = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"; // Lexicographically larger
+    const secondId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"; // Lexicographically smaller
+
+    // Insert in order: firstId, then secondId. The firstId should have an earlier rowid.
+    const first = insertFact(db, {
+      text: "test deterministic pending promotion",
+      kind: "preference",
+      scope: "project",
+      source_type: "derived",
+      id: firstId,
+      captured_at: sameTimestamp,
+      status: "pending",
+      scopeRoot: root,
+      captureRoot: root,
+    });
+    expect(first.id).toBe(firstId);
+    expect(first.status).toBe("pending");
+
+    const second = insertFact(db, {
+      text: "test deterministic pending promotion",
+      kind: "preference",
+      scope: "project",
+      source_type: "derived",
+      id: secondId,
+      captured_at: sameTimestamp,
+      status: "pending",
+      scopeRoot: root,
+      captureRoot: root,
+    });
+    expect(second.id).toBe(secondId);
+    expect(second.status).toBe("pending");
+
+    // Capture the same text explicitly and verify the first-inserted (earlier rowid) is promoted
+    const result = captureExplicit(db, {
+      text: "test deterministic pending promotion",
+      kind: "preference",
+      scope: "project",
+      root,
+    });
+
+    // The earlier-inserted row (firstId) must be the one promoted, not the lexicographically-smaller one (secondId).
+    expect(result.fact.id).toBe(firstId);
+    expect(result.fact.status).toBe("active");
+    expect(result.promotedFromPending).toBe(true);
+    expect(result.supersededPendingDuplicateCount).toBe(1);
+
+    const rows = db.prepare<[], { id: string; status: string }>("SELECT id, status FROM facts WHERE kind = ?").all("preference") as {
+      id: string;
+      status: string;
+    }[];
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.id === firstId)?.status).toBe("active");
+    expect(rows.find((row) => row.id === secondId)?.status).toBe("superseded");
   });
 
   it("does not absorb a pending suggestion bound to a different project root", () => {

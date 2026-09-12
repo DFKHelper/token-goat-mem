@@ -1406,6 +1406,9 @@ const TOKEN_SPLIT_RE = /[\s()[\]{}<>"'`,;:]+/u;
 /** Trailing sentence punctuation to shave off a token before the bare-filename lookup, so "…in package.json." still matches. */
 const TRAILING_PUNCTUATION_RE = /[.,;:!?]+$/u;
 
+/** The one-character boundary a pattern in {@link ANCHORABLE_PATTERNS} consumes ahead of its target, when it isn't matching at the very start of the text. */
+const LEADING_BOUNDARY_CHAR_RE = /^[\s"'`([<]/u;
+
 /**
  * Shapes that denote a concrete, re-checkable target. Each alternative is kept simple and
  * independently testable rather than fused into one omnibus expression.
@@ -1426,13 +1429,51 @@ const ANCHORABLE_PATTERNS: readonly { readonly name: string; readonly re: RegExp
 ];
 
 /**
- * Reports whether `text` names something an anchor predicate could plausibly be written against —
- * a path, a URL, or a conventionally-bare config filename.
+ * Extracts every substring of `text` that an anchor predicate could plausibly be written against —
+ * a path, a URL, or a conventionally-bare config filename — in the order each first appears:
+ * {@link ANCHORABLE_PATTERNS} matches first (in pattern order), then bare-filename tokens.
  *
- * This is a *nomination* predicate for `mem review --section unanchored`, not a verification one:
- * a true result means "a human could write an anchor for this", never "this fact is stale". It
- * deliberately performs no filesystem I/O, so it stays pure, synchronous, and cheap enough to run
- * over every ground-truth fact on every `mem review`.
+ * This is a *nomination* pass for `mem review --section unanchored`, not a verification one: a
+ * returned string means "a human could write an anchor for this", never "this fact is stale", and
+ * never "this target actually exists" — callers that need a live verdict still run it through
+ * {@link evaluateAnchor}. It deliberately performs no filesystem I/O itself, so it stays pure,
+ * synchronous, and cheap enough to run over every ground-truth fact on every `mem review`.
+ */
+export function extractAnchorableTargets(text: string): string[] {
+  if (text.trim().length === 0) {
+    return [];
+  }
+  const targets: string[] = [];
+  const seen = new Set<string>();
+  const push = (target: string): void => {
+    // Two patterns can plausibly match the same substring (e.g. a `./`-rooted path that also carries
+    // an extension) -- de-duplicated here so a caller trying "the first that passes" never re-checks
+    // the identical candidate twice.
+    if (!seen.has(target)) {
+      seen.add(target);
+      targets.push(target);
+    }
+  };
+  for (const pattern of ANCHORABLE_PATTERNS) {
+    const flags = pattern.re.flags.includes("g") ? pattern.re.flags : `${pattern.re.flags}g`;
+    const re = new RegExp(pattern.re.source, flags);
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(text)) !== null) {
+      const raw = match[0];
+      push(LEADING_BOUNDARY_CHAR_RE.test(raw) ? raw.slice(1) : raw);
+    }
+  }
+  for (const token of text.split(TOKEN_SPLIT_RE)) {
+    const cleaned = token.replace(TRAILING_PUNCTUATION_RE, "");
+    if (ANCHORABLE_BARE_FILENAME_SET.has(cleaned.toLowerCase())) {
+      push(cleaned);
+    }
+  }
+  return targets;
+}
+
+/**
+ * Reports whether `text` names something an anchor predicate could plausibly be written against.
  *
  * Motivation: an anchorless fact can never be `contradicted` — {@link evaluateAnchor} short-circuits
  * a `null` anchor to `unverified` — so before this predicate existed such a fact could not reach any
@@ -1440,13 +1481,5 @@ const ANCHORABLE_PATTERNS: readonly { readonly name: string; readonly re: RegExp
  * and `mem doctor`, however thoroughly the world had moved on beneath it.
  */
 export function mentionsAnchorableTarget(text: string): boolean {
-  if (text.trim().length === 0) {
-    return false;
-  }
-  if (ANCHORABLE_PATTERNS.some((pattern) => pattern.re.test(text))) {
-    return true;
-  }
-  return text
-    .split(TOKEN_SPLIT_RE)
-    .some((token) => ANCHORABLE_BARE_FILENAME_SET.has(token.replace(TRAILING_PUNCTUATION_RE, "").toLowerCase()));
+  return extractAnchorableTargets(text).length > 0;
 }

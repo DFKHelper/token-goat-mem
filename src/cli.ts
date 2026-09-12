@@ -39,9 +39,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
-import { anchorPathWithinRoot, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
+import { anchorPathWithinRoot, evaluateAnchor, extractAnchorableTargets, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
 import type { FactStatusUpdate } from "./contradiction.js";
 import {
+  buildScreenedExcerpt,
   captureExplicit,
   captureSuggested,
   CaptureValidationError,
@@ -99,6 +100,7 @@ import {
   getToolWiring,
   TOOL_NAMES,
   WiringConflictError,
+  WiringUserUnsupportedError,
   type ToolName,
   type WiringOpts,
   type WiringPlan,
@@ -115,6 +117,7 @@ import {
 import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
 import { scanTranscript } from "./sessionScan.js";
 import {
+  anchorRootFor,
   evaluateFactFreshness,
   isBoundToRoot,
   isDecayedBelowGroundTruth,
@@ -138,6 +141,7 @@ import {
   getEntityOverlapForQuery,
   getEpoch,
   getFactById,
+  getSharedTermCounts,
   getUsefulnessCounts,
   listEntityCounts,
   listFacts,
@@ -410,6 +414,7 @@ function exitCodeForError(error: unknown): number {
     error instanceof InvalidAnchorError ||
     error instanceof SecretDetectedError ||
     error instanceof WiringConflictError ||
+    error instanceof WiringUserUnsupportedError ||
     error instanceof JsonImportError ||
     error instanceof MarkdownImportError ||
     // A misconfigured dream endpoint is a typo in an environment variable the user set, so it is
@@ -436,6 +441,16 @@ function parseFactScope(raw: string): FactScope {
     throw new UsageError(`invalid scope "${raw}" (expected one of ${FACT_SCOPES.join(", ")})`);
   }
   return raw as FactScope;
+}
+
+const EXPORT_FORMATS = ["json", "md"] as const;
+type ExportFormat = (typeof EXPORT_FORMATS)[number];
+
+function parseExportFormat(raw: string): ExportFormat {
+  if (!EXPORT_FORMATS.includes(raw as ExportFormat)) {
+    throw new UsageError(`invalid --format "${raw}" (expected one of ${EXPORT_FORMATS.join(", ")})`);
+  }
+  return raw as ExportFormat;
 }
 
 const HINT_STYLES = ["full", "terse"] as const;
@@ -856,7 +871,8 @@ function formatFactDetail(
   freshness: AnchorVerdict,
   sources: readonly Source[],
   edge: SupersessionEdge | null,
-  history: readonly AuditLogRow[] = []
+  history: readonly AuditLogRow[] = [],
+  related: readonly RelatedFact[] | null = null
 ): string {
   const scopeRoot = fact.scopeRoot ?? null;
   const lines: string[] = [
@@ -893,7 +909,85 @@ function formatFactDetail(
       lines.push(`  - [${entry.createdAt}] ${entry.event}: ${entry.detail}`);
     }
   }
+  if (related !== null) {
+    if (related.length === 0) {
+      // Stated rather than omitted, for the same reason a superseded-with-no-edge fact gets a line
+      // above instead of silence: "shares no terms with anything else in scope" is a real answer,
+      // not a missing feature the reader has to disambiguate from a broken query.
+      lines.push("related: none -- no other fact in scope shares an entity or topic with this one");
+    } else {
+      lines.push("related:");
+      for (const { fact: candidate, score } of related) {
+        const caveat = relatedTrustCaveat(candidate.status);
+        lines.push(
+          `  - ${formatFactSummary(candidate)}${caveat !== null ? ` (${caveat})` : ""}  [shared=${score}]`
+        );
+      }
+    }
+  }
   return lines.join("\n");
+}
+
+/**
+ * `mem show --related`'s entity/topic weighting. An entity is a precise, verbatim identifier -- a
+ * file path, a CLI flag, a version, a constant -- while a topic is a fuzzy stemmed content word, so
+ * two facts sharing one entity are more related than two sharing one topic. 3 was picked so a single
+ * shared entity outranks up to two shared topics, while a fact sharing three or more topics can still
+ * out-rank a single shared entity -- topics keep some pull rather than being drowned out entirely.
+ */
+const RELATED_ENTITY_WEIGHT = 3;
+
+/** Cap on how many related facts `mem show --related` returns -- an inspection aid for a human already looking at one fact, not a graph traversal. */
+const MAX_RELATED_FACTS = 5;
+
+interface RelatedFact {
+  readonly fact: Fact;
+  readonly score: number;
+}
+
+/**
+ * Same "pending, unconfirmed" / "contested, excluded" wording `buildDisplay` (retrieval.ts) already
+ * uses to flag a withheld fact -- reused verbatim rather than reintroducing a second vocabulary for
+ * the same two states. Not routed through `classifyTrust` itself: that needs a freshness verdict and
+ * a pool-wide contradiction scan, both of which `retrieve()` already pays for on its own results:
+ * for a related fact, pending/contested is fully determined by its own `status` column.
+ */
+function relatedTrustCaveat(status: FactStatus): string | null {
+  if (status === "pending") {
+    return "pending, unconfirmed";
+  }
+  if (status === "contested") {
+    return "contested, excluded";
+  }
+  return null;
+}
+
+/**
+ * The facts sharing the most normalized term keys with `fact`, ranked by {@link RELATED_ENTITY_WEIGHT}-weighted
+ * shared-term score, `fact` itself excluded.
+ *
+ * Status and scope containment mirror `retrieve()`'s own correctness gate rather than inventing a
+ * second rule for this one command: `superseded` is dropped (that edge is already surfaced
+ * separately as `supersededBy`), and `isBoundToRoot` -- the same predicate `retrieve()` filters
+ * on -- keeps a project-scoped fact's neighbours from leaking across another project's `scope_root`.
+ * Pending/contested facts are not dropped, only labelled (see {@link relatedTrustCaveat}): this is an
+ * inspection surface, not the ground-truth channel `mem recall` gates hard.
+ */
+function findRelatedFacts(db: Database.Database, fact: Fact, root: string): RelatedFact[] {
+  const counts = getSharedTermCounts(db, fact.id);
+  const related: RelatedFact[] = [];
+  for (const [factId, count] of counts) {
+    const candidate = getFactById(db, factId);
+    if (candidate === undefined || candidate.status === "superseded") {
+      continue;
+    }
+    if (!isBoundToRoot(candidate, root)) {
+      continue;
+    }
+    related.push({ fact: candidate, score: count.entity * RELATED_ENTITY_WEIGHT + count.topic });
+  }
+  related.sort((a, b) => b.score - a.score || b.fact.captured_at.localeCompare(a.fact.captured_at));
+  return related.slice(0, MAX_RELATED_FACTS);
 }
 
 /** Plain-JSON projection of a `Fact`, shared by `mem export`, `mem list --json`, and `mem show --json`. */
@@ -948,11 +1042,139 @@ function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boo
   };
 }
 
-function formatSection(title: string, facts: readonly Fact[]): string {
+/** Heading text per `FactKind`, in `FACT_KINDS` order -- the plural noun a human would title a section with, none of which contain `import.ts`'s `NON_PREFERENCE_HEADING_RE` words (architecture/file structure/file organization/directory structure), confirmed by inspection since that regex would otherwise silently drop nested bullets under a same-named heading. */
+const EXPORT_MD_KIND_HEADING: Record<FactKind, string> = {
+  preference: "Preferences",
+  decision: "Decisions",
+  fact: "Facts",
+  correction: "Corrections",
+};
+
+/**
+ * Renders one fact's text as a single `import.ts` `BULLET_RE`-compatible bullet body (the caller
+ * still prepends the `- ` marker). Every transform here exists to survive a specific rule in
+ * `extractMarkdownBullets` -- see the comment on each line.
+ */
+function factTextToMarkdownBullet(text: string): string {
+  // BULLET_RE is `^(\s*)[-*]\s+(.+)$` -- single line. A raw embedded newline would either truncate
+  // the bullet at the first line break (rest silently lost) or, worse, produce a second line that
+  // is itself a bare `-`/`*`-free continuation extractMarkdownBullets simply skips. Collapse any
+  // run of whitespace containing a line break to one space so the whole fact survives on one line.
+  const collapsed = text.replace(/\s*\r?\n\s*/gu, " ").trim();
+  // A fact whose text is empty (or entirely whitespace) after collapsing would otherwise render as
+  // a bare "- " bullet; extractMarkdownBullets already discards a bullet whose captured text is
+  // empty (`text.length === 0`), so an untouched empty bullet round-trips to nothing. Render a
+  // visible placeholder instead of a silently-dropped line.
+  const nonEmpty = collapsed.length === 0 ? "(empty fact text)" : collapsed;
+  // FENCE_RE (`^\s*(```|~~~)`) only fires when a line *opens* with a fence marker after optional
+  // leading whitespace; the `- ` marker this bullet is always prefixed with already makes that
+  // impossible here. Still break up an embedded fence run with a zero-width space -- this file is
+  // published as a shareable, git-reviewable artifact (see --format's help), and a fence sequence
+  // quoted mid-text should not read as a real fence opener to some *other* markdown renderer or a
+  // future importer that lifts the `- ` requirement.
+  return nonEmpty.replace(/(`{3,}|~{3,})/gu, (run) => run.split("").join("​"));
+}
+
+/**
+ * `mem export --format md` -- a lossy, human/git-shareable rendering of the same filtered fact set
+ * `--format json` exports full-fidelity. Grouped by kind under a level-2 heading, every bullet kept
+ * top-level (no nesting) so `NON_PREFERENCE_HEADING_RE`'s nested-bullet suppression never applies
+ * regardless of heading text. The leading HTML comment is invisible to `extractMarkdownBullets`
+ * (matches neither `HEADING_RE` nor `BULLET_RE`) and records provenance plus the lossiness caveat
+ * directly in the artifact, not just in `--help`.
+ */
+function factsToMarkdown(facts: readonly Fact[]): string {
+  const header =
+    `<!-- mem export --format md, generated ${new Date().toISOString()} -- lossy: only fact text ` +
+    "survives a round trip through `mem import --from-md` (lands pending, no id/status/confidence/" +
+    "anchor/subject/value); use --format json with `mem import --from-json` for full fidelity. -->";
+
+  const byKind = new Map<FactKind, Fact[]>();
+  for (const fact of facts) {
+    const bucket = byKind.get(fact.kind);
+    if (bucket === undefined) {
+      byKind.set(fact.kind, [fact]);
+    } else {
+      bucket.push(fact);
+    }
+  }
+
+  const sections: string[] = [];
+  for (const kind of FACT_KINDS) {
+    const kindFacts = byKind.get(kind);
+    if (kindFacts === undefined || kindFacts.length === 0) {
+      continue;
+    }
+    sections.push([`## ${EXPORT_MD_KIND_HEADING[kind]}`, ...kindFacts.map((fact) => `- ${factTextToMarkdownBullet(fact.text)}`)].join("\n"));
+  }
+
+  return sections.length === 0 ? `${header}\n` : `${header}\n\n${sections.join("\n\n")}\n`;
+}
+
+function formatSection(title: string, facts: readonly Fact[], detail?: (fact: Fact) => string | null): string {
   if (facts.length === 0) {
     return "";
   }
-  return [`-- ${title} (${facts.length}) --`, ...facts.map(formatFactSummary)].join("\n");
+  const lines = [`-- ${title} (${facts.length}) --`];
+  for (const fact of facts) {
+    lines.push(formatFactSummary(fact));
+    const detailLine = detail?.(fact) ?? null;
+    if (detailLine !== null) {
+      lines.push(detailLine);
+    }
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The newest source excerpt for a pending fact, rendered the same way `mem show` renders one --
+ * same `[stored_at] excerpt` shape, no extra escaping, since the excerpt is already screened and
+ * truncated at capture time (`buildScreenedExcerpt`). Null when the fact has no source row at all,
+ * which is the common case: `mem remember`/`mem suggest` never write one, so most pending facts have
+ * nothing to show here.
+ *
+ * One query per pending fact rather than a new batch lookup in storage.ts -- the pending bucket is
+ * already the size a human reviews by hand, so the extra API surface isn't earning its keep.
+ */
+function formatPendingSourceLine(db: Database.Database, fact: Fact): string | null {
+  const [newest] = listSourcesForFact(db, fact.id);
+  return newest === undefined ? null : `    source: [${newest.storedAt}] ${newest.excerpt}`;
+}
+
+/**
+ * A paste-ready `mem edit --anchor` command for an `unanchored` fact, printed only when the
+ * suggested predicate would already be `affirmed` -- a suggestion that immediately reads
+ * `contradicted` or `unverified` teaches the user the feature is broken rather than helping them.
+ *
+ * `extractAnchorableTargets` shares its patterns with the `mentionsAnchorableTarget` nomination
+ * that put this fact in the bucket at all, so the two can never disagree about what counts as
+ * anchorable. `anchorRootFor` resolves the fact's own root (not the bare caller root) the same way
+ * `evaluateFactFreshness` does for the `contradicted` bucket above; a fact whose root cannot be
+ * resolved (deleted project, foreign machine) has nothing to check against. Candidates are tried in
+ * order and the first that passes `anchorPathWithinRoot` *and* evaluates `affirmed` wins -- never a
+ * menu of options for one fact.
+ */
+function formatUnanchoredSuggestionLine(fact: Fact, root: string): string | null {
+  const factRoot = anchorRootFor(fact, root);
+  if (factRoot === null) {
+    return null;
+  }
+  for (const candidate of extractAnchorableTargets(fact.text)) {
+    if (anchorPathWithinRoot(factRoot, candidate) === null) {
+      continue;
+    }
+    const predicate = `file-exists ${candidate}`;
+    if (evaluateAnchor(predicate, factRoot) === "affirmed") {
+      // `mem edit` refuses a source_type=user fact without --force, and most of what a store holds
+      // is user-stated -- so omitting it here would hand the user a command that answers with a
+      // refusal on the common path. The guard exists to stop an agent rewriting a user's own words
+      // unasked; this is the user pasting it themselves, the text is untouched, and the override is
+      // audited either way.
+      const force = fact.source_type === "user" ? " --force" : "";
+      return `    mem edit ${fact.id} --anchor "${predicate}"${force}`;
+    }
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── init / uninstall ───────────────────────────────────────────────────────────────────────────
@@ -980,7 +1202,7 @@ function formatWiringPlanForUninstall(plan: WiringPlan): string {
 
 // ─────────────────────────────────────────────────────────────────────────── import ───────────────────────────────────────────────────────────────────────────
 
-function formatImportOutcomeLine(outcome: ImportOutcome): string {
+function formatImportOutcomeLine(outcome: ImportOutcome, dryRun = false): string {
   const { candidate } = outcome;
   const where = `${candidate.sourceRef}`;
   switch (outcome.status) {
@@ -990,18 +1212,31 @@ function formatImportOutcomeLine(outcome: ImportOutcome): string {
       return `  imported      ${where}  ${outcome.fact.id}  "${candidate.text}"`;
     case "skipped_duplicate":
       return `  skipped (duplicate)  ${where}  "${candidate.text}"`;
+    case "skipped_known":
+      return `  skipped (already known)  ${where}  "${candidate.text}"`;
     case "skipped_error":
-      return `  skipped (${outcome.reason})  ${where}  "${candidate.text}"`;
+      // Under --dry-run nothing has been skipped yet, only predicted: "skipped" would read as a
+      // report of something that already happened. The reason text is the real import's, verbatim.
+      return `  ${dryRun ? "would-skip" : "skipped"} (${outcome.reason})  ${where}  "${candidate.text}"`;
   }
 }
 
-function formatImportResult(result: { filePath: string; outcomes: readonly ImportOutcome[] }, dryRun: boolean): string {
+function formatImportResult(
+  result: { filePath: string; outcomes: readonly ImportOutcome[] },
+  dryRun: boolean,
+  dryRunNote?: string
+): string {
   if (result.outcomes.length === 0) {
     return `no qualifying bullets found in ${result.filePath}`;
   }
-  const lines = result.outcomes.map(formatImportOutcomeLine);
+  const lines = result.outcomes.map((outcome) => formatImportOutcomeLine(outcome, dryRun));
   if (dryRun) {
-    return [`would import ${result.outcomes.length} candidate fact(s) from ${result.filePath} (dry run -- nothing written):`, ...lines].join("\n");
+    const wouldImport = result.outcomes.filter((outcome) => outcome.status === "dry_run").length;
+    return [
+      `would import ${wouldImport} of ${result.outcomes.length} candidate fact(s) from ${result.filePath} (dry run -- nothing written):`,
+      ...lines,
+      ...(dryRunNote !== undefined ? [dryRunNote] : []),
+    ].join("\n");
   }
   const importedFacts = result.outcomes.flatMap((outcome) => (outcome.status === "imported" ? [outcome.fact] : []));
   const imported = importedFacts.length;
@@ -1113,7 +1348,28 @@ function reconcileContradictions(db: Database.Database, event: string): readonly
  * whole group, making the promotion silently self-undoing. The winner returns to `prior_status`
  * where that was `pinned`, so resolving a contradiction never quietly discards a user's pin.
  */
-function promotePending(db: Database.Database, id: string): string {
+/** The outcome of a promotion: the resolved id, plus a caveat when the promoted fact cannot be contradicted. */
+interface PromotionOutcome {
+  readonly id: string;
+  readonly note?: string;
+}
+
+/**
+ * Contradiction resolution keys on `subject` + `value` (`detectContradictions` filters to facts
+ * that have one), so a fact promoted without a subject becomes ground truth nothing can ever
+ * supersede: a later fact stating the opposite accumulates beside it and both surface, with no
+ * loser. Derived candidates are the ones that land here, and they rarely carry a key -- `mem
+ * scan-session` and `mem import --from-md` extract text, not a subject -- so this is the ordinary
+ * promotion rather than an exotic one, and nothing in `promoted <id>` alone would reveal it.
+ */
+function unkeyedPromotionNote(id: string): string {
+  return (
+    `note: ${id} has no subject/value, so contradiction resolution can never supersede it -- ` +
+    `key it with \`mem edit ${id} --subject <key> --value <value>\` if a later fact should be able to replace it.`
+  );
+}
+
+function promotePending(db: Database.Database, id: string): PromotionOutcome {
   const fact = resolveIdArgOrThrow(db, id);
   // `detectContradictions` is run over the same pool `formatReview` derives its `contested` bucket
   // from -- active/pinned/contested -- and read before any status is written below, for the same
@@ -1160,10 +1416,13 @@ function promotePending(db: Database.Database, id: string): string {
         `${SUPERSEDED_BY_FACT_PREFIX}${fact.id}: contested contradiction resolved in that fact's favor via explicit review.`
       );
     }
-    return fact.id;
+    // A contested fact is keyed by construction -- it only reached a contradiction group by having a
+    // subject -- so the unkeyed caveat below cannot apply to this branch.
+    return { id: fact.id };
   }
   setStatusWithAudit(db, fact.id, "active", "review_promote", "promoted pending fact to active via explicit review");
-  return fact.id;
+  const unkeyed = fact.subject === null || fact.subject === undefined;
+  return { id: fact.id, ...(unkeyed ? { note: unkeyedPromotionNote(fact.id) } : {}) };
 }
 
 /**
@@ -1353,7 +1612,13 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
     return shown.map((name) => `${name}: ${buckets[name].length}`).join(", ");
   }
 
-  const sections = shown.map((name) => formatSection(REVIEW_SECTION_TITLES[name], buckets[name])).filter((section) => section.length > 0);
+  const detailFor: Partial<Record<ReviewSection, (fact: Fact) => string | null>> = {
+    pending: (fact) => formatPendingSourceLine(db, fact),
+    unanchored: (fact) => formatUnanchoredSuggestionLine(fact, root),
+  };
+  const sections = shown
+    .map((name) => formatSection(REVIEW_SECTION_TITLES[name], buckets[name], detailFor[name]))
+    .filter((section) => section.length > 0);
 
   return sections.length === 0 ? "nothing needs review" : sections.join("\n\n");
 }
@@ -1522,7 +1787,7 @@ function formatStaleFacts(facts: readonly Fact[], cutoffIso: string, ageDays: nu
   const lines: string[] = [];
   lines.push(
     `${facts.length} stale fact${facts.length === 1 ? "" : "s"}: active, captured before ${cutoffIso}, ` +
-      `never surfaced by recall, never marked used` +
+      `unsurfaced by recall since then, never marked used` +
       (applied ? "" : " (dry run, nothing changed)")
   );
   lines.push("");
@@ -1578,7 +1843,7 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
           fact.id,
           "superseded",
           CONSOLIDATE_STALE_EVENT,
-          `superseded as stale: captured ${fact.captured_at}, never surfaced by recall, never marked used`
+          `superseded as stale: captured ${fact.captured_at}, unsurfaced by recall since ${cutoff}, never marked used`
         );
       }
     }
@@ -1683,6 +1948,7 @@ interface ExportCliOptions {
   readonly status?: string;
   readonly subject?: string;
   readonly scope?: string;
+  readonly format?: string;
 }
 
 interface ListCliOptions {
@@ -1697,6 +1963,7 @@ interface ListCliOptions {
 interface ShowCliOptions {
   readonly root?: string;
   readonly json?: boolean;
+  readonly related?: boolean;
 }
 
 interface EditCliOptions {
@@ -1941,8 +2208,18 @@ export function buildProgram(): Command {
     .option("--status <status>", "Filter by status (comma-separated for multiple)")
     .option("--subject <key>", "Filter by subject")
     .option("--scope <scope>", "Filter by scope")
+    .option(
+      "--format <format>",
+      "json (default) or md. json is the full-fidelity path for `mem import --from-json` (id, status, confidence, " +
+        "anchor, subject, value all preserved). md is a shareable, git-reviewable rendering for humans, not a backup: " +
+        "`mem import --from-md` reads it back, but every bullet lands pending and only the fact *text* survives -- " +
+        "id, status, confidence, anchor, subject, and value are all lost. Do not treat a markdown round trip as " +
+        "preserving more than that.",
+      "json"
+    )
     .action(
       guard(async (options: ExportCliOptions) => {
+        const format = parseExportFormat(options.format ?? "json");
         const filter: FactFilter = {
           ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
           ...(options.status !== undefined ? { status: parseFactStatusList(options.status) } : {}),
@@ -1953,6 +2230,10 @@ export function buildProgram(): Command {
           facts: listFacts(db, filter),
           embeddingMeta: getEmbeddingMeta(db) ?? null,
         }));
+        if (format === "md") {
+          process.stdout.write(factsToMarkdown(facts));
+          return;
+        }
         const envelope = {
           schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
           exportedAt: new Date().toISOString(),
@@ -1996,10 +2277,15 @@ export function buildProgram(): Command {
         // written". Both plan* functions need only the source file, no db.
         if (hasFromJson) {
           const fromJson = options.fromJson;
+          const jsonRoot = resolveRoot(options.root);
           const result = dryRun
-            ? planImportFromJson({ path: fromJson })
-            : await withDb((db) => importFromJson(db, { path: fromJson, root: resolveRoot(options.root) }));
-          process.stdout.write(`${formatImportResult(result, dryRun)}\n`);
+            ? planImportFromJson({ path: fromJson, root: jsonRoot })
+            : await withDb((db) => importFromJson(db, { path: fromJson, root: jsonRoot }));
+          // A dry run cannot see the store, so duplicate ids are the one refusal it cannot predict.
+          // Say so rather than let a clean plan imply the real import has nothing left to refuse.
+          const duplicateNote =
+            "note: duplicate-id conflicts are not checked in a dry run (that needs the store) -- they surface only on the real import.";
+          process.stdout.write(`${formatImportResult(result, dryRun, dryRun ? duplicateNote : undefined)}\n`);
           return;
         }
 
@@ -2025,7 +2311,12 @@ export function buildProgram(): Command {
                 ...(options.capturedAt !== undefined ? { capturedAt: options.capturedAt } : {}),
               })
             );
-        process.stdout.write(`${formatImportResult(result, dryRun)}\n`);
+        // A dry run cannot see the store, so a bullet matching an already-known fact is the one
+        // skip it cannot predict -- same limitation, same disclosure, as --from-json's duplicate-id
+        // note above.
+        const knownFactNote =
+          "note: matches against facts already in the store are not checked in a dry run (that needs the store) -- they surface only on the real import.";
+        process.stdout.write(`${formatImportResult(result, dryRun, dryRun ? knownFactNote : undefined)}\n`);
       })
     );
 
@@ -2354,8 +2645,12 @@ export function buildProgram(): Command {
     .description("Show one fact in full, including provenance and anchor freshness")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: a project-scoped fact's own scope root, else the current directory)")
     .option(
+      "--related",
+      "Also show the facts sharing the most entity/topic terms with this one, ranked with entity matches weighted above topic matches, target and superseded facts excluded, scope-contained to --root -- an association aid, not a ground-truth channel (pending/contested neighbours appear but stay labelled as such)"
+    )
+    .option(
       "--json",
-      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array, which is reserved and always empty: no capture path writes source rows, so [] here means mem records no sources at all, not that this fact has none. Carries supersededBy: the fact that replaced this one, or null when no supersession edge is recorded -- which covers 'not superseded', 'superseded with no successor', and 'superseded by something no longer traceable in this store's audit log (e.g. after an export/import round trip)'; the fact's own status distinguishes the first from the other two, but not the other two from each other. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it."
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array: fed only by mem scan-session and mem import --from-md, each writing one screened, truncated excerpt of the raw material (a user turn, a markdown line) the fact was pulled from -- mem remember and mem suggest never write a source row, since there the caller's own text is the fact. So [] means either kind: no source was ever recorded for this fact, or the fact came from a path that deliberately never records one. Carries supersededBy: the fact that replaced this one, or null when no supersession edge is recorded -- which covers 'not superseded', 'superseded with no successor', and 'superseded by something no longer traceable in this store's audit log (e.g. after an export/import round trip)'; the fact's own status distinguishes the first from the other two, but not the other two from each other. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it. When --related is also passed, carries related: derived-at-read-time neighbours sharing entity/topic terms with this fact (see --related's own help), each with its status and a shared-term score; [] means this fact shares no term with anything else in scope, not that the field was skipped."
     )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
@@ -2370,7 +2665,8 @@ export function buildProgram(): Command {
           // back further to the fact's persisted `captureRoot` (and to `unverified` when that too is
           // unknown, or when the query root does not exactly match it) is what keeps `mem show` from
           // asserting a decisive verdict from an unrelated directory for a `path`-scoped fact.
-          const freshness = evaluateFactFreshness(fact, resolveRoot(options.root));
+          const root = resolveRoot(options.root);
+          const freshness = evaluateFactFreshness(fact, root);
           const sources = listSourcesForFact(db, fact.id);
           const history = listAuditLogForFact(db, fact.id);
           // Only for a superseded fact: the audit log's most recent row for an active fact says
@@ -2379,6 +2675,7 @@ export function buildProgram(): Command {
           const winnerId = fact.status === "superseded" ? findSupersedingFactId(db, fact.id) : null;
           const edge: SupersessionEdge | null =
             winnerId === null ? null : { winnerId, winner: getFactById(db, winnerId) };
+          const related = options.related === true ? findRelatedFacts(db, fact, root) : null;
           if (options.json === true) {
             const envelope = {
               schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
@@ -2392,10 +2689,25 @@ export function buildProgram(): Command {
                 edge === null
                   ? null
                   : { id: edge.winnerId, status: edge.winner?.status ?? null, text: edge.winner?.text ?? null },
+              ...(related !== null
+                ? {
+                    related: related.map(({ fact: candidate, score }) => ({
+                      id: candidate.id,
+                      kind: candidate.kind,
+                      status: candidate.status,
+                      text: candidate.text,
+                      sharedTerms: score,
+                      // Same vocabulary as the text output's caveat, so a JSON consumer sees the exact
+                      // wording a human reading `mem show`/`mem recall` output already sees for these
+                      // two states; null for anything already ground-truth-eligible (active/pinned).
+                      caveat: relatedTrustCaveat(candidate.status),
+                    })),
+                  }
+                : {}),
             };
             return JSON.stringify(envelope, null, 2);
           }
-          return formatFactDetail(fact, freshness, sources, edge, history);
+          return formatFactDetail(fact, freshness, sources, edge, history, related);
         });
         process.stdout.write(`${output}\n`);
       })
@@ -2452,6 +2764,11 @@ export function buildProgram(): Command {
             if ((storedByText.get(normalizeFactText(candidate.text)) ?? []).some((fact) => isBoundToRoot(fact, root))) {
               continue;
             }
+            // The whole turn is genuinely larger than the sentence captured as the fact, which is
+            // exactly the provenance gap `sources` exists to close -- screened separately because a
+            // turn can carry a secret the extracted sentence did not (see buildScreenedExcerpt doc).
+            // `null` (screened positive) means no source row, never a blocked capture.
+            const sourceExcerpt = buildScreenedExcerpt(candidate.context, root);
             try {
               const { fact } = captureSuggested(db, {
                 text: candidate.text,
@@ -2459,6 +2776,7 @@ export function buildProgram(): Command {
                 scope,
                 root,
                 sourceRef: `${transcriptPath}#turn${candidate.turnIndex}`,
+                ...(sourceExcerpt !== null ? { sourceExcerpt } : {}),
               });
               kept.push(fact.id);
             } catch (error) {
@@ -2731,8 +3049,11 @@ export function buildProgram(): Command {
 
         if (options.promote !== undefined) {
           const id = options.promote;
-          const resolved = await withDb((db) => promotePending(db, id));
-          process.stdout.write(`promoted ${resolved}\n`);
+          const outcome = await withDb((db) => promotePending(db, id));
+          process.stdout.write(`promoted ${outcome.id}\n`);
+          if (outcome.note !== undefined) {
+            process.stdout.write(`${outcome.note}\n`);
+          }
           return;
         }
         if (options.reject !== undefined) {
@@ -2791,10 +3112,10 @@ export function buildProgram(): Command {
 
   program
     .command("consolidate")
-    .description("Report near-duplicate facts (or, with --stale, live facts nothing has ever read); --apply supersedes the losers")
+    .description("Report near-duplicate facts (or, with --stale, live facts gone unread for the cutoff window); --apply supersedes the losers")
     .option("--apply", "Act on the report instead of only printing it: mark every loser superseded -- the same audited soft-delete `mem forget` uses, never a hard delete")
     .option("--threshold <0-1>", `Jaccard floor over topic terms for calling two facts duplicates (default ${DEFAULT_DUPLICATE_THRESHOLD})`)
-    .option("--stale", "Run the stale pass instead: active facts nothing has ever surfaced or marked used")
+    .option("--stale", "Run the stale pass instead: active facts unsurfaced since the cutoff and never marked used")
     .option("--stale-days <n>", `How old a fact must be to count as stale, in days (default ${DEFAULT_STALE_AGE_DAYS})`)
     .action(
       guard(async (options: ConsolidateCliOptions) => {
@@ -3097,7 +3418,9 @@ export function buildProgram(): Command {
         "A tool with more than one managed file computes every file's next content before writing any of them, so a " +
         "hand-written entry that conflicts with mem's aborts the whole install before a single file is touched -- never a " +
         "partial write. Add `*.token-goat-mem.bak` to this project's .gitignore: install takes a one-time snapshot of any " +
-        "pre-existing file before its first write."
+        "pre-existing file before its first write. Installing both an AGENTS.md tool (codex/copilot-cli/copilot-vscode) and " +
+        "a copilot-instructions.md tool (copilot-visual-studio/copilot-jetbrains) writes mem's block into both files, which " +
+        "VS Code and Copilot CLI both read -- harmless, just redundant tokens."
     )
     .option("--root <path>", "Project root to write project-level config into (default: current directory)")
     .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")

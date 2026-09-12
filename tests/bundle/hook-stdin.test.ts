@@ -52,6 +52,11 @@ function headerOf(stdout: string): string {
   return stdout.split("\n")[0] ?? "";
 }
 
+/** The TGMEM/2 footer-line, if one was emitted. */
+function footerOf(stdout: string): string | undefined {
+  return stdout.split("\n").find((line) => line.startsWith("footer  "));
+}
+
 function remember(text: string): string {
   const result = runBundle(["remember", text, "--kind", "fact", "--scope", "global"]);
   expect(result.exitCode, result.stderr).toBe(0);
@@ -188,6 +193,47 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     );
     expect(viaEnvelope.exitCode, viaEnvelope.stderr).toBe(0);
     expect(viaEnvelope.stdout).toBe("TGMEM/2  delta=1\n");
+  });
+
+  it("an envelope carrying a session id prints a footer invocation naming exactly that session, and running it marks the row useful", () => {
+    // Regression: the recall footer used to say nothing about `mem used` at all, and the agent-facing
+    // guidance told the agent to run it "using the session id you recalled under" -- an id the wire
+    // format never carried. This is the fix: the session that logged this recall is now on the wire,
+    // in a copy-pasteable command, and running it end to end actually marks the row.
+    const id = remember("a fact worth marking useful");
+    const result = runBundle(
+      ["recall", "--hint-format", "--hook-stdin", "--root", root],
+      envelope({ session_id: "sess-mark", hook_event_name: "SessionStart", source: "startup" })
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(emittedIds(result.stdout)).toEqual([id]);
+
+    const footer = footerOf(result.stdout);
+    expect(footer).toBeDefined();
+    const invocation = /mem used (.+) --session-id (\S+) to mark what helped/u.exec(footer ?? "");
+    expect(invocation).not.toBeNull();
+    const [, idList, sessionId] = invocation ?? [];
+    expect(idList?.split(" ")).toEqual([id]);
+    expect(sessionId).toBe("sess-mark");
+
+    // Drive the footer's own printed command back through `mem used`, exactly as an agent copying
+    // it would -- proving the handle works, not just that a string was formatted.
+    const used = runBundle(["used", ...(idList?.split(" ") ?? []), "--session-id", sessionId ?? ""]);
+    expect(used.exitCode, used.stderr).toBe(0);
+    expect(used.stdout).toBe(`marked 1 recall row useful in session ${sessionId}\n`);
+  });
+
+  it("with no session id known, the footer carries no usefulness invocation", () => {
+    // A plain, session-less recall never writes a `recall_log` row (see `markSurfaced` vs
+    // `recordSurfaced` in src/integration-seam.ts), so there is nothing a `mem used` call could mark
+    // -- printing one anyway would earn the exact "never surfaced in session ..." reply this fix
+    // exists to stop producing.
+    remember("a fact recalled with no session to log against");
+    const result = runBundle(["recall", "--hint-format", "--root", root]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    const footer = footerOf(result.stdout);
+    expect(footer).toBeDefined();
+    expect(footer).not.toContain("mem used");
   });
 });
 
