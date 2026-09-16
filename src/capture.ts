@@ -42,7 +42,17 @@ import type Database from "better-sqlite3";
 import { anchorPathWithinRoot } from "./anchors.js";
 import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
-import { findReaffirmableFact, findReaffirmablePendingFacts, insertFact as storageInsertFact, insertSource, reaffirmFact, setFactStatus } from "./storage.js";
+import {
+  findReaffirmableFact,
+  findReaffirmablePendingFacts,
+  incrementSightings,
+  insertFact as storageInsertFact,
+  insertSource,
+  listSourcesForFact,
+  normalizeFactText,
+  reaffirmFact,
+  setFactStatus,
+} from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
@@ -404,13 +414,106 @@ export function loadAllowlist(root: string): string[] {
  * cannot slip through by being cut off before the check runs; only a confirmed-clean excerpt is
  * then truncated for storage. Never called for `mem remember`/`mem suggest`: there the user's own
  * text *is* the fact, and a source row echoing it back would be provenance noise, not evidence.
+ *
+ * When `factText` is provided, the excerpt is windowed around the first occurrence of the fact
+ * text in `raw` (matched through `normalizeFactText` to ignore whitespace/case/trailing-period
+ * differences), ensuring the source excerpt actually contains the evidence. If the fact text is
+ * not found in raw, falls back to head truncation as a safe default. If `factText` is omitted,
+ * always truncates from the head (today's behavior).
  */
-export function buildScreenedExcerpt(raw: string, root: string): string | null {
+export function buildScreenedExcerpt(raw: string, root: string, factText?: string): string | null {
   const allowlist = loadAllowlist(root);
   if (screenForSecrets({ excerpt: raw }, allowlist).length > 0) {
     return null;
   }
-  return raw.length <= MAX_SOURCE_EXCERPT_LENGTH ? raw : `${raw.slice(0, MAX_SOURCE_EXCERPT_LENGTH)}${EXCERPT_TRUNCATION_MARKER}`;
+
+  // If raw fits in the limit, use it as-is without any windowing logic.
+  if (raw.length <= MAX_SOURCE_EXCERPT_LENGTH) {
+    return raw;
+  }
+
+  // If factText is provided, attempt to window the excerpt around it.
+  if (factText !== undefined) {
+    const factPos = findNormalizedTextPosition(raw, factText);
+    if (factPos !== -1) {
+      // Window around the found position: try to center it, but stay within bounds.
+      const halfWindow = Math.floor((MAX_SOURCE_EXCERPT_LENGTH - factText.length) / 2);
+      const targetStart = Math.max(0, factPos - halfWindow);
+      const windowEnd = Math.min(raw.length, targetStart + MAX_SOURCE_EXCERPT_LENGTH);
+      let windowStart = targetStart;
+
+      // If we're near the end and can't fit the full window, slide the start back.
+      if (windowEnd - windowStart < MAX_SOURCE_EXCERPT_LENGTH && windowStart > 0) {
+        windowStart = Math.max(0, windowEnd - MAX_SOURCE_EXCERPT_LENGTH);
+      }
+
+      const excerpt = raw.slice(windowStart, windowEnd);
+      const hasPrefix = windowStart > 0;
+      const hasSuffix = windowEnd < raw.length;
+
+      let result = excerpt;
+      if (hasPrefix) {
+        result = `${EXCERPT_TRUNCATION_MARKER}${result}`;
+      }
+      if (hasSuffix) {
+        result = `${result}${EXCERPT_TRUNCATION_MARKER}`;
+      }
+
+      return result;
+    }
+  }
+
+  // Fallback: truncate from head (today's behavior when fact text not found or not provided).
+  return `${raw.slice(0, MAX_SOURCE_EXCERPT_LENGTH)}${EXCERPT_TRUNCATION_MARKER}`;
+}
+
+/**
+ * Finds the position of a normalized text sequence within a larger string, accounting for
+ * whitespace and case differences. Returns the byte position in the original string where
+ * the normalized match starts, or -1 if not found. Used to ensure source excerpts contain
+ * the actual fact text they provide evidence for.
+ */
+function findNormalizedTextPosition(raw: string, factText: string): number {
+  const normalizedFact = normalizeFactText(factText);
+  const lowerRaw = raw.toLowerCase();
+
+  // Search through the raw text for a match, accounting for normalized whitespace.
+  for (let rawPos = 0; rawPos < raw.length; rawPos++) {
+    // Check if we have a match starting at rawPos, accounting for normalized text.
+    let factIdx = 0;
+    let checkPos = rawPos;
+    let foundMatch = true;
+
+    while (factIdx < normalizedFact.length && checkPos < raw.length) {
+      const factChar = normalizedFact.charAt(factIdx);
+      const rawChar = lowerRaw.charAt(checkPos);
+
+      if (factChar === " ") {
+        // In the normalized fact, a space can match one or more whitespace in raw.
+        if (!/\s/u.test(rawChar)) {
+          foundMatch = false;
+          break;
+        }
+        // Skip all whitespace in raw.
+        while (checkPos < raw.length && /\s/u.test(lowerRaw.charAt(checkPos))) {
+          checkPos++;
+        }
+        factIdx++;
+      } else if (factChar === rawChar) {
+        factIdx++;
+        checkPos++;
+      } else {
+        foundMatch = false;
+        break;
+      }
+    }
+
+    if (foundMatch && factIdx === normalizedFact.length) {
+      return rawPos;
+    }
+  }
+
+  return -1;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Anchor syntax ───────────────────────────────────────────────────────────────────────────
@@ -892,6 +995,52 @@ function writeFact(
   // one that decides whether the read-then-write pair is safe against a concurrent writer under WAL.
   // See storage.insertFact for the full SQLITE_BUSY_SNAPSHOT rationale.
   return tx.immediate();
+}
+
+/**
+ * Records a repeat sighting of a `pending` fact: `mem scan-session`/`mem import --from-md` matched
+ * a candidate's text to `factId`, already queued and awaiting `mem review --promote`, instead of
+ * finding nothing and writing a second pending row. A restated preference is evidence a human
+ * reviewing the queue should see, not noise to drop with a bare `continue` -- which is what both
+ * callers did before this existed.
+ *
+ * Screens `raw` through `buildScreenedExcerpt` exactly like a first capture -- not optional here:
+ * a sighting is still raw session/file material, the same secret surface a first capture has, and
+ * "it's only a sighting" is not a reason to skip the check that content otherwise always gets.
+ *
+ * Returns `false`, writing nothing, in the two cases where under-counting is the safe direction:
+ *  - `buildScreenedExcerpt` returns `null` (screened positive) -- there is no clean excerpt to
+ *    write and, with no excerpt, no independent evidence to dedup a later real sighting against;
+ *  - an identical excerpt is already stored for this fact. `sources` carries no locator column
+ *    (`id, fact_id, excerpt, stored_at`) pointing back at which transcript position or file line
+ *    produced it, so excerpt equality is the only key available to tell "the same statement, seen
+ *    again by a second hook firing over the same transcript" (`mem scan-session` runs at both
+ *    `Stop` and `PreCompact`) from "a genuine restatement" -- and a genuine restatement arrives
+ *    with different surrounding context, so a different excerpt, every time.
+ *
+ * Never touches `status`: this function has no path that can promote, demote, or otherwise change
+ * a fact's state, however many times it is called. That invariant -- a `pending` fact promotes only
+ * through `mem review --promote`, never by time or repetition -- predates this function and nothing
+ * here weakens it.
+ */
+export function recordSighting(db: Database.Database, factId: string, raw: string, root: string): boolean {
+  const excerpt = buildScreenedExcerpt(raw, root);
+  if (excerpt === null) {
+    return false;
+  }
+  if (listSourcesForFact(db, factId).some((source) => source.excerpt === excerpt)) {
+    return false;
+  }
+  // Both writes are two separate columns on two separate rows describing the same event; a crash
+  // between them must not leave a source excerpt with no corresponding count, or vice versa.
+  // BEGIN IMMEDIATE, matching every other transaction in this module -- see storage.insertFact's
+  // SQLITE_BUSY_SNAPSHOT rationale for why a deferred transaction is the wrong default here too.
+  const tx = db.transaction((): void => {
+    insertSource(db, { factId, excerpt });
+    incrementSightings(db, factId);
+  });
+  tx.immediate();
+  return true;
 }
 
 /**

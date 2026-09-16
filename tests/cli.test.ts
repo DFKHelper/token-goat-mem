@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { run } from "../src/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
-import { deleteFact, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
+import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { captureSuggested, MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 
@@ -649,11 +649,12 @@ describe("mem doctor (read-only health check)", () => {
 // ─────────────────────────────────────────────────────────────────────────── integration-seam.ts fail-open via `mem recall --hint-format` ───────────────────────────────────────────────────────────────────────────
 
 describe("--hint-format fails open on internal error (integration-seam.ts, review S2/S3)", () => {
-  it("returns a well-formed empty TGMEM payload and exit code 0 instead of throwing when the DB cannot be opened", async () => {
+  it("returns a well-formed TGMEM payload naming the unreadable store, and exit code 0, instead of throwing when the DB cannot be opened", async () => {
     // Point TOKEN_GOAT_MEM_HOME at a path that is a *file*, not a directory. `mem.db` would need to
     // live inside it, so opening the store fails internally -- exactly the class of failure
     // buildHintFormat's outer try/catch exists to absorb (never throws; caller's fail-open path never
-    // has to special-case a thrown exception).
+    // has to special-case a thrown exception). The response still says the store could not be read,
+    // rather than looking byte-identical to a project with genuinely no memory yet.
     const brokenHome = join(mkdtempSync(join(tmpdir(), "mem-cli-broken-")), "not-a-directory");
     writeFileSync(brokenHome, "this is a file, not a mem home directory");
     process.env["TOKEN_GOAT_MEM_HOME"] = brokenHome;
@@ -661,7 +662,7 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     try {
       const result = await runCli(["recall", "--hint-format", "--root", home]);
       expect(result.exitCode).toBe(0);
-      expect(result.stdout).toBe("TGMEM/2\n");
+      expect(result.stdout).toBe("TGMEM/2\nfooter  store could not be read; mem doctor shows the underlying error\n");
       expect(result.stderr).toBe("");
     } finally {
       rmSync(join(brokenHome, ".."), { recursive: true, force: true });
@@ -779,8 +780,14 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     const bare = await runCli(["recall", "--hint-format", "--root", home]);
     const noMatch = await runCli(["recall", "zzzz nonexistent xyzzy", "--hint-format", "--root", home]);
     expect(noMatch.exitCode).toBe(0);
-    // Same set of lines either way -- a query that matches nothing reorders, it never removes.
-    expect([...noMatch.stdout.split("\n")].sort()).toEqual([...bare.stdout.split("\n")].sort());
+    const factLines = (stdout: string): string[] => stdout.split("\n").filter((line) => line.startsWith("fact  "));
+    // Same set of fact-lines either way -- a query that matches nothing reorders, it never removes.
+    expect([...factLines(noMatch.stdout)].sort()).toEqual([...factLines(bare.stdout)].sort());
+    // The footer is where the two now diverge: a query with genuinely nothing to match against
+    // says so, rather than handing back the same recency dump a no-query call would with no way to
+    // tell the two apart.
+    expect(noMatch.stdout).toContain("no match for this query -- showing recent facts instead");
+    expect(bare.stdout).not.toContain("no match for this query");
   });
 
   it("--hint-format with allowed options (--context-files, --stable, --hint-style) still works", async () => {
@@ -1184,6 +1191,112 @@ describe("review shows a pending fact's newest source excerpt", () => {
     expect(review.exitCode).toBe(0);
     expect(review.stdout).toContain(fact.id);
     expect(review.stdout).not.toContain("source:");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── review names what a pending correction may contradict ───────────────────────────────────────────────────────────────────────────
+
+describe("review flags what a pending correction/subject fact may contradict", () => {
+  it("names the live fact sharing the most terms as `may contradict <id> \"<text>\"`", async () => {
+    const rival = await runCli(["remember", "the release plan pins the build to v9.9.9 while docs get updated", "--kind", "fact"]);
+    const rivalId = extractRememberedId(rival);
+
+    const db = openStorage(resolveDbPath());
+    // kind=correction alone is eligible, with no --subject/--value supplied -- the gap this
+    // feature closes is exactly the case where a correction has nothing but its text linking it
+    // to what it corrects.
+    const { fact: correction } = captureSuggested(db, {
+      text: "the release plan actually pins the build to v9.9.9 and a hotfix",
+      kind: "correction",
+      root: home,
+    });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain(correction.id);
+    expect(review.stdout).toContain(`may contradict ${rivalId} "the release plan pins the build to v9.9.9 while docs get updated"`);
+  });
+
+  it("names the live fact for a pending fact carrying --subject even when its kind is not correction", async () => {
+    const rival = await runCli([
+      "remember",
+      "uses pnpm as the package manager for this project",
+      "--kind",
+      "preference",
+      "--subject",
+      "package-manager",
+      "--value",
+      "pnpm",
+    ]);
+    const rivalId = extractRememberedId(rival);
+
+    const db = openStorage(resolveDbPath());
+    const { fact: suggestion } = captureSuggested(db, {
+      text: "uses npm as the package manager for this project",
+      kind: "preference",
+      subject: "package-manager",
+      value: "npm",
+      root: home,
+    });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain(suggestion.id);
+    expect(review.stdout).toContain(`may contradict ${rivalId}`);
+  });
+
+  it("prints no line when the pending fact is not a correction and carries no --subject", async () => {
+    await runCli(["remember", "the release plan pins the build to v9.9.9 while docs get updated", "--kind", "fact"]);
+
+    const db = openStorage(resolveDbPath());
+    const { fact: suggestion } = captureSuggested(db, {
+      text: "the release plan pins the build to v9.9.9 as well",
+      kind: "fact",
+      root: home,
+    });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain(suggestion.id);
+    expect(review.stdout).not.toContain("may contradict");
+  });
+
+  it("prints no line when a correction shares no terms with anything live", async () => {
+    const db = openStorage(resolveDbPath());
+    const { fact: suggestion } = captureSuggested(db, {
+      text: "an entirely unrelated correction about zzz-nonexistent-topic",
+      kind: "correction",
+      root: home,
+    });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain(suggestion.id);
+    expect(review.stdout).not.toContain("may contradict");
+  });
+
+  it("never supersedes, promotes, or changes status: it is a label only", async () => {
+    const rival = await runCli(["remember", "the release plan pins the build to v9.9.9 while docs get updated", "--kind", "fact"]);
+    const rivalId = extractRememberedId(rival);
+
+    const db = openStorage(resolveDbPath());
+    const { fact: correction } = captureSuggested(db, {
+      text: "the release plan actually pins the build to v9.9.9 and a hotfix",
+      kind: "correction",
+      root: home,
+    });
+    db.close();
+
+    await runCli(["review", "--section", "pending"]);
+
+    const rivalAfter = await runCli(["show", rivalId]);
+    expect(rivalAfter.stdout).toContain("status: active");
+    const correctionAfter = await runCli(["show", correction.id]);
+    expect(correctionAfter.stdout).toContain("status: pending");
   });
 });
 
@@ -1741,6 +1854,19 @@ describe("mem export", () => {
     expect(byId.has(activeId)).toBe(true);
     expect(byId.has(pendingId)).toBe(false);
   });
+
+  it("a store with no superseded facts exports byte-identical output to before superseded_by existed (modulo exportedAt)", async () => {
+    await runCli(["remember", "uses pnpm not npm", "--kind", "preference"]);
+    await runCli(["remember", "the deploy target is fly.io", "--kind", "fact"]);
+
+    const exported = await runCli(["export"]);
+    expect(exported.exitCode).toBe(0);
+    const envelope = JSON.parse(exported.stdout) as { exportedAt: string; facts: readonly Record<string, unknown>[] };
+    for (const fact of envelope.facts) {
+      expect(fact.status).not.toBe("superseded");
+      expect(Object.prototype.hasOwnProperty.call(fact, "superseded_by")).toBe(false);
+    }
+  });
 });
 
 describe("mem export --format md", () => {
@@ -2284,7 +2410,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
     }
   });
 
-  it("does not state a false specific cause for a superseded fact whose winner survived the round trip (supersession edges live only in the audit log, which export does not carry)", async () => {
+  it("carries a superseded fact's supersession edge through export/import, so `mem show` names the winner instead of printing the unknown caveat", async () => {
     const first = await runCli(["remember", "the database server is postgres", "--kind", "fact", "--subject", "db", "--value", "postgres"]);
     const loserId = extractRememberedId(first);
     const second = await runCli(["remember", "the database server is mysql", "--kind", "fact", "--subject", "db", "--value", "mysql"]);
@@ -2298,6 +2424,10 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
 
     const exported = await runCli(["export"]);
     expect(exported.exitCode).toBe(0);
+    const envelope = JSON.parse(exported.stdout) as ExportEnvelope & { facts: readonly (ExportedFact & { superseded_by?: string | null })[] };
+    const loserExport = envelope.facts.find((fact) => fact.id === loserId);
+    expect(loserExport?.superseded_by).toBe(winnerId);
+
     const exportDir = mkdtempSync(join(tmpdir(), "mem-export-"));
     const jsonPath = join(exportDir, "export.json");
     writeFileSync(jsonPath, exported.stdout, "utf8");
@@ -2311,9 +2441,10 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
       const shown = await runCli(["show", loserId]);
       expect(shown.exitCode).toBe(0);
       expect(shown.stdout).toContain("status: superseded");
-      // The winner is right there in the imported store -- the old fallback text ("retired by
-      // forget, reject, or staleness") is a specific, false claim in this case, not a hedge.
-      expect(shown.stdout).not.toContain("retired by forget, reject, or staleness");
+      // The winner is right there in the imported store, and the exported edge named it, so the
+      // "unknown" fallback must not fire -- `mem show` now names the winner directly.
+      expect(shown.stdout).not.toContain("superseded_by: unknown");
+      expect(shown.stdout).toContain(`superseded_by: ${winnerId}`);
     } finally {
       process.env["TOKEN_GOAT_MEM_HOME"] = home;
       rmSync(targetHome, { recursive: true, force: true });
@@ -4692,6 +4823,311 @@ describe("scan-session", () => {
     const shown = await runCli(["show", id, "--json"]);
     const envelope = JSON.parse(shown.stdout) as { sources: unknown[] };
     expect(envelope.sources).toEqual([]);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────── sightings (repeat restatement of a pending fact) ───────────────────────────────────────────────────────────────────────
+
+  it("does not record a sighting when the same transcript is scanned twice", async () => {
+    // Both the pending-fact dedup and the sighting dedup key on the excerpt: a second scan of the
+    // same transcript produces the identical excerpt, so it must count as one occurrence, not two.
+    const transcript = writeTranscript(["Always run the linter before pushing."]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string }[] };
+    expect(facts.facts).toHaveLength(1);
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const fact = getFactById(db, facts.facts[0]?.id ?? "");
+      expect(fact?.sightings ?? 0).toBe(0);
+    } finally {
+      db.close();
+    }
+    expect((await runCli(["review", "--section", "pending"])).stdout).not.toContain("sighted again");
+  });
+
+  it("records a sighting when a pending fact is genuinely restated in a later scan", async () => {
+    // A different turn produces a different excerpt, which is exactly what tells a genuine
+    // restatement apart from the same hook firing twice over one transcript (see `recordSighting`).
+    const text = "Always run the linter before pushing.";
+    await runCli(["scan-session", "--transcript", writeTranscript(["First mention. " + text]), "--root", "."]);
+    await runCli(["scan-session", "--transcript", writeTranscript(["Second mention, said again. " + text]), "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; status: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    expect(facts.facts[0]?.status).toBe("pending");
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const fact = getFactById(db, facts.facts[0]?.id ?? "");
+      expect(fact?.sightings).toBe(1);
+      expect(listSourcesForFact(db, fact?.id ?? "")).toHaveLength(2);
+    } finally {
+      db.close();
+    }
+
+    const reviewText = await runCli(["review", "--section", "pending"]);
+    expect(reviewText.stdout).toContain("sighted again 1 time since");
+  });
+
+  it("records no sighting and no source when the restated turn's excerpt would screen positive for a secret", async () => {
+    const text = "Always run the linter before pushing.";
+    await runCli(["scan-session", "--transcript", writeTranscript(["First mention. " + text]), "--root", "."]);
+    // The extracted candidate sentence itself carries no secret -- only the surrounding turn does --
+    // so this exercises the excerpt screen inside `recordSighting`, not `captureSuggested`'s own.
+    await runCli([
+      "scan-session",
+      "--transcript",
+      writeTranscript([`${text} Also the deploy key is AKIAIOSFODNN7EXAMPLE for reference.`]),
+      "--root",
+      ".",
+    ]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string }[] };
+    expect(facts.facts).toHaveLength(1);
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const fact = getFactById(db, facts.facts[0]?.id ?? "");
+      expect(fact?.sightings ?? 0).toBe(0);
+      expect(listSourcesForFact(db, fact?.id ?? "")).toHaveLength(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("never promotes a pending fact to active by sighting it, however many times", async () => {
+    const text = "Always run the linter before pushing.";
+    for (let i = 0; i < 3; i += 1) {
+      await runCli(["scan-session", "--transcript", writeTranscript([`Restatement number ${i}. ${text}`]), "--root", "."]);
+    }
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; status: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    expect(facts.facts[0]?.status).toBe("pending");
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const fact = getFactById(db, facts.facts[0]?.id ?? "");
+      expect(fact?.sightings).toBe(2);
+      expect(fact?.status).toBe("pending");
+    } finally {
+      db.close();
+    }
+
+    const active = await runCli(["list", "--status", "active", "--json"]);
+    expect((JSON.parse(active.stdout) as { facts: unknown[] }).facts).toHaveLength(0);
+  });
+
+  it("windows the source excerpt around the fact text when the turn exceeds MAX_SOURCE_EXCERPT_LENGTH", async () => {
+    // A long turn whose durable statement is at the very end: the old head-truncation logic
+    // would drop the fact entirely from the excerpt. The excerpt must contain the fact text.
+    const longPrefix = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(20); // ~1120 chars
+    const factText = "Always run the linter before pushing.";
+    const turn = longPrefix + factText;
+    expect(turn.length).toBeGreaterThan(600);
+
+    const transcript = writeTranscript([turn]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; text: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    const factId = facts.facts[0]?.id ?? "";
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const sources = listSourcesForFact(db, factId);
+      expect(sources).toHaveLength(1);
+      const excerpt = sources[0]?.excerpt ?? "";
+      // The excerpt must contain the fact text (normalized: whitespace/case/period insensitive).
+      expect(excerpt.toLowerCase()).toContain(factText.toLowerCase());
+    } finally {
+      db.close();
+    }
+  });
+
+  it("preserves short turns unchanged in their excerpt", async () => {
+    // A short turn well under 600 chars should produce an excerpt with no ellipsis markers.
+    const shortTurn = "Always commit meaningful messages.";
+    const transcript = writeTranscript([shortTurn]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string }[] };
+    const factId = facts.facts[0]?.id ?? "";
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const sources = listSourcesForFact(db, factId);
+      expect(sources).toHaveLength(1);
+      const excerpt = sources[0]?.excerpt ?? "";
+      expect(excerpt).toBe(shortTurn);
+      expect(excerpt).not.toContain("…");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("windows on the first occurrence when a fact text appears multiple times in the turn", async () => {
+    const long = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(10); // ~560 chars
+    const turn = `${long}Always run the linter before pushing commits to main. Also remember, always run the linter before pushing.`;
+    const transcript = writeTranscript([turn]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string }[] };
+    expect(facts.facts.length).toBeGreaterThan(0);
+    const factId = facts.facts[0]?.id ?? "";
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const sources = listSourcesForFact(db, factId);
+      expect(sources).toHaveLength(1);
+      const excerpt = sources[0]?.excerpt ?? "";
+      // The excerpt should contain the fact text.
+      expect(excerpt.toLowerCase()).toContain("linter");
+    } finally {
+      db.close();
+    }
+  });
+
+  it("windows the source excerpt while preserving ellipsis markers on truncated sides", async () => {
+    // When truncation occurs on both sides, both sides should have ellipsis markers.
+    const longPrefix = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(10); // ~560 chars
+    const longSuffix = " Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.".repeat(10); // ~660 chars
+    const turn = longPrefix + "Always remember to test thoroughly." + longSuffix;
+    expect(turn.length).toBeGreaterThan(600);
+
+    const transcript = writeTranscript([turn]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string }[] };
+    expect(facts.facts.length).toBeGreaterThan(0);
+    const factId = facts.facts[0]?.id ?? "";
+
+    const db = openStorage(resolveDbPath());
+    try {
+      const sources = listSourcesForFact(db, factId);
+      expect(sources).toHaveLength(1);
+      const excerpt = sources[0]?.excerpt ?? "";
+      // The excerpt must contain the fact text (at least "remember" or "test").
+      expect(excerpt.toLowerCase()).toMatch(/remember|test/);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("timestamps a scanned fact with the transcript entry's timestamp when present", async () => {
+    const pastTimestamp = new Date(Date.now() - 86400000).toISOString(); // 24 hours ago
+    const transcript = join(home, "transcript-with-ts.jsonl");
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "Never commit generated files to the repository." }] },
+        timestamp: pastTimestamp,
+      }) + "\n",
+      "utf8"
+    );
+
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; captured_at: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    const fact = facts.facts[0];
+
+    // The fact's captured_at should be the transcript timestamp, not "now".
+    expect(fact?.captured_at).toBeDefined();
+    const capturedTime = new Date(fact?.captured_at ?? "").getTime();
+    const expectedTime = new Date(pastTimestamp).getTime();
+    // Allow a small tolerance (within 1 second) due to ISO string rounding.
+    expect(Math.abs(capturedTime - expectedTime)).toBeLessThan(1000);
+  });
+
+  it("falls back to now when transcript entry has no timestamp", async () => {
+    const transcript = join(home, "transcript-no-ts.jsonl");
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "Always run tests before pushing." }] },
+        // No timestamp field
+      }) + "\n",
+      "utf8"
+    );
+
+    const beforeScan = Date.now();
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    const afterScan = Date.now();
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; captured_at: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    const capturedTime = new Date(facts.facts[0]?.captured_at ?? "").getTime();
+
+    // captured_at should be roughly now (within the scan window).
+    expect(capturedTime).toBeGreaterThanOrEqual(beforeScan - 1000); // Allow 1 second before
+    expect(capturedTime).toBeLessThanOrEqual(afterScan + 1000); // Allow 1 second after
+  });
+
+  it("falls back to now when transcript entry has a malformed timestamp", async () => {
+    const transcript = join(home, "transcript-bad-ts.jsonl");
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "Never commit without code review." }] },
+        timestamp: "not-a-date",
+      }) + "\n",
+      "utf8"
+    );
+
+    const beforeScan = Date.now();
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    const afterScan = Date.now();
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; captured_at: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    const capturedTime = new Date(facts.facts[0]?.captured_at ?? "").getTime();
+
+    // Should fall back to now, not fail.
+    expect(capturedTime).toBeGreaterThanOrEqual(beforeScan - 1000);
+    expect(capturedTime).toBeLessThanOrEqual(afterScan + 1000);
+  });
+
+  it("falls back to now when transcript entry has a future-dated timestamp", async () => {
+    const futureTimestamp = new Date(Date.now() + 86400000).toISOString(); // 24 hours in the future
+    const transcript = join(home, "transcript-future-ts.jsonl");
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "user",
+        message: { role: "user", content: [{ type: "text", text: "Always check for type errors." }] },
+        timestamp: futureTimestamp,
+      }) + "\n",
+      "utf8"
+    );
+
+    const beforeScan = Date.now();
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    const afterScan = Date.now();
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string; captured_at: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    const capturedTime = new Date(facts.facts[0]?.captured_at ?? "").getTime();
+
+    // Should fall back to now, not accept the future date.
+    expect(capturedTime).toBeGreaterThanOrEqual(beforeScan - 1000);
+    expect(capturedTime).toBeLessThanOrEqual(afterScan + 1000);
   });
 });
 

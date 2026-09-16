@@ -7,7 +7,7 @@ import { markRecallUsed, openStorage, setEmbeddingMeta, updateFact } from "../..
 import { EMBED_MODEL_ENV, EMBED_URL_ENV } from "../../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer } from "../support/embedding-server.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
-import { buildHintFormat, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
+import { buildHintFormat, STORE_UNREADABLE_FOOTER_LINE, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
 import type { HintFormatOptions, HintFormatResult } from "../../src/integration-seam.js";
 
@@ -219,12 +219,18 @@ describe("buildHintFormat", () => {
     expect(result.truncated).toBe(false);
   });
 
-  it("fails open (never throws, returns an empty result) when the db cannot be opened", async () => {
+  it("fails open (never throws) when the db cannot be opened, but says so instead of looking like an empty store", async () => {
     const brokenDbPath = join(workDir, "not-a-sqlite-file");
     mkdirSync(brokenDbPath); // a directory, not a valid sqlite file -- new Database() on this must throw
     const result = await buildHint({ root, dbPath: brokenDbPath });
+    const emptyStore = await buildHint({ root, dbPath });
+
     expect(result.header).toBe(TGMEM_HEADER);
-    expect(result.lines).toEqual([]);
+    // An unreadable store still carries no fact-lines -- there is nothing to read them from -- but
+    // it must not be byte-identical to a project with genuinely no memory yet (see the empty-store
+    // assertion just above): that collision is exactly the gap this footer line closes.
+    expect(result.lines).toEqual([STORE_UNREADABLE_FOOTER_LINE]);
+    expect(result.lines).not.toEqual(emptyStore.lines);
   });
 
   it("fails open when root does not resolve to anything usable", async () => {
@@ -1501,6 +1507,27 @@ describe("the footer discloses what the payload withheld", () => {
     const result = await buildHint({ root, dbPath, query: "zzzznomatchwhatsoever" });
     expect(footerOf(result)).toContain("more in scope, not sent");
     expect(footerOf(result)).not.toContain("matched");
+  });
+
+  it("says nothing matched a non-empty query when it ranked the pool on recency alone (no embedding endpoint configured)", async () => {
+    seedDecisions(1);
+    const result = await buildHint({ root, dbPath, query: "zzzznomatchwhatsoever" });
+    expect(factLines(result).length).toBeGreaterThan(0);
+    expect(footerOf(result)).toContain("no match for this query -- showing recent facts instead");
+  });
+
+  it("does not say 'no match' when the query genuinely matches", async () => {
+    seedDecisions(1);
+    const result = await buildHint({ root, dbPath, query: "deploy" });
+    expect(footerOf(result)).not.toContain("no match for this query");
+  });
+
+  it("does not say 'no match' for an empty/absent query", async () => {
+    seedDecisions(1);
+    const bare = await buildHint({ root, dbPath });
+    const empty = await buildHint({ root, dbPath, query: "" });
+    expect(footerOf(bare)).not.toContain("no match for this query");
+    expect(footerOf(empty)).not.toContain("no match for this query");
   });
 
   it("reports a review queue even when it has no fact-lines to attach it to", async () => {

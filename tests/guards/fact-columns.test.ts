@@ -80,7 +80,11 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
     // Deliberate omissions: the hook path has no reader for these, and `embedding` is appended
     // conditionally by the same SELECT because pulling the blob on a path that runs at every prompt
     // costs more than it returns when no embedding backend is configured.
-    const notNeededOnHookPath = new Set(["epoch", "status_changed_at", "last_surfaced_at", "embedding", "terms_checked_at"]);
+    // `sightings` joins this set for the same reason `terms_checked_at` is already in it: the hook
+    // path (`--hint-format`) only ever surfaces ground truth (active/pinned), and `sightings` exists
+    // solely to help a human weigh a `pending` fact in `mem review` -- a status the hook path never
+    // reads at all.
+    const notNeededOnHookPath = new Set(["epoch", "status_changed_at", "last_surfaced_at", "embedding", "terms_checked_at", "sightings"]);
     const seam = src("integration-seam.ts");
     const select = /SELECT id, text[\s\S]*?FROM facts/u.exec(seam)?.[0] ?? "";
     expect(select).not.toBe("");
@@ -108,6 +112,9 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
       "last_surfaced_at",
       "embedding",
       "terms_checked_at",
+      // A restatement count `recordSighting` (src/capture.ts) increments, never a value a user
+      // states or corrects -- there is nothing for `mem edit --scope`/`--text`/etc. to mean here.
+      "sightings",
     ]);
     const editable = /const EDITABLE_FACT_FIELDS = \[([^\]]*)\]/u.exec(src("cli.ts"))?.[1] ?? "";
     expect(editable).not.toBe("");
@@ -126,7 +133,12 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
   it("survives an export/import round trip, or is deliberately local to one store", () => {
     // `epoch` and `status_changed_at` are this store's own clocks: a restored row's status is new
     // news to the destination store, so both start fresh there rather than arriving from elsewhere.
-    const localToThisStore = new Set(["epoch", "status_changed_at", "terms_checked_at"]);
+    // `sightings` joins this set: its backing evidence (`sources` rows) is never part of export/
+    // import either (`mem export` carries no `sources` field at all), so a restored store importing
+    // a bare count with no excerpts behind it would show a number it cannot account for. Starting
+    // fresh at 0 in the destination store is the honest state -- a re-import can then earn its own
+    // sighting count the same way any project's first capture does.
+    const localToThisStore = new Set(["epoch", "status_changed_at", "terms_checked_at", "sightings"]);
     const exporter = /function factToExportJson[\s\S]*?\n\}/u.exec(src("cli.ts"))?.[0] ?? "";
     expect(exporter).not.toBe("");
     for (const column of columns) {

@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../src/db.js";
 import { insertFact, openStorage } from "../src/storage.js";
-import { buildHintFormat, TGMEM_HEADER } from "../src/integration-seam.js";
+import { buildHintFormat, STORE_UNREADABLE_FOOTER_LINE, TGMEM_HEADER } from "../src/integration-seam.js";
 import type { HintFormatOptions, HintFormatResult } from "../src/integration-seam.js";
 import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { Fact } from "../src/types.js";
@@ -183,17 +183,17 @@ describe("buildHintFormat (integration seam)", () => {
     }
   });
 
-  it("fails open (never throws, returns an empty well-formed result) when the db cannot be opened", async () => {
+  it("fails open (never throws) when the db cannot be opened, and says so instead of looking like an empty store", async () => {
     const brokenDbPath = join(workDir, "not-a-sqlite-file");
     mkdirSync(brokenDbPath); // a directory, not a valid sqlite file -- `new Database()` on this must throw
 
     await expect(buildHint({ root, dbPath: brokenDbPath })).resolves.not.toThrow();
     const result = await buildHint({ root, dbPath: brokenDbPath });
 
-    expect(result).toEqual({ header: TGMEM_HEADER, lines: [], truncated: false, delta: false });
+    expect(result).toEqual({ header: TGMEM_HEADER, lines: [STORE_UNREADABLE_FOOTER_LINE], truncated: false, delta: false });
   });
 
-  it("fails open when the resolved db path's parent cannot be created (permission/invalid-path style failure)", async () => {
+  it("fails open when the resolved db path's parent cannot be created (permission/invalid-path style failure), and says the store could not be read", async () => {
     // A null byte is invalid in a path on every platform Node targets, so this reliably throws
     // inside openDb()/mkdirSync() rather than depending on OS-specific permission setup.
     const invalidDbPath = join(workDir, "bad\0path", "mem.db");
@@ -201,7 +201,7 @@ describe("buildHintFormat (integration seam)", () => {
     const result = await buildHint({ root, dbPath: invalidDbPath });
 
     expect(result.header).toBe(TGMEM_HEADER);
-    expect(result.lines).toEqual([]);
+    expect(result.lines).toEqual([STORE_UNREADABLE_FOOTER_LINE]);
     expect(result.truncated).toBe(false);
   });
 

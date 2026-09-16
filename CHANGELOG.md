@@ -6,6 +6,65 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A store that could not be opened was reported as a project with no memory.** `buildHintFormat`
+  wrapped the whole of `buildHintFormatUnsafe` in one catch, and `openStorage` is called inside it, so
+  a permissions error, a WAL lock or a schema mismatch produced bytes identical to an empty store: the
+  bare `TGMEM/2` header and nothing else. The hook commands mem installs end in `|| true`, so nothing
+  downstream surfaced it either, and the failure mode of the one channel this tool exists to keep
+  reliable was indistinguishable from its quietest success. The open now has its own catch and its own
+  error type, so the three cases -- unreadable store, nothing to recall, some other internal fault --
+  are told apart rather than collapsed. An unreadable store emits a footer clause saying so and still
+  exits 0, because failing open is the right behaviour and silence about it was not. The clause points
+  at `mem doctor`, which opens the same store and will fail the same way: that is deliberate, and the
+  wording says only that doctor *shows the underlying error*, which is exactly what it does. Promising
+  a command that fixes this would repeat the refusal loop this project fixed one release ago.
+- **`mem scan-session` dated every fact from the moment of the scan.** The scanner read a transcript
+  entry's text and never its `timestamp`, and the capture call omitted `capturedAt` entirely -- so a
+  statement made in March and scanned in September was stored as having been said in September. Under
+  the `Stop` and `PreCompact` hooks the drift is seconds and harmless, but `--transcript <path>` is a
+  first-class flag, and a rescan of an archived session mis-dated everything it produced by the whole
+  age of the transcript. That is not cosmetic: preference confidence decays from `captured_at`, the
+  `--stale` cutoff is measured from it, recall breaks recency ties on it, and the review queue is
+  ordered by it. `mem suggest` and `mem import --from-md` already distinguished when a thing was said
+  from when mem stored it; the scanner was the one capture path that did not. It now reads the entry's
+  timestamp through the same validator, which already refuses a future date. Anything absent,
+  malformed or hostile falls back to the scan time without failing the run -- a transcript mem cannot
+  date is the situation that existed until now, not an error. The source row's `stored_at` still
+  records the scan: said-at and stored-at are genuinely different columns.
+- **A source excerpt could omit the sentence it was evidence for.** Excerpts were truncated from the
+  head at 600 characters, and for `mem scan-session` the raw material is the whole user turn --
+  deliberately larger than the extracted sentence. A turn longer than the cap whose durable statement
+  came last therefore produced a `sources` row that did not contain the fact at all, and `mem review`
+  printed it under that fact as the reviewer's grounds for promoting or rejecting it. Evidence that
+  does not contain the claim is worse than no evidence: it invites a decision on the strength of an
+  unrelated fragment. The truncation window is now centred on the fact's own sentence, located through
+  the same `normalizeFactText` the store uses everywhere else so collapsed whitespace cannot defeat
+  the search, with a marker on whichever side was cut. A raw excerpt that does not contain the fact
+  falls back to head truncation, and the screening order is untouched: the untruncated text is
+  screened first, and a screened-positive excerpt still yields no source row and still captures the
+  fact.
+- **A query that matched nothing was answered with recent facts and no mention of it.** When a
+  non-empty query produces no lexical hit and no other rank list has anything to say, every fact ties
+  at zero and the caps fill with whatever is newest. The seam's own comment calls these filler. Under
+  the installed hooks this is mostly masked, since `--delta` suppresses what was already sent, but a
+  plain `mem recall` with a query and `--hint-format` is a documented command, and it handed a host a
+  page of facts under a query none of them matched. The footer now says so. The condition is
+  deliberately not "no result matched": `matchedQuery` is computed from BM25 alone by design, so a
+  query carrying real embedding signal reads false on every row, and claiming nothing matched there
+  would put a false statement into the wire output. Retrieval now reports whether any rank list ranked
+  anything at all, and the clause is gated on that, on a non-empty query, and on there being a fact to
+  qualify.
+- **An exported supersession edge did not survive being imported.** `mem export` recorded that a fact
+  was superseded but not what superseded it, so after a round trip `mem show` printed `superseded_by:
+  unknown` -- a caveat about information the store had held and thrown away, given that fact ids
+  survive import intact. Export now carries the edge for superseded facts, and import re-establishes
+  it. The winner is resolved once the whole file has been inserted rather than row by row, so a file
+  naming a successor that appears further down its own list still links; a per-row resolve would have
+  silently dropped exactly that case. A named winner that resolves to nothing in the store is ignored
+  without writing a dangling edge and without failing the import, and the existing caveat then stands
+  -- now meaning a genuinely untraceable supersession rather than a limitation of the format. The
+  field is optional in both directions, so the export schema version is unchanged and an older reader
+  is unaffected.
 - **Nothing mem ever printed told anyone how to say a fact helped.** `mem used` shipped, `recall_log`
   carried a `used_at` column for it, and no output on any path named the command -- so in a real store
   that column is null on every row, and every consumer of the signal was reading evidence that could
@@ -662,6 +721,50 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   the cap, so a mis-ranked identifier is not a worse ordering but a fact the agent never learns.
 
 ### Added
+
+- **A repeated statement counts as evidence instead of being discarded.** `mem scan-session` skipped
+  any candidate whose text the store already knew, and `mem import --from-md` reported the same skip
+  -- correct for a fact already settled, but wasteful when the match is still `pending`. A preference
+  the user had restated in four separate sessions sat in the review queue indistinguishable from one
+  said once, and the evidence that would have told them apart was thrown away at the moment it was
+  observed. A repeat now records a **sighting**: one more screened source excerpt and a counter on the
+  fact, written in the same transaction. `mem review` sorts the pending bucket by it, so the thing
+  said most often is the thing asked about first. A sighting is evidence for a human, never a
+  mechanism: it does not promote, does not change status, and does not reach the ground-truth gate.
+  The rule that a pending fact never auto-promotes -- not on time, not on repetition, not on
+  confidence -- is unchanged and absolute. Double counting is prevented by excerpt equality rather
+  than a transcript reference, because `sources` records no locator: the same transcript scanned at
+  both `Stop` and `PreCompact` yields a byte-identical excerpt and counts once, while a genuine
+  restatement arrives surrounded by different context and counts again. An excerpt that screens
+  positive for a secret records nothing at all -- under-counting is the safe direction, and there is
+  no excerpt left to compare against.
+
+- **`mem review` names the fact a pending correction may contradict.** A correction filed by the
+  scanner or by `mem suggest` carried no link to whatever it corrects, so promoting it left both
+  claims live unless the user supplied `--subject` and `--value` by hand -- and nothing on screen said
+  that was needed. Each pending correction, and any pending fact that does carry a subject, now prints
+  the single live fact sharing the most entity and topic terms with it, labelled as one it may
+  contradict. It reuses the same computation `mem show --related` already runs, so there is one notion
+  of relatedness in the tool rather than two. Term overlap establishes that two facts are about the
+  same thing, never that one negates the other, so this is a label and only a label: it supersedes
+  nothing, promotes nothing, and changes no status. Only the best match prints, on the same reasoning
+  the unanchored bucket offers only its first viable anchor -- a review queue is a queue, not a menu.
+
+- **`mem consolidate` can see across scopes.** Its comparability rule puts global and project facts in
+  structurally disjoint groups, which is right for near-duplicates -- the two surface in different
+  places, so neither is redundant given the other -- but it also meant a project fact repeating a
+  global one word for word was never compared to it. Both bind on recall to that root and there is no
+  text-collision suppression anywhere in retrieval, so the pair double-surfaced on every query and
+  double-spent the hint budget. A separate exact-text pass now runs beside the near-duplicate
+  clustering, leaving that clustering and its reasoning untouched: relaxing the shared key would have
+  let unrelated same-kind facts merge across every project. The global fact always survives, because
+  widening a project fact's scope is a decision `mem edit --scope global` makes explicitly and not one
+  this pass should invent. `--cross-project` reports the same shape across two or more projects and
+  prints that command ready to paste, including the `--force` a user-stated fact requires; it is
+  report-only and has no `--apply`, because which scope a fact belongs in is the user's judgement.
+  Matching requires subject and value to agree as well as text: two facts can be worded identically
+  and mean different things per scope -- a `default_branch` of `main` globally and `master` in one
+  repository is an override, and collapsing it would destroy the override rather than a duplicate.
 
 - **The `sources` table is fed.** Its schema, storage API, `mem show --json` surfacing and gc pruning
   have all existed and been tested since they were added, against zero rows: no capture path ever

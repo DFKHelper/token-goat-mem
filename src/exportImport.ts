@@ -25,7 +25,7 @@ import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot } from "./anchors.js";
 import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactFieldsOrThrow } from "./capture.js";
-import { insertAuditLog } from "./db.js";
+import { insertAuditLog, SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
@@ -64,6 +64,14 @@ interface ParsedEntry {
   readonly newFact: (NewFact & { id: string }) | null;
   /** Set only when `newFact` is `null`. */
   readonly reason: string | null;
+  /**
+   * The `superseded_by` id this entry's export row named, or `null` when absent or not a non-empty
+   * string. Not a `NewFact` field (there is no `superseded_by` fact column) so it travels alongside
+   * the parsed fact rather than inside it, to be resolved against the post-import store once every
+   * fact in the file has landed (`importFromJson`) -- see that function for why per-row resolution
+   * during this parse would drop a winner named later in the same file.
+   */
+  readonly supersededByRaw: string | null;
 }
 
 /**
@@ -93,7 +101,7 @@ const MAX_IMPORTED_ID_LENGTH = 128;
 function validateJsonFact(raw: unknown, index: number, root: string | undefined): ParsedEntry {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     const candidate: ImportCandidate = { text: textGuess(null, index), line: index + 1, sourceRef: `#${index}` };
-    return { candidate, newFact: null, reason: `facts[${index}] is not an object` };
+    return { candidate, newFact: null, reason: `facts[${index}] is not an object`, supersededByRaw: null };
   }
   const obj = raw as Record<string, unknown>;
   const candidateText = textGuess(obj, index);
@@ -101,6 +109,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     candidate: { text: candidateText, line: index + 1, sourceRef: `#${index}` },
     newFact: null,
     reason,
+    supersededByRaw: null,
   });
 
   if (typeof obj["id"] !== "string" || obj["id"].trim().length === 0) {
@@ -383,8 +392,15 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     throw error;
   }
 
+  // Optional, and not checked by any exhaustive-keys guard against JSON_EXPORT_SCHEMA_VERSION: an
+  // export written before this field existed simply omits it, and one written by a newer mem with
+  // fields of its own still parses. A wrong type or an explicit `null` (the exporting store already
+  // knew of no winner) both collapse to the same "nothing to resolve" case as absent.
+  const supersededByRaw =
+    typeof obj["superseded_by"] === "string" && obj["superseded_by"].trim().length > 0 ? obj["superseded_by"] : null;
+
   const candidate: ImportCandidate = { text: candidateText, line: index + 1, sourceRef: `${newFact.id}` };
-  return { candidate, newFact, reason: null };
+  return { candidate, newFact, reason: null, supersededByRaw };
 }
 
 /**
@@ -593,7 +609,11 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
 
   const candidates = entries.map((entry) => entry.candidate);
   const outcomes: (ImportOutcome | undefined)[] = Array.from({ length: entries.length }, () => undefined);
-  const toInsert: { readonly index: number; readonly newFact: NewFact & { id: string } }[] = [];
+  const toInsert: {
+    readonly index: number;
+    readonly newFact: NewFact & { id: string };
+    readonly supersededByRaw: string | null;
+  }[] = [];
   const skips: PlannedSkip[] = [];
   const seenIds = new Set<string>();
 
@@ -652,6 +672,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
         stripImportedEmbeddings && entry.newFact.embedding !== null
           ? { ...entry.newFact, embedding: null }
           : entry.newFact,
+      supersededByRaw: entry.supersededByRaw,
     });
   });
 
@@ -691,6 +712,31 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
         detail: `imported ${fact.status} ${fact.kind} fact from JSON export (id preserved)`,
       });
     }
+
+    // Second pass, run only after every fact in this file has been inserted above -- not per-row
+    // during that loop -- because a file can name a winner id that appears later in its own list,
+    // and per-row resolution would silently drop that edge. `getFactById` here reads the
+    // post-import store, so a forward reference within this same file already resolves, and so does
+    // a winner that already existed in the target store before this import ran. A winner id absent
+    // from both the file and the store is left alone: no audit row, no throw -- the store's own
+    // `superseded_by: unknown` caveat (`findSupersedingFactId`, `formatSupersessionLine` in cli.ts)
+    // then stands, honestly, instead of asserting an edge nothing ever recorded.
+    for (const { index, newFact, supersededByRaw } of toInsert) {
+      // `lateDuplicates` means this row lost its concurrent-insert race (see the re-check above) and
+      // was never actually written this run -- nothing here for this loop to attach an edge to.
+      if (newFact.status !== "superseded" || supersededByRaw === null || lateDuplicates.has(index)) {
+        continue;
+      }
+      if (getFactById(db, supersededByRaw) === undefined) {
+        continue;
+      }
+      insertAuditLog(db, {
+        event: "json_import_supersession",
+        factId: newFact.id,
+        detail: `${SUPERSEDED_BY_FACT_PREFIX}${supersededByRaw}: supersession edge restored from JSON export.`,
+      });
+    }
+
     // Adopting the envelope's model only when a fact carrying one of its vectors actually landed:
     // recording a model for a store that ended up with zero vectors from this import would claim
     // provenance for nothing.

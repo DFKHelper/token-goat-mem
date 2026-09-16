@@ -626,6 +626,42 @@ describe("retrieve", () => {
     expect(results.every((r) => r.score === 0)).toBe(true);
   });
 
+  describe("RetrieveOutcome.zeroSignal", () => {
+    it("is true for a non-empty query with no lexical match and no other rank list", async () => {
+      const facts = [makeFact({ id: "1", text: "alpha", kind: "fact" })];
+      const outcome = await retrieve(facts, { query: "quantum", root });
+      expect(outcome.zeroSignal).toBe(true);
+    });
+
+    it("is true for an empty query too -- it describes the ranking, not the query", async () => {
+      // An empty query has no terms to rank against either, so this is honestly `true` here. The
+      // seam's footer clause does not fire on an empty query anyway: it gates on the query being
+      // non-empty as a separate condition, precisely because this field alone does not distinguish
+      // "no query" from "a real query nothing matched" -- see `footerLineFor`'s `noQuerySignal`.
+      const facts = [makeFact({ id: "1", text: "alpha", kind: "fact" })];
+      const outcome = await retrieve(facts, { query: "", root });
+      expect(outcome.zeroSignal).toBe(true);
+    });
+
+    it("is false when the query genuinely matches lexically", async () => {
+      const facts = [makeFact({ id: "1", text: "uses pnpm not npm", kind: "preference" })];
+      const outcome = await retrieve(facts, { query: "pnpm", root });
+      expect(outcome.zeroSignal).toBe(false);
+    });
+
+    it("is false for an empty candidate pool (an empty store, or everything filtered out), not the ranking case it exists to describe", async () => {
+      const outcome = await retrieve([], { query: "quantum", root });
+      expect(outcome.zeroSignal).toBe(false);
+    });
+
+    it("is false when an embedding rank list ranked something, even though nothing matched lexically", async () => {
+      const facts = [makeFact({ id: "1", text: "alpha", kind: "fact", embedding: new Float32Array([1, 0]) })];
+      const backend: EmbeddingBackend = { embed: () => new Float32Array([1, 0]) };
+      const outcome = await retrieve(facts, { query: "quantum", root, embeddingBackend: backend });
+      expect(outcome.zeroSignal).toBe(false);
+    });
+  });
+
   it("fuses BM25 and embedding signals when an embedding backend is available", async () => {
     // "a" is a strong BM25 match but far in embedding space; "b" is a weak BM25 match but close in
     // embedding space to the (contrived) query vector. RRF fusion should let "b" compete with "a"
