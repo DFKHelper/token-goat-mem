@@ -143,6 +143,16 @@ export interface Fact {
    * insert -- never by the user, and untouched by `mem edit` unless the edit rewrites the text.
    */
   readonly terms_checked_at?: string | null;
+  /**
+   * Count of repeat sightings of a `pending` fact -- a candidate `mem scan-session`/`mem import
+   * --from-md` matched to text this fact already holds, restated in a later session or file pass
+   * (`src/capture.ts`'s `recordSighting`). Optional/absent for the same reason as the columns
+   * above: existing `Fact` object literals that predate the field keep typechecking; readers should
+   * treat a missing value the same as `0`. Evidence for a human reading `mem review`'s pending
+   * bucket only -- never read by `mem review --promote`, `resolveContradictions`, or any
+   * ground-truth surface, so no number of sightings can promote a `pending` fact on its own.
+   */
+  readonly sightings?: number;
 }
 
 /**

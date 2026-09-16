@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import type Database from "better-sqlite3";
 
+import { findSupersedingFactId } from "../src/db.js";
 import { countEmbeddedFacts, getEmbeddingMeta, getFactById, insertFact, openStorage, setEmbeddingMeta } from "../src/storage.js";
 import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { NewFact } from "../src/types.js";
@@ -675,6 +676,85 @@ describe("importFromJson", () => {
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(3);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── supersession edge round-trip (superseded_by) ───────────────────────────────────────────────────────────────────────────
+
+describe("importFromJson restores a superseded fact's superseded_by edge", () => {
+  it("resolves against a winner already imported earlier in the same file", () => {
+    const winner = { ...VALID_FACT, id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", subject: "db", value: "mysql" };
+    const loser = {
+      ...VALID_FACT,
+      id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+      subject: "db",
+      value: "postgres",
+      status: "superseded",
+      superseded_by: winner.id,
+    };
+    writeFileSync(jsonPath, envelope([winner, loser]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes.every((o) => o.status === "imported")).toBe(true);
+    expect(findSupersedingFactId(db, loser.id)).toBe(winner.id);
+  });
+
+  it("resolves against a winner named earlier in the file but appearing later in the array (the ordering case)", () => {
+    const winner = { ...VALID_FACT, id: "cccccccc-cccc-cccc-cccc-cccccccccccc", subject: "db", value: "mysql" };
+    const loser = {
+      ...VALID_FACT,
+      id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+      subject: "db",
+      value: "postgres",
+      status: "superseded",
+      superseded_by: winner.id,
+    };
+    // Loser named first, winner appears later in the same array -- per-row resolution during the
+    // insert loop would not have found `winner` yet at this point.
+    writeFileSync(jsonPath, envelope([loser, winner]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes.every((o) => o.status === "imported")).toBe(true);
+    expect(findSupersedingFactId(db, loser.id)).toBe(winner.id);
+  });
+
+  it("a winner id absent from both the file and the store imports cleanly, writes no audit row, and does not throw", () => {
+    const loser = {
+      ...VALID_FACT,
+      id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee",
+      status: "superseded",
+      superseded_by: "ffffffff-ffff-ffff-ffff-ffffffffffff",
+    };
+    writeFileSync(jsonPath, envelope([loser]), "utf8");
+
+    let result: ReturnType<typeof importFromJson> | undefined;
+    expect(() => {
+      result = importFromJson(db, { path: jsonPath, root });
+    }).not.toThrow();
+    expect(result?.outcomes[0]?.status).toBe("imported");
+    expect(findSupersedingFactId(db, loser.id)).toBeNull();
+    const rows = db.prepare("SELECT event FROM audit_log WHERE fact_id = ?").all(loser.id) as { event: string }[];
+    expect(rows.map((row) => row.event)).not.toContain("json_import_supersession");
+  });
+
+  it("a mutual/circular pair (A names B, B names A) imports without hanging or corrupting", () => {
+    const factA = { ...VALID_FACT, id: "11111111-2222-3333-4444-555555555555", status: "superseded", superseded_by: "66666666-7777-8888-9999-aaaaaaaaaaaa" };
+    const factB = { ...VALID_FACT, id: "66666666-7777-8888-9999-aaaaaaaaaaaa", subject: "editor", value: "vim", status: "superseded", superseded_by: factA.id };
+    writeFileSync(jsonPath, envelope([factA, factB]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes.every((o) => o.status === "imported")).toBe(true);
+    expect(findSupersedingFactId(db, factA.id)).toBe(factB.id);
+    expect(findSupersedingFactId(db, factB.id)).toBe(factA.id);
+  });
+
+  it("an older export written before this field existed imports with no edge (field absent, not malformed)", () => {
+    const loser = { ...VALID_FACT, id: "12121212-1212-1212-1212-121212121212", status: "superseded" };
+    writeFileSync(jsonPath, envelope([loser]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes[0]?.status).toBe("imported");
+    expect(findSupersedingFactId(db, loser.id)).toBeNull();
   });
 });
 

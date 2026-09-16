@@ -21,6 +21,8 @@ import { run } from "../src/cli.js";
 import {
   DEFAULT_DUPLICATE_THRESHOLD,
   DEFAULT_STALE_AGE_DAYS,
+  findCrossProjectDuplicates,
+  findCrossScopeDuplicates,
   findDuplicateClusters,
   findStaleFacts,
   jaccard,
@@ -200,6 +202,165 @@ describe("findDuplicateClusters", () => {
     expect(second.map((c) => [c.keep.id, ...c.duplicates.map((d) => d.fact.id)])).toEqual(
       first.map((c) => [c.keep.id, ...c.duplicates.map((d) => d.fact.id)])
     );
+  });
+});
+
+describe("findCrossScopeDuplicates", () => {
+  let root: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "mem-consolidate-cross-scope-"));
+    db = openStorage(join(root, "mem.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("matches a project-scope fact against a same-kind global fact with identical text, keeping the global one", () => {
+    const text = "always use two-space indentation";
+    const globalFact = seed(db, text, { scope: "global" });
+    const projectFact = seed(db, text, { scope: "project", scopeRoot: "/repo-a" });
+
+    const duplicates = findCrossScopeDuplicates(db);
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0]?.keep.id).toBe(globalFact.id);
+    expect(duplicates[0]?.duplicate.id).toBe(projectFact.id);
+  });
+
+  it("does not match facts of different kinds, however alike their wording", () => {
+    const text = "always use two-space indentation";
+    seed(db, text, { scope: "global", kind: "preference" });
+    seed(db, text, { scope: "project", scopeRoot: "/repo-a", kind: "decision" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
+
+  it("does not report a same-subject, different-value pair as a duplicate -- that is a live contradiction, not a restatement", () => {
+    // A genuine override's two sides differ in *value*, and so in text -- "use tabs for indentation"
+    // and "use spaces for indentation" never share normalized text, the one bar this pass checks.
+    seed(db, "use spaces for indentation", { scope: "global", subject: "indent-style", value: "spaces" });
+    seed(db, "use tabs for indentation", { scope: "project", scopeRoot: "/repo-a", subject: "indent-style", value: "tabs" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
+
+  it("does not report a same-subject, different-value pair with byte-identical text -- a real override across scopes", () => {
+    // The reproduction this fix exists for: generic wording ("the default branch name") makes it
+    // easy for two legitimately different values to share exact text across scopes.
+    seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "main" });
+    seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-a", subject: "default_branch", value: "master" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
+
+  it("does not report a different-subject pair, even with identical text", () => {
+    seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "main" });
+    seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-a", subject: "release_branch", value: "main" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
+
+  it("still reports a same-subject, same-value pair with identical text as a duplicate", () => {
+    const globalFact = seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "main" });
+    const projectFact = seed(db, "the default branch name", {
+      scope: "project",
+      scopeRoot: "/repo-a",
+      subject: "default_branch",
+      value: "main",
+    });
+    const duplicates = findCrossScopeDuplicates(db);
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0]?.keep.id).toBe(globalFact.id);
+    expect(duplicates[0]?.duplicate.id).toBe(projectFact.id);
+  });
+
+  it("does not match a project fact against a global fact of different text", () => {
+    seed(db, "always use two-space indentation", { scope: "global" });
+    seed(db, "always run the linter before pushing", { scope: "project", scopeRoot: "/repo-a" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
+
+  it("ignores facts that are not live: pending, contested, and already-superseded", () => {
+    const text = "always use two-space indentation";
+    seed(db, text, { scope: "global" });
+    seed(db, text, { scope: "project", scopeRoot: "/repo-a", status: "pending" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
+});
+
+describe("findCrossProjectDuplicates", () => {
+  let root: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "mem-consolidate-cross-project-"));
+    db = openStorage(join(root, "mem.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reports a same-kind, same-text fact present under two distinct projects, newest targeted first", () => {
+    const text = "always use two-space indentation";
+    const older = seed(db, text, { scope: "project", scopeRoot: "/repo-a", capturedAt: daysAgo(10) });
+    const newer = seed(db, text, { scope: "project", scopeRoot: "/repo-b", capturedAt: daysAgo(1) });
+
+    const groups = findCrossProjectDuplicates(db);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.newest.id).toBe(newer.id);
+    expect(groups[0]?.facts.map((f) => f.id).sort()).toEqual([newer.id, older.id].sort());
+  });
+
+  it("does not report a fact present under only one project", () => {
+    seed(db, "always use two-space indentation", { scope: "project", scopeRoot: "/repo-a" });
+    expect(findCrossProjectDuplicates(db)).toEqual([]);
+  });
+
+  it("does not pair a project fact against a global fact of the same text -- that is findCrossScopeDuplicates's shape, not this one", () => {
+    const text = "always use two-space indentation";
+    seed(db, text, { scope: "global" });
+    seed(db, text, { scope: "project", scopeRoot: "/repo-a" });
+    expect(findCrossProjectDuplicates(db)).toEqual([]);
+  });
+
+  it("does not report a same-subject, different-value pair across two projects", () => {
+    seed(db, "use spaces for indentation", { scope: "project", scopeRoot: "/repo-a", subject: "indent-style", value: "spaces" });
+    seed(db, "use tabs for indentation", { scope: "project", scopeRoot: "/repo-b", subject: "indent-style", value: "tabs" });
+    expect(findCrossProjectDuplicates(db)).toEqual([]);
+  });
+
+  it("does not report a same-subject, different-value pair with byte-identical text across two projects", () => {
+    seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-a", subject: "default_branch", value: "main" });
+    seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-b", subject: "default_branch", value: "master" });
+    expect(findCrossProjectDuplicates(db)).toEqual([]);
+  });
+
+  it("does not report a different-subject pair, even with identical text", () => {
+    seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-a", subject: "default_branch", value: "main" });
+    seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-b", subject: "release_branch", value: "main" });
+    expect(findCrossProjectDuplicates(db)).toEqual([]);
+  });
+
+  it("still reports a same-subject, same-value pair with identical text across two projects as a duplicate", () => {
+    const older = seed(db, "the default branch name", {
+      scope: "project",
+      scopeRoot: "/repo-a",
+      subject: "default_branch",
+      value: "main",
+      capturedAt: daysAgo(10),
+    });
+    const newer = seed(db, "the default branch name", {
+      scope: "project",
+      scopeRoot: "/repo-b",
+      subject: "default_branch",
+      value: "main",
+      capturedAt: daysAgo(1),
+    });
+    const groups = findCrossProjectDuplicates(db);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.newest.id).toBe(newer.id);
+    expect(groups[0]?.facts.map((f) => f.id).sort()).toEqual([newer.id, older.id].sort());
   });
 });
 
@@ -517,11 +678,86 @@ describe("mem consolidate (end to end)", () => {
     [["consolidate", "--threshold", "wat"], "--threshold must be a number greater than 0 and at most 1"],
     [["consolidate", "--stale", "--stale-days", "0"], "--stale-days must be a whole number of days, at least 1"],
     [["consolidate", "--stale", "--stale-days", "nope"], "--stale-days must be a whole number of days, at least 1"],
+    [["consolidate", "--cross-project", "--apply"], "--cross-project is report-only"],
+    [["consolidate", "--cross-project", "--stale"], "--cross-project does not compose"],
+    [["consolidate", "--cross-project", "--threshold", "0.5"], "--cross-project does not compose"],
   ])("rejects %j as a usage error", async (args, message) => {
     const result = await runCli(args);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toMatch(/^mem: \S/u);
     expect(result.stderr).toContain(message);
     expect(result.stdout).toBe("");
+  });
+
+  // ─────────────────────────────────────────────────────────────────────── cross-scope / cross-project ───────────────────────────────────────────────────────────────────────
+
+  it("the default duplicate pass reports and, with --apply, supersedes a project-scope duplicate of a global fact", async () => {
+    const text = "always use two-space indentation";
+    const globalId = withStore((db) => seed(db, text, { scope: "global" }).id);
+    const projectId = withStore((db) => seed(db, text, { scope: "project", scopeRoot: "/repo-a" }).id);
+
+    const report = await runCli(["consolidate"]);
+    expect(report.exitCode).toBe(0);
+    expect(report.stdout).toContain("1 cross-scope duplicate: a project-scope fact restating a global one, word for word");
+    expect(report.stdout).toContain("(dry run, nothing changed)");
+    expect(statusOf(globalId)).toBe("active");
+    expect(statusOf(projectId)).toBe("active");
+
+    const applied = await runCli(["consolidate", "--apply"]);
+    expect(applied.exitCode).toBe(0);
+    expect(applied.stdout).toContain("superseded 1 project-scope duplicate;");
+    expect(statusOf(globalId)).toBe("active");
+    expect(statusOf(projectId)).toBe("superseded");
+    const rows = auditFor(projectId).filter((row) => row.event === "consolidate_duplicate");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.detail).toContain(`superseded as a duplicate of ${globalId}`);
+  });
+
+  it("does not supersede a project-scope override of a global fact under --apply, even with byte-identical text", async () => {
+    // The reproduction this fix exists for: same generic wording, but a genuine override (different
+    // subject/value) rather than a restatement -- `--apply` must leave both sides active.
+    const globalId = withStore(
+      (db) => seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "main" }).id
+    );
+    const projectId = withStore(
+      (db) =>
+        seed(db, "the default branch name", {
+          scope: "project",
+          scopeRoot: "/repo-a",
+          subject: "default_branch",
+          value: "master",
+        }).id
+    );
+
+    const report = await runCli(["consolidate"]);
+    expect(report.exitCode).toBe(0);
+    expect(report.stdout).not.toContain("cross-scope duplicate");
+
+    const applied = await runCli(["consolidate", "--apply"]);
+    expect(applied.exitCode).toBe(0);
+    expect(statusOf(globalId)).toBe("active");
+    expect(statusOf(projectId)).toBe("active");
+  });
+
+  it("--cross-project reports same-kind, same-text facts across two projects with no --apply path, and touches nothing", async () => {
+    const text = "always use two-space indentation";
+    const older = withStore((db) => seed(db, text, { scope: "project", scopeRoot: "/repo-a", capturedAt: daysAgo(10) }).id);
+    const newer = withStore((db) => seed(db, text, { scope: "project", scopeRoot: "/repo-b", capturedAt: daysAgo(1) }).id);
+
+    const result = await runCli(["consolidate", "--cross-project"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("1 statement restated under two or more distinct projects");
+    expect(result.stdout).toContain("no --apply path");
+    expect(result.stdout).toContain(`mem edit ${newer} --scope global`);
+    expect(result.stdout).not.toContain(`mem edit ${older} --scope global`);
+    expect(statusOf(older)).toBe("active");
+    expect(statusOf(newer)).toBe("active");
+  });
+
+  it("--cross-project reports nothing for a store with no cross-project restatements", async () => {
+    withStore((db) => seed(db, "always use two-space indentation", { scope: "project", scopeRoot: "/repo-a" }));
+    const result = await runCli(["consolidate", "--cross-project"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("no same-kind, same-text facts found under two or more distinct projects");
   });
 });

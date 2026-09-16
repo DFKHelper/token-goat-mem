@@ -1200,6 +1200,17 @@ export interface RetrieveOutcome {
    * steady state on any install where `mem init` wired the `Stop` hook that fills the queue.
    */
   readonly withheldCount: number;
+  /**
+   * True when no rank list existed for this call at all -- no lexical match, no embedding signal, no
+   * usefulness signal -- so every fact tied at zero and `results` is ordered by recency (a pin,
+   * where present) rather than relevance. Distinct from asking whether any individual result
+   * "matched": `matchedQuery` (`RetrievedFact`) is read off the pre-fusion BM25 map alone, so it is
+   * `false` for every result of a query answered purely by embedding signal, even though that query
+   * unambiguously matched something. This field is the only reliable way to ask "was there nothing
+   * to match against at all" -- see `retrieve`'s own `zeroSignal` local, which this carries out to
+   * callers that need to say so (the seam's recall footer) without recomputing it from `results`.
+   */
+  readonly zeroSignal: boolean;
 }
 
 /**
@@ -1245,7 +1256,12 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
 
   const filtered = pool.filter((fact) => matchesFilters(fact, options, now));
   if (filtered.length === 0) {
-    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0, withheldCount: 0 };
+    // `zeroSignal: false` here, not `true`: this is an empty candidate pool (nothing survived
+    // scope/status filtering, possibly an empty store), not a real pool that no rank list could
+    // match against. The seam's "nothing matched this query" footer clause keys off `zeroSignal`
+    // specifically to describe the latter -- asserting it here would fire that clause for an empty
+    // store, which has nothing to do with the query at all.
+    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0, withheldCount: 0, zeroSignal: false };
   }
 
   const bm25Scores = computeBm25Scores(filtered, options.query);
@@ -1383,5 +1399,12 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const shownIds = new Set(shownNonWithheldResults.map((result) => result.fact.id));
   const final = visible.filter((result) => result.trust === "withheld" || shownIds.has(result.fact.id));
 
-  return { results: final, totalNonWithheld: nonWithheld.length, shownNonWithheld: shownNonWithheldResults.length, anchorBudgetHits, withheldCount };
+  return {
+    results: final,
+    totalNonWithheld: nonWithheld.length,
+    shownNonWithheld: shownNonWithheldResults.length,
+    anchorBudgetHits,
+    withheldCount,
+    zeroSignal,
+  };
 }

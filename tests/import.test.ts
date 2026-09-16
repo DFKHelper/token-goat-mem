@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { captureExplicit } from "../src/capture.js";
-import { openStorage } from "../src/storage.js";
+import { captureExplicit, captureSuggested } from "../src/capture.js";
+import { getFactById, listSourcesForFact, openStorage } from "../src/storage.js";
 import { extractMarkdownBullets, importFromMarkdown, MarkdownImportError, planImportFromMarkdown } from "../src/import.js";
 
 // ─────────────────────────────────────────────────────────────────────────── extractMarkdownBullets (pure, no disk) ───────────────────────────────────────────────────────────────────────────
@@ -231,6 +231,23 @@ describe("importFromMarkdown", () => {
     expect(known?.status).toBe("skipped_known");
     const imported = result.outcomes.filter((o) => o.status === "imported");
     expect(imported.map((o) => o.candidate.text)).toEqual(["Prefer tabs over spaces in this repo."]);
+  });
+
+  it("records a sighting on a bullet matching an already-pending suggestion in the same project, without changing its status", () => {
+    const { fact: existing } = captureSuggested(db, { text: "Always use pnpm, never npm.", kind: "preference", scope: "project", root });
+    expect(existing.status).toBe("pending");
+    expect(listSourcesForFact(db, existing.id)).toHaveLength(0);
+
+    const result = importFromMarkdown(db, { path: mdPath, root });
+    const known = result.outcomes.find((o) => o.candidate.text === "Always use pnpm, never npm.");
+    expect(known?.status).toBe("skipped_known");
+    const imported = result.outcomes.filter((o) => o.status === "imported");
+    expect(imported.map((o) => (o.status === "imported" ? o.candidate.text : ""))).toEqual(["Prefer tabs over spaces in this repo."]);
+
+    const reread = getFactById(db, existing.id);
+    expect(reread?.status).toBe("pending");
+    expect(reread?.sightings).toBe(1);
+    expect(listSourcesForFact(db, existing.id)).toHaveLength(1);
   });
 
   it("does not skip a bullet matching a fact bound to an unrelated project root", () => {

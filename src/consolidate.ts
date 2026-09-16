@@ -21,7 +21,7 @@
  */
 
 import { computeContradictionBucketGroups, computeProjectIdentityGroups, sameContradictionBucket } from "./contradiction.js";
-import { listFacts, listStaleUnsurfacedFacts, listTermsForFact } from "./storage.js";
+import { listFacts, listStaleUnsurfacedFacts, listTermsForFact, normalizeFactText } from "./storage.js";
 import type { Fact } from "./types.js";
 
 /** Connection type, borrowed the way `src/storage.ts` borrows it, so this module adds no dependency of its own. */
@@ -199,6 +199,171 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
   }
 
   return clusters;
+}
+
+function kindTextKey(fact: Fact): string {
+  return `${fact.kind} ${normalizeFactText(fact.text)}`;
+}
+
+/**
+ * Whether two same-kind, same-normalized-text facts should be excluded from cross-scope or
+ * cross-project duplicate reporting because their keyed data disagrees. Backs both
+ * `findCrossScopeDuplicates` and `findCrossProjectDuplicates` -- the two passes that compare facts
+ * *across* a scope or project boundary -- as the one definition of "this is an override, not a
+ * duplicate" between them, so a future change to the rule has one place to land instead of two that
+ * can quietly drift apart.
+ *
+ * Not `sameContradictionBucket` (src/contradiction.ts): that bucket is deliberately scope-bound
+ * (its family is `subject scope`), so a global fact and a project fact -- or two facts in different
+ * projects -- never share a bucket to begin with, whatever their subject or value. Reusing it here
+ * would silently no-op on every pair these two passes exist to compare and leave the bug in place;
+ * `findDuplicateClusters` above only ever compares facts that already share a scope and project
+ * identity by construction of `comparabilityKey`, so its own bucket check never had to look past
+ * scope in the first place. This function is that same "same subject, different value is an
+ * override" judgment, generalized to also catch "different subject entirely" and applied where a
+ * shared contradiction bucket can never be assumed.
+ *
+ * Null handling, spelled out because unkeyed facts (`subject === null`) are the ordinary case this
+ * module serves -- `mem scan-session` and `mem import --from-md` capture text with no subject at
+ * all:
+ * - Both sides unkeyed: not a mismatch. There is nothing keyed to disagree about, so identical text
+ *   still means the same statement -- the behaviour this pass had before subject/value awareness
+ *   existed, and the majority path it must keep serving.
+ * - Exactly one side keyed: not a mismatch. A single labeled subject has nothing on the other side
+ *   to compare a value against, so this also falls back to the conservative text-identity read.
+ *   Byte-identical text remains real evidence of restatement even when only one side names what it
+ *   is restating.
+ * - Both sides keyed, different subjects: a mismatch. Coinciding prose does not make two facts
+ *   about different things the same fact.
+ * - Both sides keyed, same subject, different values: a mismatch -- the override case this guard
+ *   exists for. "The default branch name" can be true of two different values in two different
+ *   scopes; that is a correction or override, never a duplicate.
+ * - Both sides keyed, same subject, same value: no mismatch -- a genuine restatement, reported as
+ *   before.
+ */
+function isCrossBoundaryKeyMismatch(a: Fact, b: Fact): boolean {
+  if (a.subject === null || b.subject === null) {
+    return false;
+  }
+  return a.subject !== b.subject || a.value !== b.value;
+}
+
+/** One project-scope fact whose text exactly duplicates a same-kind global fact -- `findCrossScopeDuplicates`'s report. */
+export interface CrossScopeDuplicate {
+  /** The global fact -- always the survivor. Widening a project fact's own scope is a decision `mem edit --scope global` makes explicitly, never one this pass invents by promoting a project fact on its own. */
+  readonly keep: Fact;
+  readonly duplicate: Fact;
+}
+
+/**
+ * Project-scope facts that exactly restate a same-kind global fact -- the one duplicate shape
+ * `comparabilityKey` above cannot see by design. That function's own doc comment explains why its
+ * scope-family disjointness is deliberate: relaxing it would let the Jaccard pass above merge
+ * unrelated same-kind facts across every project boundary. This pass is a narrow, exact-match
+ * exception run *beside* that rule, not a change to it -- `normalizeFactText` equality only (the
+ * store's existing canonical equality function, not a second notion of sameness), over the same
+ * `active`/`pinned` pool `findDuplicateClusters` reads.
+ *
+ * Normalized text equality alone is not enough to call two sides duplicates, though: a same-kind
+ * global fact and project fact can share prose word for word ("the default branch name") while
+ * legitimately naming different values in different scopes. `isCrossBoundaryKeyMismatch` above
+ * excludes exactly that case -- a genuine override, never a restatement -- and its own doc comment
+ * covers the null cases (most facts here carry no subject at all).
+ */
+export function findCrossScopeDuplicates(db: Db): CrossScopeDuplicate[] {
+  const facts = [...listFacts(db, { status: ["active", "pinned"] })].sort(preferenceOrder);
+  const globalByKey = new Map<string, Fact>();
+  for (const fact of facts) {
+    if (fact.scope === "global") {
+      const key = kindTextKey(fact);
+      // First writer under `preferenceOrder` wins (pinned, then most confident, then newest) for
+      // the rare case of two global facts already sharing text -- that pair is a same-scope
+      // duplicate `findDuplicateClusters` already reports, not this pass's concern.
+      if (!globalByKey.has(key)) {
+        globalByKey.set(key, fact);
+      }
+    }
+  }
+  const duplicates: CrossScopeDuplicate[] = [];
+  for (const fact of facts) {
+    if (fact.scope !== "project") {
+      continue;
+    }
+    const keep = globalByKey.get(kindTextKey(fact));
+    if (keep !== undefined && !isCrossBoundaryKeyMismatch(keep, fact)) {
+      duplicates.push({ keep, duplicate: fact });
+    }
+  }
+  return duplicates;
+}
+
+/**
+ * One same-kind, same-normalized-text statement live under two or more distinct project
+ * identities -- `--cross-project`'s report. `facts` holds one representative per identity, newest
+ * capture first, so a printed `mem edit --scope global` command always targets the most recently
+ * stated copy.
+ */
+export interface CrossProjectDuplicateGroup {
+  readonly facts: readonly Fact[];
+  /** `facts[0]` restated as its own field, typed non-optional: every group has at least two members by construction, but nothing in `Fact[]`'s own type says so, and the CLI's printed `mem edit --scope global` command targets exactly this one. */
+  readonly newest: Fact;
+}
+
+/**
+ * Same-kind, same-normalized-text project-scope facts present under two or more distinct project
+ * identities (`computeProjectIdentityGroups` -- the identical identity notion `findDuplicateClusters`
+ * above uses, not a second one), and whose keyed data agrees per `isCrossBoundaryKeyMismatch` --
+ * same text alone is not sufficient, since two projects can legitimately override a same-worded
+ * subject with different values. Report only: nothing in this module writes for this shape, and
+ * `mem consolidate --cross-project` has no `--apply` path -- widening a fact's scope out of its own
+ * project is a bigger claim than collapsing a same-project restatement (it says the preference
+ * applies everywhere, not just here), and that is the user's call to make explicitly, not this
+ * pass's to act on unattended.
+ */
+export function findCrossProjectDuplicates(db: Db): CrossProjectDuplicateGroup[] {
+  const facts = [...listFacts(db, { status: ["active", "pinned"], scope: "project" })].sort(preferenceOrder);
+  const projectGroups = computeProjectIdentityGroups(facts, (fact) => fact.scope);
+  const byKey = new Map<string, Map<string, Fact>>();
+  for (const fact of facts) {
+    const identity = projectGroups.get(fact.id);
+    // No `scopeRoot`/`scopeRepo` at all means this project fact's identity is unknown -- there is
+    // no honest way to tell whether it belongs to a project already in the map or a new one, so it
+    // cannot count toward "two or more distinct projects" either way.
+    if (identity === undefined) {
+      continue;
+    }
+    const key = kindTextKey(fact);
+    let byIdentity = byKey.get(key);
+    if (byIdentity === undefined) {
+      byIdentity = new Map<string, Fact>();
+      byKey.set(key, byIdentity);
+    }
+    if (!byIdentity.has(identity)) {
+      byIdentity.set(identity, fact);
+    }
+  }
+  const groups: CrossProjectDuplicateGroup[] = [];
+  for (const byIdentity of byKey.values()) {
+    const candidates = [...byIdentity.values()];
+    // Same text is not sufficient once two identities' facts disagree on subject or value -- that
+    // pair is an override across two projects, not a duplicate (see `isCrossBoundaryKeyMismatch`).
+    // Kept only when it agrees with every other candidate sharing this text key, not merely one:
+    // three identities where two agree and a third is a genuine override must not let the override
+    // slip through by matching just one of the other two.
+    const agreeing = candidates.filter((fact) =>
+      candidates.every((other) => other === fact || !isCrossBoundaryKeyMismatch(fact, other))
+    );
+    if (agreeing.length < 2) {
+      continue;
+    }
+    const facts = [...agreeing].sort((a, b) => b.captured_at.localeCompare(a.captured_at));
+    const [newest] = facts;
+    if (newest === undefined) {
+      continue;
+    }
+    groups.push({ facts, newest });
+  }
+  return groups;
 }
 
 /**

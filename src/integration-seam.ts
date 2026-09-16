@@ -42,6 +42,7 @@
  */
 
 import { resolve as resolvePath, sep } from "node:path";
+import type Database from "better-sqlite3";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
 import { loadAllowlist } from "./capture.js";
 import {
@@ -197,6 +198,17 @@ function footerLineFor(counts: {
    * re-deriving that.
    */
   readonly usefulness?: string;
+  /**
+   * True when this response carries a non-empty query that matched nothing -- no lexical hit, no
+   * embedding or usefulness signal either -- so every fact-line it does carry is filler the caps
+   * swept in by recency, not an answer to the query. Deliberately not derived from `matchedQuery`
+   * at this layer: that field is read off the pre-fusion BM25 map alone (`retrieve`, src/
+   * retrieval.ts), so it reads `false` on every result of a query genuinely answered by embedding
+   * signal, and asserting "nothing matched" there would be false. `retrieve`'s own `zeroSignal` --
+   * threaded out as `RetrieveOutcome.zeroSignal` -- is the only field that actually says "there was
+   * no signal to match against at all", which is what this clause needs to stay true.
+   */
+  readonly noQuerySignal?: boolean;
 }): string | undefined {
   const clauses: string[] = [];
   if (counts.facts > 0) {
@@ -210,6 +222,9 @@ function footerLineFor(counts: {
   }
   if (counts.usefulness !== undefined) {
     clauses.push(counts.usefulness);
+  }
+  if (counts.noQuerySignal === true) {
+    clauses.push("no match for this query -- showing recent facts instead");
   }
   return clauses.length > 0 ? `${FOOTER_PREFIX}${clauses.join("; ")}` : undefined;
 }
@@ -436,17 +451,56 @@ function resolveProtocolVersion(requested: 1 | 2 | undefined): 1 | 2 {
 }
 
 /**
+ * Raised when `openStorage` itself fails inside `buildHintFormatUnsafe` -- a permissions error, a
+ * WAL lock, a schema mismatch on a store an older or newer `mem` left behind. Kept distinct from
+ * every other throw in that function so `buildHintFormat`'s outer catch can tell "the store could
+ * not even be opened" apart from a downstream retrieval bug: the two need different footer text,
+ * and reporting a query bug as an unreadable store would send a caller chasing the wrong fault.
+ */
+class StorageUnreadableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StorageUnreadableError";
+  }
+}
+
+/**
+ * The footer clause for a response whose store could not be opened at all. Points at `mem doctor`
+ * specifically because it runs the identical `openStorage` call this failed on, so it will fail too
+ * -- but unlike this seam, which must fail open onto a well-formed empty wire payload, `doctor`
+ * answers to a human on stderr and prints the real error instead of swallowing it. It is deliberately
+ * not `mem review` or any command that resolves something: none of them can act on a store nothing
+ * can open, and pointing at one that will only refuse is the failure this clause exists to not repeat.
+ */
+const STORE_UNREADABLE_CLAUSE = "store could not be read; mem doctor shows the underlying error";
+
+/**
+ * The complete footer-line for a response whose store could not be opened. Exported, like
+ * `TGMEM_FOOTER_LINE`, so a test pins it against the composer instead of duplicating its bytes.
+ */
+export const STORE_UNREADABLE_FOOTER_LINE = `${FOOTER_PREFIX}${STORE_UNREADABLE_CLAUSE}`;
+
+/**
  * Builds the `--hint-format` payload for `mem recall --hint-format`. Never
  * throws: any internal failure resolves to an empty result so the caller's
  * fail-open path has nothing to special-case.
  */
 export async function buildHintFormat(options: HintFormatOptions): Promise<HintFormatResult> {
+  const protocolVersion = resolveProtocolVersion(options.protocolVersion);
+  const delta = options.delta === true && typeof options.sessionId === "string" && options.sessionId.length > 0;
+  const header = tgmemHeaderFor(protocolVersion, delta);
   try {
     return await buildHintFormatUnsafe(options);
   } catch (error) {
+    if (error instanceof StorageUnreadableError) {
+      logWarning(`hint-format could not open the store, returning an unreadable-store footer: ${error.message}`);
+      // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an
+      // unreadable store on that version is silently identical to an empty one -- the same
+      // limitation the internal-failure branch below already accepts for the same reason.
+      return { header, lines: protocolVersion === 2 ? [STORE_UNREADABLE_FOOTER_LINE] : [], truncated: false, delta };
+    }
     logWarning(`hint-format failed internally, returning empty hint set: ${errorMessage(error)}`);
-    const delta = options.delta === true && typeof options.sessionId === "string" && options.sessionId.length > 0;
-    return { header: tgmemHeaderFor(resolveProtocolVersion(options.protocolVersion), delta), lines: [], truncated: false, delta };
+    return { header, lines: [], truncated: false, delta };
   }
 }
 
@@ -471,7 +525,17 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // Reading a fact through a connection that skipped `ensureStorageSchema` worked only by accident
   // of which columns this path happens to select today.
   const budgetMs = options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS;
-  const db = openStorage(options.dbPath ?? resolveDbPath());
+  let db: Database.Database;
+  try {
+    db = openStorage(options.dbPath ?? resolveDbPath());
+  } catch (error) {
+    // Distinguished from every other throw site below: a store that cannot even be opened
+    // (permissions, a WAL lock, a schema mismatch) is a different fact for `buildHintFormat`'s
+    // outer catch to report than a bug in the retrieval logic that follows. Reporting the wrong one
+    // here would tell a caller their store is fine when it is not open at all, or that it is
+    // unreadable when the real fault is downstream and `mem doctor` would show nothing wrong.
+    throw new StorageUnreadableError(errorMessage(error));
+  }
   let allFacts: Fact[];
   let alreadySurfaced: ReadonlySet<string> = new Set();
   let usefulness: ReadonlyMap<string, { surfaced: number; used: number }>;
@@ -519,7 +583,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const scoped = allFacts.filter((fact) => isInScope(fact, root, contextFiles));
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
-  const { results, withheldCount } = await retrieve(scoped, {
+  const { results, withheldCount, zeroSignal } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
     hintFormat: true,
@@ -622,6 +686,15 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // never written would earn the exact "was never surfaced in session ... -- nothing to mark" reply
   // this fix exists to stop producing.
   const usefulnessClause = sessionId !== undefined && emittedIds.length > 0 ? usefulnessInvocation(sessionId, emittedIds) : undefined;
+  // A non-empty query, zero signal to rank it against, not one result actually matched it
+  // lexically, and at least one fact-line actually going out: the claim this clause makes is "the
+  // facts below are filler, not a match", which is false to assert over an empty payload -- a
+  // delta call that suppressed every filler fact as already-sent, or a query matching only
+  // withheld (pending/contested) facts, has nothing for "showing recent facts instead" to describe.
+  // `results`, not `unseen`, for the zero-signal/matchedQuery checks: that claim is about what
+  // `retrieve` found or didn't, not about what the delta filter went on to keep.
+  const noQuerySignal =
+    (options.query ?? "").length > 0 && zeroSignal && !results.some((result) => result.matchedQuery) && emittable.length > 0;
   // `unseen`, not `results`: a fact the caps dropped was withheld from this payload, but one the
   // delta filter dropped was already sent and the consumer still has it. Counting the latter as
   // "not sent" would report a shortfall that does not exist on a `--delta` call.
@@ -632,6 +705,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
           cut: unseen.length - emittable.length,
           withheld: withheldCount,
           ...(usefulnessClause !== undefined ? { usefulness: usefulnessClause } : {}),
+          ...(noQuerySignal ? { noQuerySignal } : {}),
         })
       : undefined;
   if (footer !== undefined) {

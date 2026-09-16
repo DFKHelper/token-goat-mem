@@ -22,7 +22,14 @@
 import { relative, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { buildScreenedExcerpt, CaptureValidationError, SecretDetectedError, captureSuggested, type CaptureSuggestedInput } from "./capture.js";
+import {
+  buildScreenedExcerpt,
+  CaptureValidationError,
+  SecretDetectedError,
+  captureSuggested,
+  recordSighting,
+  type CaptureSuggestedInput,
+} from "./capture.js";
 import { MAX_IMPORT_FILE_SIZE_BYTES } from "./exportImport.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { isBoundToRoot } from "./retrieval.js";
@@ -269,15 +276,24 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
     // Same rule `scan-session` and `retrieval.ts` use for what recall may surface: a text match
     // bound to an unrelated project's scope_root must not suppress this candidate, so `isBoundToRoot`
     // gates it rather than a bare text-index hit.
-    if ((storedByText.get(normalizeFactText(candidate.text)) ?? []).some((fact) => isBoundToRoot(fact, options.root))) {
+    const boundMatches = (storedByText.get(normalizeFactText(candidate.text)) ?? []).filter((fact) => isBoundToRoot(fact, options.root));
+    if (boundMatches.length > 0) {
       outcomes.push({ status: "skipped_known", candidate });
+      // A restatement of a `pending` suggestion, re-imported from a later revision of the same
+      // file, is evidence for `mem review`'s human reader (`recordSighting`'s own doc comment);
+      // a match against anything else has no pending row to record a sighting against.
+      for (const fact of boundMatches) {
+        if (fact.status === "pending") {
+          recordSighting(db, fact.id, `${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root);
+        }
+      }
       continue;
     }
 
     // Screened separately from candidate.text: a bullet's own line can carry a secret the
     // heuristic-trimmed candidate text did not (e.g. a trailing inline token past where the bullet
     // parser stopped). `null` (screened positive) means no source row, never a blocked import.
-    const sourceExcerpt = buildScreenedExcerpt(`${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root);
+    const sourceExcerpt = buildScreenedExcerpt(`${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root, candidate.text);
     const input: CaptureSuggestedInput = {
       text: candidate.text,
       kind,

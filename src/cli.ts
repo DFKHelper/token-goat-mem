@@ -49,6 +49,7 @@ import {
   loadAllowlist,
   parseCapturedAtOrThrow,
   InvalidAnchorError,
+  recordSighting,
   resolveScopeRepo,
   screenForSecrets,
   screenInputOrThrow,
@@ -70,9 +71,13 @@ import {
 import {
   DEFAULT_DUPLICATE_THRESHOLD,
   DEFAULT_STALE_AGE_DAYS,
+  findCrossProjectDuplicates,
+  findCrossScopeDuplicates,
   findDuplicateClusters,
   findStaleFacts,
   staleCutoff,
+  type CrossProjectDuplicateGroup,
+  type CrossScopeDuplicate,
   type DuplicateCluster,
 } from "./consolidate.js";
 import {
@@ -838,18 +843,13 @@ interface SupersessionEdge {
  *
  * `edge === null` means only "no supersession edge was found in this store's audit log" -- it does
  * NOT mean "nothing superseded this fact". `findSupersedingFactId` (src/db.ts) reads the edge out
- * of `audit_log`, and `mem export`/`mem import --from-json` do not carry that table at all, so a
- * fact superseded before an export/import round trip lands here with its winner very possibly
- * still present in the very same store. Two fixes were considered: carrying the edge through the
- * export envelope as a new optional field on the fact (validated the way `validateJsonFact`
- * validates every other optional field -- reject a malformed value rather than coerce it), or
- * wording this fallback so it never enumerates specific causes it cannot actually distinguish from
- * "unknown". The former also needs a way to make the restored edge visible to
- * `findSupersedingFactId` post-import (e.g. a synthetic audit row), which is a second piece of
- * surface for a support case (`mem show` right after an offline export/import) most stores hit
- * rarely if ever; the latter is a one-line, provably-correct fix that satisfies the actual
- * requirement -- never assert a false cause -- without adding an export schema field or an import
- * validation path to maintain. Reword chosen.
+ * of `audit_log`. `mem export` carries the edge forward as an optional `superseded_by` field
+ * (`factToExportJson`), and `mem import --from-json` restores it as a fresh audit row once every
+ * fact in the file has landed (`importFromJson`), so a fact superseded before an export/import round
+ * trip keeps its edge as long as the export recorded a winner and that winner resolves somewhere
+ * the file or the target store can see. `unknown` below is therefore no longer a blanket casualty of
+ * export/import -- it now means either a genuine terminal retirement that never named a winner
+ * (`mem forget`, staleness), or a named winner that does not resolve anywhere reachable.
  */
 function formatSupersessionLine(fact: Fact, edge: SupersessionEdge | null): string | null {
   if (fact.status !== "superseded") {
@@ -857,8 +857,8 @@ function formatSupersessionLine(fact: Fact, edge: SupersessionEdge | null): stri
   }
   if (edge === null) {
     return "superseded_by: unknown (no supersession edge recorded in this store's audit log -- " +
-      "could be a genuine terminal retirement (forget/reject/staleness), or an edge lost to an " +
-      "operation that does not carry audit history, e.g. export/import)";
+      "could be a genuine terminal retirement (forget/reject/staleness), or a named winner that " +
+      "does not resolve in this store, e.g. an export/import whose winner id was never found)";
   }
   if (edge.winner === undefined) {
     return `superseded_by: ${edge.winnerId} (no longer in the store -- pruned by mem gc)`;
@@ -1009,6 +1009,8 @@ interface ExportedFactJson {
   readonly confidence: number;
   readonly last_surfaced_at: string | null;
   readonly prior_status: FactStatus | null;
+  /** Present only when `status` is `"superseded"`. The winner's id, or `null` when no supersession edge is known -- see `factToExportJson`. */
+  readonly superseded_by?: string | null;
   readonly embedding?: number[] | null;
 }
 
@@ -1018,7 +1020,10 @@ interface ExportedFactJson {
  * show --json` pass `false` to drop the field entirely (large, usually null, an internal
  * retrieval-only detail -- see the design plan's council/GLM synthesis).
  */
-function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boolean } = {}): ExportedFactJson {
+function factToExportJson(
+  fact: Fact,
+  options: { readonly includeEmbedding?: boolean; readonly supersededBy?: string | null } = {}
+): ExportedFactJson {
   const includeEmbedding = options.includeEmbedding ?? true;
   return {
     id: fact.id,
@@ -1038,6 +1043,10 @@ function factToExportJson(fact: Fact, options: { readonly includeEmbedding?: boo
     confidence: fact.confidence,
     last_surfaced_at: fact.last_surfaced_at ?? null,
     prior_status: fact.prior_status ?? null,
+    // Only meaningful for a superseded fact -- omitted (not `null`) for every other status so an
+    // untouched call site (mem list --json, mem show --json's embedded `fact`) does not start
+    // asserting `superseded_by: null` for a fact nobody checked the audit log for.
+    ...(fact.status === "superseded" ? { superseded_by: options.supersededBy ?? null } : {}),
     ...(includeEmbedding ? { embedding: fact.embedding === null ? null : Array.from(fact.embedding) } : {}),
   };
 }
@@ -1139,6 +1148,43 @@ function formatSection(title: string, facts: readonly Fact[], detail?: (fact: Fa
 function formatPendingSourceLine(db: Database.Database, fact: Fact): string | null {
   const [newest] = listSourcesForFact(db, fact.id);
   return newest === undefined ? null : `    source: [${newest.storedAt}] ${newest.excerpt}`;
+}
+
+/**
+ * `null` for the common case (`sightings` is 0: never restated, or predates the column, which
+ * reads identically -- see `Fact.sightings`'s doc comment). A fact worth showing here is one a
+ * human reviewing the queue should weigh more heavily for having been said more than once; the
+ * count is display only, same non-gating contract as `formatPendingSourceLine` and
+ * `formatPendingContradictionLine` beside it.
+ */
+function formatPendingSightingsLine(fact: Fact): string | null {
+  const sightings = fact.sightings ?? 0;
+  return sightings > 0 ? `    sighted again ${sightings} time${sightings === 1 ? "" : "s"} since` : null;
+}
+
+/**
+ * Names the single best-matching live fact a pending `correction` -- or any pending fact carrying a
+ * `subject`, since that is exactly what a same-subject contradiction is keyed on -- may contradict
+ * once promoted. Reuses `findRelatedFacts`, the same entity/topic-weighted lookup `mem show
+ * --related` already runs, rather than inventing a second similarity mechanism for one more bucket.
+ *
+ * Narrowed to `active`/`pinned` candidates: `findRelatedFacts` also surfaces pending/contested
+ * neighbours (labelled, for `mem show --related`'s inspection purpose), but "may contradict" only
+ * means something against the ground truth this fact could eventually replace -- another pending or
+ * contested fact is not live enough yet to be worth flagging as a rival.
+ *
+ * A label, not a gate: this never supersedes, changes status, or promotes anything, same contract as
+ * `mem show --related`. Only the top match prints, same shape as `formatUnanchoredSuggestionLine`
+ * offering only its first viable anchor candidate -- ambiguity narrowed to one line is the point.
+ */
+function formatPendingContradictionLine(db: Database.Database, fact: Fact, root: string): string | null {
+  if (fact.kind !== "correction" && fact.subject === null) {
+    return null;
+  }
+  const [top] = findRelatedFacts(db, fact, root).filter(
+    (related) => related.fact.status === "active" || related.fact.status === "pinned"
+  );
+  return top === undefined ? null : `    may contradict ${top.fact.id} "${auditValuePreview(top.fact.text)}"`;
 }
 
 /**
@@ -1534,7 +1580,10 @@ const UNANCHORED_ELIGIBLE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["dec
  */
 function formatReview(db: Database.Database, root: string, options: ReviewOptions = {}): string {
   const epochFilter: FactFilter = options.sinceEpoch !== undefined ? { epochAfter: options.sinceEpoch } : {};
-  const pending = listFacts(db, { status: "pending", ...epochFilter });
+  // Most-restated first, ties broken by `listFacts`'s own `captured_at DESC` -- `Array.prototype.sort`
+  // is stable, so re-sorting an already-ordered array by sightings alone preserves that secondary
+  // order for every tie exactly as `listFacts` produced it, with no second query needed to express it.
+  const pending = [...listFacts(db, { status: "pending", ...epochFilter })].sort((a, b) => (b.sightings ?? 0) - (a.sightings ?? 0));
   // Persisted-`contested` facts are part of the detection pool, not just live ground truth. Querying
   // only active/pinned meant a fact `mem epoch --gc` had already marked contested vanished from the
   // one bucket that exists to surface it: `mem review --summary` reported `contested: 0` while
@@ -1613,7 +1662,14 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
   }
 
   const detailFor: Partial<Record<ReviewSection, (fact: Fact) => string | null>> = {
-    pending: (fact) => formatPendingSourceLine(db, fact),
+    pending: (fact) => {
+      const lines = [
+        formatPendingSightingsLine(fact),
+        formatPendingSourceLine(db, fact),
+        formatPendingContradictionLine(db, fact, root),
+      ].filter((line): line is string => line !== null);
+      return lines.length > 0 ? lines.join("\n") : null;
+    },
     unanchored: (fact) => formatUnanchoredSuggestionLine(fact, root),
   };
   const sections = shown
@@ -1779,6 +1835,60 @@ function formatDuplicateClusters(clusters: readonly DuplicateCluster[], threshol
   return lines.join("\n");
 }
 
+/**
+ * Renders `findCrossScopeDuplicates`'s report, in the same shape `formatDuplicateClusters` uses
+ * (a running count, a blank-line-separated block per pair, the applied/dry-run closing line) --
+ * `""` when there is nothing to show, so the caller can drop this section entirely rather than
+ * print an empty "0 cross-scope duplicates" line the Jaccard pass above never had a reason to.
+ */
+function formatCrossScopeDuplicates(duplicates: readonly CrossScopeDuplicate[], applied: boolean): string {
+  if (duplicates.length === 0) {
+    return "";
+  }
+  const lines: string[] = [
+    `${duplicates.length} cross-scope duplicate${duplicates.length === 1 ? "" : "s"}: a project-scope fact restating a global one, word for word` +
+      (applied ? "" : " (dry run, nothing changed)"),
+  ];
+  for (const { keep, duplicate } of duplicates) {
+    lines.push("");
+    lines.push(`  keep    ${formatFactSummary(keep)}`);
+    lines.push(`          ${formatFactSummary(duplicate)}`);
+  }
+  lines.push("");
+  lines.push(
+    applied
+      ? `superseded ${duplicates.length} project-scope duplicate${duplicates.length === 1 ? "" : "s"}; ${CONSOLIDATE_REVERSIBLE_NOTE}`
+      : `${duplicates.length} fact${duplicates.length === 1 ? "" : "s"} would be superseded -- re-run with --apply to act`
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Renders `findCrossProjectDuplicates`'s report for `--cross-project`. Always the dry-run shape --
+ * there is no `--apply` line to print, because there is no `--apply` path for this pass (see that
+ * function's doc comment) -- so the one action offered is the paste-ready `mem edit --scope global`
+ * command against the newest fact in each group, mirroring `formatUnanchoredSuggestionLine`'s own
+ * `--force`-when-`source_type=user` rule rather than inventing a second one.
+ */
+function formatCrossProjectDuplicates(groups: readonly CrossProjectDuplicateGroup[]): string {
+  if (groups.length === 0) {
+    return "no same-kind, same-text facts found under two or more distinct projects";
+  }
+  const lines: string[] = [
+    `${groups.length} statement${groups.length === 1 ? "" : "s"} restated under two or more distinct projects ` +
+      "(report only -- no --apply path; widen scope yourself with the printed command)",
+  ];
+  for (const group of groups) {
+    lines.push("");
+    for (const fact of group.facts) {
+      lines.push(`  ${formatFactSummary(fact)}`);
+    }
+    const force = group.newest.source_type === "user" ? " --force" : "";
+    lines.push(`  mem edit ${group.newest.id} --scope global${force}`);
+  }
+  return lines.join("\n");
+}
+
 function formatStaleFacts(facts: readonly Fact[], cutoffIso: string, ageDays: number, applied: boolean): string {
   const window = `older than ${ageDays} day${ageDays === 1 ? "" : "s"}`;
   if (facts.length === 0) {
@@ -1808,6 +1918,7 @@ interface ConsolidateCliOptions {
   readonly threshold?: string;
   readonly stale?: boolean;
   readonly staleDays?: string;
+  readonly crossProject?: boolean;
 }
 
 /**
@@ -1822,6 +1933,7 @@ interface ConsolidateCliOptions {
  */
 function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, now: Date): string {
   const stale = options.stale === true;
+  const crossProject = options.crossProject === true;
   const applied = options.apply === true;
   // Each flag belongs to exactly one pass and they do not compose (`mem facets` takes the same
   // line): silently ignoring the one that does not apply would make it look honoured.
@@ -1830,6 +1942,19 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
   }
   if (!stale && options.staleDays !== undefined) {
     throw new UsageError("--stale-days applies to --stale; the duplicate pass is bounded by --threshold");
+  }
+  if (crossProject && (stale || options.threshold !== undefined || options.staleDays !== undefined)) {
+    throw new UsageError("--cross-project does not compose with --stale/--threshold/--stale-days");
+  }
+  // No `--apply` path for this pass at all (see `findCrossProjectDuplicates`'s doc comment): refused
+  // here rather than silently ignored, same as every other flag combination this function rejects.
+  if (crossProject && applied) {
+    throw new UsageError(
+      "--cross-project is report-only -- there is no --apply path; widen scope yourself with the printed `mem edit --scope global` command"
+    );
+  }
+  if (crossProject) {
+    return formatCrossProjectDuplicates(findCrossProjectDuplicates(db));
   }
 
   if (stale) {
@@ -1852,6 +1977,11 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
 
   const threshold = options.threshold !== undefined ? parseThreshold(options.threshold) : DEFAULT_DUPLICATE_THRESHOLD;
   const clusters = findDuplicateClusters(db, threshold);
+  // Run alongside `findDuplicateClusters`, not inside it: exact-text global/project duplicates are
+  // a shape that pass's own `comparabilityKey` cannot see by design (see `findCrossScopeDuplicates`'s
+  // doc comment), so this is a second, narrower pass over the same live pool rather than a change
+  // to the first one's comparability rule.
+  const crossScope = findCrossScopeDuplicates(db);
   if (applied) {
     for (const cluster of clusters) {
       for (const member of cluster.duplicates) {
@@ -1864,8 +1994,19 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
         );
       }
     }
+    for (const { keep, duplicate } of crossScope) {
+      setStatusWithAudit(
+        db,
+        duplicate.id,
+        "superseded",
+        CONSOLIDATE_DUPLICATE_EVENT,
+        `${SUPERSEDED_AS_DUPLICATE_PREFIX}${keep.id} (exact text match against a global-scope fact)`
+      );
+    }
   }
-  return formatDuplicateClusters(clusters, threshold, applied);
+  return [formatDuplicateClusters(clusters, threshold, applied), formatCrossScopeDuplicates(crossScope, applied)]
+    .filter((section) => section.length > 0)
+    .join("\n\n");
 }
 
 interface RememberCliOptions {
@@ -2226,10 +2367,22 @@ export function buildProgram(): Command {
           ...(options.subject !== undefined ? { subject: options.subject } : {}),
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
         };
-        const { facts, embeddingMeta } = await withDb((db) => ({
-          facts: listFacts(db, filter),
-          embeddingMeta: getEmbeddingMeta(db) ?? null,
-        }));
+        const { facts, embeddingMeta, supersededByIds } = await withDb((db) => {
+          const listed = listFacts(db, filter);
+          return {
+            facts: listed,
+            embeddingMeta: getEmbeddingMeta(db) ?? null,
+            // Computed only for superseded facts (findSupersedingFactId's SELECT is per-id, not
+            // free) and only here, once, rather than re-deriving it inside factToExportJson: the
+            // edge this carries forward is what lets `mem import --from-json` restore it without
+            // re-running contradiction resolution.
+            supersededByIds: new Map(
+              listed
+                .filter((fact) => fact.status === "superseded")
+                .map((fact) => [fact.id, findSupersedingFactId(db, fact.id)] as const)
+            ),
+          };
+        });
         if (format === "md") {
           process.stdout.write(factsToMarkdown(facts));
           return;
@@ -2238,7 +2391,7 @@ export function buildProgram(): Command {
           schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
           exportedAt: new Date().toISOString(),
           embeddingMeta,
-          facts: facts.map((fact) => factToExportJson(fact)),
+          facts: facts.map((fact) => factToExportJson(fact, { supersededBy: supersededByIds.get(fact.id) ?? null })),
         };
         process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
       })
@@ -2650,7 +2803,7 @@ export function buildProgram(): Command {
     )
     .option(
       "--json",
-      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array: fed only by mem scan-session and mem import --from-md, each writing one screened, truncated excerpt of the raw material (a user turn, a markdown line) the fact was pulled from -- mem remember and mem suggest never write a source row, since there the caller's own text is the fact. So [] means either kind: no source was ever recorded for this fact, or the fact came from a path that deliberately never records one. Carries supersededBy: the fact that replaced this one, or null when no supersession edge is recorded -- which covers 'not superseded', 'superseded with no successor', and 'superseded by something no longer traceable in this store's audit log (e.g. after an export/import round trip)'; the fact's own status distinguishes the first from the other two, but not the other two from each other. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it. When --related is also passed, carries related: derived-at-read-time neighbours sharing entity/topic terms with this fact (see --related's own help), each with its status and a shared-term score; [] means this fact shares no term with anything else in scope, not that the field was skipped."
+      "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface). Adds a freshness verdict, which mem export/mem list --json do not. Also carries a sources array: fed only by mem scan-session and mem import --from-md, each writing one screened, truncated excerpt of the raw material (a user turn, a markdown line) the fact was pulled from -- mem remember and mem suggest never write a source row, since there the caller's own text is the fact. So [] means either kind: no source was ever recorded for this fact, or the fact came from a path that deliberately never records one. Carries supersededBy: the fact that replaced this one, or null when no supersession edge is recorded -- which covers 'not superseded', 'superseded with no successor', and 'superseded by a winner id that does not resolve anywhere reachable (a genuine terminal retirement like mem forget, or an export/import whose named winner was never found)'; the fact's own status distinguishes the first from the other two, but not the other two from each other. Also carries history: every audit row for this fact, oldest first, which is where an edited fact's previous text is recorded -- `mem edit` overwrites in place, so nothing else in the store retains it. When --related is also passed, carries related: derived-at-read-time neighbours sharing entity/topic terms with this fact (see --related's own help), each with its status and a shared-term score; [] means this fact shares no term with anything else in scope, not that the field was skipped."
     )
     .action(
       guard(async (id: string, options: ShowCliOptions) => {
@@ -2679,7 +2832,9 @@ export function buildProgram(): Command {
           if (options.json === true) {
             const envelope = {
               schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
-              fact: factToExportJson(fact, { includeEmbedding: false }),
+              // Reuses `winnerId` (computed above for the top-level `supersededBy` field) rather
+              // than a second `findSupersedingFactId` lookup for the same fact.
+              fact: factToExportJson(fact, { includeEmbedding: false, supersededBy: winnerId }),
               freshness,
               sources,
               history,
@@ -2761,14 +2916,25 @@ export function buildProgram(): Command {
             // second copy of "does this apply here" re-implemented against `scope_root` directly.
             // A text match with an unrelated project's `scope_root` does not count: that
             // project's suggestion (or rejection) must not suppress this one's.
-            if ((storedByText.get(normalizeFactText(candidate.text)) ?? []).some((fact) => isBoundToRoot(fact, root))) {
+            const boundMatches = (storedByText.get(normalizeFactText(candidate.text)) ?? []).filter((fact) => isBoundToRoot(fact, root));
+            if (boundMatches.length > 0) {
+              // A restatement of a `pending` suggestion is evidence for `mem review`'s human reader
+              // (`recordSighting`'s own doc comment covers the screening/dedup/no-promotion
+              // contract) -- a match against anything else (active, superseded, ...) has no
+              // pending row to record a sighting against, and this candidate is simply already
+              // known, exactly as before.
+              for (const fact of boundMatches) {
+                if (fact.status === "pending") {
+                  recordSighting(db, fact.id, candidate.context, root);
+                }
+              }
               continue;
             }
             // The whole turn is genuinely larger than the sentence captured as the fact, which is
             // exactly the provenance gap `sources` exists to close -- screened separately because a
             // turn can carry a secret the extracted sentence did not (see buildScreenedExcerpt doc).
             // `null` (screened positive) means no source row, never a blocked capture.
-            const sourceExcerpt = buildScreenedExcerpt(candidate.context, root);
+            const sourceExcerpt = buildScreenedExcerpt(candidate.context, root, candidate.text);
             try {
               const { fact } = captureSuggested(db, {
                 text: candidate.text,
@@ -2777,6 +2943,7 @@ export function buildProgram(): Command {
                 root,
                 sourceRef: `${transcriptPath}#turn${candidate.turnIndex}`,
                 ...(sourceExcerpt !== null ? { sourceExcerpt } : {}),
+                ...(candidate.capturedAt !== undefined ? { capturedAt: candidate.capturedAt } : {}),
               });
               kept.push(fact.id);
             } catch (error) {
@@ -3117,6 +3284,10 @@ export function buildProgram(): Command {
     .option("--threshold <0-1>", `Jaccard floor over topic terms for calling two facts duplicates (default ${DEFAULT_DUPLICATE_THRESHOLD})`)
     .option("--stale", "Run the stale pass instead: active facts unsurfaced since the cutoff and never marked used")
     .option("--stale-days <n>", `How old a fact must be to count as stale, in days (default ${DEFAULT_STALE_AGE_DAYS})`)
+    .option(
+      "--cross-project",
+      "Report same-kind, same-text facts restated under two or more distinct projects -- report only, no --apply path"
+    )
     .action(
       guard(async (options: ConsolidateCliOptions) => {
         const output = await withDb((db) => runConsolidate(db, options, new Date()));

@@ -188,6 +188,14 @@ export function ensureStorageSchema(db: Db): void {
   // text is entirely stopwords", so a fact of that shape was re-offered by `mem facets --backfill`
   // forever: the command runs, finds nothing to write, and the shortfall never closes.
   applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN terms_checked_at TEXT");
+  // Repeat-sighting counter for a `pending` fact (`mem review`'s pending bucket sort, `mem
+  // scan-session`/`mem import --from-md`'s `recordSighting`). `NOT NULL DEFAULT 0`, matching
+  // `epoch` above rather than the nullable "unknown" convention most of this block uses: unlike
+  // `status_changed_at` or `last_surfaced_at`, there is an honest value to backfill here -- a row
+  // written before this column existed has, by construction, zero sightings *recorded*, which is
+  // exactly what `0` means. Backdating it to NULL would only force every reader to treat "never
+  // sighted again" and "predates the column" as two states needing the same `?? 0` fallback anyway.
+  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN sightings INTEGER NOT NULL DEFAULT 0");
 }
 
 /**
@@ -434,6 +442,7 @@ interface FactRow {
   prior_status: string | null;
   last_surfaced_at: string | null;
   terms_checked_at: string | null;
+  sightings: number;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -459,6 +468,7 @@ function rowToFact(row: FactRow): Fact {
     prior_status: row.prior_status as FactStatus | null,
     last_surfaced_at: row.last_surfaced_at,
     terms_checked_at: row.terms_checked_at,
+    sightings: row.sightings,
   };
 }
 
@@ -490,8 +500,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at, sightings)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
@@ -540,7 +550,13 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // in this same transaction and stamps the real value, so a value threaded through this
       // parameter would only ever be immediately overwritten -- see that function's own extraction
       // rationale.
-      null
+      null,
+      // Always 0: a freshly captured fact has not been restated yet, whatever status it starts in
+      // -- `NewFact` carries no `sightings` field to thread through here, unlike `prior_status`/
+      // `last_surfaced_at` above, because there is no restore path (export/import round trip) that
+      // needs to preserve a nonzero count. Only `recordSighting` (src/capture.ts) increments it,
+      // strictly after this row already exists.
+      0
     );
     replaceFactTermsInternal(db, id, extractFacets(fact.text), false);
   });
@@ -926,6 +942,19 @@ export function listSourcesForFact(db: Db, factId: string): Source[] {
     .prepare<[string], SourceRow>("SELECT * FROM sources WHERE fact_id = ? ORDER BY stored_at DESC")
     .all(factId)
     .map(rowToSource);
+}
+
+/**
+ * Increments `facts.sightings` for `factId` by one -- the counter `mem review`'s pending bucket
+ * sorts by (`capture.ts`'s `recordSighting`, called when a scan/import candidate restates a
+ * `pending` fact instead of writing a new one). Does not bump the write epoch, for the same reason
+ * writes to `sources` do not (see this module's doc comment): a sighting count is audit-adjacent
+ * evidence for a human reading the pending bucket, never part of the ground-truth surface the epoch
+ * exists to guard -- a `pending` fact is excluded from `--hint-format` output whether it has been
+ * sighted once or a hundred times.
+ */
+export function incrementSightings(db: Db, factId: string): void {
+  db.prepare("UPDATE facts SET sightings = sightings + 1 WHERE id = ?").run(factId);
 }
 
 /** Deletes one source row by id. Returns `true` if a row was deleted. */

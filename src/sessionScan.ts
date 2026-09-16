@@ -99,6 +99,11 @@ export interface Candidate {
    * that only ever echoed the fact back would carry no provenance beyond it.
    */
   readonly context: string;
+  /**
+   * ISO 8601 timestamp when the user turn was made, extracted from the transcript entry.
+   * Absent, malformed, or rejected falls back to undefined and is treated as "now" by the capture logic.
+   */
+  readonly capturedAt?: string;
 }
 
 /**
@@ -234,7 +239,7 @@ function isSlashCommand(turn: string): boolean {
  * Exported separately from {@link scanTranscript} so the matching rules can be tested without a
  * transcript file, which is where the interesting cases live.
  */
-export function extractCandidates(turns: readonly string[]): Candidate[] {
+export function extractCandidates(turns: readonly string[], capturedAts?: readonly (string | undefined)[]): Candidate[] {
   const found: Candidate[] = [];
   const seen = new Set<string>();
   turns.forEach((turn, turnIndex) => {
@@ -277,10 +282,44 @@ export function extractCandidates(turns: readonly string[]): Candidate[] {
         continue;
       }
       seen.add(key);
-      found.push({ text: sentence, kind: trigger.kind, turnIndex, context });
+      // Preserve the timestamp from the turn, if available. The capturedAts array mirrors the
+      // turns array, so we can index it the same way.
+      const capturedAt = capturedAts !== undefined ? capturedAts[turnIndex] : undefined;
+      found.push({ text: sentence, kind: trigger.kind, turnIndex, context, ...(capturedAt !== undefined ? { capturedAt } : {}) });
     }
   });
   return found;
+}
+
+/**
+ * Extracts the timestamp from a transcript entry, if present. Returns the ISO 8601 timestamp
+ * string if found and readable, or undefined if absent, malformed, or invalid. Invalid timestamps
+ * are silently skipped (not thrown) since transcript data is from outside this tool.
+ */
+function extractTimestampFromEntry(entry: unknown): string | undefined {
+  if (typeof entry !== "object" || entry === null) {
+    return undefined;
+  }
+  const record = entry as Record<string, unknown>;
+  const timestamp = record["timestamp"];
+  if (typeof timestamp !== "string") {
+    return undefined;
+  }
+  // Validate the timestamp by parsing it. A future-dated, malformed, or otherwise invalid
+  // timestamp falls back to undefined (treat it as "now" in the capture logic).
+  try {
+    const parsed = new Date(timestamp);
+    if (Number.isNaN(parsed.getTime())) {
+      return undefined;
+    }
+    // Reject future-dated entries silently (treat as malformed for this purpose).
+    if (parsed.getTime() > Date.now()) {
+      return undefined;
+    }
+    return parsed.toISOString();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -300,6 +339,7 @@ export function scanTranscript(transcriptPath: string): Candidate[] {
     return [];
   }
   const turns: string[] = [];
+  const capturedAts: (string | undefined)[] = [];
   for (const line of raw.split(/\r?\n/)) {
     if (line.trim().length === 0) {
       continue;
@@ -313,6 +353,10 @@ export function scanTranscript(transcriptPath: string): Candidate[] {
     const text = userTurnText(parsed);
     if (text !== undefined && text.trim().length > 0) {
       turns.push(text);
+      // Extract the timestamp from the same parsed entry. A missing, malformed, or invalid
+      // timestamp falls back to undefined, and the capture logic treats that as "now".
+      // Stored in `captured_at`; `stored_at` (the moment of the scan itself) is a separate column.
+      capturedAts.push(extractTimestampFromEntry(parsed));
     }
   }
   // `turnIndex` leaves this module as `<transcript>#turn<n>` in a suggestion's `source_ref`, so it
@@ -320,6 +364,7 @@ export function scanTranscript(transcriptPath: string): Candidate[] {
   // made the pointer slide: the same sentence reported a different turn on every scan as the
   // transcript grew past the cap, so provenance neither located the sentence nor stayed put.
   const window = turns.slice(-MAX_SCANNED_TURNS);
+  const windowCapturedAts = capturedAts.slice(-MAX_SCANNED_TURNS);
   const offset = turns.length - window.length;
-  return extractCandidates(window).map((candidate) => ({ ...candidate, turnIndex: offset + candidate.turnIndex }));
+  return extractCandidates(window, windowCapturedAts).map((candidate) => ({ ...candidate, turnIndex: offset + candidate.turnIndex }));
 }
