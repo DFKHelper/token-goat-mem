@@ -54,6 +54,8 @@ const TRIGGERS: readonly Trigger[] = [
   { pattern: /^(?:we should|let's|lets) (?:always|never)\b/i, kind: "preference" },
   { pattern: /^decision:\s*/i, kind: "decision" },
   { pattern: /^rule:\s*/i, kind: "decision" },
+  { pattern: /^correction:\s*/i, kind: "correction" },
+  { pattern: /^that(?:'s| is) (?:wrong|outdated|no longer (?:true|the case|right))\b/i, kind: "correction" },
 ];
 
 /**

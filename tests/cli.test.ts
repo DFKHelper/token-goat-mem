@@ -4567,6 +4567,49 @@ describe("scan-session", () => {
     expect((JSON.parse(after.stdout) as { facts: unknown[] }).facts).toHaveLength(0);
   });
 
+  it("does not resurrect a rejected candidate even after its tombstone ages past the superseded GC window", async () => {
+    // A rejection tombstone (`superseded` with `prior_status` `pending`) is the record of a human's
+    // "no" -- pruning it on the ordinary 90-day/1000-row superseded GC would let the very next scan
+    // re-file the same sentence as `pending`, as though the human had never been asked.
+    const transcript = writeTranscript(["Never commit generated files to the repository."]);
+    await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const id = (JSON.parse(review.stdout) as { facts: { id: string }[] }).facts[0]?.id ?? "";
+    await runCli(["review", "--reject", id]);
+
+    const db = openStorage(resolveDbPath());
+    db.prepare("UPDATE facts SET status_changed_at = ? WHERE id = ?").run(
+      new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
+      id
+    );
+    db.close();
+
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+    expect((await runCli(["show", id])).exitCode).toBe(0);
+
+    const second = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    expect(second.stdout).toContain("no new durable statements found");
+    const after = await runCli(["list", "--status", "pending", "--json"]);
+    expect((JSON.parse(after.stdout) as { facts: unknown[] }).facts).toHaveLength(0);
+  });
+
+  it("still prunes an ordinary superseded loser (not a rejection) past the GC window", async () => {
+    // The exemption above is narrow: a fact superseded for an ordinary reason -- here, a
+    // contradiction loser with `prior_status` `active` -- has no human "no" to protect and remains
+    // subject to the normal age-based prune.
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { text: "an ordinary contradiction loser", kind: "fact", scope: "global", source_type: "user" });
+    const id = db.prepare<[], { id: string }>("SELECT id FROM facts LIMIT 1").get()?.id ?? "";
+    db.prepare("UPDATE facts SET status = 'superseded', prior_status = 'active', status_changed_at = ? WHERE id = ?").run(
+      new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString(),
+      id
+    );
+    db.close();
+
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+    expect((await runCli(["show", id])).exitCode).toBe(1);
+  });
+
   it("is idempotent across repeated scans of the same transcript", async () => {
     // The Stop hook fires at the end of every assistant turn, so the same history is re-scanned
     // for the life of the session. Without the dedup the review queue would fill with copies.
@@ -5482,6 +5525,22 @@ describe("mem remember reaffirms rather than duplicating", () => {
     // on -- refreshing it is the whole substance of a reaffirmation.
     expect(String(after[0]?.["captured_at"]) > String(before?.["captured_at"])).toBe(true);
     expect(after[0]?.["confidence"]).toBe(1);
+  });
+
+  it("reaffirms rather than duplicating when the restated --value differs only in case", async () => {
+    // Value comparison for reaffirm must be case-insensitive the same way contradiction detection
+    // is: "pnpm" restated as "Pnpm" is the same fact said again, not a second value on the subject.
+    const first = await runCli(["remember", "uses pnpm not npm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
+    expect(first.stdout).toContain("remembered");
+
+    const second = await runCli(["remember", "uses pnpm not npm", "--kind", "preference", "--subject", "package-manager", "--value", "Pnpm"]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain("reaffirmed");
+
+    const after = await facts();
+    expect(after).toHaveLength(1);
+    // The raw value as typed is still stored/displayed verbatim -- normalization is comparison-only.
+    expect(after[0]?.["value"]).toBe("pnpm");
   });
 
   it("applies an --anchor carried by a restatement instead of discarding it", async () => {
