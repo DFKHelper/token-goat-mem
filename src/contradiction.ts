@@ -16,7 +16,13 @@
 
 import { SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import { normalizePath } from "./pathUtils.js";
+import { normalizeValue } from "./storage.js";
 import type { Fact, FactScope, FactStatus } from "./types.js";
+
+/** `normalizeValue`, threaded through the `null` a fact's `value` can carry -- comparison only, never storage or display. */
+function normalizedFactValue(value: string | null): string | null {
+  return value === null ? null : normalizeValue(value);
+}
 
 /** Statuses eligible to be surfaced as ground truth. Everything else (pending/superseded/contested) is withheld. */
 const GROUND_TRUTH_STATUSES: readonly FactStatus[] = ["active", "pinned"];
@@ -305,7 +311,10 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
   const updates: FactStatusUpdate[] = [];
 
   for (const bucket of buckets.values()) {
-    const distinctValues = new Set(bucket.facts.map((fact) => fact.value));
+    // Normalized for comparison only (case/internal-whitespace-insensitive) -- "pnpm" and "Pnpm"
+    // are the same value agreeing, not a contradiction, though each fact still stores and displays
+    // its own raw text.
+    const distinctValues = new Set(bucket.facts.map((fact) => normalizedFactValue(fact.value)));
     if (distinctValues.size <= 1) {
       continue;
     }
@@ -317,7 +326,7 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
     }
     // All facts tied for the top precedence rank (may be 2+, not just the top two array slots).
     const topGroup = sorted.filter((fact) => comparePrecedence(fact, best) === 0);
-    const topValues = new Set(topGroup.map((fact) => fact.value));
+    const topValues = new Set(topGroup.map((fact) => normalizedFactValue(fact.value)));
     // Genuinely ambiguous only when the tied-top-precedence facts themselves disagree on value.
     const isGenuineTie = topGroup.length > 1 && topValues.size > 1;
 
@@ -346,7 +355,7 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
       // different (lower-precedence) value are superseded; the other tied leader(s) sharing the
       // winning value are left untouched since they are not actually in conflict with the winner.
       for (const fact of bucket.facts) {
-        if (fact.value === best.value) {
+        if (normalizedFactValue(fact.value) === normalizedFactValue(best.value)) {
           continue;
         }
         updates.push({

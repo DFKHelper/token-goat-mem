@@ -70,7 +70,8 @@ token-goat-mem is installed (`mem` on PATH).
 - Add `--anchor "<predicate> <args>"` when a fact can be re-verified later
   instead of staying caveated forever, e.g.
   `--anchor "file-exists pnpm-lock.yaml"`. Predicates: file-exists,
-  file-absent, file-newer-than, glob-exists, git-tracked, newest-of. The
+  file-absent, file-newer-than, file-contains, file-not-contains, glob-exists,
+  git-branch-is, git-tracked, package-version, valid-until, newest-of. The
   anchor path must stay inside --root (no "..", no absolute path).
 ```
 

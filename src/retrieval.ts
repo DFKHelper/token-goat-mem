@@ -945,7 +945,7 @@ function buildDisplay(
   }
   if (freshness === "contradicted") {
     const tag = fact.status === "pinned" ? "pinned but contradicted" : "contradicted, excluded";
-    return withCta(`${label} (${tag}): ${body}`, "resolve via mem review");
+    return withCta(`${label} (${tag}): ${body}`, "mem forget <id> or mem edit <id> --anchor");
   }
 
   const alwaysCaveat = fact.kind === "preference" || fact.kind === "correction";

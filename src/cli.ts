@@ -123,6 +123,7 @@ import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./h
 import { scanTranscript } from "./sessionScan.js";
 import {
   anchorRootFor,
+  decayedConfidence,
   evaluateFactFreshness,
   isBoundToRoot,
   isDecayedBelowGroundTruth,
@@ -875,6 +876,23 @@ function formatFactDetail(
   related: readonly RelatedFact[] | null = null
 ): string {
   const scopeRoot = fact.scopeRoot ?? null;
+  const confidenceLine = (() => {
+    if (fact.kind === "preference" && fact.status !== "pinned") {
+      const now = new Date();
+      const decayed = decayedConfidence(fact, now);
+      const isBelowFloor = isDecayedBelowGroundTruth(fact, now);
+      // Decay is continuous, so `decayed < confidence` is true within seconds of capture and would
+      // print "(decayed to 1.00)" on every healthy preference -- clutter that says nothing. The note
+      // appears only once the decayed value differs at the precision it is printed to.
+      const decayNote = isBelowFloor
+        ? ` (decayed to ${decayed.toFixed(2)}, below ground truth; refresh with mem remember or mem pin to reaffirm)`
+        : decayed.toFixed(2) !== fact.confidence.toFixed(2)
+          ? ` (decayed to ${decayed.toFixed(2)})`
+          : "";
+      return `confidence: ${fact.confidence}${decayNote}`;
+    }
+    return `confidence: ${fact.confidence}`;
+  })();
   const lines: string[] = [
     `id: ${fact.id}`,
     `kind: ${fact.kind}`,
@@ -887,7 +905,7 @@ function formatFactDetail(
     `source_ref: ${fact.source_ref ?? "(none)"}`,
     `captured_at: ${fact.captured_at}`,
     `anchor: ${fact.anchor ?? "(none)"}  freshness=${freshness}`,
-    `confidence: ${fact.confidence}`,
+    confidenceLine,
   ];
   const supersession = formatSupersessionLine(fact, edge);
   if (supersession !== null) {
@@ -1670,6 +1688,16 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
       ].filter((line): line is string => line !== null);
       return lines.length > 0 ? lines.join("\n") : null;
     },
+    contradicted: (fact) => {
+      const lines: string[] = [];
+      const force = fact.source_type === "user" ? " --force" : "";
+      lines.push(`    mem forget ${fact.id}  (if no longer true)`);
+      lines.push(`    mem edit ${fact.id} --anchor "<predicate>"${force}  (if the anchor is wrong)`);
+      return lines.join("\n");
+    },
+    pins: (fact) => {
+      return `    mem pin ${fact.id}  (to re-confirm) or mem forget ${fact.id}  (to drop)`;
+    },
     unanchored: (fact) => formatUnanchoredSuggestionLine(fact, root),
   };
   const sections = shown
@@ -1681,7 +1709,15 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
 
 // ─────────────────────────────────────────────────────────────────────────── epoch / retention pass ───────────────────────────────────────────────────────────────────────────
 
-/** Section 6: "superseded facts and offloaded sources are GC'd after N days or M rows (whichever first)." */
+/**
+ * Section 6: "superseded facts and offloaded sources are GC'd after N days or M rows (whichever
+ * first)." Neither bound applies to a rejection tombstone -- a `superseded` row whose
+ * `prior_status` is `pending` -- because that row IS the record of a human's "no" to a suggested
+ * fact, not an ordinary contradiction loser. Pruning it would let the same sentence come back and
+ * be filed `pending` again as if it had never been asked, silently reversing the decision. See the
+ * exemption in `runRetentionPass` below. This makes rejection-tombstone growth unbounded by age or
+ * count; it is bounded instead by how often a human rejects a suggestion, which is small.
+ */
 const GC_SUPERSEDED_MAX_AGE_DAYS = 90;
 const GC_SUPERSEDED_MAX_ROWS = 1000;
 const GC_SOURCES_MAX_AGE_DAYS = 90;
@@ -1737,12 +1773,20 @@ function runRetentionPass(db: Database.Database): string {
     statusChangedAt(b).localeCompare(statusChangedAt(a))
   );
   let prunedFacts = 0;
-  superseded.forEach((fact, index) => {
-    if (statusChangedAt(fact) < supersededCutoff || index >= GC_SUPERSEDED_MAX_ROWS) {
+  let supersededOrdinal = 0;
+  superseded.forEach((fact) => {
+    // Rejection tombstone -- see the doc comment on GC_SUPERSEDED_MAX_ROWS above. This row is the
+    // record of a human decision, not an ordinary contradiction loser, so it is exempt from both
+    // the age cutoff and the row cap, and it does not consume a cap slot from the rows that follow.
+    if (fact.prior_status === "pending") {
+      return;
+    }
+    if (statusChangedAt(fact) < supersededCutoff || supersededOrdinal >= GC_SUPERSEDED_MAX_ROWS) {
       if (deleteFact(db, fact.id)) {
         prunedFacts += 1;
       }
     }
+    supersededOrdinal += 1;
   });
 
   const sourcesCutoff = new Date(now.getTime() - GC_SOURCES_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
@@ -1755,8 +1799,9 @@ function runRetentionPass(db: Database.Database): string {
   const prunedRecallLogRows = deleteRecallLogOlderThan(db, recallLogCutoff);
 
   const epoch = getEpoch(db);
+  const remedyNote = decayedCount > 0 ? `  (mem show <id> to inspect; mem remember to refresh or mem pin to exempt)` : "";
   return (
-    `epoch=${epoch}  contradictions_resolved=${updates.length}  preferences_decayed_below_floor=${decayedCount}  ` +
+    `epoch=${epoch}  contradictions_resolved=${updates.length}  preferences_decayed_below_floor=${decayedCount}${remedyNote}  ` +
     `pruned_superseded_facts=${prunedFacts}  pruned_sources=${prunedSources}  pruned_audit_log_rows=${prunedAuditRows}  ` +
     `pruned_recall_log_rows=${prunedRecallLogRows}`
   );
@@ -2262,7 +2307,7 @@ export function buildProgram(): Command {
     .requiredOption("--kind <kind>", `preference, decision, fact, or correction`)
     .option("--subject <key>", SUBJECT_KEY_HELP)
     .option("--value <value>", "Value for the subject (requires --subject)")
-    .option("--anchor <predicate>", "Read-only anchor predicate (filesystem/git)")
+    .option("--anchor <predicate>", "Read-only anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "global, project, or path", "global")
     .option("--source-ref <ref>", "Reference to the originating conversation/message")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
@@ -2314,7 +2359,7 @@ export function buildProgram(): Command {
     .requiredOption("--kind <kind>", `preference, decision, fact, or correction`)
     .option("--subject <key>", SUBJECT_KEY_HELP)
     .option("--value <value>", "Value for the subject (requires --subject)")
-    .option("--anchor <predicate>", "Read-only anchor predicate (filesystem/git)")
+    .option("--anchor <predicate>", "Read-only anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "global, project, or path", "global")
     .option("--source-ref <ref>", "Reference to the originating conversation/message")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
@@ -3088,7 +3133,7 @@ export function buildProgram(): Command {
     .option("--text <text>", "New fact text")
     .option("--subject <key>", "New normalized subject key (requires --value)")
     .option("--value <value>", "New value for the subject (requires --subject)")
-    .option("--anchor <predicate>", "New anchor predicate")
+    .option("--anchor <predicate>", "New anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "New scope: global, project, or path")
     .option("--root <path>", "Project root for .mem/allowlist and (if --scope is given) scope binding (default: current directory)")
     .option("--path <file>", "File or directory to bind to, resolved against --root (required when --scope path, rejected otherwise)")

@@ -49,6 +49,36 @@ describe("detectContradictions", () => {
     expect(result.updates).toHaveLength(0);
   });
 
+  it("does not flag values that agree except in case as a contradiction", () => {
+    const facts = [
+      makeFact({ id: "a", subject: "package-manager", value: "pnpm" }),
+      makeFact({ id: "b", subject: "package-manager", value: "Pnpm", captured_at: "2026-02-01T00:00:00.000Z" }),
+    ];
+    const result = detectContradictions(facts);
+    expect(result.groups).toHaveLength(0);
+    expect(result.updates).toHaveLength(0);
+  });
+
+  it("does not flag values that agree except in collapsed internal whitespace as a contradiction", () => {
+    const facts = [
+      makeFact({ id: "a", subject: "package-manager", value: "pnpm workspace" }),
+      makeFact({ id: "b", subject: "package-manager", value: "pnpm  workspace", captured_at: "2026-02-01T00:00:00.000Z" }),
+    ];
+    const result = detectContradictions(facts);
+    expect(result.groups).toHaveLength(0);
+    expect(result.updates).toHaveLength(0);
+  });
+
+  it("still flags genuinely different values as a contradiction", () => {
+    const facts = [
+      makeFact({ id: "a", subject: "default-branch", value: "main" }),
+      makeFact({ id: "b", subject: "default-branch", value: "master", captured_at: "2026-02-01T00:00:00.000Z" }),
+    ];
+    const result = detectContradictions(facts);
+    expect(result.groups).toHaveLength(1);
+    expect(result.updates).toHaveLength(1);
+  });
+
   it("ignores different scopes even with the same subject and conflicting values", () => {
     const facts = [
       makeFact({ id: "a", subject: "package-manager", value: "npm", scope: "global" }),

@@ -481,6 +481,36 @@ const STORE_UNREADABLE_CLAUSE = "store could not be read; mem doctor shows the u
 export const STORE_UNREADABLE_FOOTER_LINE = `${FOOTER_PREFIX}${STORE_UNREADABLE_CLAUSE}`;
 
 /**
+ * The footer clause for a response cut short by the retrieval time budget. Does not promise a
+ * partial result -- see the comment above `const truncated` in `buildHintFormatUnsafe`, which is
+ * why the payload is empty rather than a slice: a partial response is byte-indistinguishable from
+ * a complete one in TGMEM/2, so this clause only explains the emptiness, it does not offer one.
+ * `mem recall` runs with no budget at all, so it is the command that can actually show what this
+ * call ran out of time to send.
+ */
+const BUDGET_EXHAUSTED_CLAUSE = "hint set empty; retrieval ran out of its time budget, not out of facts -- mem recall shows them";
+
+/**
+ * The complete footer-line for a budget-exhausted response. Exported for the same reason as
+ * `STORE_UNREADABLE_FOOTER_LINE`.
+ */
+export const BUDGET_EXHAUSTED_FOOTER_LINE = `${FOOTER_PREFIX}${BUDGET_EXHAUSTED_CLAUSE}`;
+
+/**
+ * The footer clause for a response whose store opened fine but some other step in retrieval threw.
+ * Unlike `STORE_UNREADABLE_CLAUSE`, `mem doctor` here is not re-running the call that failed -- it
+ * is a broader read-only health check (schema, embedding coverage, hint-budget projection) that can
+ * still surface a wrong count or a broken invariant even when `openStorage` itself succeeded.
+ */
+const INTERNAL_ERROR_CLAUSE = "hints unavailable; an internal error stopped retrieval -- mem doctor shows the store state";
+
+/**
+ * The complete footer-line for an internal-failure response. Exported for the same reason as
+ * `STORE_UNREADABLE_FOOTER_LINE`.
+ */
+export const INTERNAL_ERROR_FOOTER_LINE = `${FOOTER_PREFIX}${INTERNAL_ERROR_CLAUSE}`;
+
+/**
  * Builds the `--hint-format` payload for `mem recall --hint-format`. Never
  * throws: any internal failure resolves to an empty result so the caller's
  * fail-open path has nothing to special-case.
@@ -499,8 +529,11 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
       // limitation the internal-failure branch below already accepts for the same reason.
       return { header, lines: protocolVersion === 2 ? [STORE_UNREADABLE_FOOTER_LINE] : [], truncated: false, delta };
     }
-    logWarning(`hint-format failed internally, returning empty hint set: ${errorMessage(error)}`);
-    return { header, lines: [], truncated: false, delta };
+    logWarning(`hint-format failed internally, returning an internal-error footer: ${errorMessage(error)}`);
+    // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an
+    // internal failure on that version is silently identical to an empty one -- the same
+    // limitation the unreadable-store branch above already accepts for the same reason.
+    return { header, lines: protocolVersion === 2 ? [INTERNAL_ERROR_FOOTER_LINE] : [], truncated: false, delta };
   }
 }
 
@@ -627,8 +660,16 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is
     // byte-indistinguishable from a complete one in TGMEM/2, so emitting one would
     // hand the consumer a subset while its own contract says it received everything.
-    logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning an empty hint set`);
-    return { header: tgmemHeaderFor(protocolVersion, delta), lines: [], truncated: true, delta };
+    logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning a budget-exhausted footer`);
+    // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget
+    // exhaustion on that version is silently identical to an empty one -- the same limitation the
+    // other two failure branches in this file already accept for the same reason.
+    return {
+      header: tgmemHeaderFor(protocolVersion, delta),
+      lines: protocolVersion === 2 ? [BUDGET_EXHAUSTED_FOOTER_LINE] : [],
+      truncated: true,
+      delta,
+    };
   }
 
   // Delta filtering happens before the caps (see `HintFormatOptions.delta`): the caps then select

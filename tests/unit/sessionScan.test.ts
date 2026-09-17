@@ -163,6 +163,29 @@ describe("extractCandidates", () => {
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.turnIndex).toBe(0);
   });
+
+  it("matches correction trigger shapes and assigns kind correction", () => {
+    // Explicit `correction:` prefix and natural-language reversal phrasings.
+    const candidates = extractCandidates([
+      "Correction: the test should run against production, not staging.",
+      "That's wrong about the SSH key location.",
+      "That is outdated now that we switched to Deno.",
+      "That's no longer true with the latest API change.",
+    ]);
+    expect(candidates.map((candidate) => candidate.kind)).toEqual([
+      "correction",
+      "correction",
+      "correction",
+      "correction",
+    ]);
+  });
+
+  it("does not match bare negation openers that lack reversal meaning", () => {
+    // `no,` and `actually,` are too broad and match any negative response, not reversals.
+    // A bare `no, that test is fine` is just disagreement, not a statement that something is wrong.
+    expect(extractCandidates(["No, that test is fine."])).toEqual([]);
+    expect(extractCandidates(["Actually, I tested it already."])).toEqual([]);
+  });
 });
 
 describe("durable statements behind a discourse prefix", () => {

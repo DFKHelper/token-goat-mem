@@ -7,9 +7,41 @@ import { markRecallUsed, openStorage, setEmbeddingMeta, updateFact } from "../..
 import { EMBED_MODEL_ENV, EMBED_URL_ENV } from "../../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer } from "../support/embedding-server.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
-import { buildHintFormat, STORE_UNREADABLE_FOOTER_LINE, TGMEM_FOOTER_LINE, TGMEM_HEADER } from "../../src/integration-seam.js";
+import {
+  buildHintFormat,
+  BUDGET_EXHAUSTED_FOOTER_LINE,
+  INTERNAL_ERROR_FOOTER_LINE,
+  STORE_UNREADABLE_FOOTER_LINE,
+  TGMEM_FOOTER_LINE,
+  TGMEM_HEADER,
+} from "../../src/integration-seam.js";
 import type { Fact } from "../../src/types.js";
 import type { HintFormatOptions, HintFormatResult } from "../../src/integration-seam.js";
+
+/**
+ * A deterministic handle on the "some other step in retrieval threw" branch of `buildHintFormat`,
+ * distinct from the "store could not even be opened" branch already covered by the broken-db-file
+ * test below. `getUsefulnessCounts` runs on the connection `openStorage` already opened
+ * successfully, so overriding it reaches the generic catch without touching `StorageUnreadableError`
+ * at all. Mirrors the `node:fs` override pattern in tests/anchors-branches.test.ts: the ESM module
+ * namespace is not configurable, so `vi.spyOn` cannot patch a named export directly, and this slot
+ * defaults to passing through to the real implementation for every test that does not set it.
+ */
+type StorageOverride = ((real: (...args: unknown[]) => unknown, ...args: unknown[]) => unknown) | null;
+const storageOverrides = vi.hoisted(() => ({
+  getUsefulnessCounts: null as StorageOverride,
+}));
+
+vi.mock("../../src/storage.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/storage.js")>();
+  return {
+    ...actual,
+    getUsefulnessCounts: (...args: unknown[]) =>
+      storageOverrides.getUsefulnessCounts
+        ? storageOverrides.getUsefulnessCounts(actual.getUsefulnessCounts as (...a: unknown[]) => unknown, ...args)
+        : (actual.getUsefulnessCounts as (...a: unknown[]) => unknown)(...args),
+  };
+});
 
 /** A soft budget no test machine can exceed. */
 const NO_TRUNCATION_BUDGET_MS = 3_600_000;
@@ -125,6 +157,7 @@ describe("buildHintFormat", () => {
     while (openServers.length > 0) {
       await openServers.pop()?.close();
     }
+    storageOverrides.getUsefulnessCounts = null;
     rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -192,7 +225,7 @@ describe("buildHintFormat", () => {
       // returned 2 + 1 = 3 lines here, in a payload a consumer could not tell from a complete one.
       // Any reintroduction of a reduced-cap path makes this a non-zero count.
       expect(factLines(result)).toEqual([]);
-      expect(result.lines).toEqual([]);
+      expect(result.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
     });
 
     it("never emits a third size: at scale the fact-line count is the full cap set or zero", async () => {
@@ -231,6 +264,48 @@ describe("buildHintFormat", () => {
     // assertion just above): that collision is exactly the gap this footer line closes.
     expect(result.lines).toEqual([STORE_UNREADABLE_FOOTER_LINE]);
     expect(result.lines).not.toEqual(emptyStore.lines);
+  });
+
+  it("TGMEM/1: an unreadable store carries no footer at all, same as an empty one", async () => {
+    // TGMEM/1 has no footer-line grammar at all (see the wire-format doc comment in
+    // src/integration-seam.ts), so this collision is an accepted limitation of that version, not a
+    // gap this fix closes -- the fix is scoped to TGMEM/2, which is the only version with a footer
+    // to distinguish with.
+    const brokenDbPath = join(workDir, "not-a-sqlite-file-v1");
+    mkdirSync(brokenDbPath);
+    const result = await buildHint({ root, dbPath: brokenDbPath, protocolVersion: 1 });
+    expect(result.header).toBe("TGMEM/1");
+    expect(result.lines).toEqual([]);
+  });
+
+  it("fails open (never throws) on an internal retrieval error, but says so instead of looking like an empty store", async () => {
+    // Distinguished from the broken-db-file test above: the store opens fine here, and something
+    // downstream of that throws instead -- the branch `buildHintFormat`'s catch reaches when the
+    // error is not a `StorageUnreadableError`.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    storageOverrides.getUsefulnessCounts = () => {
+      throw new Error("simulated internal failure downstream of a successful store open");
+    };
+    const result = await buildHint({ root, dbPath });
+    storageOverrides.getUsefulnessCounts = null;
+    const emptyStore = await buildHint({ root, dbPath: join(workDir, "another-empty.db") });
+    warnSpy.mockRestore();
+
+    expect(result.header).toBe(TGMEM_HEADER);
+    expect(result.lines).toEqual([INTERNAL_ERROR_FOOTER_LINE]);
+    expect(result.lines).not.toEqual(emptyStore.lines);
+  });
+
+  it("TGMEM/1: an internal retrieval error carries no footer at all, same as an empty one", async () => {
+    storageOverrides.getUsefulnessCounts = () => {
+      throw new Error("simulated internal failure downstream of a successful store open");
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const result = await buildHint({ root, dbPath, protocolVersion: 1 });
+    warnSpy.mockRestore();
+
+    expect(result.header).toBe("TGMEM/1");
+    expect(result.lines).toEqual([]);
   });
 
   it("fails open when root does not resolve to anything usable", async () => {
@@ -922,9 +997,21 @@ describe("buildHintFormat", () => {
     // presented a quarter of what was found as though it were all of it. TGMEM/2's grammar is
     // closed, so there is no in-band way to say "partial"; the only honest options are complete
     // or empty. Asserting emptiness rather than `< full` is deliberate: `< full` would pass again
-    // the moment someone reintroduces a reduced cap, which is the bug.
-    expect(exhausted.lines).toEqual([]);
+    // the moment someone reintroduces a reduced cap, which is the bug. The lone footer below is
+    // not a fact-line, so it does not reopen that gap -- it is what tells an agent the emptiness is
+    // a budget cutoff, not a project with nothing to say.
+    expect(exhausted.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
     expect(factLines(exhausted)).toEqual([]);
+  });
+
+  it("TGMEM/1: a budget-exhausted response carries no footer at all, same as an empty one", async () => {
+    seedFacts(dbPath, [
+      { id: "pref-v1", text: "preference for v1", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+    ]);
+    const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0, protocolVersion: 1 });
+    expect(exhausted.truncated).toBe(true);
+    expect(exhausted.header).toBe("TGMEM/1");
+    expect(exhausted.lines).toEqual([]);
   });
 
   /**
@@ -968,11 +1055,15 @@ describe("buildHintFormat", () => {
    * The wire-level half of the assertion above, at the boundary the consumer actually sees.
    *
    * `buildHintFormat`'s return value is in-process; what token-goat parses is stdout. A response
-   * that withholds facts has to be distinguishable *there* -- and the distinguishing signal is the
-   * absence of fact-lines, not a flag, because `HintFormatResult.truncated` never reaches the wire
-   * and cannot be made to without a version bump that fails un-upgraded consumers open to nothing.
+   * that withholds facts has to be distinguishable *there* -- and the distinguishing signal is a
+   * lone footer carrying no fact-lines, not a flag, because `HintFormatResult.truncated` never
+   * reaches the wire and cannot be made to without a version bump that fails un-upgraded consumers
+   * open to nothing. A lone footer is not off-grammar: `STORE_UNREADABLE_FOOTER_LINE` already ships
+   * that exact shape on TGMEM/2 today, so this response reuses the same shape rather than inventing
+   * one. Without it, a healthy but empty store and a budget cutoff on a full store both produce the
+   * bare header, and the caller cannot tell "nothing to say" from "ran out of time to say it".
    */
-  it("emits no fact-lines and no footer on the wire when the budget is exhausted", async () => {
+  it("emits no fact-lines but a distinguishing footer on the wire when the budget is exhausted", async () => {
     seedFacts(dbPath, [
       {
         id: "pref-wire",
@@ -989,11 +1080,18 @@ describe("buildHintFormat", () => {
     expect(healthy.lines).toContain(TGMEM_FOOTER_LINE);
 
     const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
-    // No footer either: TGMEM/2 emits one only alongside at least one fact-line, so a lone
-    // footer would itself be an off-grammar response.
+    // A different footer than the healthy response's, not the same TGMEM_FOOTER_LINE: this footer
+    // must not claim there is nothing to follow up on, and must not be confusable with the healthy
+    // count-based footer either.
     expect(exhausted.lines).not.toContain(TGMEM_FOOTER_LINE);
     expect(exhausted.header).toBe(TGMEM_HEADER);
-    expect(exhausted.lines).toEqual([]);
+    expect(exhausted.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
+
+    const emptyStore = await buildHint({ root, dbPath: join(workDir, "empty.db") });
+    // The exact collision this fix closes: an empty store and a budget cutoff must not both
+    // resolve to the bare header with no lines at all.
+    expect(emptyStore.lines).toEqual([]);
+    expect(emptyStore.lines).not.toEqual(exhausted.lines);
   });
 
   // ── Session recall log and --delta ───────────────────────────────────────────────────────────
@@ -1432,11 +1530,11 @@ describe("buildHintFormat", () => {
     expect(warnings.some((line) => line.includes("could not record surfaced facts") && line.includes("recall_log is read-only in this test"))).toBe(true);
   });
 
-  it("an empty (budget-exhausted) response logs nothing, so the session is not marked as having seen facts it never received", async () => {
+  it("a fact-empty (budget-exhausted) response logs nothing, so the session is not marked as having seen facts it never received", async () => {
     threeGlobalFacts();
     const exhausted = await buildHintFormat({ root, dbPath, sessionId: "sess-1", retrievalBudgetMs: 0 });
     expect(exhausted.truncated).toBe(true);
-    expect(exhausted.lines).toEqual([]);
+    expect(exhausted.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
     expect(loggedIds("sess-1")).toEqual([]);
   });
 });

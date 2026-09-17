@@ -228,6 +228,20 @@ export function normalizeSubject(subject: string): string {
 }
 
 /**
+ * Normalizes a value for agreement comparison ONLY -- trims, collapses internal whitespace, and
+ * lowercases, so "pnpm", "Pnpm", and "pnpm  " (or "pnpm workspace" vs "pnpm workspace") all compare
+ * as the same value regardless of how a caller typed `--value`. Mirrors `normalizeSubject`'s shape,
+ * with one addition: unlike a subject key, a value can legitimately contain internal whitespace a
+ * caller varies without meaning anything by it. Callers must keep storing and displaying the raw
+ * `fact.value` -- this exists only for the comparisons in `detectContradictions` and
+ * `reaffirmMatch` that decide whether two facts agree, never for what gets written to a row or
+ * printed by `mem show`.
+ */
+export function normalizeValue(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
  * Matching form for "is this the same statement said again".
  *
  * Deliberately conservative and deterministic: case folded, internal whitespace collapsed, and a
@@ -253,8 +267,13 @@ function reaffirmMatch(fact: Fact, candidate: NewFact, wanted: string, subject: 
     normalizeFactText(fact.text) === wanted &&
     scopeBindingMatchesCandidate(fact, candidate.scope, candidateScopeRoot, candidateScopeRepo) &&
     (fact.subject ?? null) === subject &&
-    (fact.value ?? null) === (candidate.value ?? null)
+    normalizeValueOrNull(fact.value) === normalizeValueOrNull(candidate.value)
   );
+}
+
+/** `normalizeValue`, threaded through the `null`/`undefined` a fact's optional `value` can carry. */
+function normalizeValueOrNull(value: string | null | undefined): string | null {
+  return value === null || value === undefined ? null : normalizeValue(value);
 }
 
 /**

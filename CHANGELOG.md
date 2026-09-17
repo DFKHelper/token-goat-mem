@@ -2,6 +2,82 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **A rejected suggestion came back as `pending` once the garbage collector pruned its tombstone.**
+  `mem review --reject` marks a fact `superseded`, and the retention pass hard-deletes superseded rows
+  past 90 days or 1000 rows. Nothing distinguished a rejection from an ordinary contradiction loser.
+  But the row is what keeps the sentence out of the queue: `mem scan-session` and `mem import
+  --from-md` both dedup against stored text at any status, so deleting the tombstone deletes the only
+  record that the question was ever asked. A stable CLAUDE.md re-imported each quarter refilled the
+  queue with bullets a human had already declined, and the README's claim that rejected facts are
+  "kept for audit" was false at the 91st day. A `superseded` fact whose prior status was `pending` is
+  now exempt from both bounds, and does not consume a row-cap slot on the way past. The exemption is
+  deliberately narrow: an ordinary loser, and anything reaching `superseded` from `active`, is pruned
+  exactly as before. The honest cost is that rejection tombstones now grow without an upper bound;
+  they are bounded in practice by how often a human rejects something, which is not often, and the
+  `mem epoch --gc` documentation says so rather than leaving it to be discovered.
+- **A value that agreed except in capitalization superseded the fact it agreed with.** `subject` is
+  stored through `normalizeSubject`, `value` was stored and compared raw, and contradiction detection
+  keys on both. Two facts on one subject recording `pnpm` and `Pnpm` therefore read as a disagreement
+  about the same question, and the recall-time gate resolved it by withholding the loser. The damage
+  was invisible from `mem show`, which reported every row `active` and healthy, while recall quietly
+  surfaced one of them. Comparison now runs through a `normalizeValue` that mirrors `normalizeSubject`
+  -- trim, collapse internal whitespace, lowercase -- in both contradiction detection and the reaffirm
+  match. The raw value is still what gets stored and printed, because what the user typed is what they
+  should see. Genuinely different values still contradict; a `default_branch` of `main` against
+  `master` is unaffected, which is the case the normalization must not swallow.
+- **Two of the recall seam's three failure modes were byte-identical to having nothing to say.** An
+  unreadable store already emitted a footer saying so. A retrieval that exhausted its time budget, and
+  any other internal fault, both returned an empty line set -- exactly the bare `TGMEM/2` header a
+  project with no memory yet emits. The hook commands end in `|| true` and the warnings go to stderr,
+  so nothing downstream distinguished them either: a slow disk on `UserPromptSubmit` told the agent
+  this project had no memory while the store sat full and healthy. Each now carries its own footer
+  clause. The budget clause says the hint set is empty because retrieval ran out of time rather than
+  out of facts, and points at a plain `mem recall`; it promises no partial result, because a partial
+  response is byte-indistinguishable from a complete one on this wire and emitting one would hand a
+  consumer a subset its own contract says is everything. Neither clause needs a protocol bump: footer
+  text and footer presence have always been outside that set.
+- **`mem review` listed two buckets of facts and named no command that would accept them.**
+  `--promote` and `--reject` take `pending` and `contested`; the anchor-contradicted and overdue-pin
+  buckets hold `active` facts, so the two verbs their sibling buckets advertise exit 1 on everything
+  listed there. Recall's own caveat pointed at `mem review` to resolve a contradicted fact, which
+  delivered the user to exactly that dead end. Both buckets now print the commands that do work --
+  `mem forget` for a fact that is no longer true, `mem edit --anchor` for one whose anchor is wrong,
+  re-running `mem pin` to re-confirm a stale pin -- and the `mem edit` line carries `--force` when the
+  fact is user-stated, because `mem edit` refuses those without it and a remedy that refuses is the
+  defect this repeats. This is the same fix one release earlier applied to the contested bucket.
+- **A decaying preference reported full confidence everywhere a human could look.** A non-pinned
+  preference decays on a 180-day half-life and stops being ground truth below 0.5, but `mem show`
+  printed the stored confidence of 1 with no hint that recall had already demoted it, and the garbage
+  collector's `preferences_decayed_below_floor` count named no ids and no remedy. `mem show` now
+  prints the effective value beside the stored one and, below the floor, the two things that fix it:
+  restating the preference, or pinning it. Healthy preferences print nothing extra -- decay is
+  continuous, so a note gated on any decay at all would appear on every preference seconds after
+  capture and mean nothing.
+- **The integration block mem installs advertised six of its eleven anchor predicates.** The agent
+  reading that block is the one writing anchors, and it was never told `file-contains`,
+  `file-not-contains`, `git-branch-is`, `package-version` or `valid-until` exist. `valid-until` is the
+  natural anchor for the corrections the same block asks it to record, so the omission cost exactly
+  the facts most likely to expire. All eleven are now listed in both installed block bodies, in the
+  per-tool integration guides, and in the `--anchor` help on `remember`, `suggest` and `edit`, which
+  previously named none at all.
+
+### Added
+
+- **`mem scan-session` can file a `correction`.** Its trigger table yielded `fact`, `preference` and
+  `decision` and had no shape that produced a `correction`, while the block mem installs tells the
+  agent to persist exactly those three kinds plus corrections. The scanner was structurally unable to
+  find one. Two openers now do: an explicit `correction:` prefix, matching the existing `decision:`
+  and `rule:` entries, and the reversal forms of `that's wrong` / `that's outdated` / `that's no
+  longer true`. Bare `no,` and `actually,` are deliberately not among them. They open any negative
+  answer -- "no, that test is fine" reverses nothing -- and the pending queue is sorted by sighting
+  count, so a false positive restated across sessions would climb it. Only shapes that assert the
+  reversal in their own words qualify; anything subtler is what `mem remember --kind correction` is
+  for.
+
 ## [0.4.1] - 2026-09-16
 
 ### Fixed
