@@ -179,8 +179,9 @@ function textHashUp(db: Database.Database): void {
  * Cache of anchor verification verdicts, keyed on the capture root and the anchor string itself.
  * `witness` holds whatever the evaluator recorded as the thing it verified against (an mtime, a
  * hash, a git ref) so a later phase can treat any mismatch as a cache miss; nullable because not
- * every predicate has one. No reader or writer is wired to this table in this phase -- it exists so
- * a later phase can add both without also needing a migration.
+ * every predicate has one. Both sides are wired in `src/storage.ts`: `createAnchorCacheStore` reads
+ * and writes through it directly, and `prefetchAnchorCache` + `createBufferedAnchorCacheStore`
+ * snapshot it for the recall paths that must not hold the connection open per anchor.
  */
 function anchorCacheUp(db: Database.Database): void {
   db.exec(`
