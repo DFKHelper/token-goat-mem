@@ -23,9 +23,16 @@ contradiction had already been filtered out before resolution ever saw it.
 ## Ranking
 
 Ranking is hybrid: BM25 over Porter-stemmed, stopword-filtered text, fused by reciprocal rank fusion
-(RRF) with rank lists from embeddings, entity overlap, and usefulness feedback. A BM25 list whose
-every score is zero is deliberately excluded from fusion -- it is a ranking, but not a signal, and
-letting an all-zero list into RRF allowed recency to outvote a real embedding match.
+(RRF) with rank lists from embeddings, entity overlap, usefulness feedback, and graph propagation.
+An auxiliary list contributes only when it is non-empty, and the BM25 list only when some score in
+it is above zero: an all-zero BM25 list is a ranking, but not a signal -- its sort has fallen through
+to the `captured_at` tie-break, and feeding that pure recency order into RRF let recency outvote a
+real embedding match.
+
+The graph signal (`src/factgraph.ts`) propagates score across the co-occurrence edges between facts
+that share entity vocabulary, so a fact the query never mentions can surface on the strength of its
+neighbours. Like every other signal it reaches `retrieve()` as precomputed data -- the caller runs
+`getGraphScoresForQuery` against the database and passes the resulting map in.
 
 Structured facet extraction (`src/facets.ts`) exists because BM25's tokenizer destroys exactly the
 tokens a query is most likely to be about: identifiers, paths, and version strings collapse into
@@ -43,6 +50,14 @@ read-only predicates attached to a `Fact` -- are re-evaluated on every recall un
 budget-exhausted check reads as `unverified`, which classifies as `hint` rather than being suppressed
 outright, so a slow filesystem never silently drops a fact from view.
 
+Verdicts persist in `anchor_cache`, keyed by `(root, anchor)` and carrying a `witness` (an mtime, a
+hash, a git ref) so a later evaluation can treat a mismatch as a miss rather than trusting a stale
+`affirmed`. The cache is what keeps the budget from being spent twice on the same predicate across
+sessions. Which roots get prefetched is not a free choice: `anchorRootsFor` derives them from the
+same `anchorRootFor` the evaluation itself uses, because a root computed any other way produces a
+key the lookup never hits -- a silent, verdict-correct miss that re-evaluates every anchor while
+every test still passes.
+
 Facts of kind `preference` decay on a 180-day half-life computed fresh from `captured_at` on every
 read and never persisted back to storage. Decay can demote a fact from `ground-truth` to `hint`, and
 never further than that -- decay alone cannot withhold a fact.
@@ -51,9 +66,20 @@ never further than that -- decay alone cannot withhold a fact.
 
 Storage is SQLite via `better-sqlite3`. `src/db.ts` owns the `facts`, `audit_log`, and `meta` tables,
 and with them the whole-database `PRAGMA user_version` counter: `openDb` runs `src/migrations.ts` on
-every connection open. `src/storage.ts` owns `sources`, `recall_log`, and `fact_terms` but carries no
-schema logic of its own -- every table and column any module needs is one ordered step in the single
-migration list.
+every connection open. `src/storage.ts` owns `sources`, `recall_log`, `fact_terms`, `anchor_cache`,
+and `fact_links` but carries no schema logic of its own -- every table and column any module needs is
+one ordered step in the single migration list.
+
+`fact_links` holds the sub-threshold relations `mem consolidate --related` discovers: pairs similar
+enough to share topic vocabulary but not similar enough to merge. Recording the relation instead of
+collapsing the pair is the point -- a merge destroys one of the two facts, and the similarity that
+prompted it is frequently a shared subject rather than a shared claim. Writing follows this command's
+usual contract: `--related` lists, `--related --apply` persists, and nothing lands until a human has
+seen the listing. Pairs are stored in canonical
+order (`fact_id_a < fact_id_b`), enforced by a `CHECK` and not merely by convention, so an unordered
+pair cannot be written once per side and double every count of how many links exist. Rows are not
+status-aware: the cascade fires on delete, not on supersede, so the first consumer that cares must
+join `facts` and filter on `status` itself.
 
 Each step is individually idempotent, guarded by a `PRAGMA table_info` column check rather than by
 catching SQLite's "duplicate column" error text, because a store written by an older build arrives
@@ -69,6 +95,31 @@ own state -- it is a one-directional, pull-based, pure-CLI contract: it shapes C
 caller like token-goat to consume via `mem recall --hint-format`. Line shape, field order, separator,
 and the closed tag/verdict sets are version-committed; the footer's prose is explicitly not, so it can
 change without bumping the wire version.
+
+## Measuring ranking (`eval/`)
+
+`eval/` is a ranking-quality harness, not a test: `npm run eval` runs it, and `npm test` deliberately
+does not. It scores the same synthetic corpus under four configurations -- three reduced rankers in
+`eval/rank.ts` (recency, query-without-stemming, query-with-stemming) and `"pipeline"`, which drives
+the real `retrieve()` -- and reports precision@k, nDCG@k, duplicate-subject pairs, tokens, and the
+share of surfaced anchored facts whose anchor re-affirmed. The baselines exist to make the last
+number meaningful in both directions: they report `n/a` for it, because `rankFacts` has no anchor
+stage at all.
+
+Two properties make the numbers mean anything. The corpus is seeded, so a diff in the output is a
+diff in the ranker; and `"pipeline"` runs against a real temp filesystem (`eval/pipelineFixture.ts`),
+because an anchor verdict is a *trust* signal rather than a ranking one -- it moves neither precision
+nor nDCG, so a corpus whose anchors all fail to resolve scores identically to one whose anchors all
+hold. That was not hypothetical: the fixture's anchors were unevaluable for their whole existence and
+every ranking metric was unmoved.
+
+The "a query ranks, it never filters" invariant is checked by re-running each no-match scenario
+against the *same* configuration with an empty query and comparing pool sizes. Comparing against a
+scope-eligible count instead charges the result limit, unconditional superseded-exclusion, and
+`restrictToRoot` binding to the query, and reports a correct pipeline as a violation.
+
+`eval/` sits outside `.arch-doc-sync.json`'s roots, so the generated table below does not cover it --
+which is exactly why it is described here.
 
 ## Keeping this map current
 
