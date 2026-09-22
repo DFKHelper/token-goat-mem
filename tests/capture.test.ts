@@ -475,25 +475,35 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
   });
 
   it("resolves every matching pending duplicate, not just the first, when more than one was suggested", () => {
-    // `mem suggest` (and JSON import) does not dedup against an existing identical pending row --
-    // that is a separate, deliberately untouched defect -- so two identical suggestions can both
-    // land as `pending`. An explicit restatement must still answer the queue for the whole sentence:
-    // promoting only one and leaving the other queued is the same complaint the defect was about,
-    // one row down.
-    const first = captureSuggested(db, {
+    // Two identical `pending` rows for the same sentence -- seeded directly with `insertFact` rather
+    // than via two `captureSuggested` calls, since `captureSuggested` now collapses a second
+    // identical suggestion into a sighting on the first (see its own tests). A duplicate pair can
+    // still exist in a store `captureExplicit` has to cope with -- an older row predating that fix,
+    // or two rows whose text only normalizes to the same sentence through different original
+    // spellings -- so `captureExplicit`'s "supersede every matching duplicate, not just the first"
+    // behavior still needs its own coverage independent of how the duplicates got there.
+    const first = insertFact(db, {
       text: "always tag releases before publishing",
       kind: "preference",
       scope: "project",
-      root,
+      source_type: "derived",
+      status: "pending",
+      confidence: 0.6,
+      scopeRoot: root,
+      captureRoot: root,
     });
-    const second = captureSuggested(db, {
+    const second = insertFact(db, {
       text: "always tag releases before publishing",
       kind: "preference",
       scope: "project",
-      root,
+      source_type: "derived",
+      status: "pending",
+      confidence: 0.6,
+      scopeRoot: root,
+      captureRoot: root,
     });
-    expect(first.fact.status).toBe("pending");
-    expect(second.fact.status).toBe("pending");
+    expect(first.status).toBe("pending");
+    expect(second.status).toBe("pending");
 
     const result = captureExplicit(db, {
       text: "always tag releases before publishing",
@@ -502,20 +512,20 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
       root,
     });
 
-    // The earlier-suggested row is the one promoted (deterministic, not arbitrary).
-    expect(result.fact.id).toBe(first.fact.id);
+    // The earlier-inserted row is the one promoted (deterministic, not arbitrary).
+    expect(result.fact.id).toBe(first.id);
     expect(result.fact.status).toBe("active");
     expect(result.promotedFromPending).toBe(true);
     expect(result.supersededPendingDuplicateCount).toBe(1);
 
     const rows = db.prepare<[], { id: string; status: string }>("SELECT id, status FROM facts").all();
     expect(rows).toHaveLength(2);
-    expect(rows.find((row) => row.id === first.fact.id)?.status).toBe("active");
-    expect(rows.find((row) => row.id === second.fact.id)?.status).toBe("superseded");
+    expect(rows.find((row) => row.id === first.id)?.status).toBe("active");
+    expect(rows.find((row) => row.id === second.id)?.status).toBe("superseded");
 
     // No pending row of this sentence survives for `mem review` to keep asking about.
     expect(rows.filter((row) => row.status === "pending")).toHaveLength(0);
-    expect(auditEvents(second.fact.id)).toContain("capture_reaffirmed_pending_duplicate_superseded");
+    expect(auditEvents(second.id)).toContain("capture_reaffirmed_pending_duplicate_superseded");
   });
 
   it("when two pending duplicates share a captured_at timestamp, promotes the earlier-inserted (earlier rowid), not the lexicographically-smaller id", () => {
@@ -667,6 +677,89 @@ describe("captureSuggested -- derived-source facts never auto-promote (design pl
     expect(() =>
       captureSuggested(db, { text: "found token sk-ant-abcdefghijklmnopqrstuvwxyz012345", kind: "fact", root })
     ).toThrow(SecretDetectedError);
+  });
+});
+
+// ── captureSuggested collapses a repeat suggestion into a sighting ─────────────────────────────
+//
+// `mem scan-session`/`mem import --from-md` already record a sighting instead of a second `pending`
+// row when their own `factsByTextHash` + `isBoundToRoot` lookup matches; `captureSuggested` (the
+// function `mem suggest <text>` calls directly, with no such pre-check of its own) did not, so the
+// identical repetition counted differently depending on which command saw it. These tests pin the
+// closed gap and its boundary.
+describe("captureSuggested -- a repeat suggestion sights the existing pending fact instead of duplicating it", () => {
+  function sightingsOf(id: string): number {
+    return (db.prepare("SELECT sightings FROM facts WHERE id = ?").get(id) as { sightings: number }).sightings;
+  }
+
+  it("increments sightings and writes no second row", () => {
+    const { fact: first } = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
+    expect(sightingsOf(first.id)).toBe(0);
+
+    const second = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
+    expect(second.sighted).toBe(true);
+    expect(second.fact.id).toBe(first.id);
+    expect(sightingsOf(first.id)).toBe(1);
+
+    const rows = db.prepare("SELECT id FROM facts").all() as { id: string }[];
+    expect(rows).toHaveLength(1);
+  });
+
+  it("does not promote, change status, or raise confidence", () => {
+    const { fact: first } = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", confidence: 0.4, root });
+    const second = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", confidence: 0.99, root });
+
+    expect(second.fact.status).toBe("pending");
+    // The sighting reuses the first call's stored fact untouched -- a later call's (higher, clamped)
+    // requested confidence is not applied to it, exactly as `recordSighting`'s own doc comment
+    // requires ("never touches status", and nothing in it touches confidence either).
+    expect(second.fact.confidence).toBe(first.confidence);
+    const row = factRow(first.id);
+    expect(row.status).toBe("pending");
+  });
+
+  it("still inserts a new pending fact for genuinely different text", () => {
+    const { fact: first } = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
+    const other = captureSuggested(db, { text: "always run linting before deploy", kind: "preference", root });
+
+    expect(other.sighted).toBeUndefined();
+    expect(other.fact.id).not.toBe(first.id);
+    const rows = db.prepare("SELECT id FROM facts").all() as { id: string }[];
+    expect(rows).toHaveLength(2);
+  });
+
+  it("matches scan-session's own bound-match rule: a pending fact scoped to an unrelated project is not sighted", () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "mem-capture-other-root-"));
+    const { fact: unrelated } = captureSuggested(db, {
+      text: "always run migrations before deploy",
+      kind: "preference",
+      scope: "project",
+      root: otherRoot,
+    });
+    expect(unrelated.status).toBe("pending");
+
+    // Same text, this project's root: `isBoundToRoot` (the same predicate `mem scan-session`/
+    // `mem import --from-md` filter with) excludes a project-scoped fact bound to a different root,
+    // so this must insert a new row rather than sight the unrelated one.
+    const here = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", scope: "project", root });
+    expect(here.sighted).toBeUndefined();
+    expect(here.fact.id).not.toBe(unrelated.id);
+    rmSync(otherRoot, { recursive: true, force: true });
+  });
+
+  it("does not sight an existing active fact -- matches scan-session/import, which record a sighting only against a pending match", () => {
+    const { fact: active } = captureExplicit(db, { text: "always run migrations before deploy", kind: "preference", root });
+    expect(active.status).toBe("active");
+
+    const suggested = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
+    // No sighting recorded against the active fact (its `sightings` column stays untouched), and
+    // the suggestion still files its own pending row -- exactly as before this fix, since neither
+    // `scan-session` nor `import --from-md` ever calls `recordSighting` against anything but a
+    // `pending` bound match.
+    expect(suggested.sighted).toBeUndefined();
+    expect(suggested.fact.status).toBe("pending");
+    expect(suggested.fact.id).not.toBe(active.id);
+    expect(sightingsOf(active.id)).toBe(0);
   });
 });
 

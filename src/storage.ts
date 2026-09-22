@@ -343,7 +343,7 @@ export function findReaffirmablePendingFacts(db: Db, candidate: NewFact): Fact[]
  * stricter than that: restating identical text from a second clone or a worktree of the same
  * project changes `scopeRoot` (a different absolute path) while `scopeRepo` (the repository
  * identity) stays the same, and the AND check failed that match and inserted a duplicate row
- * instead of reaffirming. Recall's own `isBoundToRoot` (src/retrieval.ts) treats a project fact's
+ * instead of reaffirming. Recall's own `isBoundToRoot` (src/projectIdentity.ts) treats a project fact's
  * `scopeRoot`/`scopeRepo` as an OR for exactly this reason, and AGENTS.md documents reaffirm's own
  * match as "scope binding" -- the same widening contradiction bucketing now uses too
  * (`computeProjectIdentityGroups`, src/contradiction.ts), so this is no longer a stricter, separate

@@ -301,6 +301,64 @@ const AGGRESSIVE_CAP = 8;
 const PRECISION_CAP = 4;
 
 /**
+ * Minimum number of ranked results before the elbow (see {@link applyElbowCutoff}) is allowed to
+ * fire at all. Below this, a "largest drop" is not a signal -- with two or three results there is
+ * always exactly one biggest gap, and letting the elbow act on it would truncate almost every short
+ * list to its first entry, which is the "fires on noise" failure mode the elbow exists to avoid.
+ */
+const ELBOW_MIN_RESULTS = 4;
+
+/**
+ * Minimum *relative* drop between two consecutive ranked scores for the elbow to treat it as the
+ * signal boundary rather than ordinary score noise. Relative, not absolute: the list this runs over
+ * is sorted on `retrieve()`'s fused score, whose scale has no fixed unit (raw BM25 alone, or an RRF
+ * value once an embedding/usefulness list joins it) -- a fixed absolute threshold tuned for one
+ * scale would misfire on the other. 0.4 was picked so a flat or near-flat distribution (the common
+ * case: a query whose terms appear identically across near-duplicate facts) never crosses it, while
+ * a fact that clearly stops matching still does.
+ */
+const ELBOW_MIN_RELATIVE_DROP = 0.4;
+
+/**
+ * Cuts an already score-descending, already cap-limited list at its sharpest relative score drop,
+ * so a hint block ends where the ranked signal does rather than always filling every slot the caps
+ * allow.
+ *
+ * Reduction only: the caller already applied the authoritative per-kind cap before calling this, so
+ * the result can never exceed what the caller passed in, and {@link HINT_LINE_CEILING} stays the
+ * true upper bound regardless of whether the elbow fires. A flat or too-short distribution is left
+ * untouched -- see {@link ELBOW_MIN_RESULTS} and {@link ELBOW_MIN_RELATIVE_DROP} -- mirroring
+ * retrieval.ts's own discipline that an all-zero/no-signal ranking is excluded rather than trusted,
+ * since a cutoff that fires on noise would silently discard good context with no way for the agent
+ * reading the block to notice what it lost.
+ */
+function applyElbowCutoff(results: readonly RetrievedFact[]): readonly RetrievedFact[] {
+  if (results.length < ELBOW_MIN_RESULTS) {
+    return results;
+  }
+  let cutIndex = -1;
+  let maxRelativeDrop = 0;
+  for (let i = 0; i < results.length - 1; i += 1) {
+    const current = results[i]?.score ?? 0;
+    // A zero (or negative, defensively) score has no meaningful relative drop to the next entry --
+    // dividing by it would either throw away the comparison or manufacture a 100% "drop" out of two
+    // ties, so these positions are simply not elbow candidates.
+    if (current <= 0) {
+      continue;
+    }
+    const relativeDrop = (current - (results[i + 1]?.score ?? 0)) / current;
+    if (relativeDrop > maxRelativeDrop) {
+      maxRelativeDrop = relativeDrop;
+      cutIndex = i;
+    }
+  }
+  if (cutIndex === -1 || maxRelativeDrop < ELBOW_MIN_RELATIVE_DROP) {
+    return results;
+  }
+  return results.slice(0, cutIndex + 1);
+}
+
+/**
  * Wire slots held for `status="pinned"` facts, taken off the top before the kind caps below see the
  * ranked list at all.
  *
@@ -732,8 +790,13 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const reserved = unseen.filter(isPinned).slice(0, PINNED_RESERVE);
   const reservedIds = new Set(reserved.map((result) => result.fact.id));
   const contested = unseen.filter((result) => !reservedIds.has(result.fact.id));
-  const aggressive = contested.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP);
-  const precision = contested.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP);
+  // The elbow runs after the cap slice, not before: it can only shrink what the cap already
+  // authorized, never widen the pool it is choosing from. Applied per kind group, not to the two
+  // concatenated, because `aggressive` and `precision` are independently ranked pools (the caps
+  // exist precisely so one pool's scores don't compete with the other's) -- merging them first would
+  // let a legitimate precision-kind score gap get compared against an unrelated aggressive-kind one.
+  const aggressive = applyElbowCutoff(contested.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP));
+  const precision = applyElbowCutoff(contested.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP));
 
   const ordered = [...reserved, ...aggressive, ...precision];
   if (stable) {
@@ -950,7 +1013,7 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
   const scopeRoot = normalizePath(resolvePath(scopeRootRaw));
 
   if (fact.scope === "project") {
-    // Mirrors retrieval.ts's isBoundToRoot: path binding first, repo identity as a widening.
+    // Mirrors projectIdentity.ts's isBoundToRoot: path binding first, repo identity as a widening.
     return normalizePath(root) === scopeRoot || identityMatches(fact.scopeRepo, root);
   }
 
@@ -959,7 +1022,7 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
     // No caller has ever supplied context files here: every hook/command `mem init` installs calls
     // `mem recall --hint-format --root <dir>` with no `--context-files`, so this branch was the only
     // one ever exercised and it always excluded path-scoped facts -- structurally undeliverable to
-    // the one consumer that exists. Fall back to isBoundToRoot's rule (retrieval.ts): in scope when
+    // the one consumer that exists. Fall back to isBoundToRoot's rule (projectIdentity.ts): in scope when
     // the fact's file sits at or under the caller's root. A caller that *does* pass context files
     // keeps the narrower, more precise match below -- it told mem what it is looking at.
     return scopeRoot === normalizePath(root) || scopeRoot.startsWith(normalizePath(root) + sep);
