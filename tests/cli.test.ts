@@ -5987,11 +5987,16 @@ describe("mem remember reaffirms rather than duplicating", () => {
     // never restated.
     await runCli(["remember", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
     const before = (await facts())[0];
-    await runCli(["suggest", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
+    const suggest = await runCli(["suggest", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
     const after = await facts();
-    expect(after).toHaveLength(2);
+    // Not reaffirmed (the clock is untouched, which is what this test is about) and not duplicated
+    // either: a bound match of any status suppresses the insert, so the derived restatement leaves
+    // the store exactly as it found it and queues nothing for `mem review`.
+    expect(after).toHaveLength(1);
     const active = after.find((fact) => fact["id"] === before?.["id"]);
     expect(active?.["captured_at"]).toBe(before?.["captured_at"]);
+    expect(active?.["status"]).toBe("active");
+    expect(suggest.stdout).toContain("already active");
   });
 });
 

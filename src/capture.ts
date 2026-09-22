@@ -806,6 +806,13 @@ export interface CaptureResult {
    * again, nothing more.
    */
   readonly sighted?: boolean;
+  /**
+   * True when the text matched a fact already bound to this root that was *not* `pending` --
+   * `active`, `superseded`, anything -- so no row was filed and no sighting recorded. `fact` is the
+   * pre-existing row, untouched. Mutually exclusive with {@link sighted}: a `pending` match takes
+   * the sighting path, everything else lands here. See {@link captureSuggested}.
+   */
+  readonly alreadyKnown?: boolean;
 }
 
 function validateCommonInput(input: CaptureExplicitInput): { text: string; root: string } {
@@ -1227,20 +1234,24 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
   }
   applyOptionalFields(newFact, input, scope, root);
 
-  // Same restatement rule `mem scan-session`/`mem import --from-md` already apply before ever
-  // reaching this function (both look up `factsByTextHash` + `isBoundToRoot`, then `recordSighting`
-  // on a `pending` match instead of filing a second row) -- reused here, not re-derived, so a caller
-  // that skips their pre-check (`mem suggest <text>`, called twice with the same text) counts the
-  // repetition identically rather than under-counting it. A bound match against anything other than
-  // `pending` (active, superseded, ...) is left untouched: that is the boundary those two callers
-  // already draw (only a `pending` row has a sighting to record against), and widening it here would
-  // make `mem suggest` dedupe differently from what this function's own callers do.
-  const pendingMatch = factsByTextHash(db, text)
-    .filter((fact) => isBoundToRoot(fact, root))
-    .find((fact) => fact.status === "pending");
+  // The same restatement rule `mem scan-session`/`mem import --from-md` apply before ever reaching
+  // this function, reused here rather than re-derived, so `mem suggest <text>` called twice counts
+  // the repetition identically instead of under-counting it.
+  //
+  // Those callers draw two different boundaries, and this has to draw both. A bound match of *any*
+  // status suppresses the insert (`import.ts`'s `skipped_known`): filing a pending row for a
+  // sentence the store already holds as `active` queues a human decision that was already made,
+  // which is precisely the noise `mem review` exists to be free of. Only a `pending` match gets a
+  // sighting, because only a pending row has anything to record one against.
+  const boundMatches = factsByTextHash(db, text).filter((fact) => isBoundToRoot(fact, root));
+  const pendingMatch = boundMatches.find((fact) => fact.status === "pending");
   if (pendingMatch !== undefined) {
     recordSighting(db, pendingMatch.id, text, root);
     return { fact: pendingMatch, sighted: true };
+  }
+  const knownMatch = boundMatches[0];
+  if (knownMatch !== undefined) {
+    return { fact: knownMatch, alreadyKnown: true };
   }
 
   const fact = writeFact(

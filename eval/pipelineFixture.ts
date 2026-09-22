@@ -33,8 +33,7 @@ import {
   prefetchAnchorCache,
 } from "../src/storage.js";
 import { PROJECT_ROOTS, type EvalFact } from "./fixtures.js";
-import type { RankScenario } from "./harness.js";
-import type { RankedResult } from "./rank.js";
+import type { RankScenario, ScenarioRanking } from "./harness.js";
 
 function runGit(args: readonly string[], cwd: string): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
@@ -139,7 +138,7 @@ export function buildPipelineContext(dbPath: string, facts: readonly EvalFact[],
   const factEntityKeys = getEntityKeysByFact(db);
   const pipelineFacts = remapFactRoots(facts, rootMap);
 
-  const rankScenario: RankScenario = async (_facts, scenario): Promise<RankedResult[]> => {
+  const rankScenario: RankScenario = async (_facts, scenario): Promise<ScenarioRanking> => {
     const root = rootMap.get(scenario.root) ?? scenario.root;
     const entityOverlap = getEntityOverlapForQuery(db, scenario.query);
     const graphScores = getGraphScoresForQuery(db, scenario.query, {}, entityOverlap);
@@ -161,7 +160,14 @@ export function buildPipelineContext(dbPath: string, facts: readonly EvalFact[],
     // spread, never rebuilt from scratch -- see `src/contradiction.ts`'s `resolveContradictions`),
     // so it still carries `EvalFact`'s `_template`/`_value`/`_isDuplicate` bookkeeping fields at
     // runtime even though `retrieve`'s own return type only promises the narrower `Fact`.
-    return outcome.results.map((result) => ({ fact: result.fact as EvalFact, score: result.score, freshness: result.freshness }));
+    const results = outcome.results.map((result) => ({ fact: result.fact as EvalFact, score: result.score, freshness: result.freshness }));
+    // `totalNonWithheld` is the count *before* `DEFAULT_RECALL_LIMIT` truncated anything; withheld
+    // results are never capped, so they are already all present in `results`. Their sum is the pool
+    // the query actually left standing, which is what `noMatchNeverFiltered` is asking about --
+    // `results.length` would charge the limit to the query and report a correct pipeline as a
+    // filtering violation.
+    const withheld = outcome.results.filter((result) => result.trust === "withheld").length;
+    return { results, poolSize: outcome.totalNonWithheld + withheld };
   };
 
   return {
