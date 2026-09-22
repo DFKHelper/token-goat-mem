@@ -25,6 +25,8 @@
     "eval": "tsx eval/run.ts",
     "lint": "eslint src tests eval",
     "dev": "tsx src/main.ts",
+    "arch:check": "node scripts/sync-arch-docs.mjs --check",
+    "arch:write": "node scripts/sync-arch-docs.mjs --write",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build",
     "prepare": "git config core.hooksPath .githooks || true"
   },
