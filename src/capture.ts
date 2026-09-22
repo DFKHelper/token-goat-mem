@@ -42,7 +42,9 @@ import type Database from "better-sqlite3";
 import { anchorPathWithinRoot } from "./anchors.js";
 import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
+import { isBoundToRoot } from "./projectIdentity.js";
 import {
+  factsByTextHash,
   findReaffirmableFact,
   findReaffirmablePendingFacts,
   incrementSightings,
@@ -790,6 +792,13 @@ export interface CaptureResult {
   readonly promotedFromPending?: boolean;
   /** Count of additional `pending` duplicates of the same restated sentence superseded alongside the promotion. See {@link captureExplicit}. */
   readonly supersededPendingDuplicateCount?: number;
+  /**
+   * True when the text matched an existing `pending` fact and this call recorded a sighting on it
+   * (see {@link recordSighting}) instead of filing a second row. See {@link captureSuggested}.
+   * Never implies promotion or a status change -- `fact` is the pre-existing `pending` row, sighted
+   * again, nothing more.
+   */
+  readonly sighted?: boolean;
 }
 
 function validateCommonInput(input: CaptureExplicitInput): { text: string; root: string } {
@@ -1210,6 +1219,22 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
     newFact.captured_at = parseCapturedAtOrThrow(input.capturedAt);
   }
   applyOptionalFields(newFact, input, scope, root);
+
+  // Same restatement rule `mem scan-session`/`mem import --from-md` already apply before ever
+  // reaching this function (both look up `factsByTextHash` + `isBoundToRoot`, then `recordSighting`
+  // on a `pending` match instead of filing a second row) -- reused here, not re-derived, so a caller
+  // that skips their pre-check (`mem suggest <text>`, called twice with the same text) counts the
+  // repetition identically rather than under-counting it. A bound match against anything other than
+  // `pending` (active, superseded, ...) is left untouched: that is the boundary those two callers
+  // already draw (only a `pending` row has a sighting to record against), and widening it here would
+  // make `mem suggest` dedupe differently from what this function's own callers do.
+  const pendingMatch = factsByTextHash(db, text)
+    .filter((fact) => isBoundToRoot(fact, root))
+    .find((fact) => fact.status === "pending");
+  if (pendingMatch !== undefined) {
+    recordSighting(db, pendingMatch.id, text, root);
+    return { fact: pendingMatch, sighted: true };
+  }
 
   const fact = writeFact(
     db,

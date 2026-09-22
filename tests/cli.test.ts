@@ -1759,6 +1759,22 @@ describe("mem suggest (suggested/candidate capture, S9 trust path)", () => {
     expect(summary.stdout.trim()).toBe("pending: 1, contested: 0, contradicted: 0, pins: 0, unanchored: 0");
   });
 
+  it("records a sighting instead of a second row when the same text is suggested again", async () => {
+    const first = await runCli(["suggest", "always run migrations before deploy", "--kind", "preference"]);
+    const id = /suggested \S+ fact (\S+) \(pending\)/u.exec(first.stdout)?.[1];
+    expect(id).toBeDefined();
+
+    const second = await runCli(["suggest", "always run migrations before deploy", "--kind", "preference"]);
+    expect(second.exitCode).toBe(0);
+    expect(second.stdout).toContain(`sighted preference fact ${id}`);
+    expect(second.stdout).toContain("recorded another sighting");
+
+    const pendingList = await runCli(["list", "--status", "pending"]);
+    // One row, not two -- `mem list` printing the id once pins the no-duplicate-row guarantee at
+    // the CLI surface, matching what tests/capture.test.ts already pins at the function level.
+    expect(pendingList.stdout.split(id as string)).toHaveLength(2);
+  });
+
   it("rejects a malformed anchor the same way mem remember does", async () => {
     const result = await runCli(["suggest", "bogus", "--kind", "fact", "--anchor", "run-shell rm"]);
     expect(result.exitCode).toBe(1);

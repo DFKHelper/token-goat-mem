@@ -32,6 +32,8 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { normalizePath } from "./pathUtils.js";
+import type { Fact } from "./types.js";
 
 /**
  * Set to `path` to switch project binding back to absolute paths only, at both capture and recall.
@@ -274,4 +276,43 @@ export function identityMatches(stored: string | null | undefined, root: string)
     return false;
   }
   return stored === resolveProjectIdentity(root);
+}
+
+/**
+ * Whether `fact`'s scope binding resolves to `root` -- the predicate behind retrieval.ts's
+ * `RetrievalOptions.restrictToRoot`, reused by `mem review` (cli.ts) to decide whether a fact's
+ * anchor is even meaningful to evaluate against a given root before calling it `contradicted`, and
+ * by the capture paths (capture.ts, import.ts) to decide whether an existing fact is close enough
+ * to a restatement to take a sighting instead of a second row.
+ *
+ * It lives here rather than in retrieval.ts because it is a statement about a fact's scope binding
+ * and this module's own `identityMatches`, not about ranking: every layer that asks the question
+ * can reach a Support module, and capture.ts asking retrieval.ts would close an import cycle
+ * (retrieval.ts already imports `screenForSecrets` from capture.ts).
+ *
+ * A `path` fact counts as bound when its `scopeRoot` names a file or directory *inside* `root`,
+ * which is the containment direction the CLI needs: the caller supplies a project directory and
+ * the fact is bound to a file within it. integration-seam.ts's `isInScope` tests the opposite
+ * direction against open editor files, so the two predicates are deliberately not shared.
+ */
+export function isBoundToRoot(fact: Fact, root: string): boolean {
+  if (fact.scope === "global") {
+    return true;
+  }
+  const scopeRootRaw = fact.scopeRoot ?? null;
+  if (scopeRootRaw === null || scopeRootRaw.trim().length === 0) {
+    // A project/path fact with no binding cannot be resolved against any root. Exclude rather than
+    // guess: that fails toward under-recall, which is the safe direction.
+    return false;
+  }
+  const scopeRoot = normalizePath(resolve(scopeRootRaw));
+  const normalizedRoot = normalizePath(resolve(root));
+  if (fact.scope === "project") {
+    // Path first: it is the original binding, needs no filesystem read, and answers the common case.
+    // The identity check only widens -- the same repository at another path, in a worktree, or on
+    // another machine -- and can never exclude a fact the path binding already accepted.
+    return normalizedRoot === scopeRoot || identityMatches(fact.scopeRepo, root);
+  }
+  // scope === "path": bound when the target sits at or beneath the querying root.
+  return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot + sep);
 }

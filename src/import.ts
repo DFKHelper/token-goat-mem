@@ -32,7 +32,7 @@ import {
 } from "./capture.js";
 import { MAX_IMPORT_FILE_SIZE_BYTES } from "./exportImport.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
-import { isBoundToRoot } from "./retrieval.js";
+import { isBoundToRoot } from "./projectIdentity.js";
 import { factsByTextHash, listFacts } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
 

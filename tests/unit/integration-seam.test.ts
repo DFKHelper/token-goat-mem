@@ -10,6 +10,7 @@ import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieva
 import {
   buildHintFormat,
   BUDGET_EXHAUSTED_FOOTER_LINE,
+  HINT_LINE_CEILING,
   INTERNAL_ERROR_FOOTER_LINE,
   STORE_UNREADABLE_FOOTER_LINE,
   TGMEM_FOOTER_LINE,
@@ -1665,5 +1666,156 @@ describe("the footer discloses what the payload withheld", () => {
     seedFacts(dbPath, []);
     const result = await buildHint({ root, dbPath, query: "anything" });
     expect(result.lines).toEqual([]);
+  });
+});
+
+// ── The elbow cutoff (further trims an already-capped ranked list) ─────────────────────────────
+//
+// `retrieve()`'s BM25 scoring rewards a fact that matches every query term over one that matches
+// only some of them, and rewards it enough that the gap between "matched all three terms" and
+// "matched one of three" is large and reproducible with plain text, no mocking of `score` required.
+// Every test below leans on that: a "hi" group repeats the full query ("alpha bravo charlie"), a
+// "lo" group repeats only its first term ("alpha"), and the two groups tie within themselves (same
+// terms, same term frequency), which is what makes them a reliable elbow fixture rather than a
+// fragile one -- the gap is about which terms matched, not a score value pinned to this BM25
+// implementation's exact constants.
+describe("the elbow cutoff", () => {
+  let workDir: string;
+  let root: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "mem-seam-elbow-"));
+    root = join(workDir, "project");
+    mkdirSync(root, { recursive: true });
+    dbPath = join(workDir, "mem.db");
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  const ELBOW_QUERY = "alpha bravo charlie";
+
+  /** `count` facts of `kind` that match every term in {@link ELBOW_QUERY} -- the high-scoring group. */
+  function seedHiGroup(kind: Fact["kind"], count: number, idPrefix = "hi"): FactSeed[] {
+    return Array.from({ length: count }, (_unused, index) => ({
+      id: `${idPrefix}-${index}`,
+      text: `alpha bravo charlie configuration entry ${index}`,
+      kind,
+      scope: "global" as const,
+      source_type: "user" as const,
+      captured_at: `2026-03-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+      status: "active" as const,
+    }));
+  }
+
+  /** `count` facts of `kind` that match only the first term in {@link ELBOW_QUERY} -- the low-scoring group. */
+  function seedLoGroup(kind: Fact["kind"], count: number, idPrefix = "lo"): FactSeed[] {
+    return Array.from({ length: count }, (_unused, index) => ({
+      id: `${idPrefix}-${index}`,
+      text: `alpha padding filler unrelated entry ${index}`,
+      kind,
+      scope: "global" as const,
+      source_type: "user" as const,
+      captured_at: `2026-04-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
+      status: "active" as const,
+    }));
+  }
+
+  it("truncates at a clear score drop", async () => {
+    // 3 facts matching all three query terms, 1 matching only the first: fills PRECISION_CAP (4)
+    // exactly, so without the elbow all 4 would ship. The elbow should cut the trailing lo-group
+    // fact the cap alone would have let through.
+    seedFacts(dbPath, [...seedHiGroup("decision", 3), ...seedLoGroup("decision", 1)]);
+    const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
+    const lines = factLines(result);
+    expect(lines).toHaveLength(3);
+    expect(lines.every((line) => line.includes("id=hi-"))).toBe(true);
+  });
+
+  it("emits exactly today's output on a flat distribution", async () => {
+    // Every fact matches the query identically, so every score ties -- there is no drop to cut at,
+    // and the pre-elbow cap behavior (4 of 6) must be unchanged.
+    seedFacts(dbPath, seedLoGroup("decision", 6));
+    const result = await buildHint({ root, dbPath, query: "alpha" });
+    expect(factLines(result)).toHaveLength(4);
+  });
+
+  it("never emits more fact-lines than HINT_LINE_CEILING", async () => {
+    // A sharp elbow in both the aggressive and precision pools, on top of the pinned reserve --
+    // the worst case for accidentally exceeding the ceiling is exercising all three at once.
+    seedFacts(dbPath, [
+      {
+        id: "pinned-a",
+        text: "pinned fact unrelated to the query one",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "pinned",
+      },
+      {
+        id: "pinned-b",
+        text: "pinned fact unrelated to the query two",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-02T00:00:00.000Z",
+        status: "pinned",
+      },
+      ...seedHiGroup("preference", 3, "hi-pref"),
+      ...seedLoGroup("preference", 5, "lo-pref"),
+      ...seedHiGroup("decision", 2, "hi-dec"),
+      ...seedLoGroup("decision", 4, "lo-dec"),
+    ]);
+    const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
+    expect(factLines(result).length).toBeLessThanOrEqual(HINT_LINE_CEILING);
+  });
+
+  it("never drops a pinned fact even when the aggressive pool elbows hard", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "pinned-unrelated",
+        text: "deployments require a signed changelog entry",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "pinned",
+      },
+      ...seedHiGroup("preference", 3),
+      ...seedLoGroup("preference", 5),
+    ]);
+    const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
+    const lines = factLines(result);
+    expect(lines.some((line) => line.includes("id=pinned-unrelated"))).toBe(true);
+    // The elbow cuts the lo-group preferences (index 3 onward); the pin plus the 3 hi-group
+    // preferences is what should remain.
+    expect(lines).toHaveLength(4);
+    expect(lines.some((line) => line.includes("id=lo-"))).toBe(false);
+  });
+
+  it("does not touch the withheld count", async () => {
+    seedFacts(dbPath, [
+      { id: "pend-1", text: "pending fact one", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-05-01T00:00:00.000Z", status: "pending" },
+      { id: "pend-2", text: "pending fact two", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-05-02T00:00:00.000Z", status: "pending" },
+      ...seedHiGroup("decision", 3),
+      ...seedLoGroup("decision", 1),
+    ]);
+    const withElbow = await buildHint({ root, dbPath, query: ELBOW_QUERY });
+    expect(factLines(withElbow)).toHaveLength(3);
+    const footer = withElbow.lines.find((line) => line.startsWith("footer  "));
+    // Both pending facts are withheld regardless of what the elbow trims from the ranked,
+    // non-withheld pool -- `withheldCount` is never touched by `applyElbowCutoff`.
+    expect(footer).toContain("2 withheld; mem review to resolve contested/pending");
+  });
+
+  it("does not fire with too few ranked results", async () => {
+    // 2 hi-group facts and 1 lo-group fact: the same sharp per-fact score drop as the truncation
+    // test above, but only 3 results -- below ELBOW_MIN_RESULTS, so all 3 must survive.
+    seedFacts(dbPath, [...seedHiGroup("decision", 2), ...seedLoGroup("decision", 1)]);
+    const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
+    expect(factLines(result)).toHaveLength(3);
   });
 });

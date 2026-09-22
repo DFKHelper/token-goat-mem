@@ -134,13 +134,13 @@ import {
   anchorRootFor,
   decayedConfidence,
   evaluateFactFreshness,
-  isBoundToRoot,
   isDecayedBelowGroundTruth,
   retrieve,
   selectVerifiedFacts,
   DEFAULT_EMBEDDING_TIMEOUT_MS,
   type RetrievalOptions,
 } from "./retrieval.js";
+import { isBoundToRoot } from "./projectIdentity.js";
 import {
   clearAllEmbeddings,
   countEmbeddedFacts,
@@ -2567,9 +2567,17 @@ export function buildProgram(): Command {
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
-        const { fact } = await withDb((db) => captureSuggested(db, input));
-        process.stdout.write(`suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`);
-        await attachEmbeddingBestEffort(fact);
+        const { fact, sighted } = await withDb((db) => captureSuggested(db, input));
+        process.stdout.write(
+          sighted === true
+            ? `sighted ${factNounPhrase(fact.kind)} ${fact.id} (already pending; recorded another sighting rather than filing a duplicate)\n`
+            : `suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`
+        );
+        // A sighting reuses the existing row's text verbatim -- nothing for an embedding call to
+        // pick up that the first `mem suggest` of this sentence did not already attempt.
+        if (sighted !== true) {
+          await attachEmbeddingBestEffort(fact);
+        }
       })
     );
 
