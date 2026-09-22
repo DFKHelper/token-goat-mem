@@ -585,7 +585,14 @@ function hasDisallowedAnchorChar(arg: string): boolean {
   return false;
 }
 
-function validateAnchorSyntax(anchor: string): void {
+/**
+ * Rejects an anchor the real predicates cannot parse. Exported so fixtures that construct `Fact`
+ * rows directly -- bypassing `captureFact`, and with it this check -- can still assert their anchors
+ * are the syntax `anchors.ts` actually evaluates. `eval/fixtures.ts` carried colon-glued anchors
+ * (`"file-exists:package.json"`) for exactly as long as nothing validated them: `tokenize` splits on
+ * whitespace, so every one of them was a single unknown token that silently read `unverified`.
+ */
+export function validateAnchorSyntax(anchor: string): void {
   const tokens = anchor.trim().split(/\s+/u).filter((token) => token.length > 0);
   const [predicate, ...args] = tokens;
   if (predicate === undefined) {

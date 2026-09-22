@@ -131,7 +131,11 @@ const TEMPLATES: readonly Template[] = [
   },
 ];
 
-const ANCHOR_TEMPLATES = ["file-exists:package.json", "git-tracked:src/index.ts", "glob-exists:*.config.*", "file-exists:.eslintrc"] as const;
+// Space-separated, because that is the only syntax `anchors.ts` parses: `tokenize` splits on
+// whitespace, so a colon-glued `"file-exists:package.json"` is one token, matches no case in
+// `evaluateTokens`, and falls to `default: "unverified"`. These read as real anchors now, which is
+// what makes the `"pipeline"` config's filesystem fixture load-bearing rather than decorative.
+export const ANCHOR_TEMPLATES = ["file-exists package.json", "git-tracked src/index.ts", "glob-exists *.config.*", "file-exists .eslintrc"] as const;
 
 export interface EvalFact extends Fact {
   /** Not part of the real `Fact` shape -- eval-only bookkeeping so `queries.ts` can compute a
@@ -180,6 +184,10 @@ export function generateCorpus(seed: number = EVAL_SEED, count = 400): readonly 
       value,
       scope,
       scopeRoot,
+      // `capture.ts` records this for every scope, and `anchorRootFor` returns `null` -- i.e. an
+      // unconditional `unverified` -- for a `path` fact without it. Omitting it made every
+      // path-scoped anchor in the corpus unevaluable no matter what the filesystem said.
+      captureRoot: scopeRoot,
       source_type: chance(rng, 0.85) ? "user" : "derived",
       source_ref: null,
       captured_at: nextCapturedAt(),

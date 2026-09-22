@@ -11,7 +11,8 @@ import { describe, expect, it } from "vitest";
 
 import { duplicateSubjectPairs, ndcgAtK, precisionAtK, approximateTokens } from "../../eval/metrics.js";
 import { rankFacts } from "../../eval/rank.js";
-import { generateCorpus, PROJECT_ROOTS, type EvalFact } from "../../eval/fixtures.js";
+import { ANCHOR_TEMPLATES, generateCorpus, PROJECT_ROOTS, type EvalFact } from "../../eval/fixtures.js";
+import { validateAnchorSyntax } from "../../src/capture.js";
 import { generateScenarios } from "../../eval/queries.js";
 import { evaluateConfig } from "../../eval/harness.js";
 import { mulberry32, pick, pickN, chance } from "../../eval/prng.js";
@@ -199,33 +200,59 @@ describe("eval/fixtures.ts + eval/queries.ts (generator invariants)", () => {
 });
 
 describe("eval/harness.ts (evaluateConfig)", () => {
-  it("a no-match scenario never shrinks the scope-eligible candidate count under any configuration", () => {
+  it("a no-match scenario never shrinks the scope-eligible candidate count under any configuration", async () => {
     const facts = generateCorpus(11, 80);
     const scenarios = generateScenarios(facts).filter((s) => s.family === "no-match");
     expect(scenarios.length).toBeGreaterThan(0);
     for (const config of ["recency", "query-no-stem", "query-stem"] as const) {
-      const report = evaluateConfig(facts, scenarios, config, 8);
+      const report = await evaluateConfig(facts, scenarios, config, 8);
       expect(report.noMatchNeverFiltered).toBe(true);
     }
   });
 
-  it("query-stem scores at least as well as recency-only on mean precision@k and nDCG@k over the same scenario set", () => {
+  it("query-stem scores at least as well as recency-only on mean precision@k and nDCG@k over the same scenario set", async () => {
     const facts = generateCorpus(22, 200);
     const scenarios = generateScenarios(facts);
-    const recency = evaluateConfig(facts, scenarios, "recency", 8);
-    const stem = evaluateConfig(facts, scenarios, "query-stem", 8);
+    const recency = await evaluateConfig(facts, scenarios, "recency", 8);
+    const stem = await evaluateConfig(facts, scenarios, "query-stem", 8);
     expect(stem.judgedScenarioCount).toBe(recency.judgedScenarioCount);
     expect(stem.meanPrecisionAtK).toBeGreaterThan(recency.meanPrecisionAtK);
     expect(stem.meanNdcgAtK).toBeGreaterThan(recency.meanNdcgAtK);
   });
 
-  it("stemming scenarios specifically favor query-stem over query-no-stem", () => {
+  it("stemming scenarios specifically favor query-stem over query-no-stem", async () => {
     const facts = generateCorpus(33, 200);
     const stemScenarios = generateScenarios(facts).filter((s) => s.family === "stem");
     expect(stemScenarios.length).toBeGreaterThan(0);
-    const noStem = evaluateConfig(facts, stemScenarios, "query-no-stem", 8);
-    const stem = evaluateConfig(facts, stemScenarios, "query-stem", 8);
+    const noStem = await evaluateConfig(facts, stemScenarios, "query-no-stem", 8);
+    const stem = await evaluateConfig(facts, stemScenarios, "query-stem", 8);
     expect(stem.meanPrecisionAtK).toBeGreaterThan(noStem.meanPrecisionAtK);
     expect(stem.meanNdcgAtK).toBeGreaterThan(noStem.meanNdcgAtK);
+  });
+});
+
+describe("eval fixture anchors", () => {
+  it("uses anchor syntax the real predicates can parse", () => {
+    // Regression guard. `eval/fixtures.ts` builds `Fact` rows directly rather than going through
+    // `captureFact`, so `validateAnchorSyntax` -- the check every real capture passes -- never ran
+    // on its anchors. They were colon-glued (`"file-exists:package.json"`), which `anchors.ts`
+    // tokenizes as one unknown predicate and answers `"unverified"` for, unconditionally: every
+    // anchored fact in the corpus was inert, and no gate said so because an inert anchor is
+    // indistinguishable from a legitimately unverifiable one unless something checks the syntax.
+    expect(ANCHOR_TEMPLATES.length).toBeGreaterThan(0);
+    for (const anchor of ANCHOR_TEMPLATES) {
+      expect(() => validateAnchorSyntax(anchor)).not.toThrow();
+    }
+  });
+
+  it("records a captureRoot, without which a path-scoped anchor can never be evaluated", () => {
+    // Second half of the same defect: `anchorRootFor` returns `null` -- an unconditional
+    // `"unverified"` -- for a `path` fact with no `captureRoot`, and the generator set none.
+    const pathFacts = generateCorpus().filter((fact) => fact.scope === "path");
+    expect(pathFacts.length).toBeGreaterThan(0);
+    for (const fact of pathFacts) {
+      expect(typeof fact.captureRoot).toBe("string");
+      expect((fact.captureRoot ?? "").length).toBeGreaterThan(0);
+    }
   });
 });
