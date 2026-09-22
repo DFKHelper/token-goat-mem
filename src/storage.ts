@@ -46,7 +46,7 @@ import type { EmbeddingMeta } from "./embeddings.js";
 import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
 import { hashFactText, normalizeFactText } from "./factText.js";
 import { runMigrations } from "./migrations.js";
-import type { Fact, FactFilter, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
+import type { Fact, FactFilter, FactLink, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
 
 /** Connection type, borrowed from db.ts's own return type rather than importing better-sqlite3's types directly -- keeps this module's public surface in lockstep with whatever db.ts actually opens. */
 type Db = ReturnType<typeof openDb>;
@@ -979,6 +979,45 @@ export function deleteSourcesForFact(db: Db, factId: string): number {
 /** GC primitive (design plan Section 6): deletes source rows stored before `beforeIso` (ISO 8601). Returns the number of rows deleted. Retention policy (which threshold to pass) is a future GC module's decision, not this function's. */
 export function deleteSourcesOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM sources WHERE stored_at < ?").run(beforeIso).changes;
+}
+
+interface FactLinkRow {
+  fact_id_a: string;
+  fact_id_b: string;
+  similarity: number;
+  discovered_at: string;
+}
+
+function rowToFactLink(row: FactLinkRow): FactLink {
+  return { factIdA: row.fact_id_a, factIdB: row.fact_id_b, similarity: row.similarity, discoveredAt: row.discovered_at };
+}
+
+/**
+ * Writes (or refreshes) one discovered relation between two facts -- `mem consolidate --related
+ * --apply`'s only writer. Canonicalizes the pair order itself (`factIdA <= factIdB` lexicographically)
+ * regardless of which side the caller names first, so `fact_links`'s `(fact_id_a, fact_id_b)` primary
+ * key sees exactly one row per unordered pair no matter how many times either ordering is offered --
+ * a caller cannot store a pair twice by swapping the arguments. Re-running the pass over the same
+ * pair updates `similarity`/`discoveredAt` in place rather than erroring, since a link is a current
+ * observation, not a history to preserve. Does not bump the write epoch, for the same reason writes
+ * to `sources` do not (see this module's doc comment): a discovered relation is audit-adjacent
+ * evidence about the store's shape, never part of the ground-truth surface the epoch exists to guard.
+ */
+export function upsertFactLink(db: Db, factIdA: string, factIdB: string, similarity: number, discoveredAt: string): FactLink {
+  const [a, b] = factIdA <= factIdB ? [factIdA, factIdB] : [factIdB, factIdA];
+  db.prepare(
+    `INSERT INTO fact_links (fact_id_a, fact_id_b, similarity, discovered_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (fact_id_a, fact_id_b) DO UPDATE SET similarity = excluded.similarity, discovered_at = excluded.discovered_at`
+  ).run(a, b, similarity, discoveredAt);
+  return { factIdA: a, factIdB: b, similarity, discoveredAt };
+}
+
+/** Every discovered relation in the store, canonical pair order, then newest first. */
+export function listFactLinks(db: Db): FactLink[] {
+  return db
+    .prepare<[], FactLinkRow>("SELECT * FROM fact_links ORDER BY discovered_at DESC, fact_id_a, fact_id_b")
+    .all()
+    .map(rowToFactLink);
 }
 
 /**

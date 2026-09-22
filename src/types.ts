@@ -278,3 +278,18 @@ export interface NewSource {
   excerpt: string;
   storedAt?: string;
 }
+
+/**
+ * A discovered, non-destructive relation between two facts -- `mem consolidate --related`'s
+ * persisted output. `factIdA`/`factIdB` are always in canonical order (`factIdA <= factIdB`
+ * lexicographically), so a pair is one row regardless of which side a caller names first;
+ * storage.upsertFactLink enforces the ordering, this type only documents it.
+ */
+export interface FactLink {
+  readonly factIdA: string;
+  readonly factIdB: string;
+  /** Jaccard similarity over topic terms that produced this link, in `[0, 1)` -- always below the duplicate threshold it was found under, or it would have merged instead. */
+  readonly similarity: number;
+  /** ISO 8601 timestamp of the `mem consolidate --related --apply` run that (re)wrote this row. */
+  readonly discoveredAt: string;
+}

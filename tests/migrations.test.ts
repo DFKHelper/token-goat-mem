@@ -42,7 +42,16 @@ describe("runMigrations on a fresh database", () => {
 
       const tables = tablesOf(db);
       expect(tables).toEqual(
-        expect.arrayContaining(["facts", "audit_log", "meta", "sources", "recall_log", "fact_terms", "anchor_cache"])
+        expect.arrayContaining([
+          "facts",
+          "audit_log",
+          "meta",
+          "sources",
+          "recall_log",
+          "fact_terms",
+          "anchor_cache",
+          "fact_links",
+        ])
       );
 
       const factsColumns = columnsOf(db, "facts");
@@ -266,6 +275,75 @@ describe("anchor_cache", () => {
             `INSERT INTO anchor_cache (root, anchor, verdict, verified_at)
              VALUES ('/repo', 'some anchor', 'affirmed', '2025-01-01T00:00:00.000Z')`
           )
+          .run()
+      ).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+});
+
+describe("fact_links (v5)", () => {
+  it("upgrades an existing v4 database, with rows already present, to v5 without loss", () => {
+    // A real store immediately before this phase: baseline through the v4 text_hash backfill, with
+    // facts and their fact_terms rows already written -- `findRelatedFactPairs`/`upsertFactLink`
+    // read exactly this shape on their first run after upgrade.
+    const db = openDb(dbPath);
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)
+       VALUES ('pre-v5-a', 'uses pnpm', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1),
+              ('pre-v5-b', 'we use pnpm here', 'preference', 'global', 'user', '2025-01-02T00:00:00.000Z', 'active', 1)`
+    ).run();
+    db.exec("DROP TABLE fact_links");
+    db.pragma("user_version = 4");
+    db.close();
+
+    const reopened = openDb(dbPath);
+    try {
+      expect(reopened.pragma("user_version", { simple: true })).toBe(HIGHEST_VERSION);
+      expect(tablesOf(reopened)).toContain("fact_links");
+      const factRow = reopened.prepare("SELECT text FROM facts WHERE id = ?").get("pre-v5-a") as { text: string };
+      expect(factRow.text).toBe("uses pnpm"); // pre-existing rows survive the upgrade untouched
+      expect(
+        reopened.prepare("SELECT COUNT(*) AS n FROM fact_links").get() as { n: number }
+      ).toEqual({ n: 0 }); // the new table starts empty; nothing backfills a discovered relation
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("re-running the migration is a no-op and does not recreate the table or its index", () => {
+    const db = openDb(dbPath); // already at HIGHEST_VERSION, fact_links created once
+    try {
+      const result = runMigrations(db);
+      expect(result.applied).toEqual([]);
+      const indexCount = (
+        db
+          .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_fact_links_b'")
+          .get() as { n: number }
+      ).n;
+      expect(indexCount).toBe(1);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("enforces canonical pair order at the schema level, not just by convention", () => {
+    const db = openDb(dbPath);
+    try {
+      db.prepare(
+        `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)
+         VALUES ('a', 'fact a', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1),
+                ('b', 'fact b', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1)`
+      ).run();
+      expect(() =>
+        db
+          .prepare("INSERT INTO fact_links (fact_id_a, fact_id_b, similarity, discovered_at) VALUES ('b', 'a', 0.3, '2025-01-01T00:00:00.000Z')")
+          .run()
+      ).toThrow(/CHECK constraint failed/i);
+      expect(() =>
+        db
+          .prepare("INSERT INTO fact_links (fact_id_a, fact_id_b, similarity, discovered_at) VALUES ('a', 'b', 0.3, '2025-01-01T00:00:00.000Z')")
           .run()
       ).not.toThrow();
     } finally {

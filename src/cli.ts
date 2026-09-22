@@ -74,11 +74,15 @@ import {
   findCrossProjectDuplicates,
   findCrossScopeDuplicates,
   findDuplicateClusters,
+  findGraphStaleFacts,
+  findRelatedFactPairs,
   findStaleFacts,
   staleCutoff,
   type CrossProjectDuplicateGroup,
   type CrossScopeDuplicate,
   type DuplicateCluster,
+  type GraphStaleFact,
+  type RelatedFactPair,
 } from "./consolidate.js";
 import {
   findSupersedingFactId,
@@ -171,6 +175,7 @@ import {
   setEmbeddingMeta,
   setFactStatus,
   updateFact,
+  upsertFactLink,
 } from "./storage.js";
 import { extractFacets } from "./facets.js";
 import { getGraphScoresForQuery } from "./factgraph.js";
@@ -1896,6 +1901,7 @@ function runRetentionPass(db: Database.Database): string {
  */
 const CONSOLIDATE_DUPLICATE_EVENT = "consolidate_duplicate";
 const CONSOLIDATE_STALE_EVENT = "consolidate_stale";
+const CONSOLIDATE_GRAPH_STALE_EVENT = "consolidate_graph_stale";
 
 function parseThreshold(raw: string): number {
   const value = Number.parseFloat(raw);
@@ -2035,12 +2041,70 @@ function formatStaleFacts(facts: readonly Fact[], cutoffIso: string, ageDays: nu
   return lines.join("\n");
 }
 
+/**
+ * Renders `findGraphStaleFacts`'s report for `--stale --include-graph-stale`, in the same shape
+ * `formatCrossScopeDuplicates` uses -- `""` when there is nothing to show, so the caller can drop
+ * this section rather than print an empty one when the signal found nothing beyond what the
+ * age-based pass already proposed.
+ */
+function formatGraphStaleFacts(facts: readonly GraphStaleFact[], applied: boolean): string {
+  if (facts.length === 0) {
+    return "";
+  }
+  const lines: string[] = [
+    `${facts.length} additional stale fact${facts.length === 1 ? "" : "s"} by graph signal: most topic-connected neighbours already superseded` +
+      (applied ? "" : " (dry run, nothing changed)"),
+  ];
+  lines.push("");
+  for (const { fact, supersededNeighbours, totalNeighbours } of facts) {
+    lines.push(`  ${supersededNeighbours}/${totalNeighbours} neighbours superseded  ${formatFactSummary(fact)}`);
+  }
+  lines.push("");
+  lines.push(
+    applied
+      ? `superseded ${facts.length} additional fact${facts.length === 1 ? "" : "s"} by graph signal; ${CONSOLIDATE_REVERSIBLE_NOTE}`
+      : `re-run with --apply to supersede ${facts.length === 1 ? "it" : "them"} too`
+  );
+  return lines.join("\n");
+}
+
+/**
+ * Renders `findRelatedFactPairs`'s report for `--related`, in the same shape `formatCrossScopeDuplicates`
+ * uses. `--related --apply` persists every pair to `fact_links` (`storage.upsertFactLink`) rather
+ * than changing any fact's status -- nothing here is destructive, but the pass still follows this
+ * command's own contract that nothing is written until a human has seen the listing and typed
+ * `--apply`.
+ */
+function formatRelatedFacts(pairs: readonly RelatedFactPair[], applied: boolean): string {
+  if (pairs.length === 0) {
+    return "no related facts found below the duplicate threshold";
+  }
+  const lines: string[] = [
+    `${pairs.length} related fact pair${pairs.length === 1 ? "" : "s"}: sharing topic terms, below the duplicate threshold` +
+      (applied ? "" : " (dry run, nothing changed)"),
+  ];
+  for (const { a, b, similarity } of pairs) {
+    lines.push("");
+    lines.push(`  ${similarity.toFixed(2)}    ${formatFactSummary(a)}`);
+    lines.push(`          ${formatFactSummary(b)}`);
+  }
+  lines.push("");
+  lines.push(
+    applied
+      ? `persisted ${pairs.length} fact link${pairs.length === 1 ? "" : "s"} to \`fact_links\``
+      : `${pairs.length} link${pairs.length === 1 ? "" : "s"} would be persisted -- re-run with --apply to store ${pairs.length === 1 ? "it" : "them"}`
+  );
+  return lines.join("\n");
+}
+
 interface ConsolidateCliOptions {
   readonly apply?: boolean;
   readonly threshold?: string;
   readonly stale?: boolean;
   readonly staleDays?: string;
   readonly crossProject?: boolean;
+  readonly related?: boolean;
+  readonly includeGraphStale?: boolean;
 }
 
 /**
@@ -2056,6 +2120,7 @@ interface ConsolidateCliOptions {
 function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, now: Date): string {
   const stale = options.stale === true;
   const crossProject = options.crossProject === true;
+  const related = options.related === true;
   const applied = options.apply === true;
   // Each flag belongs to exactly one pass and they do not compose (`mem facets` takes the same
   // line): silently ignoring the one that does not apply would make it look honoured.
@@ -2065,8 +2130,14 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
   if (!stale && options.staleDays !== undefined) {
     throw new UsageError("--stale-days applies to --stale; the duplicate pass is bounded by --threshold");
   }
-  if (crossProject && (stale || options.threshold !== undefined || options.staleDays !== undefined)) {
-    throw new UsageError("--cross-project does not compose with --stale/--threshold/--stale-days");
+  if (!stale && options.includeGraphStale === true) {
+    throw new UsageError("--include-graph-stale applies to --stale; the duplicate pass has no graph signal of its own");
+  }
+  if (crossProject && (stale || related || options.threshold !== undefined || options.staleDays !== undefined)) {
+    throw new UsageError("--cross-project does not compose with --stale/--related/--threshold/--stale-days");
+  }
+  if (related && (stale || crossProject || options.threshold !== undefined || options.staleDays !== undefined)) {
+    throw new UsageError("--related does not compose with --stale/--cross-project/--threshold/--stale-days");
   }
   // No `--apply` path for this pass at all (see `findCrossProjectDuplicates`'s doc comment): refused
   // here rather than silently ignored, same as every other flag combination this function rejects.
@@ -2079,10 +2150,32 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
     return formatCrossProjectDuplicates(findCrossProjectDuplicates(db));
   }
 
+  if (related) {
+    const pairs = findRelatedFactPairs(db);
+    if (applied) {
+      const discoveredAt = now.toISOString();
+      for (const { a, b, similarity } of pairs) {
+        upsertFactLink(db, a.id, b.id, similarity, discoveredAt);
+      }
+    }
+    return formatRelatedFacts(pairs, applied);
+  }
+
   if (stale) {
     const ageDays = options.staleDays !== undefined ? parseStaleDays(options.staleDays) : DEFAULT_STALE_AGE_DAYS;
     const cutoff = staleCutoff(ageDays, now);
     const facts = findStaleFacts(db, cutoff);
+    // Absent by default (see `findGraphStaleFacts`'s own doc comment on why): only computed at all
+    // when the caller opts in, so a store never sees a wider `--apply` set than it did before this
+    // signal existed unless it explicitly asked for the wider one.
+    const includeGraphStale = options.includeGraphStale === true;
+    const graphStale = includeGraphStale
+      ? findGraphStaleFacts(
+          db,
+          cutoff,
+          new Set(facts.map((fact) => fact.id))
+        )
+      : [];
     if (applied) {
       for (const fact of facts) {
         setStatusWithAudit(
@@ -2093,8 +2186,19 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
           `superseded as stale: captured ${fact.captured_at}, unsurfaced by recall since ${cutoff}, never marked used`
         );
       }
+      for (const { fact, supersededNeighbours, totalNeighbours } of graphStale) {
+        setStatusWithAudit(
+          db,
+          fact.id,
+          "superseded",
+          CONSOLIDATE_GRAPH_STALE_EVENT,
+          `superseded via graph staleness: ${supersededNeighbours} of ${totalNeighbours} topic-connected neighbours already superseded`
+        );
+      }
     }
-    return formatStaleFacts(facts, cutoff, ageDays, applied);
+    return [formatStaleFacts(facts, cutoff, ageDays, applied), formatGraphStaleFacts(graphStale, applied)]
+      .filter((section) => section.length > 0)
+      .join("\n\n");
   }
 
   const threshold = options.threshold !== undefined ? parseThreshold(options.threshold) : DEFAULT_DUPLICATE_THRESHOLD;
@@ -2740,27 +2844,32 @@ export function buildProgram(): Command {
         // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
         // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
         const wantedEntities = options.entity ?? [];
-        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap, graphScores, anchorCacheSnapshot } = await withDb((db) => ({
-          facts: listFacts(db, {}),
-          usefulness: getUsefulnessCounts(db),
-          embeddingMeta: getEmbeddingMeta(db) ?? null,
-          // Read only when something asks for it: this is a full scan of `fact_terms`, and every
-          // recall that passes no `--entity` would pay for a map nothing reads.
-          entityKeys: wantedEntities.length > 0 ? getEntityKeysByFact(db) : null,
-          // Unconditional, unlike `entityKeys` above, because it costs one indexed lookup per
-          // identifier the query actually contains -- nothing at all for a query with none. It is
-          // the signal BM25 cannot carry: stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts`
-          // and then ranks the fact naming that file no higher than one merely using those words.
-          entityOverlap: getEntityOverlapForQuery(db, query ?? ""),
-          // Propagated from the same entity-overlap seeds, one or two hops out over `fact_terms`
-          // (see `factgraph.getGraphScoresForQuery`) -- empty for the same no-entity queries
-          // `entityOverlap` above already costs nothing for.
-          graphScores: getGraphScoresForQuery(db, query ?? ""),
-          // One indexed range scan on the connection already open, for the same reason as every
-          // read above: `retrieve()` below must not hold a DB handle across its embedding round
-          // trip, so whatever `anchor_cache` already knows about this root has to be read now.
-          anchorCacheSnapshot: prefetchAnchorCache(db, root),
-        }));
+        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap, graphScores, anchorCacheSnapshot } = await withDb((db) => {
+          // Unconditional, because it costs one indexed lookup per identifier the query actually
+          // contains -- nothing at all for a query with none. It is the signal BM25 cannot carry:
+          // stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts` and then ranks the fact
+          // naming that file no higher than one merely using those words. Computed once here, not
+          // inline per field below, so `graphScores` can reuse it instead of paying for the same
+          // lookup twice.
+          const entityOverlap = getEntityOverlapForQuery(db, query ?? "");
+          return {
+            facts: listFacts(db, {}),
+            usefulness: getUsefulnessCounts(db),
+            embeddingMeta: getEmbeddingMeta(db) ?? null,
+            // Read only when something asks for it: this is a full scan of `fact_terms`, and every
+            // recall that passes no `--entity` would pay for a map nothing reads.
+            entityKeys: wantedEntities.length > 0 ? getEntityKeysByFact(db) : null,
+            entityOverlap,
+            // Propagated from the same entity-overlap seeds, one or two hops out over `fact_terms`
+            // (see `factgraph.getGraphScoresForQuery`) -- empty for the same no-entity queries
+            // `entityOverlap` above already costs nothing for.
+            graphScores: getGraphScoresForQuery(db, query ?? "", {}, entityOverlap),
+            // One indexed range scan on the connection already open, for the same reason as every
+            // read above: `retrieve()` below must not hold a DB handle across its embedding round
+            // trip, so whatever `anchor_cache` already knows about this root has to be read now.
+            anchorCacheSnapshot: prefetchAnchorCache(db, root),
+          };
+        });
         // Disconnected from storage by construction (see storage.ts's `BufferedAnchorCacheStore`):
         // `retrieve()` can read and write anchor verdicts through it without ever touching SQLite.
         const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
@@ -3432,6 +3541,14 @@ export function buildProgram(): Command {
     .option(
       "--cross-project",
       "Report same-kind, same-text facts restated under two or more distinct projects -- report only, no --apply path"
+    )
+    .option(
+      "--related",
+      "Run the related pass instead: facts sharing topic terms below the duplicate threshold; --apply persists them to `fact_links`, no fact status ever changes"
+    )
+    .option(
+      "--include-graph-stale",
+      "With --stale, also propose facts whose topic-graph neighbours are mostly already superseded -- opt-in, never widens the default --stale --apply set"
     )
     .action(
       guard(async (options: ConsolidateCliOptions) => {

@@ -24,11 +24,23 @@ import {
   findCrossProjectDuplicates,
   findCrossScopeDuplicates,
   findDuplicateClusters,
+  findGraphStaleFacts,
+  findRelatedFactPairs,
   findStaleFacts,
   jaccard,
   staleCutoff,
 } from "../src/consolidate.js";
-import { insertFact, insertRecallLog, listStaleUnsurfacedFacts, markRecallUsed, openStorage } from "../src/storage.js";
+import {
+  insertFact,
+  insertRecallLog,
+  listFactLinks,
+  listStaleUnsurfacedFacts,
+  markFactsSurfaced,
+  markRecallUsed,
+  openStorage,
+  replaceFactTerms,
+  setFactStatus,
+} from "../src/storage.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "../src/types.js";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -681,6 +693,11 @@ describe("mem consolidate (end to end)", () => {
     [["consolidate", "--cross-project", "--apply"], "--cross-project is report-only"],
     [["consolidate", "--cross-project", "--stale"], "--cross-project does not compose"],
     [["consolidate", "--cross-project", "--threshold", "0.5"], "--cross-project does not compose"],
+    [["consolidate", "--related", "--stale"], "--related does not compose"],
+    [["consolidate", "--related", "--cross-project"], "--cross-project does not compose"],
+    [["consolidate", "--related", "--threshold", "0.5"], "--related does not compose"],
+    [["consolidate", "--related", "--stale-days", "5"], "--stale-days applies to --stale"],
+    [["consolidate", "--include-graph-stale"], "--include-graph-stale applies to --stale"],
   ])("rejects %j as a usage error", async (args, message) => {
     const result = await runCli(args);
     expect(result.exitCode).toBe(1);
@@ -759,5 +776,383 @@ describe("mem consolidate (end to end)", () => {
     const result = await runCli(["consolidate", "--cross-project"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout.trim()).toBe("no same-kind, same-text facts found under two or more distinct projects");
+  });
+});
+
+describe("findRelatedFactPairs", () => {
+  let root: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "mem-consolidate-related-unit-"));
+    db = openStorage(join(root, "mem.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("reports a pair below the duplicate threshold, in canonical id order", () => {
+    const first = seed(db, "fact one");
+    const second = seed(db, "fact two");
+    replaceFactTerms(db, first.id, { entities: [], topics: ["alpha", "beta"] });
+    replaceFactTerms(db, second.id, { entities: [], topics: ["beta", "gamma"] }); // Jaccard 1/3
+
+    const pairs = findRelatedFactPairs(db);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]?.similarity).toBeCloseTo(1 / 3, 10);
+    const [lower, higher] = first.id <= second.id ? [first, second] : [second, first];
+    expect(pairs[0]?.a.id).toBe(lower.id);
+    expect(pairs[0]?.b.id).toBe(higher.id);
+  });
+
+  it("never links two facts sharing no topic terms -- zero similarity is no relation to record", () => {
+    const first = seed(db, "fact one");
+    const second = seed(db, "fact two");
+    replaceFactTerms(db, first.id, { entities: [], topics: ["alpha"] });
+    replaceFactTerms(db, second.id, { entities: [], topics: ["zeta"] });
+    expect(findRelatedFactPairs(db)).toEqual([]);
+  });
+
+  it("never links a pair at or above the duplicate threshold -- that pair belongs to the merge pass, not this one", () => {
+    for (const text of PNPM_RESTATEMENTS.slice(0, 2)) {
+      seed(db, text);
+    }
+    // PNPM_RESTATEMENTS score 1.00 against each other with this repo's tokenizer (see the fixture's
+    // own comment), well above DEFAULT_DUPLICATE_THRESHOLD.
+    expect(findRelatedFactPairs(db)).toEqual([]);
+    expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toHaveLength(1);
+  });
+
+  it("THE TRAP: never links a live contradiction, even though it shares topic terms below the threshold", () => {
+    // Same fixture as findDuplicateClusters's own contradiction test: same subject+scope, different
+    // value. Terms chosen so their Jaccard (0.2) lands strictly inside (0, DEFAULT_DUPLICATE_THRESHOLD)
+    // -- clear of both the zero-similarity filter and the merge threshold -- so only the
+    // contradiction guard can be what excludes this pair.
+    const postgres = seed(db, "the database server is postgres", { status: "pinned", subject: "db", value: "postgres" });
+    const mysql = seed(db, "the database server is mysql", { subject: "db", value: "mysql" });
+    replaceFactTerms(db, postgres.id, { entities: [], topics: ["database", "server", "postgres"] });
+    replaceFactTerms(db, mysql.id, { entities: [], topics: ["database", "mysql", "cache"] });
+    // Sanity: this pair scores inside the related band the guard has to actively exclude it from.
+    const similarity = jaccard(new Set(["database", "server", "postgres"]), new Set(["database", "mysql", "cache"]));
+    expect(similarity).toBeGreaterThan(0);
+    expect(similarity).toBeLessThan(DEFAULT_DUPLICATE_THRESHOLD);
+    expect(findRelatedFactPairs(db)).toEqual([]);
+  });
+
+  it("never links facts of different kinds, the same comparability guard the duplicate pass uses", () => {
+    const first = seed(db, "fact one", { kind: "preference" });
+    const second = seed(db, "fact two", { kind: "decision" });
+    replaceFactTerms(db, first.id, { entities: [], topics: ["alpha", "beta"] });
+    replaceFactTerms(db, second.id, { entities: [], topics: ["beta", "gamma"] });
+    expect(findRelatedFactPairs(db)).toEqual([]);
+  });
+});
+
+describe("findGraphStaleFacts", () => {
+  let root: string;
+  let db: Database.Database;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "mem-consolidate-graph-stale-unit-"));
+    db = openStorage(join(root, "mem.db"));
+  });
+
+  afterEach(() => {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  /**
+   * `neighbours` (factgraph.ts) drops a term outright once its document frequency exceeds the
+   * default df ceiling (60% of the store) -- a real safety feature (hub-term damping), not
+   * something these fixtures should trip over by accident. Padding the store with `count`
+   * unrelated facts keeps "redis" comfortably under that ceiling so a test's assertions are about
+   * the staleness signal, not about incidentally recreating the hub-term exclusion.
+   */
+  function seedFiller(count: number): void {
+    for (let i = 0; i < count; i += 1) {
+      const filler = seed(db, `unrelated filler fact ${i}`);
+      replaceFactTerms(db, filler.id, { entities: [], topics: [`filler-${i}`] });
+    }
+  }
+
+  it("flags a candidate whose neighbours are majority-superseded", () => {
+    seedFiller(2); // 3 redis-tagged facts over 5 total keeps "redis" under the 60% df ceiling
+    const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+    const supersededA = seed(db, "we use redis for caching");
+    const supersededB = seed(db, "redis is the cache layer");
+    for (const fact of [candidate, supersededA, supersededB]) {
+      replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+    }
+    setFactStatus(db, supersededA.id, "superseded");
+    setFactStatus(db, supersededB.id, "superseded");
+
+    const cutoff = daysAgo(90);
+    const results = findGraphStaleFacts(db, cutoff);
+    expect(results).toHaveLength(1);
+    expect(results[0]?.fact.id).toBe(candidate.id);
+    expect(results[0]?.supersededNeighbours).toBe(2);
+    expect(results[0]?.totalNeighbours).toBe(2);
+  });
+
+  it("does not flag a candidate whose neighbours are only a minority superseded", () => {
+    seedFiller(3); // 4 redis-tagged facts over 7 total, same df-ceiling reasoning as above
+    const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+    const superseded = seed(db, "we use redis for caching");
+    const activeA = seed(db, "redis is the cache layer");
+    const activeB = seed(db, "the redis client library is ioredis");
+    for (const fact of [candidate, superseded, activeA, activeB]) {
+      replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+    }
+    setFactStatus(db, superseded.id, "superseded");
+
+    expect(findGraphStaleFacts(db, daysAgo(90))).toEqual([]);
+  });
+
+  it("does not flag a candidate with too few neighbours to carry a signal", () => {
+    const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+    const superseded = seed(db, "we use redis for caching");
+    replaceFactTerms(db, candidate.id, { entities: [], topics: ["redis"] });
+    replaceFactTerms(db, superseded.id, { entities: [], topics: ["redis"] });
+    setFactStatus(db, superseded.id, "superseded");
+
+    // Only one neighbour: below GRAPH_STALE_MIN_NEIGHBOURS, whatever its status.
+    expect(findGraphStaleFacts(db, daysAgo(90))).toEqual([]);
+  });
+
+  it("never flags a fact captured after the cutoff, however superseded its neighbours are", () => {
+    const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(1) });
+    const supersededA = seed(db, "we use redis for caching");
+    const supersededB = seed(db, "redis is the cache layer");
+    for (const fact of [candidate, supersededA, supersededB]) {
+      replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+    }
+    setFactStatus(db, supersededA.id, "superseded");
+    setFactStatus(db, supersededB.id, "superseded");
+
+    expect(findGraphStaleFacts(db, daysAgo(90))).toEqual([]);
+  });
+
+  it("excludes ids the caller already attributed to the age-based pass", () => {
+    const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+    const supersededA = seed(db, "we use redis for caching");
+    const supersededB = seed(db, "redis is the cache layer");
+    for (const fact of [candidate, supersededA, supersededB]) {
+      replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+    }
+    setFactStatus(db, supersededA.id, "superseded");
+    setFactStatus(db, supersededB.id, "superseded");
+
+    expect(findGraphStaleFacts(db, daysAgo(90), new Set([candidate.id]))).toEqual([]);
+  });
+
+  it("never flags a pinned fact", () => {
+    const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200), status: "pinned" });
+    const supersededA = seed(db, "we use redis for caching");
+    const supersededB = seed(db, "redis is the cache layer");
+    for (const fact of [candidate, supersededA, supersededB]) {
+      replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+    }
+    setFactStatus(db, supersededA.id, "superseded");
+    setFactStatus(db, supersededB.id, "superseded");
+
+    expect(findGraphStaleFacts(db, daysAgo(90))).toEqual([]);
+  });
+});
+
+describe("mem consolidate --related (end to end)", () => {
+  let home: string;
+
+  function withStore<T>(fn: (db: Database.Database) => T): T {
+    const db = openStorage();
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "mem-consolidate-related-e2e-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  });
+
+  afterEach(() => {
+    delete process.env["TOKEN_GOAT_MEM_HOME"];
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("reports related pairs and writes nothing to fact_links without --apply", async () => {
+    const ids = withStore((db) => {
+      const first = seed(db, "fact one");
+      const second = seed(db, "fact two");
+      replaceFactTerms(db, first.id, { entities: [], topics: ["alpha", "beta"] });
+      replaceFactTerms(db, second.id, { entities: [], topics: ["beta", "gamma"] });
+      return [first.id, second.id];
+    });
+
+    const result = await runCli(["consolidate", "--related"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("1 related fact pair");
+    expect(result.stdout).toContain("(dry run, nothing changed)");
+    expect(result.stdout).toContain("re-run with --apply to store it");
+    expect(withStore((db) => listFactLinks(db))).toEqual([]);
+    // Nothing about a report-only pass may change a fact's own status.
+    for (const id of ids) {
+      expect(withStore((db) => db.prepare("SELECT status FROM facts WHERE id = ?").get(id))).toEqual({
+        status: "active",
+      });
+    }
+  });
+
+  it("--apply persists exactly one row per pair, stable across a second run", async () => {
+    withStore((db) => {
+      const first = seed(db, "fact one");
+      const second = seed(db, "fact two");
+      replaceFactTerms(db, first.id, { entities: [], topics: ["alpha", "beta"] });
+      replaceFactTerms(db, second.id, { entities: [], topics: ["beta", "gamma"] });
+    });
+
+    const first = await runCli(["consolidate", "--related", "--apply"]);
+    expect(first.exitCode).toBe(0);
+    expect(first.stdout).toContain("persisted 1 fact link");
+    expect(withStore((db) => listFactLinks(db))).toHaveLength(1);
+
+    // A second --apply run over the same store must refresh, not duplicate, the row (see
+    // storage.upsertFactLink's own ordering guarantee).
+    const second = await runCli(["consolidate", "--related", "--apply"]);
+    expect(second.exitCode).toBe(0);
+    expect(withStore((db) => listFactLinks(db))).toHaveLength(1);
+  });
+
+  it("an empty store reports nothing to link", async () => {
+    const result = await runCli(["consolidate", "--related"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe("no related facts found below the duplicate threshold");
+  });
+});
+
+describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
+  let home: string;
+
+  function withStore<T>(fn: (db: Database.Database) => T): T {
+    const db = openStorage();
+    try {
+      return fn(db);
+    } finally {
+      db.close();
+    }
+  }
+
+  function statusOf(id: string): string {
+    return withStore((db) => (db.prepare("SELECT status FROM facts WHERE id = ?").get(id) as { status: string }).status);
+  }
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "mem-consolidate-graph-stale-e2e-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  });
+
+  afterEach(() => {
+    delete process.env["TOKEN_GOAT_MEM_HOME"];
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("--stale --apply supersedes the identical set whether or not the graph signal would also flag something -- absent by default", async () => {
+    // A fact old enough and unsurfaced -- the age-based pass's own population.
+    const ageStale = withStore((db) => seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) }).id);
+    // A separate candidate the graph signal alone WOULD flag if asked (old enough, neighbours
+    // majority superseded) but the age-based pass never would: marked recently surfaced, so
+    // `findStaleFacts`'s own "unsurfaced since the cutoff" test excludes it. Its presence proves
+    // `--include-graph-stale`'s absence changes nothing -- not merely that the fixture was too weak
+    // for either pass to ever catch.
+    const graphCandidate = withStore((db) => {
+      replaceFactTerms(db, seed(db, "unrelated filler fact 0").id, { entities: [], topics: ["filler-0"] });
+      replaceFactTerms(db, seed(db, "unrelated filler fact 1").id, { entities: [], topics: ["filler-1"] });
+      const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+      markFactsSurfaced(db, [candidate.id], new Date().toISOString());
+      const supersededA = seed(db, "we use redis for caching");
+      const supersededB = seed(db, "redis is the cache layer");
+      for (const fact of [candidate, supersededA, supersededB]) {
+        replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+      }
+      setFactStatus(db, supersededA.id, "superseded");
+      setFactStatus(db, supersededB.id, "superseded");
+      return candidate.id;
+    });
+
+    const withoutFlag = await runCli(["consolidate", "--stale", "--apply"]);
+    expect(withoutFlag.exitCode).toBe(0);
+    expect(statusOf(ageStale)).toBe("superseded");
+    expect(statusOf(graphCandidate)).toBe("active"); // never touched -- the signal was never asked for
+  });
+
+  it("--include-graph-stale additionally supersedes a graph-flagged fact with a distinct, accurate audit reason", async () => {
+    const graphCandidate = withStore((db) => {
+      // Two unrelated filler facts keep "redis" under `neighbours`' default 60% df ceiling (3 of 5
+      // facts, not 3 of 3) -- see findGraphStaleFacts's own unit tests for the same reasoning.
+      replaceFactTerms(db, seed(db, "unrelated filler fact 0").id, { entities: [], topics: ["filler-0"] });
+      replaceFactTerms(db, seed(db, "unrelated filler fact 1").id, { entities: [], topics: ["filler-1"] });
+      const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+      // Marked recently surfaced so the age-based pass's own "unsurfaced since the cutoff" test
+      // excludes it -- otherwise this fixture (old, never recalled) would also qualify for
+      // `findStaleFacts` and this test could not tell which pass actually superseded it.
+      markFactsSurfaced(db, [candidate.id], new Date().toISOString());
+      const supersededA = seed(db, "we use redis for caching");
+      const supersededB = seed(db, "redis is the cache layer");
+      for (const fact of [candidate, supersededA, supersededB]) {
+        replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+      }
+      setFactStatus(db, supersededA.id, "superseded");
+      setFactStatus(db, supersededB.id, "superseded");
+      return candidate.id;
+    });
+
+    const result = await runCli(["consolidate", "--stale", "--include-graph-stale", "--apply"]);
+    expect(result.exitCode).toBe(0);
+    expect(statusOf(graphCandidate)).toBe("superseded");
+
+    const rows = withStore(
+      (db) =>
+        db.prepare("SELECT event, detail FROM audit_log WHERE fact_id = ? ORDER BY created_at").all(graphCandidate) as {
+          event: string;
+          detail: string;
+        }[]
+    );
+    const graphRow = rows.find((row) => row.event === "consolidate_graph_stale");
+    expect(graphRow).toBeDefined();
+    // The reason must be true of *this* fact, not the age-based pass's reason repurposed: this fact
+    // was captured 200 days ago and never surfaced, so an unfalsifiable "unsurfaced since" string
+    // would also happen to read true -- the distinct wording is what makes the claim checkable.
+    expect(graphRow?.detail).toBe("superseded via graph staleness: 2 of 2 topic-connected neighbours already superseded");
+    expect(rows.some((row) => row.event === "consolidate_stale")).toBe(false);
+  });
+
+  it("--include-graph-stale without --apply reports the additional candidate but changes nothing", async () => {
+    const graphCandidate = withStore((db) => {
+      replaceFactTerms(db, seed(db, "unrelated filler fact 0").id, { entities: [], topics: ["filler-0"] });
+      replaceFactTerms(db, seed(db, "unrelated filler fact 1").id, { entities: [], topics: ["filler-1"] });
+      const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
+      // Marked recently surfaced so the age-based pass's own "unsurfaced since the cutoff" test
+      // excludes it -- otherwise this fixture would also be a `findStaleFacts` candidate, and the
+      // report line asserted below could come from either pass.
+      markFactsSurfaced(db, [candidate.id], new Date().toISOString());
+      const supersededA = seed(db, "we use redis for caching");
+      const supersededB = seed(db, "redis is the cache layer");
+      for (const fact of [candidate, supersededA, supersededB]) {
+        replaceFactTerms(db, fact.id, { entities: [], topics: ["redis"] });
+      }
+      setFactStatus(db, supersededA.id, "superseded");
+      setFactStatus(db, supersededB.id, "superseded");
+      return candidate.id;
+    });
+
+    const result = await runCli(["consolidate", "--stale", "--include-graph-stale"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("1 additional stale fact");
+    expect(result.stdout).toContain("(dry run, nothing changed)");
+    expect(statusOf(graphCandidate)).toBe("active");
   });
 });
