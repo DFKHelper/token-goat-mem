@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import {
-  applyIdempotentAlter,
   ensureStorageSchema,
   openStorage,
   normalizeSubject,
@@ -29,6 +28,7 @@ import {
   resolveFactIdOrPrefix,
 } from "../src/storage.js";
 import { openDb } from "../src/db.js";
+import { addColumn } from "../src/migrations.js";
 import type { NewFact } from "../src/types.js";
 
 let root: string;
@@ -88,12 +88,18 @@ describe("openStorage / ensureStorageSchema", () => {
 describe("facts.epoch migration (ensureStorageSchema, pre-migration database)", () => {
   it("backfills epoch=0 on pre-existing rows without touching their other columns, and is a no-op re-applied", () => {
     // Simulate a database written by a pre-migration build: open via db.ts's bare openDb() (which
-    // creates `facts` from FACTS_SCHEMA -- no `epoch` column) and insert directly with raw SQL that
-    // matches that old schema exactly, bypassing storage.ts's insertFact entirely (insertFact now
-    // requires the epoch column and would fail against this schema, which is the point). Uses its
-    // own file, separate from the `db`/`root` opened in `beforeEach`.
+    // now runs every migration itself, `epoch` included, since db.ts owns the whole-database
+    // `PRAGMA user_version` counter) and then undo exactly what this test needs absent -- drop the
+    // `epoch` column and reset `user_version` to `0`, the same technique
+    // tests/unit/schema-migration.test.ts uses to manufacture "a database that predates this
+    // column" without hand-writing a stale schema. Insert directly with raw SQL that matches that
+    // old shape exactly, bypassing storage.ts's insertFact entirely (insertFact now requires the
+    // epoch column and would fail against this schema, which is the point). Uses its own file,
+    // separate from the `db`/`root` opened in `beforeEach`.
     const preMigrationPath = join(root, "pre-migration.db");
     const preMigrationDb = openDb(preMigrationPath);
+    preMigrationDb.exec("ALTER TABLE facts DROP COLUMN epoch");
+    preMigrationDb.pragma("user_version = 0");
     const columnsBefore = preMigrationDb
       .prepare("PRAGMA table_info(facts)")
       .all() as { name: string }[];
@@ -153,15 +159,14 @@ describe("facts.epoch migration (ensureStorageSchema, pre-migration database)", 
   });
 });
 
-describe("applyIdempotentAlter", () => {
-  it("swallows a duplicate-column failure on repeated application", () => {
-    const sql = "ALTER TABLE sources ADD COLUMN note TEXT";
-    applyIdempotentAlter(db, sql);
-    expect(() => applyIdempotentAlter(db, sql)).not.toThrow();
+describe("addColumn (migrations.ts)", () => {
+  it("no-ops on repeated application instead of failing on a duplicate column", () => {
+    addColumn(db, "sources", "note", "TEXT");
+    expect(() => addColumn(db, "sources", "note", "TEXT")).not.toThrow();
   });
 
-  it("propagates a non-duplicate-column error", () => {
-    expect(() => applyIdempotentAlter(db, "ALTER TABLE not_a_real_table ADD COLUMN x TEXT")).toThrow();
+  it("propagates a genuine ALTER failure", () => {
+    expect(() => addColumn(db, "not_a_real_table", "x", "TEXT")).toThrow();
   });
 });
 
@@ -550,11 +555,16 @@ describe("regression: updateFact trims the same fields insertFact trims", () => 
 
 describe("recall_log.used_at migration (ensureStorageSchema, pre-column database)", () => {
   it("adds used_at to a recall_log written before the column existed, without disturbing its rows", () => {
-    // Simulate a database written by a build that had `recall_log` but not `used_at`. STORAGE_SCHEMA's
-    // `CREATE TABLE IF NOT EXISTS` is a no-op against such a database, so the ALTER is the only thing
-    // that can migrate it -- which is exactly what this pins.
+    // Simulate a database written by a build that had `recall_log` but not `used_at`. `openDb` now
+    // creates `recall_log` complete (it runs every baseline migration step itself), so build the
+    // old shape by dropping that table and recreating it without `used_at`, then resetting
+    // `user_version` to `0` -- the same technique tests/unit/schema-migration.test.ts uses to
+    // manufacture "a database that predates this column". `CREATE TABLE IF NOT EXISTS` is a no-op
+    // against a table that already exists, so the ALTER inside `runMigrations`' baseline step is
+    // the only thing that can migrate this database -- which is exactly what this pins.
     const preColumnPath = join(root, "pre-used-at.db");
     const preColumnDb = openDb(preColumnPath);
+    preColumnDb.exec("DROP TABLE recall_log");
     preColumnDb.exec(
       `CREATE TABLE recall_log (
          fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
@@ -562,6 +572,7 @@ describe("recall_log.used_at migration (ensureStorageSchema, pre-column database
          surfaced_at TEXT NOT NULL
        )`
     );
+    preColumnDb.pragma("user_version = 0");
     preColumnDb
       .prepare(
         `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)

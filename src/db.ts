@@ -18,6 +18,7 @@
 
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
+import { runMigrations } from "./migrations.js";
 import { chmodSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -81,8 +82,8 @@ export function resolveDbPath(home: string = resolveMemHome()): string {
  * `CREATE TABLE IF NOT EXISTS` does nothing at all to a table that already exists:
  *
  *  1. A new column added here reaches new databases only. Every database already on disk needs a
- *     matching `applyIdempotentAlter` in `storage.ensureStorageSchema`, or it opens without the
- *     column and the first query naming it fails with `no such column`.
+ *     matching migration step in `migrations.ts`'s `MIGRATIONS`, or it opens without the column and
+ *     the first query naming it fails with `no such column`.
  *  2. Widening one of the `CHECK (... IN (...))` enums cannot be done here at all. A CHECK is frozen
  *     into the table at creation and `ALTER TABLE` cannot amend one, so every existing database
  *     keeps rejecting the new value with `CHECK constraint failed` while a freshly created database
@@ -170,6 +171,11 @@ export function openDb(dbPath: string = resolveDbPath()): Database.Database {
     db.exec(FACTS_SCHEMA);
     db.exec(AUDIT_LOG_SCHEMA);
     db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+    // db.ts owns the whole-database `PRAGMA user_version` counter: every table any module adds --
+    // `sources`/`recall_log`/`fact_terms`/`anchor_cache` included -- ends up versioned from the one
+    // place every connection passes through, rather than only being migrated by whichever module's
+    // own schema-ensure function happens to run next.
+    runMigrations(db);
   } catch (error) {
     db.close();
     throw error;

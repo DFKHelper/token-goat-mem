@@ -4524,9 +4524,14 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
 
   it("migration: a store from before recall_log existed keeps working, and the table is created on first open", async () => {
     const id = extractRememberedId(await runCli(["remember", "a pre-migration fact", "--kind", "fact", "--scope", "global"]));
-    // Reproduce a v0.3.2 store: everything else in place, no recall_log table at all.
+    // Reproduce a v0.3.2 store: everything else in place, no recall_log table at all. `openDb` now
+    // runs every migration itself and stamps `user_version`, so resetting it to `0` here is what
+    // makes this a faithful "predates recall_log" store rather than one the migration runner
+    // considers already fully migrated and skips -- a real v0.3.2 store never had `user_version`
+    // set at all.
     const raw = openDb(resolveDbPath());
     raw.exec("DROP TABLE recall_log");
+    raw.pragma("user_version = 0");
     const before = raw.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'recall_log'").get()?.n;
     raw.close();
     expect(before).toBe(0);

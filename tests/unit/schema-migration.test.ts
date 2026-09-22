@@ -3,8 +3,8 @@
  * already on disk while leaving a suite that starts from an empty file entirely green.
  *
  * `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists. So a schema change
- * reaches an existing user's store only through `ensureStorageSchema`'s `applyIdempotentAlter`
- * calls, and only for the changes `ALTER TABLE` is capable of expressing:
+ * reaches an existing user's store only through `migrations.ts`'s `runMigrations` steps, and only
+ * for the changes `ALTER TABLE` is capable of expressing:
  *
  *  - a new column IS expressible, but only if someone remembers to add the matching ALTER;
  *  - a widened `CHECK (... IN (...))` enum is NOT expressible at all, because a CHECK is frozen
@@ -73,6 +73,9 @@ function userTables(db: Db): string[] {
  * A column added to a table that already shipped satisfies neither, and needs an ALTER.
  */
 const COLUMNS_WITHOUT_A_MIGRATION: readonly string[] = [
+  "anchor_cache.verdict",
+  "anchor_cache.verified_at",
+  "anchor_cache.witness",
   "audit_log.created_at",
   "audit_log.detail",
   "audit_log.event",
@@ -133,6 +136,13 @@ function survivesReopenWithoutColumn(table: string, column: string): boolean | n
       db.exec(`DROP INDEX ${name}`);
     }
     db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    // `freshStore()` already ran every migration, so `user_version` sits at the latest version and
+    // migrations.ts's `runMigrations` would otherwise see nothing pending on reopen and skip every
+    // step -- including the one that would restore `column`. Resetting it to `0` here is what makes
+    // this fixture a faithful "database that predates this column" rather than "a database with a
+    // column missing that nothing will ever look at again": every real pre-phase-1 database reads
+    // `user_version = 0` too, since nothing set it before this phase existed.
+    db.pragma("user_version = 0");
   } catch {
     return null;
   } finally {
@@ -171,9 +181,9 @@ describe("opening a database that predates a schema change", () => {
         .sort();
 
     // Every name here is a column an existing user's store never receives. Adding a column to a
-    // CREATE TABLE that already shipped puts it in this list and breaks that store: give it an
-    // `applyIdempotentAlter` in `ensureStorageSchema` instead of widening the constant, which is
-    // pinned so it cannot be used to wave a real gap through.
+    // CREATE TABLE that already shipped puts it in this list and breaks that store: give it a
+    // migration step in `migrations.ts` instead of widening the constant, which is pinned so it
+    // cannot be used to wave a real gap through.
     expect(pick(false)).toEqual([...COLUMNS_WITHOUT_A_MIGRATION]);
     // The fixture's blind spot, kept empty on purpose: SQLite refuses DROP COLUMN on a PRIMARY KEY
     // or UNIQUE column, and a column that lands here is silently unguarded by the assertion above.
@@ -184,6 +194,10 @@ describe("opening a database that predates a schema change", () => {
     const { db, path } = freshStore();
     db.exec("DROP TABLE fact_terms");
     db.exec("DELETE FROM meta");
+    // See the comment in `survivesReopenWithoutColumn`: without this, `user_version` still reads
+    // the latest version from `freshStore()`'s own migration run, and `runMigrations` would see
+    // nothing pending on reopen -- masking exactly the loss this test manufactures.
+    db.pragma("user_version = 0");
     db.close();
 
     const reopened = openStorage(path);
@@ -203,6 +217,8 @@ describe("opening a database that predates a schema change", () => {
     // store can actually insert and read a fact through it, not just carry the column.
     const { db, path } = freshStore();
     db.exec("ALTER TABLE facts DROP COLUMN capture_root");
+    // See the comment in `survivesReopenWithoutColumn`.
+    db.pragma("user_version = 0");
     db.close();
 
     const reopened = openStorage(path);

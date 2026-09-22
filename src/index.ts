@@ -23,7 +23,6 @@ export type {
 export { insertAuditLog, openDb, resolveDbPath, resolveMemHome, type AuditLogEntry } from "./db.js";
 
 export {
-  applyIdempotentAlter,
   clearAllEmbeddings,
   countEmbeddedFacts,
   countFacts,
