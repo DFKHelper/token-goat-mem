@@ -2568,15 +2568,18 @@ export function buildProgram(): Command {
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
-        const { fact, sighted } = await withDb((db) => captureSuggested(db, input));
+        const { fact, sighted, alreadyKnown } = await withDb((db) => captureSuggested(db, input));
+        const reusedExistingRow = sighted === true || alreadyKnown === true;
         process.stdout.write(
           sighted === true
             ? `sighted ${factNounPhrase(fact.kind)} ${fact.id} (already pending; recorded another sighting rather than filing a duplicate)\n`
-            : `suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`
+            : alreadyKnown === true
+              ? `known ${factNounPhrase(fact.kind)} ${fact.id} (already ${fact.status}; nothing queued for review)\n`
+              : `suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`
         );
-        // A sighting reuses the existing row's text verbatim -- nothing for an embedding call to
-        // pick up that the first `mem suggest` of this sentence did not already attempt.
-        if (sighted !== true) {
+        // Either reuse path returns a pre-existing row with its text verbatim -- nothing for an
+        // embedding call to pick up that the first capture of this sentence did not already attempt.
+        if (!reusedExistingRow) {
           await attachEmbeddingBestEffort(fact);
         }
       })

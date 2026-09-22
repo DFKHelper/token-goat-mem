@@ -14,16 +14,33 @@ import { approximateTokens, duplicateSubjectPairs, ndcgAtK, precisionAtK } from 
 import type { EvalFact } from "./fixtures.js";
 import type { Scenario } from "./queries.js";
 
-/** Ranks one scenario under `config`, returning results in surfacing order. */
-export type RankScenario = (facts: readonly EvalFact[], scenario: Scenario, config: RankConfig) => Promise<RankedResult[]>;
+export interface ScenarioRanking {
+  /** Results in surfacing order, already truncated by whatever limit the configuration applies. */
+  readonly results: readonly RankedResult[];
+  /**
+   * How many facts survived ranking *before* any result limit truncated them.
+   *
+   * Distinct from `results.length` only for a configuration that caps, which is the real
+   * `retrieve()` and nothing else (`DEFAULT_RECALL_LIMIT`). The `noMatchNeverFiltered` invariant
+   * below asks whether the *query* filtered, and a limit is not the query -- comparing
+   * `results.length` against the scope-eligible count charges the cap as if it were lexical
+   * filtering and reports a correct pipeline as a violation.
+   */
+  readonly poolSize: number;
+}
+
+/** Ranks one scenario under `config`, returning results in surfacing order plus the pre-limit pool size. */
+export type RankScenario = (facts: readonly EvalFact[], scenario: Scenario, config: RankConfig) => Promise<ScenarioRanking>;
 
 /** Wraps the synchronous `rankFacts` for the three baseline configurations. Throws if handed `"pipeline"` -- that configuration has no reduced-model ranking to fall back to and must supply its own `rankScenario` (see `eval/run.ts`). */
-async function defaultRankScenario(facts: readonly EvalFact[], scenario: Scenario, config: RankConfig): Promise<RankedResult[]> {
+async function defaultRankScenario(facts: readonly EvalFact[], scenario: Scenario, config: RankConfig): Promise<ScenarioRanking> {
   if (config === "pipeline") {
     throw new Error("evaluateConfig: the \"pipeline\" config requires an explicit rankScenario (see eval/pipelineFixture.ts)");
   }
   const baseline: BaselineRankConfig = config;
-  return rankFacts(facts, scenario.query, scenario.root, baseline);
+  // `rankFacts` applies no limit at all, so the pool it returns is the pool it ranked.
+  const results = rankFacts(facts, scenario.query, scenario.root, baseline);
+  return { results, poolSize: results.length };
 }
 
 export interface ConfigReport {
@@ -38,9 +55,11 @@ export interface ConfigReport {
   readonly totalDuplicateSubjectPairs: number;
   /** Total approximate tokens emitted across every scenario's top-k. */
   readonly totalTokensEmitted: number;
-  /** For every "no-match" scenario, whether the full candidate set still appeared in the top-k
-   * (bounded by corpus size) -- i.e. the query ranked rather than filtered. `true` iff every
-   * no-match scenario preserved the full scope-eligible candidate count. */
+  /**
+   * For every "no-match" scenario, whether the query ranked rather than filtered: `true` iff the
+   * candidate pool this configuration left standing is the same size it leaves standing for the
+   * same scenario with an empty query. Self-referential on purpose -- see the check itself.
+   */
   readonly noMatchNeverFiltered: boolean;
   /**
    * Share of surfaced anchored facts whose anchor re-evaluated to `"affirmed"`, across every
@@ -76,7 +95,7 @@ export async function evaluateConfig(
   let anchoredAffirmed = 0;
 
   for (const scenario of scenarios) {
-    const ranked = await rankScenario(facts, scenario, config);
+    const { results: ranked, poolSize } = await rankScenario(facts, scenario, config);
     const rankedFacts = ranked.map((r) => r.fact);
     const rankedIds = rankedFacts.map((f) => f.id);
 
@@ -96,10 +115,19 @@ export async function evaluateConfig(
     totalTokensEmitted += approximateTokens(rankedFacts, k);
 
     if (scenario.family === "no-match") {
-      // A query is a ranking input, never a filter (src/cli.ts's documented BM25 contract): the
-      // full scope-eligible candidate set must still be present, just (possibly) reordered.
-      const scopeEligibleCount = facts.filter((f) => f.scope === "global" || f.scopeRoot === scenario.root).length;
-      if (rankedIds.length !== scopeEligibleCount) {
+      // A query is a ranking input, never a filter (src/cli.ts's documented BM25 contract).
+      //
+      // Measured against the same configuration ranking the same scenario with an empty query,
+      // rather than against the scope-eligible count. Counting scope-eligible facts silently
+      // assumed a ranker that drops nothing for any other reason, which is true of `rankFacts` and
+      // false of the real `retrieve()`: it excludes superseded facts unconditionally (P4 -- and the
+      // fixture builds contradiction pairs precisely so `resolveContradictions` supersedes some),
+      // and applies `restrictToRoot` binding rules richer than `scopeRoot === root`. Both are
+      // correct, neither is the query, and charging them to the query reported a working pipeline
+      // as a filtering violation. Comparing a config against itself isolates the one variable the
+      // invariant is actually about, and needs no reimplementation of what `retrieve()` does.
+      const { poolSize: unqueriedPoolSize } = await rankScenario(facts, { ...scenario, query: "" }, config);
+      if (poolSize !== unqueriedPoolSize) {
         noMatchNeverFiltered = false;
       }
       continue;

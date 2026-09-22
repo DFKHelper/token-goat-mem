@@ -747,19 +747,60 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     rmSync(otherRoot, { recursive: true, force: true });
   });
 
-  it("does not sight an existing active fact -- matches scan-session/import, which record a sighting only against a pending match", () => {
+  it("does not sight an existing active fact, and files nothing either -- both of import.ts's boundaries at once", () => {
     const { fact: active } = captureExplicit(db, { text: "always run migrations before deploy", kind: "preference", root });
     expect(active.status).toBe("active");
 
     const suggested = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
-    // No sighting recorded against the active fact (its `sightings` column stays untouched), and
-    // the suggestion still files its own pending row -- exactly as before this fix, since neither
-    // `scan-session` nor `import --from-md` ever calls `recordSighting` against anything but a
-    // `pending` bound match.
+    // Two separate boundaries, both taken from `src/import.ts`. No sighting, because only a
+    // `pending` row has one to record against (`active.sightings` stays untouched). And no insert
+    // either, because `import.ts` skips on *any* bound match (`skipped_known`) -- filing a pending
+    // row for a sentence already held as `active` queues a human decision that was already made,
+    // which is precisely the noise `mem review` exists to be free of.
     expect(suggested.sighted).toBeUndefined();
-    expect(suggested.fact.status).toBe("pending");
-    expect(suggested.fact.id).not.toBe(active.id);
+    expect(suggested.alreadyKnown).toBe(true);
+    expect(suggested.fact.id).toBe(active.id);
+    expect(suggested.fact.status).toBe("active");
     expect(sightingsOf(active.id)).toBe(0);
+    const rows = db.prepare("SELECT id FROM facts").all() as { id: string }[];
+    expect(rows).toHaveLength(1);
+  });
+
+  it("skips a superseded bound match too -- the rule is any bound match, not just active", () => {
+    const { fact: first } = captureExplicit(db, { text: "always run migrations before deploy", kind: "preference", root });
+    db.prepare("UPDATE facts SET status = 'superseded' WHERE id = ?").run(first.id);
+
+    const suggested = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
+    // A superseded row is a decision already made and then revisited. Re-queueing the identical
+    // sentence as `pending` would silently re-litigate it through `mem review` rather than through
+    // `mem edit`/`captureExplicit`, which is where a genuine reversal belongs.
+    expect(suggested.alreadyKnown).toBe(true);
+    expect(suggested.fact.id).toBe(first.id);
+    const rows = db.prepare("SELECT id FROM facts").all() as { id: string }[];
+    expect(rows).toHaveLength(1);
+  });
+
+  it("prefers the pending match when both a pending and a non-pending bound match exist", () => {
+    const text = "always run migrations before deploy";
+    // A store can hold both shapes for one sentence only from rows written before this dedup rule
+    // existed, so the pair is built directly -- and built with the *superseded* row inserted first,
+    // which is the order that actually exposes the bug: a `boundMatches[0]` check ahead of the
+    // pending lookup passes when the pending row happens to come back first, and swallows the
+    // sighting when it does not.
+    const { fact: stale } = captureExplicit(db, { text, kind: "preference", root });
+    db.prepare("UPDATE facts SET status = 'superseded' WHERE id = ?").run(stale.id);
+
+    // `factsByTextHash` narrows on `text_hash`, then re-checks normalized text equality in JS, so
+    // the pending row needs both copied onto it to count as a match.
+    const { fact: pending } = captureSuggested(db, { text: "always run linting before deploy", kind: "preference", root });
+    expect(pending.status).toBe("pending");
+    db.prepare("UPDATE facts SET text = ?, text_hash = (SELECT text_hash FROM facts WHERE id = ?) WHERE id = ?").run(text, stale.id, pending.id);
+
+    const third = captureSuggested(db, { text, kind: "preference", root });
+    expect(third.sighted).toBe(true);
+    expect(third.alreadyKnown).toBeUndefined();
+    expect(third.fact.id).toBe(pending.id);
+    expect(sightingsOf(pending.id)).toBe(1);
   });
 });
 
