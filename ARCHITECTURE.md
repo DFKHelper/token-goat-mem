@@ -49,10 +49,17 @@ never further than that -- decay alone cannot withhold a fact.
 
 ## Storage
 
-Storage is SQLite via `better-sqlite3`. `src/db.ts` owns the `facts`, `audit_log`, and `meta` tables.
-`src/storage.ts` builds on it rather than duplicating it, owning `sources`, `recall_log`, and
-`fact_terms`, and carries the schema migration mechanism -- a sequence of idempotent `ALTER TABLE`
-calls, not a `PRAGMA user_version` counter.
+Storage is SQLite via `better-sqlite3`. `src/db.ts` owns the `facts`, `audit_log`, and `meta` tables,
+and with them the whole-database `PRAGMA user_version` counter: `openDb` runs `src/migrations.ts` on
+every connection open. `src/storage.ts` owns `sources`, `recall_log`, and `fact_terms` but carries no
+schema logic of its own -- every table and column any module needs is one ordered step in the single
+migration list.
+
+Each step is individually idempotent, guarded by a `PRAGMA table_info` column check rather than by
+catching SQLite's "duplicate column" error text, because a store written by an older build arrives
+with every column already present and `user_version` still at 0. Replaying the baseline against it
+has to be a silent no-op, so a fresh database and a years-old one converge on the same shape the
+first time a newer build opens either.
 
 ## Integration seam
 
@@ -96,7 +103,8 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/import.ts` | Capture | `mem import --from-md <path>` -- the mem-side half of the "advisory CLAUDE.md->mem migration probe" (the other half, `to | MarkdownImportError, MarkdownBullet, extractMarkdownBullets, ImportFromMarkdownOptions, ImportCandidate |
 | `src/sessionScan.ts` | Capture | Deterministic extraction of durable-preference candidates from a session transcript | MAX_SCANNED_TURNS, MAX_CANDIDATE_LENGTH, Candidate, userTurnText, extractCandidates |
 | `src/db.ts` | Storage | SQLite connection and schema for the `facts` table (design plan Section 3), plus two small infra tables every write path | resolveMemHome, resolveDbPath, openDb, SUPERSEDED_BY_FACT_PREFIX, SUPERSEDED_AS_DUPLICATE_PREFIX |
-| `src/storage.ts` | Storage | Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (d | applyIdempotentAlter, ensureStorageSchema, openStorage, normalizeSubject, normalizeValue |
+| `src/migrations.ts` | Storage | Ordered schema migrations for the mem database, keyed on SQLite's own `PRAGMA user_version` | MigrationStep, MigrationResult, hasColumn, addColumn, MIGRATIONS |
+| `src/storage.ts` | Storage | Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (d | ensureStorageSchema, openStorage, normalizeSubject, normalizeValue, normalizeFactText |
 | `src/hook-envelope.ts` | Integration | Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin | HOOK_PROMPT_KEYS, HOOK_SESSION_KEY, HOOK_TRANSCRIPT_KEY, HookEnvelope, parseHookEnvelope |
 | `src/integration-seam.ts` | Integration | The token-goat integration seam (design plan Section 4) | TGMEM_PROTOCOL_VERSION, TGMEM_HEADER, FOLLOW_UP_SHOW_DETAIL, FOLLOW_UP_REVIEW, TGMEM_FOOTER_LINE |
 | `src/wiring.ts` | Integration | Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets | WiringOpts, WiringFileAction, WiringChange, WiringResult, WiringPlanEntry |

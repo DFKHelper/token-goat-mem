@@ -43,159 +43,28 @@ import { randomUUID } from "node:crypto";
 import { openDb, resolveDbPath } from "./db.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
+import { runMigrations } from "./migrations.js";
 import type { Fact, FactFilter, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
 
 /** Connection type, borrowed from db.ts's own return type rather than importing better-sqlite3's types directly -- keeps this module's public surface in lockstep with whatever db.ts actually opens. */
 type Db = ReturnType<typeof openDb>;
 
-const STORAGE_SCHEMA = `
-CREATE TABLE IF NOT EXISTS sources (
-  id TEXT PRIMARY KEY,
-  fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
-  excerpt TEXT NOT NULL,
-  stored_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sources_fact_id ON sources(fact_id);
-CREATE INDEX IF NOT EXISTS idx_sources_stored_at ON sources(stored_at);
-
-CREATE TABLE IF NOT EXISTS meta (
-  key TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS recall_log (
-  fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
-  session_id TEXT NOT NULL,
-  surfaced_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_recall_log_session_fact ON recall_log(session_id, fact_id);
-CREATE INDEX IF NOT EXISTS idx_recall_log_surfaced_at ON recall_log(surfaced_at);
-
-CREATE TABLE IF NOT EXISTS fact_terms (
-  fact_id TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
-  term TEXT NOT NULL,
-  term_key TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK (kind IN ('entity','topic'))
-);
-CREATE INDEX IF NOT EXISTS idx_fact_terms_fact_id ON fact_terms(fact_id);
-CREATE INDEX IF NOT EXISTS idx_fact_terms_lookup ON fact_terms(term_key, kind);
-`;
-
 /**
- * Runs an ALTER TABLE that may already have been applied by an earlier
- * version of this module. Swallows exactly a "duplicate column" failure so
- * re-running init against an already-migrated database is a no-op; any other
- * failure propagates. This -- rather than a `PRAGMA user_version` counter --
- * is this module's migration mechanism: `user_version` is not claimed here
- * because db.ts (which creates `facts` and does not use it today) would be
- * the natural owner of a whole-database version counter, and this module
- * only owns `sources`/`meta`. `CREATE TABLE IF NOT EXISTS` (STORAGE_SCHEMA
- * above) already covers the common case of a brand-new table; this covers
- * the rarer case of a column added to an existing one in a future release.
- * Every column added to an existing table since the first release goes
- * through here; exported so a migration owned outside this module has the
- * same already-tested home.
- */
-export function applyIdempotentAlter(db: Db, sql: string): void {
-  try {
-    db.exec(sql);
-  } catch (error) {
-    if (!(error instanceof Error) || !/duplicate column/i.test(error.message)) {
-      throw error;
-    }
-  }
-}
-
-/**
- * Ensures the `sources` and `meta` tables (and the seeded epoch row) exist on
- * an already-open connection, and enables foreign-key enforcement so
- * `sources`'s `ON DELETE CASCADE` actually fires -- `PRAGMA foreign_keys` is
- * per-connection and off by default in SQLite, and db.ts's `openDb` does not
- * set it (it does not need to: `facts` has no foreign keys of its own).
- * Idempotent: safe to call on every connection open.
+ * Ensures every table/column this module and `migrations.ts`'s steps are responsible for exists on
+ * an already-open connection, and enables foreign-key enforcement so `sources`'s `ON DELETE CASCADE`
+ * actually fires -- `PRAGMA foreign_keys` is per-connection and off by default in SQLite, and
+ * db.ts's `openDb` does not set it (it does not need to: `facts` has no foreign keys of its own).
+ *
+ * The schema work itself lives in `migrations.ts`'s `runMigrations`, keyed on `PRAGMA user_version`;
+ * this is now just that module's entry point for callers that only hold a connection opened via
+ * `openDb` rather than `openStorage`. `openDb` already runs the same migrations, so on a connection
+ * opened through `openStorage` (below) this call is a same-version no-op every time -- cheap, and
+ * kept rather than skipped so a bare `openDb` handle passed here directly still ends up fully
+ * migrated. Idempotent: safe to call on every connection open.
  */
 export function ensureStorageSchema(db: Db): void {
   db.pragma("foreign_keys = ON");
-  db.exec(STORAGE_SCHEMA);
-  db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
-  // `mem review --since-epoch <n>` (design plan Section 4/6) needs to know which write epoch each
-  // fact was last touched at. A `NOT NULL DEFAULT 0` backfill is deliberate, not just SQLite's usual
-  // ADD COLUMN behavior: rows written before this migration existed have no recorded epoch, and `0`
-  // is the correct "predates every real write" sentinel -- the epoch counter itself starts at `0` and
-  // only strictly increases (`bumpEpoch`), so no real write can ever be stamped `0` again, and
-  // `epoch > n` for any `n >= 0` correctly excludes pre-migration rows without a separate NULL case.
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0");
-  // Status bookkeeping (types.ts `status_changed_at` / `prior_status`). Both are nullable with no
-  // backfill, unlike the `epoch` column above: there is no correct value to invent for a row whose
-  // status history predates the columns, and NULL is the honest "unknown" every reader falls back
-  // on (`status_changed_at ?? captured_at`) rather than a sentinel that would silently look like a
-  // real, very old status change and drag pre-migration rows into the GC window on first pass.
-  // Repository-relative project identity (src/projectIdentity.ts). Nullable with no backfill: the
-  // value is derived from a repository's layout, and inventing one during a migration would mean
-  // touching the filesystem for every stored row -- including roots that have since been deleted or
-  // moved, where any answer would be a fabrication. NULL is exactly "this fact predates identities",
-  // and every reader falls back to the absolute-path binding for it, which is what it was captured
-  // with. A re-capture in the same project fills it in naturally.
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN scope_repo TEXT");
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN status_changed_at TEXT");
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN prior_status TEXT");
-  // Capture-time root (retrieval.ts's `anchorRootFor`). Nullable with no backfill, same reasoning
-  // as `scope_repo` above: a row written before this column existed recorded no capture root at
-  // all, and there is no honest value to invent for it -- the directory a `path`/`global` fact's
-  // anchor was meant to be evaluated against is simply unrecoverable from the row itself. NULL is
-  // exactly "capture root unknown", and every reader must treat it as `unverified` rather than
-  // guessing `affirmed` or `contradicted` off whatever directory the query happened to run from.
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN capture_root TEXT");
-  // Usefulness feedback (`mem used`). Nullable with no backfill for the same reason as the two
-  // columns above and one of its own: `recall_log` rows written before this column existed record
-  // only that a fact was *surfaced*, and no value invented for them would be honest. A `0`-style
-  // sentinel is not available here either -- the column holds the timestamp a fact was confirmed
-  // useful, so any non-NULL value is itself the claim. NULL is exactly "nobody ever said", which is
-  // what `getUsefulnessCounts` needs to keep a never-confirmed fact out of the usefulness ranking
-  // rather than ranking it as confirmed-unhelpful.
-  //
-  // Deliberately an ALTER rather than a column on STORAGE_SCHEMA's `CREATE TABLE IF NOT EXISTS`:
-  // that statement is a no-op against every database that already has a `recall_log`, so editing it
-  // would leave the column missing on every existing install while looking correct on a fresh one.
-  // The ALTER is the migration; a fresh database gets the column from the very same line.
-  applyIdempotentAlter(db, "ALTER TABLE recall_log ADD COLUMN used_at TEXT");
-  // Durable "this fact has been surfaced at least once" mark, for `mem consolidate --stale`.
-  //
-  // `recall_log` alone cannot answer that question: `mem epoch --gc` rotates its rows after
-  // GC_RECALL_LOG_MAX_AGE_DAYS (30), so a fact surfaced two months ago has no row left and reads as
-  // never-surfaced -- exactly the fact the stale pass would then propose superseding. Rotating the
-  // log is correct (its only reader is a same-session `--delta` recall); losing the one bit that
-  // outlives the session is not. This column is that bit, written alongside every `recall_log`
-  // insert and never rotated.
-  //
-  // Nullable with no backfill, same reasoning as the three columns above: for a fact captured
-  // before this column existed there is no honest value to invent. `listStaleUnsurfacedFacts`
-  // covers that window by *also* requiring no surviving `recall_log` row, so a pre-migration fact
-  // surfaced inside the rotation window is still excluded.
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN last_surfaced_at TEXT");
-  // `mem edit --undo`'s reversal payload (cli.ts `buildEditPriorPayload`/`undoEdit`). Nullable with
-  // no backfill, same reasoning as the columns above: an `edit` row written before this column
-  // existed recorded only a previewed `detail` string, and there is no prior value to reconstruct
-  // from that -- reconstructing one would be exactly the truncation defect this column exists to
-  // fix, wearing a different hat. NULL is exactly "this edit predates undo", and `undoEdit` refuses
-  // cleanly on it rather than treating a stale row as reversible.
-  applyIdempotentAlter(db, "ALTER TABLE audit_log ADD COLUMN prior_json TEXT");
-  // Marks that facet extraction has run for a fact at all, independent of whether it found
-  // anything to store. Nullable with no backfill, same NULL-means-unknown convention as the
-  // columns above: a fact this predates has genuinely never been checked and belongs in the
-  // backfill queue, same as today. Without this column, `listFactsNeedingTerms` had to infer
-  // "never extracted" from "no row in fact_terms" -- indistinguishable from "extracted, and its
-  // text is entirely stopwords", so a fact of that shape was re-offered by `mem facets --backfill`
-  // forever: the command runs, finds nothing to write, and the shortfall never closes.
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN terms_checked_at TEXT");
-  // Repeat-sighting counter for a `pending` fact (`mem review`'s pending bucket sort, `mem
-  // scan-session`/`mem import --from-md`'s `recordSighting`). `NOT NULL DEFAULT 0`, matching
-  // `epoch` above rather than the nullable "unknown" convention most of this block uses: unlike
-  // `status_changed_at` or `last_surfaced_at`, there is an honest value to backfill here -- a row
-  // written before this column existed has, by construction, zero sightings *recorded*, which is
-  // exactly what `0` means. Backdating it to NULL would only force every reader to treat "never
-  // sighted again" and "predates the column" as two states needing the same `?? 0` fallback anyway.
-  applyIdempotentAlter(db, "ALTER TABLE facts ADD COLUMN sightings INTEGER NOT NULL DEFAULT 0");
+  runMigrations(db);
 }
 
 /**
