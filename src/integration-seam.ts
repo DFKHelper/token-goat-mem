@@ -64,7 +64,7 @@ import { resolveDbPath } from "./db.js";
 import { getGraphScoresForQuery } from "./factgraph.js";
 import { planEmbeddingRanking } from "./embeddings.js";
 import { identityMatches } from "./projectIdentity.js";
-import { retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
+import { anchorRootsFor, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
 /**
@@ -679,11 +679,13 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }
-    // One indexed range scan (`root` is a primary-key prefix) on the connection already open, for
-    // the same reason as every other read in this block: `retrieve()` below must not hold a DB
-    // handle across its embedding round trip, so whatever `anchor_cache` already knows about this
-    // root has to be read now or not at all.
-    anchorCacheSnapshot = prefetchAnchorCache(db, root);
+    // One indexed lookup per evaluation root (`root` is a primary-key prefix) on the connection
+    // already open, for the same reason as every other read in this block: `retrieve()` below must
+    // not hold a DB handle across its embedding round trip, so whatever `anchor_cache` already
+    // knows has to be read now or not at all. Keyed on `anchorRootsFor` rather than `root` alone --
+    // this is the hook path, so the monorepo case it covers (a `path` fact reached from the
+    // repository root, evaluated against its own `captureRoot`) is the common one here, not an edge.
+    anchorCacheSnapshot = prefetchAnchorCache(db, anchorRootsFor(allFacts, root));
   } finally {
     db.close();
   }

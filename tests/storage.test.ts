@@ -868,6 +868,30 @@ describe("prefetchAnchorCache / createBufferedAnchorCacheStore / persistAnchorVe
     expect(createBufferedAnchorCacheStore(snapshot).get("/other-repo", "file-exists a.txt")).toBeUndefined();
   });
 
+  it("prefetches every evaluation root, not just the query root -- the monorepo path-scope case", () => {
+    // Regression guard. `anchorRootFor` evaluates a `path` fact against its own `captureRoot`
+    // whenever the query root is an ancestor of it, and leaves a `project` fact bound elsewhere on
+    // its `scopeRoot` on any recall that is not `restrictToRoot`. Prefetching on the query root
+    // alone meant those facts missed the cache on every single recall and wrote their verdict back
+    // under a key the next prefetch would never load -- invisibly, because the recomputed verdict
+    // is still correct. Only the wasted filesystem work gave it away, and nothing measured that.
+    const store = createAnchorCacheStore(db);
+    store.set("/repo/packages/api", "file-exists a.txt", "affirmed", "f:1:1");
+    store.set("/elsewhere", "file-exists a.txt", "contradicted", "f:2:2");
+    const snapshot = createBufferedAnchorCacheStore(
+      prefetchAnchorCache(db, ["/repo", "/repo/packages/api", "/elsewhere"])
+    );
+    expect(snapshot.get("/repo/packages/api", "file-exists a.txt")).toEqual({ verdict: "affirmed", witness: "f:1:1" });
+    expect(snapshot.get("/elsewhere", "file-exists a.txt")).toEqual({ verdict: "contradicted", witness: "f:2:2" });
+    // Verdicts stay keyed per root: the ancestor must not inherit a descendant's answer.
+    expect(snapshot.get("/repo", "file-exists a.txt")).toBeUndefined();
+  });
+
+  it("an empty root list reads nothing rather than every row in the table", () => {
+    createAnchorCacheStore(db).set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    expect(prefetchAnchorCache(db, []).size).toBe(0);
+  });
+
   it("createBufferedAnchorCacheStore.get reads the prefetched snapshot -- the round trip a real prefetch depends on", () => {
     createAnchorCacheStore(db).set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
     const store = createBufferedAnchorCacheStore(prefetchAnchorCache(db, "/repo"));

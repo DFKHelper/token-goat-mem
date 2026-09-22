@@ -132,6 +132,7 @@ import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./h
 import { scanTranscript } from "./sessionScan.js";
 import {
   anchorRootFor,
+  anchorRootsFor,
   decayedConfidence,
   evaluateFactFreshness,
   isDecayedBelowGroundTruth,
@@ -2860,8 +2861,11 @@ export function buildProgram(): Command {
           // inline per field below, so `graphScores` can reuse it instead of paying for the same
           // lookup twice.
           const entityOverlap = getEntityOverlapForQuery(db, query ?? "");
+          // Hoisted out of the literal below so the anchor-cache prefetch can see it: the roots
+          // anchors are evaluated against are derived from the facts, not from `root` alone.
+          const allFacts = listFacts(db, {});
           return {
-            facts: listFacts(db, {}),
+            facts: allFacts,
             usefulness: getUsefulnessCounts(db),
             embeddingMeta: getEmbeddingMeta(db) ?? null,
             // Read only when something asks for it: this is a full scan of `fact_terms`, and every
@@ -2872,10 +2876,12 @@ export function buildProgram(): Command {
             // (see `factgraph.getGraphScoresForQuery`) -- empty for the same no-entity queries
             // `entityOverlap` above already costs nothing for.
             graphScores: getGraphScoresForQuery(db, query ?? "", {}, entityOverlap),
-            // One indexed range scan on the connection already open, for the same reason as every
-            // read above: `retrieve()` below must not hold a DB handle across its embedding round
-            // trip, so whatever `anchor_cache` already knows about this root has to be read now.
-            anchorCacheSnapshot: prefetchAnchorCache(db, root),
+            // One indexed lookup per evaluation root on the connection already open, for the same
+            // reason as every read above: `retrieve()` below must not hold a DB handle across its
+            // embedding round trip, so whatever `anchor_cache` already knows has to be read now.
+            // Keyed on `anchorRootsFor`, not `root`: a `path` fact reached from an ancestor and a
+            // `project` fact bound elsewhere both evaluate against a root that is not this one.
+            anchorCacheSnapshot: prefetchAnchorCache(db, anchorRootsFor(allFacts, root)),
           };
         });
         // Disconnected from storage by construction (see storage.ts's `BufferedAnchorCacheStore`):
