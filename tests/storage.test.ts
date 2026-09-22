@@ -1,12 +1,16 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import {
+  clearAnchorCacheStore,
+  createAnchorCacheStore,
+  createBufferedAnchorCacheStore,
   ensureStorageSchema,
   openStorage,
   normalizeSubject,
+  factsByTextHash,
   insertFact,
   getFactById,
   listFacts,
@@ -24,10 +28,13 @@ import {
   insertRecallLog,
   listFactsNeedingEmbedding,
   markRecallUsed,
+  persistAnchorVerdicts,
+  prefetchAnchorCache,
   replaceFactTerms,
   resolveFactIdOrPrefix,
 } from "../src/storage.js";
 import { openDb } from "../src/db.js";
+import { hashFactText } from "../src/factText.js";
 import { addColumn } from "../src/migrations.js";
 import type { NewFact } from "../src/types.js";
 
@@ -210,6 +217,57 @@ describe("insertFact / getFactById", () => {
 
   it("returns undefined for a nonexistent id", () => {
     expect(getFactById(db, "does-not-exist")).toBeUndefined();
+  });
+});
+
+describe("factsByTextHash", () => {
+  it("finds a fresh insert by its hash", () => {
+    const fact = insertFact(db, baseFact({ text: "uses pnpm not npm" }));
+    expect(factsByTextHash(db, "uses pnpm not npm").map((f) => f.id)).toEqual([fact.id]);
+  });
+
+  it("finds a pre-existing row backfilled by the v4 migration -- the regression test for the silent-miss trap", () => {
+    // Simulates a row written before facts.text_hash existed: inserted with the column NULL,
+    // exactly what the v4 backfill (migrations.test.ts) exists to fix. A hash-keyed lookup against
+    // an un-backfilled row silently misses it and reports "no duplicate" with total confidence --
+    // this pins that `factsByTextHash` only works once the row is actually backfilled.
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)
+       VALUES ('pre-hash-fact', 'uses pnpm not npm', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1)`
+    ).run();
+
+    expect(factsByTextHash(db, "uses pnpm not npm")).toEqual([]);
+
+    // Backfill it the same way migrations.ts's v4 step does, then confirm the lookup finds it.
+    db.prepare("UPDATE facts SET text_hash = ? WHERE id = ?").run(hashFactText("uses pnpm not npm"), "pre-hash-fact");
+
+    expect(factsByTextHash(db, "uses pnpm not npm").map((f) => f.id)).toEqual(["pre-hash-fact"]);
+  });
+
+  it("collides whitespace/case/trailing-period variants into the same bucket as the full scan would", () => {
+    const fact = insertFact(db, baseFact({ text: "Uses PNPM  not npm." }));
+    expect(factsByTextHash(db, "uses pnpm not npm").map((f) => f.id)).toEqual([fact.id]);
+    expect(factsByTextHash(db, "  USES pnpm not npm  ").map((f) => f.id)).toEqual([fact.id]);
+  });
+
+  it("a text update refreshes the hash so the old text no longer resolves and the new text does", () => {
+    const fact = insertFact(db, baseFact({ text: "uses npm" }));
+    updateFact(db, fact.id, { text: "uses pnpm" });
+    expect(factsByTextHash(db, "uses npm")).toEqual([]);
+    expect(factsByTextHash(db, "uses pnpm").map((f) => f.id)).toEqual([fact.id]);
+  });
+
+  it("does not merge two distinct texts even if they shared a hash (equality, not just the hash, decides)", () => {
+    // Not a real collision (sha256 is not going to collide in a test) -- this instead pins that the
+    // lookup filters by normalizeFactText equality on the hash-narrowed candidate set, rather than
+    // trusting the index match alone, by planting a row whose stored hash matches a text it does
+    // not actually normalize to.
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence, text_hash)
+       VALUES ('fake-collision', 'an unrelated statement', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1, ?)`
+    ).run(hashFactText("uses pnpm not npm"));
+
+    expect(factsByTextHash(db, "uses pnpm not npm")).toEqual([]);
   });
 });
 
@@ -708,5 +766,104 @@ describe("replaceFactTerms epoch accounting", () => {
     const epochBefore = getEpoch(db);
     insertFact(db, baseFact());
     expect(getEpoch(db)).toBe(epochBefore + 1);
+  });
+});
+
+describe("createAnchorCacheStore", () => {
+  it("returns undefined for a verdict never written", () => {
+    const store = createAnchorCacheStore(db);
+    expect(store.get("/repo", "file-exists a.txt")).toBeUndefined();
+  });
+
+  it("round-trips a written verdict and witness", () => {
+    const store = createAnchorCacheStore(db);
+    store.set("/repo", "file-exists a.txt", "affirmed", "f:123:4");
+    expect(store.get("/repo", "file-exists a.txt")).toEqual({ verdict: "affirmed", witness: "f:123:4" });
+  });
+
+  it("keys on (root, anchor) -- a different root or anchor text misses", () => {
+    const store = createAnchorCacheStore(db);
+    store.set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    expect(store.get("/other-repo", "file-exists a.txt")).toBeUndefined();
+    expect(store.get("/repo", "file-exists b.txt")).toBeUndefined();
+  });
+
+  it("a second set for the same (root, anchor) overwrites rather than erroring", () => {
+    const store = createAnchorCacheStore(db);
+    store.set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    store.set("/repo", "file-exists a.txt", "contradicted", "f:2:2");
+    expect(store.get("/repo", "file-exists a.txt")).toEqual({ verdict: "contradicted", witness: "f:2:2" });
+  });
+
+  it("clearAnchorCacheStore removes every row, so cases sharing one db don't leak state", () => {
+    const store = createAnchorCacheStore(db);
+    store.set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    clearAnchorCacheStore(db);
+    expect(store.get("/repo", "file-exists a.txt")).toBeUndefined();
+  });
+});
+
+describe("prefetchAnchorCache / createBufferedAnchorCacheStore / persistAnchorVerdicts (disconnected-from-storage anchor cache)", () => {
+  it("prefetchAnchorCache scopes to one root -- a different root's rows are not returned", () => {
+    createAnchorCacheStore(db).set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    createAnchorCacheStore(db).set("/other-repo", "file-exists a.txt", "contradicted", "f:9:9");
+    const snapshot = prefetchAnchorCache(db, "/repo");
+    expect(createBufferedAnchorCacheStore(snapshot).get("/repo", "file-exists a.txt")).toEqual({
+      verdict: "affirmed",
+      witness: "f:1:1",
+    });
+    expect(createBufferedAnchorCacheStore(snapshot).get("/other-repo", "file-exists a.txt")).toBeUndefined();
+  });
+
+  it("createBufferedAnchorCacheStore.get reads the prefetched snapshot -- the round trip a real prefetch depends on", () => {
+    createAnchorCacheStore(db).set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    const store = createBufferedAnchorCacheStore(prefetchAnchorCache(db, "/repo"));
+    expect(store.get("/repo", "file-exists a.txt")).toEqual({ verdict: "affirmed", witness: "f:1:1" });
+    expect(store.get("/repo", "file-exists b.txt")).toBeUndefined();
+  });
+
+  it("set() buffers in memory and never touches the db -- a fresh prefetch does not see it", () => {
+    const store = createBufferedAnchorCacheStore(new Map());
+    store.set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    expect(store.get("/repo", "file-exists a.txt")).toEqual({ verdict: "affirmed", witness: "f:1:1" });
+    expect(store.buffer.size).toBe(1);
+    expect(prefetchAnchorCache(db, "/repo").size).toBe(0);
+  });
+
+  it("get() prefers a buffered write over the prefetched snapshot for the same key", () => {
+    createAnchorCacheStore(db).set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    const store = createBufferedAnchorCacheStore(prefetchAnchorCache(db, "/repo"));
+    store.set("/repo", "file-exists a.txt", "contradicted", "f:2:2");
+    expect(store.get("/repo", "file-exists a.txt")).toEqual({ verdict: "contradicted", witness: "f:2:2" });
+  });
+
+  it("persistAnchorVerdicts flushes the buffer to anchor_cache, readable by a fresh open (the cross-process win)", () => {
+    const store = createBufferedAnchorCacheStore(new Map());
+    store.set("/repo", "file-exists a.txt", "affirmed", "f:1:1");
+    persistAnchorVerdicts(db, store.buffer);
+
+    db.close();
+    db = openStorage(join(root, "mem.db"));
+    expect(createAnchorCacheStore(db).get("/repo", "file-exists a.txt")).toEqual({
+      verdict: "affirmed",
+      witness: "f:1:1",
+    });
+  });
+
+  it("persistAnchorVerdicts batches every entry into one transaction, not one per verdict", () => {
+    const store = createBufferedAnchorCacheStore(new Map());
+    store.set("/repo", "a", "affirmed", "f:1:1");
+    store.set("/repo", "b", "contradicted", "f:2:2");
+    const transactionSpy = vi.spyOn(db, "transaction");
+    persistAnchorVerdicts(db, store.buffer);
+    expect(transactionSpy).toHaveBeenCalledTimes(1);
+    expect(createAnchorCacheStore(db).get("/repo", "a")).toEqual({ verdict: "affirmed", witness: "f:1:1" });
+    expect(createAnchorCacheStore(db).get("/repo", "b")).toEqual({ verdict: "contradicted", witness: "f:2:2" });
+  });
+
+  it("persistAnchorVerdicts is a no-op on an empty buffer -- no statement prepared, no transaction opened", () => {
+    const prepareSpy = vi.spyOn(db, "prepare");
+    persistAnchorVerdicts(db, new Map());
+    expect(prepareSpy).not.toHaveBeenCalled();
   });
 });

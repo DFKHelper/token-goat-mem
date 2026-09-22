@@ -67,6 +67,22 @@ import type { FreshnessVerdict } from "./types.js";
  */
 export type AnchorVerdict = FreshnessVerdict;
 
+/**
+ * Storage-agnostic seam for a verdict cache that outlives this process — this module has no
+ * knowledge of SQLite or any other backing store and must stay that way (the concrete
+ * implementation belongs in storage.ts, which already owns every non-`facts` table). A caller that
+ * wants cross-process reuse constructs an implementation and passes it into {@link evaluateAnchor};
+ * absent, evaluation behaves exactly as it did before this existed (in-process `memo` only).
+ *
+ * `witness` is whatever cheap, deterministic fingerprint the predicate that produced `verdict` read
+ * at evaluation time (a stat tuple, typically) — see each cacheable predicate's own comment for what
+ * it uses and why an unchanged witness proves the verdict still holds.
+ */
+export interface AnchorCacheStore {
+  get(root: string, anchor: string): { verdict: AnchorVerdict; witness: string | null } | undefined;
+  set(root: string, anchor: string, verdict: AnchorVerdict, witness: string | null): void;
+}
+
 /** Cap on bytes read for `file-contains` / `file-not-contains` — keeps the anchor cheap and bounded (S4). */
 const MAX_CONTENT_READ_BYTES = 1_000_000;
 
@@ -207,6 +223,25 @@ function mtimeOrNull(path: string): number | StatOutcome {
 }
 
 /**
+ * A cheap, deterministic fingerprint of `path` for the persistent anchor cache (mtime + size, not
+ * mtime alone -- two edits landing in the same millisecond with the same byte count is the only gap
+ * mtime alone would miss, and size is free once `statSync` has already run). `"absent"` when the
+ * path genuinely does not exist (itself a valid, cacheable witness: an anchor that reads "no such
+ * file" today reads the same tomorrow unless something is created there). `null` when the state
+ * could not be determined for any other reason ({@link isGenuineAbsence}) -- not a sound basis for
+ * either reusing or writing a cached verdict, same reasoning as the missing-root check in
+ * {@link evaluateAnchor}.
+ */
+function statWitness(path: string): string | null {
+  try {
+    const stat = statSync(path);
+    return `f:${stat.mtimeMs}:${stat.size}`;
+  } catch (error) {
+    return isGenuineAbsence(error) ? "absent" : null;
+  }
+}
+
+/**
  * Returns `true` if `target` itself, or any directory component between `root` and `target`, is a
  * symlink. Root-containment (`resolveWithinRoot`) only guarantees the *resolved* path stays inside
  * `root` — it says nothing about whether a symlink somewhere along that path hops outside `root`
@@ -275,6 +310,52 @@ interface BudgetState {
 }
 
 /**
+ * Looks up a persisted verdict for `root`+`anchor` and returns it only if `witness` (freshly
+ * computed by the caller, right before it would otherwise do the predicate's real, expensive work)
+ * matches the witness stored alongside it exactly. A match proves nothing the predicate reads has
+ * changed since that verdict was recorded, so reusing it is not a guess -- it is the same answer
+ * evaluation would reach again, without paying for it again. `undefined` means "no reusable
+ * verdict": either there's no store, no sound witness could be formed (`witness === null`), nothing
+ * is cached yet, or what's cached no longer matches -- every one of those is a cache miss, not an
+ * error, and the caller falls through to evaluating for real.
+ *
+ * A store failure (read-only file, lock contention, disk full -- recall is a read path, and
+ * writing to SQLite during a read can fail) degrades to "no reusable verdict" rather than
+ * propagating: a broken cache must never be the reason `mem recall` fails.
+ */
+function tryPersistentCache(store: AnchorCacheStore | undefined, root: string, anchor: string, witness: string | null): AnchorVerdict | undefined {
+  if (store === undefined || witness === null) {
+    return undefined;
+  }
+  let cached: { verdict: AnchorVerdict; witness: string | null } | undefined;
+  try {
+    cached = store.get(root, anchor);
+  } catch {
+    return undefined;
+  }
+  return cached !== undefined && cached.witness === witness ? cached.verdict : undefined;
+}
+
+/**
+ * Persists a freshly-computed verdict alongside the witness that justified reusing it later. Never
+ * called with a budget-exhausted or missing-root `unverified` -- see those verdicts' own comments in
+ * {@link evaluateAnchor} for why, doubly so once the cache outlives the process: a budget bailout
+ * written here would poison every future call for this anchor+root, not just this one, and a
+ * missing-root verdict would assert forever that a directory nobody has checked since is still gone.
+ * Same fail-open contract as {@link tryPersistentCache}: a write failure is swallowed, never thrown.
+ */
+function persistVerdict(store: AnchorCacheStore | undefined, root: string, anchor: string, verdict: AnchorVerdict, witness: string | null): void {
+  if (store === undefined || witness === null) {
+    return;
+  }
+  try {
+    store.set(root, anchor, verdict, witness);
+  } catch {
+    // Fail open: a broken persistent store degrades to "no caching", never breaks recall.
+  }
+}
+
+/**
  * `file-newer-than <a> <b>` — tests whether `a` is the currently-active file relative to `b`.
  * affirmed: `a` exists and is newer than `b`.
  * contradicted: `b` exists and is newer than `a`, or `a` does not exist while `b` does.
@@ -317,7 +398,14 @@ function evaluateFileNewerThan(mtimeA: number | StatOutcome, mtimeB: number | St
  * outside it, and following it here would turn this predicate into a content-read oracle for
  * arbitrary filesystem locations.
  */
-function evaluateFileContains(root: string, path: string, substring: string, negate: boolean): AnchorVerdict {
+function evaluateFileContains(
+  root: string,
+  path: string,
+  substring: string,
+  negate: boolean,
+  anchor: string,
+  cacheStore: AnchorCacheStore | undefined
+): AnchorVerdict {
   if (containsSymlink(root, path)) {
     // `file-contains`/`file-not-contains` is the same asserts-presence/asserts-absence pair as
     // `file-exists`/`file-absent` (header comment above): a symlink means mem refuses to read the
@@ -337,6 +425,16 @@ function evaluateFileContains(root: string, path: string, substring: string, neg
   if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
     return "unverified";
   }
+  // Persistent cache: reusing this file's `statWitness` costs one syscall this function already
+  // paid for above, and spares the read + full-content scan below -- the actual expense this
+  // predicate exists to bound (`MAX_CONTENT_READ_BYTES`). `file-exists`/`file-absent` get no
+  // equivalent treatment because for them the predicate *is* the stat above; there is nothing left
+  // to spare by caching.
+  const witness = `f:${stat.mtimeMs}:${stat.size}`;
+  const cached = tryPersistentCache(cacheStore, root, anchor, witness);
+  if (cached !== undefined) {
+    return cached;
+  }
   let content: string;
   try {
     content = readFileSync(path, "utf8");
@@ -344,10 +442,9 @@ function evaluateFileContains(root: string, path: string, substring: string, neg
     return "unverified";
   }
   const found = content.includes(substring);
-  if (negate) {
-    return found ? "contradicted" : "affirmed";
-  }
-  return found ? "affirmed" : "contradicted";
+  const verdict: AnchorVerdict = negate ? (found ? "contradicted" : "affirmed") : found ? "affirmed" : "contradicted";
+  persistVerdict(cacheStore, root, anchor, verdict, witness);
+  return verdict;
 }
 
 /**
@@ -400,7 +497,41 @@ function comparePackageVersion(declared: string, expected: string): AnchorVerdic
   return declaredMajorMatch[1] === expectedMajorMatch[1] ? "affirmed" : "contradicted";
 }
 
-function evaluatePackageVersion(root: string, path: string, expected: string): AnchorVerdict {
+/** The post-stat body of `evaluatePackageVersion`, split out so the cache check below it has a single verdict to persist rather than one for each of this function's several early returns. */
+function evaluatePackageVersionContent(path: string, name: string, version: string): AnchorVerdict {
+  let content: string;
+  try {
+    content = readFileSync(path, "utf8");
+  } catch {
+    return "unverified";
+  }
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(content);
+  } catch {
+    return "unverified";
+  }
+  if (typeof manifest !== "object" || manifest === null) {
+    return "unverified";
+  }
+  const deps = (manifest as Record<string, unknown>)["dependencies"];
+  const devDeps = (manifest as Record<string, unknown>)["devDependencies"];
+  const declared =
+    (typeof deps === "object" && deps !== null ? (deps as Record<string, unknown>)[name] : undefined) ??
+    (typeof devDeps === "object" && devDeps !== null ? (devDeps as Record<string, unknown>)[name] : undefined);
+  if (typeof declared !== "string") {
+    return "unverified";
+  }
+  return comparePackageVersion(declared, version);
+}
+
+function evaluatePackageVersion(
+  root: string,
+  path: string,
+  expected: string,
+  anchor: string,
+  cacheStore: AnchorCacheStore | undefined
+): AnchorVerdict {
   const atIdx = expected.lastIndexOf("@");
   if (atIdx <= 0) {
     return "unverified";
@@ -426,30 +557,17 @@ function evaluatePackageVersion(root: string, path: string, expected: string): A
   if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
     return "unverified";
   }
-  let content: string;
-  try {
-    content = readFileSync(path, "utf8");
-  } catch {
-    return "unverified";
+  // Persistent cache: this predicate reads and JSON-parses the whole manifest -- materially dearer
+  // than the stat above, which is all `evaluatePackageVersionContent` would otherwise cost to redo
+  // on every call for an unchanged manifest.
+  const witness = `f:${stat.mtimeMs}:${stat.size}`;
+  const cached = tryPersistentCache(cacheStore, root, anchor, witness);
+  if (cached !== undefined) {
+    return cached;
   }
-  let manifest: unknown;
-  try {
-    manifest = JSON.parse(content);
-  } catch {
-    return "unverified";
-  }
-  if (typeof manifest !== "object" || manifest === null) {
-    return "unverified";
-  }
-  const deps = (manifest as Record<string, unknown>)["dependencies"];
-  const devDeps = (manifest as Record<string, unknown>)["devDependencies"];
-  const declared =
-    (typeof deps === "object" && deps !== null ? (deps as Record<string, unknown>)[name] : undefined) ??
-    (typeof devDeps === "object" && devDeps !== null ? (devDeps as Record<string, unknown>)[name] : undefined);
-  if (typeof declared !== "string") {
-    return "unverified";
-  }
-  return comparePackageVersion(declared, version);
+  const verdict = evaluatePackageVersionContent(path, name, version);
+  persistVerdict(cacheStore, root, anchor, verdict, witness);
+  return verdict;
 }
 
 /**
@@ -962,11 +1080,8 @@ function pathTrackedIn(paths: ReadonlySet<string>, relPath: string): boolean {
  * the fabrication P3 forbids. Only when the entry table is the *complete* set of tracked paths does
  * an absence become `contradicted`.
  */
-function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
-  const gitDir = resolveGitDir(root);
-  if (gitDir === null) {
-    return "unverified";
-  }
+/** The post-`gitDir` body of `evaluateGitTracked`, split out so the cache check below it has a single verdict to persist rather than one for each of this function's several early returns. */
+function evaluateGitTrackedUncached(root: string, resolvedPath: string, gitDir: string): AnchorVerdict {
   const index = readGitIndexPaths(gitDir);
   if (index === null) {
     return "unverified";
@@ -989,6 +1104,29 @@ function evaluateGitTracked(root: string, resolvedPath: string): AnchorVerdict {
     return FS_CASE_INSENSITIVE ? "affirmed" : "unverified";
   }
   return complete ? "contradicted" : "unverified";
+}
+
+function evaluateGitTracked(root: string, resolvedPath: string, anchor: string, cacheStore: AnchorCacheStore | undefined): AnchorVerdict {
+  const gitDir = resolveGitDir(root);
+  if (gitDir === null) {
+    return "unverified";
+  }
+  // Persistent cache: `.git/index`'s own stat is the witness, never `resolvedPath`'s -- whether a
+  // path is tracked is entirely a property of the index's contents, and the target file's own
+  // mtime is irrelevant to that (`git add`/`git rm` changes the index without touching the target
+  // file at all, and renaming a tracked path in the index changes nothing about the file on disk).
+  // An unchanged index stat means the parsed path set -- and therefore this verdict, for any path
+  // -- provably cannot have changed; this is also materially dearer to skip than a stat: parsing
+  // `.git/index` reads and walks its whole entry table (`readGitIndexPathsUncached`), which the
+  // in-process `gitIndexCache` already spares within one process but not across new ones.
+  const witness = statWitness(join(gitDir, "index"));
+  const cached = tryPersistentCache(cacheStore, root, anchor, witness);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const verdict = evaluateGitTrackedUncached(root, resolvedPath, gitDir);
+  persistVerdict(cacheStore, root, anchor, verdict, witness);
+  return verdict;
 }
 
 function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): ReadonlySet<string> {
@@ -1056,6 +1194,8 @@ function evaluateTokens(
   root: string,
   deadlineMs: number | undefined,
   budgetState: BudgetState,
+  anchor: string,
+  cacheStore: AnchorCacheStore | undefined
 ): AnchorVerdict {
   const [predicate, ...args] = tokens;
   const resolvedRoot = resolve(root);
@@ -1201,7 +1341,7 @@ function evaluateTokens(
         budgetState.hit = true;
         return "unverified";
       }
-      return evaluatePackageVersion(resolvedRoot, resolved, expected);
+      return evaluatePackageVersion(resolvedRoot, resolved, expected, anchor, cacheStore);
     }
     case "valid-until": {
       const [rawDate] = args;
@@ -1223,7 +1363,7 @@ function evaluateTokens(
         budgetState.hit = true;
         return "unverified";
       }
-      return evaluateGitTracked(resolvedRoot, a);
+      return evaluateGitTracked(resolvedRoot, a, anchor, cacheStore);
     }
     default:
       return "unverified";
@@ -1241,6 +1381,7 @@ function evaluateFileContainsRaw(
   resolvedRoot: string,
   deadlineMs: number | undefined,
   budgetState: BudgetState,
+  cacheStore: AnchorCacheStore | undefined
 ): AnchorVerdict | undefined {
   const match = /^(file-contains|file-not-contains)\s+(\S+)\s+([\s\S]+)$/u.exec(trimmed);
   if (match === null) {
@@ -1260,7 +1401,7 @@ function evaluateFileContainsRaw(
     budgetState.hit = true;
     return "unverified";
   }
-  return evaluateFileContains(resolvedRoot, resolvedPath, substring, predicate === "file-not-contains");
+  return evaluateFileContains(resolvedRoot, resolvedPath, substring, predicate === "file-not-contains", trimmed, cacheStore);
 }
 
 /**
@@ -1305,13 +1446,22 @@ function isExistingDirectory(path: string): boolean {
   }
 }
 
-export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?: number, budgetHit?: { hit: boolean }): AnchorVerdict {
+export function evaluateAnchor(
+  anchor: string | null,
+  root: string,
+  deadlineMs?: number,
+  budgetHit?: { hit: boolean },
+  cacheStore?: AnchorCacheStore
+): AnchorVerdict {
   if (anchor === null || anchor.trim().length === 0) {
     return "unverified";
   }
   if (budgetExceeded(deadlineMs)) {
     // Already-expired deadline on entry: never a genuine predicate outcome, so never memoized —
-    // there is nothing to cache under `key` since we return before ever reading/writing `memo`.
+    // there is nothing to cache under `key` since we return before ever reading/writing `memo`. A
+    // persistent `cacheStore` is never touched for the same reason, with more force: writing this
+    // here would poison every future *process's* first call for this anchor+root too, not just this
+    // one's remaining budget.
     if (budgetHit) {
       budgetHit.hit = true;
     }
@@ -1330,7 +1480,11 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
     // (its own command fails), so the predicates disagreed with each other about the same absence.
     //
     // Deliberately not memoized: unlike a predicate outcome, this is a statement about the root
-    // rather than the anchor, and a directory that is missing now may be present later.
+    // rather than the anchor, and a directory that is missing now may be present later. Never
+    // written to `cacheStore` either, with more force than the in-process memo: a persistent
+    // verdict outlives this process, so writing "unverified, root missing" here would keep
+    // asserting it in every later invocation too, long after the root reappears -- the memo at
+    // least clears itself the moment the process exits.
     return "unverified";
   }
   const key = `${resolvedRoot} ${trimmed}`;
@@ -1340,13 +1494,17 @@ export function evaluateAnchor(anchor: string | null, root: string, deadlineMs?:
   }
 
   const budgetState: BudgetState = { hit: false };
-  const containsResult = evaluateFileContainsRaw(trimmed, resolvedRoot, deadlineMs, budgetState);
-  const verdict = containsResult ?? evaluateTokens(tokenize(trimmed), resolvedRoot, deadlineMs, budgetState);
+  const containsResult = evaluateFileContainsRaw(trimmed, resolvedRoot, deadlineMs, budgetState, cacheStore);
+  const verdict = containsResult ?? evaluateTokens(tokenize(trimmed), resolvedRoot, deadlineMs, budgetState, trimmed, cacheStore);
   // A budget-limited "unverified" is a "ran out of time this call" bailout, not a genuine
   // predicate outcome — memoizing it under a key that doesn't encode the deadline would let a
   // later, differently-budgeted (or unbudgeted) call for the same anchor+root incorrectly reuse
   // it instead of actually re-evaluating. Genuine verdicts (affirmed/contradicted, and unverified
-  // that stems from the predicate itself rather than the time budget) are cached as before.
+  // that stems from the predicate itself rather than the time budget) are cached as before. The
+  // cacheable predicates below (`file-contains`/`file-not-contains`, `package-version`,
+  // `git-tracked`) already refuse to touch `cacheStore` on a budget bailout themselves -- they
+  // return before ever computing a witness to persist -- so nothing further is needed here for
+  // `cacheStore` specifically; this branch only governs the in-process `memo`.
   if (!budgetState.hit) {
     memo.set(key, verdict);
   } else if (budgetHit) {

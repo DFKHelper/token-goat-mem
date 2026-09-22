@@ -25,6 +25,7 @@
  */
 
 import type Database from "better-sqlite3";
+import { hashFactText } from "./factText.js";
 
 /** One migration: a dense, ascending version number, a name for `runMigrations`' `applied` list, and the DDL/DML it runs. */
 export interface MigrationStep {
@@ -195,11 +196,34 @@ CREATE INDEX IF NOT EXISTS idx_anchor_cache_verified_at ON anchor_cache(verified
 `);
 }
 
+/**
+ * Backfills `facts.text_hash` for every row `textHashUp` (v2) left NULL -- everything written
+ * before that migration existed. Deliberately a separate step rather than folded into v2: v2 is
+ * already applied on every store that has reached `user_version >= 2`, and `runMigrations` only
+ * ever replays steps whose version exceeds the database's current one, so editing v2 in place would
+ * silently skip the backfill on exactly the databases that need it.
+ *
+ * Hashed in JS, not SQL: `normalizeFactText` (factText.ts) collapses whitespace and folds case in a
+ * way SQLite's own functions cannot soundly reproduce, and `hashFactText` is the single place that
+ * turns that normalized form into the value `text_hash` stores -- the same function every write
+ * path (`insertFact`/`updateFact`) calls, so a backfilled row and a freshly-written one are keyed
+ * identically. Runs inside `runMigrations`' existing transaction, so a mid-backfill failure rolls
+ * back the whole migration rather than leaving some rows hashed and others not.
+ */
+function textHashBackfillUp(db: Database.Database): void {
+  const rows = db.prepare<[], { id: string; text: string }>("SELECT id, text FROM facts WHERE text_hash IS NULL").all();
+  const update = db.prepare<[string, string]>("UPDATE facts SET text_hash = ? WHERE id = ?");
+  for (const row of rows) {
+    update.run(hashFactText(row.text), row.id);
+  }
+}
+
 /** Every migration, in the order `runMigrations` applies them. Version numbers are dense and start at 1. */
 export const MIGRATIONS: readonly MigrationStep[] = [
   { version: 1, name: "baseline", up: baselineUp },
   { version: 2, name: "facts.text_hash", up: textHashUp },
   { version: 3, name: "anchor_cache", up: anchorCacheUp },
+  { version: 4, name: "facts.text_hash backfill", up: textHashBackfillUp },
 ];
 
 /**

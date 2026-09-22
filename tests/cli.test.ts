@@ -11,7 +11,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,7 @@ import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { captureSuggested, MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
+import { _clearAnchorMemoForTests } from "../src/anchors.js";
 
 interface CliResult {
   readonly stdout: string;
@@ -3590,6 +3591,144 @@ describe("regression: review and show resolve anchor roots the way recall does",
   });
 });
 
+describe("mem recall persists and reuses anchor verdicts across CLI invocations", () => {
+  function seedContentAnchoredFact(root: string): string {
+    const db = openStorage(resolveDbPath());
+    const inserted = insertFact(db, {
+      // `kind: "fact"` deliberately, not "preference": a preference's display always carries a
+      // "(verify)" caveat regardless of freshness (P6), which would make the affirmed/contradicted
+      // assertions below true for the wrong reason. A plain fact's display shows the freshness
+      // verdict itself.
+      text: "uses pnpm not npm",
+      kind: "fact",
+      scope: "project",
+      scopeRoot: root,
+      source_type: "user",
+      anchor: "file-contains config.json pnpm",
+    });
+    db.close();
+    return inserted.id;
+  }
+
+  it("persists the verdict it computed, readable by a later, independent connection", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-cli-anchor-cache-"));
+    try {
+      writeFileSync(join(root, "config.json"), "pnpm");
+      seedContentAnchoredFact(root);
+
+      const recalled = await runCli(["recall", "pnpm", "--root", root]);
+      expect(recalled.exitCode).toBe(0);
+      expect(recalled.stdout).not.toContain("contradicted");
+
+      // A fresh `openDb`, not the connection `mem recall` already closed.
+      const db = openDb(resolveDbPath());
+      const row = db
+        .prepare<[string, string], { verdict: string }>("SELECT verdict FROM anchor_cache WHERE root = ? AND anchor = ?")
+        .get(resolve(root), "file-contains config.json pnpm");
+      db.close();
+      expect(row).toEqual({ verdict: "affirmed" });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("actually reuses a prefetched row rather than silently missing and re-evaluating", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-cli-anchor-cache-"));
+    try {
+      writeFileSync(join(root, "config.json"), "pnpm");
+      const factId = seedContentAnchoredFact(root);
+
+      // One real call to learn the witness a genuine evaluation computes for this untouched file.
+      await runCli(["recall", "pnpm", "--root", root]);
+
+      // Overwrite the persisted verdict to one a fresh evaluation could never produce, keeping the
+      // same witness. If the prefetch's key form does not match what the flush wrote it under,
+      // `mem recall` misses the cache, re-evaluates for real, and this assertion fails even though
+      // every other behavior looks correct -- the exact silent-miss this test exists to catch.
+      const db = openDb(resolveDbPath());
+      db.prepare("UPDATE anchor_cache SET verdict = 'contradicted' WHERE root = ? AND anchor = ?").run(
+        resolve(root),
+        "file-contains config.json pnpm"
+      );
+      db.close();
+
+      // A real second `mem recall` is a fresh OS process, so anchors.ts's in-process memo (module
+      // state `evaluateAnchor` checks before ever consulting the persistent store) starts empty.
+      // This test drives both calls through one long-lived `run()`, so it has to clear that memo
+      // itself to simulate the same starting condition -- without this, the first call's real
+      // "affirmed" verdict would still be sitting in the in-process memo and mask the persistent
+      // cache read this test exists to prove.
+      _clearAnchorMemoForTests();
+
+      const second = await runCli(["recall", "pnpm", "--root", root]);
+      expect(second.stdout).toContain(factId.slice(0, 8));
+      expect(second.stdout).toContain("contradicted, excluded");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("writes nothing to anchor_cache when nothing anchored was recalled (empty buffer)", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-cli-anchor-cache-"));
+    try {
+      const db = openStorage(resolveDbPath());
+      insertFact(db, {
+        text: "no default exports",
+        kind: "fact",
+        scope: "project",
+        scopeRoot: root,
+        source_type: "user",
+      });
+      db.close();
+
+      const recalled = await runCli(["recall", "no default exports", "--root", root]);
+      expect(recalled.exitCode).toBe(0);
+
+      const check = openDb(resolveDbPath());
+      const count = check.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM anchor_cache").get()?.n;
+      check.close();
+      expect(count).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a flush failure does not fail the recall", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-cli-anchor-cache-"));
+    try {
+      writeFileSync(join(root, "config.json"), "pnpm");
+      seedContentAnchoredFact(root);
+
+      // No warm-up call: `anchor_cache` starts empty, so this recall's evaluation is genuinely
+      // fresh and `persistAnchorVerdicts` has something to flush -- a reused, cache-hit verdict
+      // would leave the buffer empty and the trigger below would never fire.
+      //
+      // A trigger that fails every INSERT into `anchor_cache`, not a whole-database lock: locking
+      // the file also blocks the read phase's own `openStorage` (schema/pragma setup needs a brief
+      // write-capable open even for a read), which would fail the read this test needs to succeed
+      // and fail for the wrong reason. This isolates the failure to the write `persistAnchorVerdicts`
+      // makes, mirroring the doc comment's own "a read-only store" failure mode.
+      const trigDb = openStorage(resolveDbPath());
+      trigDb.exec(
+        "CREATE TRIGGER block_anchor_cache_insert BEFORE INSERT ON anchor_cache BEGIN SELECT RAISE(ABORT, 'simulated flush failure'); END;"
+      );
+      trigDb.close();
+      try {
+        const result = await runCli(["recall", "pnpm", "--root", root]);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain("uses pnpm not npm");
+        expect(result.stderr).toContain("could not mark facts surfaced");
+      } finally {
+        const cleanupDb = openStorage(resolveDbPath());
+        cleanupDb.exec("DROP TRIGGER block_anchor_cache_insert");
+        cleanupDb.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // --- regression: a path-scoped fact's anchor is evaluated against its persisted capture root ---
 
 describe("regression: the hook path and the CLI path agree about the same fact", () => {
@@ -4810,7 +4949,7 @@ describe("scan-session", () => {
   });
 
   it("does not store a differently-cased restatement as a second copy once the original scrolls out of the scan window", async () => {
-    // `factsByNormalizedText` (storage.ts) backs the cross-scan check. In-scan dedup collapses a
+    // `factsByTextHash` (storage.ts) backs the cross-scan check. In-scan dedup collapses a
     // differently-cased repeat within the same window via a normalized key, but once the original
     // occurrence ages out of MAX_SCANNED_TURNS, the cross-scan check is all that stands between a
     // later, differently-cased restatement of the same rule and a second stored copy of it.

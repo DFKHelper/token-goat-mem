@@ -47,6 +47,7 @@ import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
 import { loadAllowlist } from "./capture.js";
 import {
   countEmbeddedFacts,
+  createBufferedAnchorCacheStore,
   getEmbeddingMeta,
   getEntityOverlapForQuery,
   getUsefulnessCounts,
@@ -54,7 +55,10 @@ import {
   listSurfacedFactIds,
   markFactsSurfaced,
   openStorage,
+  persistAnchorVerdicts,
+  prefetchAnchorCache,
   unpackEmbedding,
+  type BufferedAnchorVerdict,
 } from "./storage.js";
 import { resolveDbPath } from "./db.js";
 import { planEmbeddingRanking } from "./embeddings.js";
@@ -573,6 +577,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   let alreadySurfaced: ReadonlySet<string> = new Set();
   let usefulness: ReadonlyMap<string, { surfaced: number; used: number }>;
   let entityOverlap: ReadonlyMap<string, number>;
+  let anchorCacheSnapshot: ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }>;
   // Decided before the fact query, not after, because it decides the query's row shape: an
   // embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget
   // for a signal that is switched off on every install without a configured endpoint is exactly the
@@ -609,11 +614,22 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }
+    // One indexed range scan (`root` is a primary-key prefix) on the connection already open, for
+    // the same reason as every other read in this block: `retrieve()` below must not hold a DB
+    // handle across its embedding round trip, so whatever `anchor_cache` already knows about this
+    // root has to be read now or not at all.
+    anchorCacheSnapshot = prefetchAnchorCache(db, root);
   } finally {
     db.close();
   }
 
   const scoped = allFacts.filter((fact) => isInScope(fact, root, contextFiles));
+
+  // Disconnected from storage by construction (see {@link BufferedAnchorCacheStore}): `retrieve()`
+  // below can read and write anchor verdicts through it without ever touching SQLite, so the
+  // connection this block already closed does not need to stay open for anchor evaluation to get
+  // the persistent-cache benefit.
+  const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
   const { results, withheldCount, zeroSignal } = await retrieve(scoped, {
@@ -621,6 +637,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     root,
     hintFormat: true,
     limit: HINT_FORMAT_RECALL_LIMIT,
+    anchorCacheStore,
     // The `UserPromptSubmit` hook path (`mem recall --hint-format --hook-stdin`) sends every user
     // prompt through here as `query` -- the same screen-before-send invariant `retrieve()` applies
     // to that query has to see this project's own `.mem/allowlist`, not an empty one.
@@ -758,29 +775,39 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // `stable` is deliberately not consulted here: it is an output-ordering override, and a fact
     // emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the
     // consumer already holds and make `mem used` report them as never surfaced.
-    recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittedIds, now);
+    recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittedIds, now, anchorCacheStore.buffer);
   } else {
     // No session id to log a `recall_log` row against: still stamp the durable mark so
     // stale-supersede never treats an emitted fact as never-surfaced.
-    markSurfaced(options.dbPath ?? resolveDbPath(), emittedIds, now);
+    markSurfaced(options.dbPath ?? resolveDbPath(), emittedIds, now, anchorCacheStore.buffer);
   }
 
   return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta };
 }
 
 /**
- * Best-effort write of the emitted fact ids to `recall_log`. Any failure -- a read-only store, a
- * locked database, a schema this build does not expect -- is logged to stderr and otherwise
- * ignored: the recall already succeeded, and a bookkeeping failure must not turn it into a failure.
+ * Best-effort write of the emitted fact ids to `recall_log`, plus a flush of any anchor verdicts
+ * `retrieve()` computed this query (`anchorVerdicts`, drained from the disconnected store built
+ * above) -- on the same connection, not a second `openStorage`, for the same reason the pre-retrieve
+ * reads share one. Any failure -- a read-only store, a locked database, a schema this build does not
+ * expect -- is logged to stderr and otherwise ignored: the recall already succeeded, and a
+ * bookkeeping failure must not turn it into a failure.
  */
-function recordSurfaced(dbPath: string, sessionId: string, factIds: readonly string[], now: Date): void {
-  if (factIds.length === 0) {
+function recordSurfaced(
+  dbPath: string,
+  sessionId: string,
+  factIds: readonly string[],
+  now: Date,
+  anchorVerdicts: ReadonlyMap<string, BufferedAnchorVerdict>
+): void {
+  if (factIds.length === 0 && anchorVerdicts.size === 0) {
     return;
   }
   try {
     const db = openStorage(dbPath);
     try {
       insertRecallLog(db, sessionId, factIds, now.toISOString());
+      persistAnchorVerdicts(db, anchorVerdicts);
     } finally {
       db.close();
     }
@@ -790,18 +817,25 @@ function recordSurfaced(dbPath: string, sessionId: string, factIds: readonly str
 }
 
 /**
- * Best-effort stamp of `facts.last_surfaced_at` for the emitted fact ids, with no `recall_log`
- * row -- used when there is no session id to log against. Same fail-open
- * contract as `recordSurfaced`: a bookkeeping failure must not turn a successful recall into one.
+ * Best-effort stamp of `facts.last_surfaced_at` for the emitted fact ids, plus the same anchor
+ * verdict flush as `recordSurfaced` -- used when there is no session id to log against. Same
+ * fail-open contract as `recordSurfaced`: a bookkeeping failure must not turn a successful recall
+ * into one.
  */
-function markSurfaced(dbPath: string, factIds: readonly string[], now: Date): void {
-  if (factIds.length === 0) {
+function markSurfaced(
+  dbPath: string,
+  factIds: readonly string[],
+  now: Date,
+  anchorVerdicts: ReadonlyMap<string, BufferedAnchorVerdict>
+): void {
+  if (factIds.length === 0 && anchorVerdicts.size === 0) {
     return;
   }
   try {
     const db = openStorage(dbPath);
     try {
       markFactsSurfaced(db, factIds, now.toISOString());
+      persistAnchorVerdicts(db, anchorVerdicts);
     } finally {
       db.close();
     }

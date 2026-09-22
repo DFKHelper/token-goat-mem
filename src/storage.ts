@@ -40,9 +40,11 @@
  */
 
 import { randomUUID } from "node:crypto";
+import type { AnchorCacheStore, AnchorVerdict } from "./anchors.js";
 import { openDb, resolveDbPath } from "./db.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
+import { hashFactText, normalizeFactText } from "./factText.js";
 import { runMigrations } from "./migrations.js";
 import type { Fact, FactFilter, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
 
@@ -91,6 +93,145 @@ export function openStorage(dbPath: string = resolveDbPath()): Db {
   return db;
 }
 
+/**
+ * The one `anchor_cache` upsert statement, shared by {@link createAnchorCacheStore} (writes as it
+ * goes) and {@link persistAnchorVerdicts} (flushes a batch) -- both write the same row shape, so
+ * there is exactly one place that knows it.
+ */
+const ANCHOR_CACHE_UPSERT_SQL = `
+INSERT INTO anchor_cache (root, anchor, verdict, verified_at, witness) VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(root, anchor) DO UPDATE SET verdict = excluded.verdict, verified_at = excluded.verified_at, witness = excluded.witness
+`;
+
+/**
+ * SQLite-backed {@link AnchorCacheStore} (anchors.ts): the concrete implementation for the
+ * `anchor_cache` table `migrations.ts` creates. anchors.ts stays free of any storage-specific
+ * import by depending only on the narrow interface -- this is the one place that translates it into
+ * SQL, so callers construct this from an open `Db` and pass it into `evaluateAnchor`/`retrieve`.
+ *
+ * `INSERT ... ON CONFLICT DO UPDATE` rather than a read-then-write: `(root, anchor)` is the table's
+ * primary key, so this is a single statement either way, and avoids a race between two `mem`
+ * processes evaluating the same anchor+root at once.
+ */
+export function createAnchorCacheStore(db: Db): AnchorCacheStore {
+  const getStmt = db.prepare<[string, string], { verdict: AnchorVerdict; witness: string | null }>(
+    "SELECT verdict, witness FROM anchor_cache WHERE root = ? AND anchor = ?"
+  );
+  const setStmt = db.prepare<[string, string, AnchorVerdict, string, string | null]>(ANCHOR_CACHE_UPSERT_SQL);
+  return {
+    get(root, anchor) {
+      const row = getStmt.get(root, anchor);
+      return row === undefined ? undefined : { verdict: row.verdict, witness: row.witness };
+    },
+    set(root, anchor, verdict, witness) {
+      setStmt.run(root, anchor, verdict, new Date().toISOString(), witness);
+    },
+  };
+}
+
+/**
+ * Test convenience: clears every persisted anchor verdict, mirroring anchors.ts's own
+ * `clearAnchorCaches`/`_clearAnchorMemoForTests` for the in-process memo. Not needed by production
+ * code -- a real store's rows are meant to persist -- but tests sharing one on-disk db across cases
+ * need a way to stop one case's verdicts leaking into the next.
+ */
+export function clearAnchorCacheStore(db: Db): void {
+  db.exec("DELETE FROM anchor_cache");
+}
+
+/** One buffered verdict, keyed by its own `(root, anchor)` pair -- see {@link BufferedAnchorCacheStore}. */
+export interface BufferedAnchorVerdict {
+  readonly root: string;
+  readonly anchor: string;
+  readonly verdict: AnchorVerdict;
+  readonly witness: string | null;
+}
+
+/** Composite key for the prefetch snapshot and the write buffer below -- `root` and `anchor` are both free-form strings, so a delimiter absent from either is required; `\u0000` cannot appear in a resolved filesystem path or an anchor token. */
+function anchorCacheKey(root: string, anchor: string): string {
+  return `${root}\u0000${anchor}`;
+}
+
+/**
+ * An `AnchorCacheStore` for callers that must not hold a DB handle open across `retrieve()`
+ * (integration-seam.ts's hint-format path, `mem recall`): both load-all-then-rank, closing the
+ * connection before ranking runs, so holding a WAL read connection across `retrieve()`'s embedding
+ * round trip risks lock pileups on the hook path, which can fire concurrently across sessions.
+ *
+ * `get` is reused by `prefetchAnchorCache` below (see its doc comment) -- rows read while the
+ * connection was open, before `retrieve()` starts. `set` never touches SQLite: it buffers in
+ * memory, and the caller flushes with {@link persistAnchorVerdicts} once a connection is available
+ * again (see integration-seam.ts's post-retrieve bookkeeping write). A verdict already in the
+ * buffer wins over the prefetched snapshot for the same key, so a second `evaluateAnchor` call for
+ * the same anchor within one `retrieve()` (a different fact anchored to the same file) sees its own
+ * fresh write rather than the value that was true before this query started.
+ */
+export interface BufferedAnchorCacheStore extends AnchorCacheStore {
+  /** Verdicts written via `set()` during this query, not yet persisted. Drained by `persistAnchorVerdicts`, never mutated by anything else. */
+  readonly buffer: ReadonlyMap<string, BufferedAnchorVerdict>;
+}
+
+/**
+ * Snapshots every `anchor_cache` row for `root` while `db` is open, for {@link createBufferedAnchorCacheStore}
+ * to hydrate from. `root` is a primary-key prefix (`PRIMARY KEY (root, anchor)`), so this is one
+ * indexed range scan -- not the full table, and not one query per anchor.
+ */
+export function prefetchAnchorCache(db: Db, root: string): ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }> {
+  const rows = db
+    .prepare<[string], { anchor: string; verdict: AnchorVerdict; witness: string | null }>(
+      "SELECT anchor, verdict, witness FROM anchor_cache WHERE root = ?"
+    )
+    .all(root);
+  const snapshot = new Map<string, { verdict: AnchorVerdict; witness: string | null }>();
+  for (const row of rows) {
+    snapshot.set(anchorCacheKey(root, row.anchor), { verdict: row.verdict, witness: row.witness });
+  }
+  return snapshot;
+}
+
+/** Builds the disconnected store described on {@link BufferedAnchorCacheStore}, hydrated from `prefetched` (see {@link prefetchAnchorCache}). */
+export function createBufferedAnchorCacheStore(
+  prefetched: ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }>
+): BufferedAnchorCacheStore {
+  const buffer = new Map<string, BufferedAnchorVerdict>();
+  return {
+    get buffer(): ReadonlyMap<string, BufferedAnchorVerdict> {
+      return buffer;
+    },
+    get(root, anchor) {
+      const key = anchorCacheKey(root, anchor);
+      const pending = buffer.get(key);
+      if (pending !== undefined) {
+        return { verdict: pending.verdict, witness: pending.witness };
+      }
+      return prefetched.get(key);
+    },
+    set(root, anchor, verdict, witness) {
+      buffer.set(anchorCacheKey(root, anchor), { root, anchor, verdict, witness });
+    },
+  };
+}
+
+/**
+ * Flushes a {@link BufferedAnchorCacheStore}'s buffer to `anchor_cache` in one transaction, using
+ * the same upsert `createAnchorCacheStore` writes with (`ANCHOR_CACHE_UPSERT_SQL`). A no-op --
+ * opens no statement, starts no transaction -- when the buffer is empty, so a query that evaluated
+ * no anchors (or reused every verdict from the prefetch) costs this function nothing.
+ */
+export function persistAnchorVerdicts(db: Db, buffer: ReadonlyMap<string, BufferedAnchorVerdict>): void {
+  if (buffer.size === 0) {
+    return;
+  }
+  const setStmt = db.prepare<[string, string, AnchorVerdict, string, string | null]>(ANCHOR_CACHE_UPSERT_SQL);
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    for (const entry of buffer.values()) {
+      setStmt.run(entry.root, entry.anchor, entry.verdict, now, entry.witness);
+    }
+  });
+  tx.immediate();
+}
+
 /** Normalizes a subject key for deterministic contradiction detection (design plan P4): trims surrounding whitespace and lowercases, so "Package-Manager", "package-manager ", and "package-manager" all key to the same bucket regardless of how a caller typed `--subject`. */
 export function normalizeSubject(subject: string): string {
   return subject.trim().toLowerCase();
@@ -110,17 +251,9 @@ export function normalizeValue(value: string): string {
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-/**
- * Matching form for "is this the same statement said again".
- *
- * Deliberately conservative and deterministic: case folded, internal whitespace collapsed, and a
- * single trailing period dropped. Nothing semantic -- no stemming, no synonyms, no model. Two facts
- * that differ by a word are two facts, and the cost of being wrong here is a user's second, more
- * precise statement being swallowed as a repeat of their first.
- */
-export function normalizeFactText(text: string): string {
-  return text.trim().toLowerCase().replace(/\s+/gu, " ").replace(/\.$/u, "");
-}
+// `normalizeFactText`/`hashFactText` live in factText.ts (see that module's own doc comment for
+// why) and are re-exported here so every existing `from "./storage.js"` caller keeps working.
+export { normalizeFactText, hashFactText } from "./factText.js";
 
 /**
  * Whether `fact` is the same statement as `candidate`, for the purposes of an explicit restatement.
@@ -331,6 +464,7 @@ interface FactRow {
   last_surfaced_at: string | null;
   terms_checked_at: string | null;
   sightings: number;
+  text_hash: string | null;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -388,8 +522,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at, sightings)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at, sightings, text_hash)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
@@ -444,7 +578,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // `last_surfaced_at` above, because there is no restore path (export/import round trip) that
       // needs to preserve a nonzero count. Only `recordSighting` (src/capture.ts) increments it,
       // strictly after this row already exists.
-      0
+      0,
+      hashFactText(fact.text)
     );
     replaceFactTermsInternal(db, id, extractFacets(fact.text), false);
   });
@@ -466,48 +601,30 @@ export function insertFact(db: Db, fact: NewFact): Fact {
 }
 
 /**
- * Every stored fact, indexed by {@link normalizeFactText} of its text.
+ * Every stored fact whose text normalizes the same as `text` -- a single-text-lookup: "does a fact
+ * with this normalized text already exist?", asked once per candidate rather than indexing the
+ * whole store, for a caller that only ever looks up a handful of candidates against one that may
+ * hold many more facts than that.
  *
- * Feeds the idempotency guard for `mem scan-session`: the Stop hook fires at the end of every
- * assistant turn, so the same sentence is re-extracted for the rest of the session. Matching on
- * text rather than on a session marker is what makes a *rejected* candidate stay rejected -- a
- * rejected fact is still in the store as `superseded`, so re-filing it would resurrect a decision
- * the user already made, which is the one thing a review queue must not do. Every status is
- * indexed for that reason.
+ * Feeds `mem scan-session`'s cross-scan idempotency guard: the Stop hook fires at the end of every
+ * assistant turn, so the same sentence is re-extracted for the rest of the session, and matching on
+ * text rather than a session marker is what keeps a *rejected* candidate rejected -- a rejected
+ * fact is still in the store as `superseded`, so re-filing it would resurrect a decision the user
+ * already made.
  *
- * Indexed regardless of the fact's `scope`/`scope_root` -- the caller narrows to "does this apply
- * here" via `isBoundToRoot` (retrieval.ts), the one place that scoping rule already lives, rather
- * than a second copy of it re-implemented in SQL here.
- *
- * Not a `WHERE` clause, and not one lookup per candidate. SQL `LOWER()` folds ASCII only, so a
- * clause built on it can miss a stored row outright when the two sides disagree on the case of a
- * non-ASCII letter ("Émacs" stored, "émacs" queried) -- there is no `LOWER()`-based prefilter
- * guaranteed not to drop a genuine match, so the comparison has to happen in JS through the same
- * function {@link extractCandidates} (sessionScan.ts) keys its in-scan dedup on. The two dedup
- * layers have to agree: in-scan dedup collapses a differently-cased repeat only while both
- * occurrences are in the same scan's window, and once the earlier one ages out of
- * `MAX_SCANNED_TURNS`, this check is the only thing standing between a later restatement of the
- * same rule in different case and a second stored copy of it. They used to be two hand-maintained
- * rules -- SQL `LOWER()` here, `sentence.toLowerCase()` there -- that silently disagreed on any
- * sentence containing an uppercase non-ASCII letter; sharing one function is what keeps them from
- * drifting apart again.
- *
- * Returning an index built in one pass, rather than a lookup that rescans per candidate, keeps a
- * scan of a long transcript from reading the whole table (embedding blobs included) once per
- * candidate sentence -- this runs on the Stop hook, at the end of every session.
+ * Narrows via `idx_facts_text_hash` first, then re-checks `normalizeFactText` equality in JS on the
+ * (small) candidate set -- a `text_hash` collision must never be treated as a text match on its
+ * own, and SQL `LOWER()` folds ASCII only, so a clause built on it can miss a stored row outright
+ * when the two sides disagree on the case of a non-ASCII letter ("Émacs" stored, "émacs" queried).
  */
-export function factsByNormalizedText(db: Db): Map<string, Fact[]> {
-  const index = new Map<string, Fact[]>();
-  for (const row of db.prepare<[], FactRow>("SELECT * FROM facts").all()) {
-    const key = normalizeFactText(row.text);
-    const bucket = index.get(key);
-    if (bucket === undefined) {
-      index.set(key, [rowToFact(row)]);
-    } else {
-      bucket.push(rowToFact(row));
-    }
-  }
-  return index;
+export function factsByTextHash(db: Db, text: string): Fact[] {
+  const normalized = normalizeFactText(text);
+  const hash = hashFactText(text);
+  return db
+    .prepare<[string], FactRow>("SELECT * FROM facts WHERE text_hash = ?")
+    .all(hash)
+    .filter((row) => normalizeFactText(row.text) === normalized)
+    .map(rowToFact);
 }
 
 /** Reads one fact by id, or `undefined` if no such fact exists. */
@@ -654,6 +771,10 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
     // that agree, keyed as rivals, and on a captured_at/provenance tie marked `contested` and
     // withheld from ground truth for disagreeing with themselves.
     params.push(patch.text.trim());
+    // Kept in lockstep with `text` on every write that changes it -- see factText.ts's own comment
+    // on why a stale hash is a silent-miss bug, not a cosmetic one.
+    sets.push("text_hash = ?");
+    params.push(hashFactText(patch.text.trim()));
   }
   if (patch.subject !== undefined) {
     sets.push("subject = ?");

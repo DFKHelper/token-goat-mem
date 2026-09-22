@@ -28,7 +28,7 @@
 
 import { resolve as resolvePath, sep } from "node:path";
 
-import { evaluateAnchor, type AnchorVerdict } from "./anchors.js";
+import { evaluateAnchor, type AnchorCacheStore, type AnchorVerdict } from "./anchors.js";
 import { screenForSecrets } from "./capture.js";
 import { resolveContradictions } from "./contradiction.js";
 import { normalizePath } from "./pathUtils.js";
@@ -116,6 +116,13 @@ export interface RetrievalOptions {
   readonly secretAllowlist?: readonly string[];
   /** Hard overall budget for anchor re-evaluation across all candidates. Default `DEFAULT_ANCHOR_TIME_BUDGET_MS`. */
   readonly anchorTimeBudgetMs?: number;
+  /**
+   * Optional cross-process anchor verdict cache (anchors.ts's `AnchorCacheStore`), threaded through
+   * to every `evaluateAnchor` call this module makes. Passed in rather than opened here for the same
+   * reason as {@link usefulness}/{@link factEntityKeys} above: this module ranks and gates, it does
+   * not open databases. Omitted = today's behavior, in-process memoization only.
+   */
+  readonly anchorCacheStore?: AnchorCacheStore;
   /**
    * When `false`, `display` omits its trailing `" — <follow-up command>"` suffix (the "CTA"),
    * emitting only the bare caveated fact text. Defaults to `true` (today's exact display format,
@@ -1080,13 +1087,14 @@ export function evaluateFactFreshness(
   fact: Fact,
   queryRoot: string,
   deadlineMs?: number,
-  budgetHit?: { hit: boolean }
+  budgetHit?: { hit: boolean },
+  cacheStore?: AnchorCacheStore
 ): AnchorVerdict {
   const root = anchorRootFor(fact, queryRoot);
   if (root === null) {
     return "unverified";
   }
-  return evaluateAnchor(fact.anchor, root, deadlineMs, budgetHit);
+  return evaluateAnchor(fact.anchor, root, deadlineMs, budgetHit, cacheStore);
 }
 
 /**
@@ -1226,7 +1234,8 @@ export interface RetrieveOutcome {
 export function selectVerifiedFacts(
   facts: readonly Fact[],
   root: string,
-  anchorDeadline?: number
+  anchorDeadline?: number,
+  anchorCacheStore?: AnchorCacheStore
 ): readonly Fact[] {
   const liveCandidates = facts.filter((fact) => fact.status !== "superseded");
   const { facts: resolved } = resolveContradictions(liveCandidates);
@@ -1234,7 +1243,7 @@ export function selectVerifiedFacts(
     if (fact.status !== "active" && fact.status !== "pinned") {
       return false;
     }
-    return evaluateFactFreshness(fact, root, anchorDeadline) !== "contradicted";
+    return evaluateFactFreshness(fact, root, anchorDeadline, undefined, anchorCacheStore) !== "contradicted";
   });
 }
 
@@ -1339,7 +1348,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   let anchorBudgetHits = 0;
   const results: RetrievedFact[] = filtered.map((fact) => {
     const budgetHit = { hit: false };
-    const freshness = evaluateFactFreshness(fact, options.root, anchorDeadline, budgetHit);
+    const freshness = evaluateFactFreshness(fact, options.root, anchorDeadline, budgetHit, options.anchorCacheStore);
     if (budgetHit.hit) {
       anchorBudgetHits += 1;
     }

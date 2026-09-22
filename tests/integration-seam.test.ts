@@ -8,11 +8,11 @@
  *   - contested facts excluded from hint-format (Section 4: "Contested / low-trust / pending facts
  *     are excluded from --hint-format entirely").
  */
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { openDb } from "../src/db.js";
 import { insertFact, openStorage } from "../src/storage.js";
 import { buildHintFormat, STORE_UNREADABLE_FOOTER_LINE, TGMEM_HEADER } from "../src/integration-seam.js";
@@ -360,6 +360,145 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
     expect(names).toContain("epoch");
     expect(names).toContain("status_changed_at");
     expect(names).toContain("prior_status");
+  });
+});
+
+describe("persistent anchor verdict cache (hint-format path)", () => {
+  let workDir: string;
+  let root: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "mem-seam-anchor-cache-"));
+    root = join(workDir, "project");
+    mkdirSync(root, { recursive: true });
+    dbPath = join(workDir, "mem.db");
+  });
+
+  afterEach(() => {
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  function seedContentAnchoredFact(): void {
+    seedFacts(dbPath, [
+      {
+        id: "content-anchored-1",
+        text: "uses pnpm not npm",
+        kind: "preference",
+        subject: "package-manager",
+        value: "pnpm",
+        scope: "global",
+        source_type: "user",
+        captured_at: new Date().toISOString(),
+        anchor: "file-contains config.json pnpm",
+        status: "active",
+      },
+    ]);
+  }
+
+  it("persists the verdict it computed, readable by a later, independent connection (the cross-process win a persistent cache exists for)", async () => {
+    seedContentAnchoredFact();
+    writeFileSync(join(root, "config.json"), "pnpm");
+
+    const result = await buildHint({ root, dbPath });
+    expect(result.lines[0]).toContain("fresh=affirmed");
+
+    // A fresh `openDb`, not the connection `buildHintFormat` already closed -- this is exactly
+    // what a second, unrelated `mem` process opening the same store would see.
+    const db = openDb(dbPath);
+    const row = db
+      .prepare<[string, string], { root: string; anchor: string; verdict: string }>(
+        "SELECT root, anchor, verdict FROM anchor_cache WHERE root = ? AND anchor = ?"
+      )
+      .get(resolve(root), "file-contains config.json pnpm");
+    db.close();
+    expect(row).toEqual({ root: resolve(root), anchor: "file-contains config.json pnpm", verdict: "affirmed" });
+  });
+
+  it("actually reuses a prefetched row rather than silently missing and re-evaluating (a wrong-but-witness-matching cached verdict wins)", async () => {
+    seedContentAnchoredFact();
+    writeFileSync(join(root, "config.json"), "pnpm");
+
+    // One real call to learn the witness `evaluateAnchor` computes for this exact file -- the same
+    // value a genuine re-evaluation would still compute, since the file is untouched below.
+    await buildHint({ root, dbPath });
+    const db = openDb(dbPath);
+    const before = db
+      .prepare<[string, string], { witness: string | null }>("SELECT witness FROM anchor_cache WHERE root = ? AND anchor = ?")
+      .get(resolve(root), "file-contains config.json pnpm");
+    expect(before).toBeDefined();
+
+    // Overwrite the persisted verdict to one a fresh evaluation of the untouched file could never
+    // produce, keeping the same witness. If the prefetch's key form (root/anchor) does not match
+    // what the flush wrote them under, `get()` misses, `evaluateAnchor` recomputes for real, and
+    // this assertion fails even though every other behavior looks correct -- the exact silent-miss
+    // this test exists to catch.
+    db.prepare("UPDATE anchor_cache SET verdict = 'contradicted' WHERE root = ? AND anchor = ?").run(
+      resolve(root),
+      "file-contains config.json pnpm"
+    );
+    db.close();
+
+    const result = await buildHint({ root, dbPath });
+    // `--hint-format` drops a contradicted fact entirely rather than emitting it -- see the
+    // sibling "re-evaluates anchors on every call" test above for the same contract.
+    expect(result.lines.some((line) => line.includes("content-anchored-1"))).toBe(false);
+  });
+
+  it("does not open a second connection or write anything when nothing was evaluated (empty buffer)", async () => {
+    // No anchored fact at all: `retrieve()` never calls into the anchor cache store, so its
+    // buffer stays empty and `persistAnchorVerdicts` must be a no-op.
+    seedFacts(dbPath, [
+      {
+        id: "unanchored-1",
+        text: "no default exports",
+        kind: "preference",
+        scope: "global",
+        source_type: "user",
+        captured_at: new Date().toISOString(),
+        status: "active",
+      },
+    ]);
+
+    await buildHint({ root, dbPath });
+
+    const db = openDb(dbPath);
+    const count = db.prepare<[], { n: number }>("SELECT COUNT(*) AS n FROM anchor_cache").get()?.n;
+    db.close();
+    expect(count).toBe(0);
+  });
+
+  it("a flush failure does not fail the recall", async () => {
+    seedContentAnchoredFact();
+    writeFileSync(join(root, "config.json"), "pnpm");
+
+    // A trigger that fails every INSERT into `anchor_cache`, not a whole-database lock: locking
+    // the file also blocks `openStorage`'s own schema/pragma setup on the read phase, which would
+    // fail the read this test needs to succeed and fail for the wrong reason (a store-unreadable
+    // result, not the flush failure this test targets). This isolates the failure to the write
+    // `persistAnchorVerdicts` makes in the post-retrieve bookkeeping block, mirroring the doc
+    // comment's own "a read-only store" failure mode. No warm-up call first: `anchor_cache` starts
+    // empty, so this evaluation is genuinely fresh and has a verdict to flush -- a cache-hit would
+    // leave the buffer empty and the trigger would never fire.
+    const trigDb = openStorage(dbPath);
+    trigDb.exec(
+      "CREATE TRIGGER block_anchor_cache_insert BEFORE INSERT ON anchor_cache BEGIN SELECT RAISE(ABORT, 'simulated flush failure'); END;"
+    );
+    trigDb.close();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = await buildHint({ root, dbPath });
+      // The recall itself still succeeds -- the affirmed fact is still returned -- even though the
+      // flush that would have made the next call's evaluation free again silently failed.
+      expect(result.lines[0]).toContain("fresh=affirmed");
+      // No session id in this call, so the flush runs through `markSurfaced`, not `recordSurfaced`.
+      expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("could not mark facts surfaced"))).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+      const cleanupDb = openStorage(dbPath);
+      cleanupDb.exec("DROP TRIGGER block_anchor_cache_insert");
+      cleanupDb.close();
+    }
   });
 });
 

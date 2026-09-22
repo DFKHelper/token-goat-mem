@@ -33,7 +33,7 @@ import {
 import { MAX_IMPORT_FILE_SIZE_BYTES } from "./exportImport.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { isBoundToRoot } from "./retrieval.js";
-import { factsByNormalizedText, listFacts, normalizeFactText } from "./storage.js";
+import { factsByTextHash, listFacts } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
 
 /**
@@ -187,7 +187,7 @@ export interface ImportResult {
   readonly outcomes: readonly ImportOutcome[];
 }
 
-/** Dedup key: same source location *and* same text. A file edited between imports (bullet text changed at that line, or line numbers shifted) is treated as a new candidate rather than silently dropped -- only an exact re-import of unchanged content is a duplicate. Answers a different question than the store-wide `factsByNormalizedText` check below: this catches "this exact line was already imported"; that one catches "this text is already known to the store", e.g. as a fact the user captured themselves via `mem remember`. */
+/** Dedup key: same source location *and* same text. A file edited between imports (bullet text changed at that line, or line numbers shifted) is treated as a new candidate rather than silently dropped -- only an exact re-import of unchanged content is a duplicate. Answers a different question than the `factsByTextHash` check below: this catches "this exact line was already imported"; that one catches "this text is already known to the store", e.g. as a fact the user captured themselves via `mem remember`. */
 function dedupKey(sourceRef: string, text: string): string {
   return `${sourceRef}::${text}`;
 }
@@ -261,11 +261,6 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
   // audit-facing text a human reads, and an absolute path is noise a fact's own scopeRoot already
   // carries.
   const relativePath = relative(options.root, filePath);
-  // Built once: same rationale as `scan-session`'s own `storedByText` -- the check runs per
-  // candidate, and rebuilding this inside the loop would read the whole facts table once per
-  // bullet in a file with many of them.
-  const storedByText = factsByNormalizedText(db);
-
   const outcomes: ImportOutcome[] = [];
   for (const candidate of candidates) {
     const key = dedupKey(candidate.sourceRef, candidate.text);
@@ -273,10 +268,14 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       outcomes.push({ status: "skipped_duplicate", candidate });
       continue;
     }
+    // One indexed lookup per candidate (`idx_facts_text_hash`), same rationale as `scan-session`'s
+    // own per-candidate lookup: a file's bullet count is typically far smaller than the store's
+    // total fact count, so this avoids reading the whole facts table once per bullet.
+    //
     // Same rule `scan-session` and `retrieval.ts` use for what recall may surface: a text match
     // bound to an unrelated project's scope_root must not suppress this candidate, so `isBoundToRoot`
     // gates it rather than a bare text-index hit.
-    const boundMatches = (storedByText.get(normalizeFactText(candidate.text)) ?? []).filter((fact) => isBoundToRoot(fact, options.root));
+    const boundMatches = factsByTextHash(db, candidate.text).filter((fact) => isBoundToRoot(fact, options.root));
     if (boundMatches.length > 0) {
       outcomes.push({ status: "skipped_known", candidate });
       // A restatement of a `pending` suggestion, re-imported from a later revision of the same
