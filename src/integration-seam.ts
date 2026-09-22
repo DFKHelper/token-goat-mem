@@ -61,6 +61,7 @@ import {
   type BufferedAnchorVerdict,
 } from "./storage.js";
 import { resolveDbPath } from "./db.js";
+import { getGraphScoresForQuery } from "./factgraph.js";
 import { planEmbeddingRanking } from "./embeddings.js";
 import { identityMatches } from "./projectIdentity.js";
 import { retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
@@ -577,6 +578,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   let alreadySurfaced: ReadonlySet<string> = new Set();
   let usefulness: ReadonlyMap<string, { surfaced: number; used: number }>;
   let entityOverlap: ReadonlyMap<string, number>;
+  let graphScores: ReadonlyMap<string, number>;
   let anchorCacheSnapshot: ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }>;
   // Decided before the fact query, not after, because it decides the query's row shape: an
   // embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget
@@ -611,6 +613,11 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // where the ranking matters most, since an agent gets one shot at the context it is handed and
     // never sees the facts that ranked below the cap.
     entityOverlap = getEntityOverlapForQuery(db, options.query ?? "");
+    // Bounded by `entityOverlap` itself: `getGraphScoresForQuery` returns empty immediately for a
+    // query naming no entity (the common case, since `entityOverlap` above already paid for that
+    // check), and a query that *does* name something walks at most two hops of grouped, indexed
+    // queries -- no per-fact loop, on the connection already open, within this same ~150ms budget.
+    graphScores = entityOverlap.size > 0 ? getGraphScoresForQuery(db, options.query ?? "") : new Map();
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }
@@ -659,6 +666,10 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // three words. Empty whenever the query names no identifier, so it cannot vote on a query it has
     // no signal for.
     ...(entityOverlap.size > 0 ? { entityOverlap } : {}),
+    // Fourth RRF rank list, fused only when non-empty (see `RetrievalOptions.graphScores`):
+    // absent on every query that names no entity, which keeps ranking byte-identical to today for
+    // the common case this budget exists to protect.
+    ...(graphScores.size > 0 ? { graphScores } : {}),
     ...(embeddingBackend !== null ? { embeddingBackend, embeddingTimeoutMs: embeddingBudgetMs } : {}),
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });

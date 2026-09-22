@@ -995,6 +995,58 @@ describe("usefulness as a third RRF rank list", () => {
   });
 });
 
+describe("graphScores as a fourth RRF rank list", () => {
+  const facts = [
+    makeFact({ id: "a", text: "deploy runbook mentions the deploy step", kind: "fact", captured_at: "2026-01-03T00:00:00.000Z" }),
+    makeFact({ id: "b", text: "deploy runbook", kind: "fact", captured_at: "2026-01-02T00:00:00.000Z" }),
+    makeFact({ id: "c", text: "unrelated note about cheese", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
+  ];
+
+  it("leaves ranking byte-identical when absent -- the default path every store without a caller-computed graph is on", async () => {
+    const withoutGraph = await retrieve(facts, { query: "deploy", root });
+    const withUndefinedGraph = await retrieve(facts, { query: "deploy", root, graphScores: undefined });
+    expect(withUndefinedGraph.results.map((r) => [r.fact.id, r.score])).toEqual(withoutGraph.results.map((r) => [r.fact.id, r.score]));
+  });
+
+  it("reorders results toward a fact the graph connects to the query even though BM25 alone ranked it last", async () => {
+    const withoutGraph = await retrieve(facts, { query: "deploy", root });
+    expect(withoutGraph.results.map((r) => r.fact.id).slice(0, 2)).toEqual(["a", "b"]);
+
+    // RRF is rank-based, not magnitude-based: swapping only the top two of a two-entry graph list
+    // against a two-entry BM25 list in the opposite order is an exact tie (each fact is first in
+    // one list and second in the other) and the recency tie-break decides it right back to `a`.
+    // `c` ranked last in the graph list is what actually breaks the tie in `b`'s favor.
+    const withGraph = await retrieve(facts, {
+      query: "deploy",
+      root,
+      graphScores: new Map([
+        ["b", 3],
+        ["c", 1],
+        ["a", 0.1],
+      ]),
+    });
+    expect(withGraph.results.map((r) => r.fact.id).slice(0, 2)).toEqual(["b", "a"]);
+  });
+
+  it("ignores an all-zero graph score map rather than letting a degenerate list vote", async () => {
+    // A BM25-informative query, mirroring the all-zero-BM25-list regression above: an all-zero
+    // graph map must produce an *empty* rank list (see `graphScoreRanking`'s `score > 0` filter),
+    // not a zero-filled one that would still enter fusion and let RRF's rank spacing move scores
+    // for a signal that never actually differed between any two facts.
+    const baseline = await retrieve(facts, { query: "deploy", root });
+    const withZeroes = await retrieve(facts, {
+      query: "deploy",
+      root,
+      graphScores: new Map([
+        ["a", 0],
+        ["b", 0],
+        ["c", 0],
+      ]),
+    });
+    expect(withZeroes.results.map((r) => [r.fact.id, r.score])).toEqual(baseline.results.map((r) => [r.fact.id, r.score]));
+  });
+});
+
 describe("pinned facts and the recall cap", () => {
   /** `limit` newer facts, so anything older is pushed off the end of a zero-signal recall. */
   function newerThan(count: number): Fact[] {

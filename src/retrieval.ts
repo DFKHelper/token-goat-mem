@@ -205,6 +205,23 @@ export interface RetrievalOptions {
    * and gates, it does not open databases.
    */
   readonly entityOverlap?: ReadonlyMap<string, number>;
+  /**
+   * How strongly each fact is connected, by shared terms, to the facts {@link entityOverlap}
+   * finds -- `factgraph.getGraphScoresForQuery`'s seeded, IDF-damped propagation over the
+   * `fact_terms` co-occurrence graph, fused as a fourth RRF rank list.
+   *
+   * Where {@link entityOverlap} answers "does the query name this fact", this answers "is this
+   * fact strongly connected to what the query names, even though the query never says so" -- a
+   * fact reached only through a shared term, never through the identifier itself, surfaces here
+   * and nowhere else. A vote, never an override, for the same reason as {@link entityOverlap}: it
+   * joins fusion rather than replacing anything, so it cannot displace a fact that actually
+   * matches the rest of the query.
+   *
+   * Passed in rather than read here for the same reason as {@link usefulness}: this module ranks
+   * and gates, it does not open databases or walk graphs -- see ARCHITECTURE.md's one-way
+   * dependency rule, which this field exists specifically not to violate.
+   */
+  readonly graphScores?: ReadonlyMap<string, number>;
 }
 
 export interface RetrievedFact {
@@ -703,6 +720,27 @@ function entityOverlapRanking(candidates: readonly Fact[], overlap: RetrievalOpt
   scored.sort((a, b) => {
     const byCount = b.count - a.count;
     return byCount !== 0 ? byCount : b.fact.captured_at.localeCompare(a.fact.captured_at);
+  });
+  return scored.map((entry) => entry.fact.id);
+}
+
+/**
+ * Candidates ordered by `factgraph`'s propagated score, most-connected first. Filtering
+ * `score > 0` is what keeps a degenerate all-zero (or absent) map out of fusion -- the same
+ * treatment {@link entityOverlapRanking} gives a zero-count map, for the same reason: a ranking
+ * where nothing actually differs is not a signal, and letting it vote lets fusion's rank spacing
+ * pull scores off their true value for free.
+ */
+function graphScoreRanking(candidates: readonly Fact[], graphScores: RetrievalOptions["graphScores"]): string[] {
+  if (graphScores === undefined || graphScores.size === 0) {
+    return [];
+  }
+  const scored = candidates
+    .map((fact) => ({ fact, score: graphScores.get(fact.id) ?? 0 }))
+    .filter((entry) => entry.score > 0);
+  scored.sort((a, b) => {
+    const byScore = b.score - a.score;
+    return byScore !== 0 ? byScore : b.fact.captured_at.localeCompare(a.fact.captured_at);
   });
   return scored.map((entry) => entry.fact.id);
 }
@@ -1312,7 +1350,8 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a
   // fourth signal is one push rather than another doubling of cases.
   const entityRankIds = entityOverlapRanking(filtered, options.entityOverlap);
-  const extraRankLists = [embeddingRankIds, usefulnessRankIds, entityRankIds].filter((list) => list.length > 0);
+  const graphRankIds = graphScoreRanking(filtered, options.graphScores);
+  const extraRankLists = [embeddingRankIds, usefulnessRankIds, entityRankIds, graphRankIds].filter((list) => list.length > 0);
 
   // A BM25 list where every score is zero is a *ranking* but not a *signal*: nothing matched, so
   // `bm25Ranked`'s sort fell through to its `captured_at` tie-break and the list is now pure recency

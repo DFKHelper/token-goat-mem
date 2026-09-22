@@ -173,6 +173,7 @@ import {
   updateFact,
 } from "./storage.js";
 import { extractFacets } from "./facets.js";
+import { getGraphScoresForQuery } from "./factgraph.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { AuditLogRow } from "./db.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
@@ -2739,7 +2740,7 @@ export function buildProgram(): Command {
         // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
         // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
         const wantedEntities = options.entity ?? [];
-        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap, anchorCacheSnapshot } = await withDb((db) => ({
+        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap, graphScores, anchorCacheSnapshot } = await withDb((db) => ({
           facts: listFacts(db, {}),
           usefulness: getUsefulnessCounts(db),
           embeddingMeta: getEmbeddingMeta(db) ?? null,
@@ -2751,6 +2752,10 @@ export function buildProgram(): Command {
           // the signal BM25 cannot carry: stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts`
           // and then ranks the fact naming that file no higher than one merely using those words.
           entityOverlap: getEntityOverlapForQuery(db, query ?? ""),
+          // Propagated from the same entity-overlap seeds, one or two hops out over `fact_terms`
+          // (see `factgraph.getGraphScoresForQuery`) -- empty for the same no-entity queries
+          // `entityOverlap` above already costs nothing for.
+          graphScores: getGraphScoresForQuery(db, query ?? ""),
           // One indexed range scan on the connection already open, for the same reason as every
           // read above: `retrieve()` below must not hold a DB handle across its embedding round
           // trip, so whatever `anchor_cache` already knows about this root has to be read now.
@@ -2799,6 +2804,7 @@ export function buildProgram(): Command {
           // as clean ground truth.
           ...(wantedEntities.length > 0 && entityKeys !== null ? { entities: wantedEntities, factEntityKeys: entityKeys } : {}),
           ...(entityOverlap.size > 0 ? { entityOverlap } : {}),
+          ...(graphScores.size > 0 ? { graphScores } : {}),
           ...(hintStyle !== "full" ? { hintStyle } : {}),
           // Default (full) output drops the per-line CTA in favor of one shared trailing footer
           // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
