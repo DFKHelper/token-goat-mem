@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _clearAnchorMemoForTests } from "../../src/anchors.js";
 import {
   _stemForTests,
+  anchorRootsFor,
   computeBm25Scores,
   cosineSimilarity,
   reciprocalRankFusion,
@@ -1085,5 +1086,29 @@ describe("pinned facts and the recall cap", () => {
     const match = makeFact({ id: "relevant", text: "deployments use blue-green rollout", kind: "decision" });
     const outcome = await retrieve([pinned, match], { query: "blue-green rollout", root });
     expect(outcome.results[0]?.fact.id).toBe("relevant");
+  });
+});
+
+describe("anchorRootsFor", () => {
+  it("returns the roots anchors are really evaluated against, not the query root", () => {
+    // The set a persistent anchor cache has to be primed with. A `path` fact reached from an
+    // ancestor evaluates against its own `captureRoot`, and a `project` fact bound elsewhere
+    // against its own `scopeRoot` -- neither is the query root, so a prefetch keyed on the query
+    // root alone can never hold either one's verdict.
+    const facts: Fact[] = [
+      makeFact({ id: "p", text: "path fact", kind: "fact", scope: "path", scopeRoot: "/repo/packages/api", captureRoot: "/repo/packages/api", anchor: "file-exists a.txt" }),
+      makeFact({ id: "j", text: "project fact", kind: "fact", scope: "project", scopeRoot: "/elsewhere", anchor: "file-exists b.txt" }),
+      makeFact({ id: "g", text: "global fact", kind: "fact", scope: "global", scopeRoot: null, anchor: "file-exists c.txt" }),
+    ];
+    const roots = anchorRootsFor(facts, "/repo");
+    expect(roots).toContain("/repo/packages/api");
+    expect(roots).toContain("/elsewhere");
+    // A global fact is re-checked wherever the caller currently is, so it contributes the query root.
+    expect(roots).toContain("/repo");
+  });
+
+  it("ignores facts with no anchor -- they cost no cache key", () => {
+    const facts: Fact[] = [makeFact({ id: "n", text: "no anchor", kind: "fact", scope: "global", scopeRoot: null, anchor: null })];
+    expect(anchorRootsFor(facts, "/repo")).toEqual([]);
   });
 });

@@ -176,15 +176,30 @@ export interface BufferedAnchorCacheStore extends AnchorCacheStore {
  * to hydrate from. `root` is a primary-key prefix (`PRIMARY KEY (root, anchor)`), so this is one
  * indexed range scan -- not the full table, and not one query per anchor.
  */
-export function prefetchAnchorCache(db: Db, root: string): ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }> {
-  const rows = db
-    .prepare<[string], { anchor: string; verdict: AnchorVerdict; witness: string | null }>(
-      "SELECT anchor, verdict, witness FROM anchor_cache WHERE root = ?"
-    )
-    .all(root);
+export function prefetchAnchorCache(
+  db: Db,
+  roots: string | readonly string[]
+): ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }> {
+  // Takes the set of roots anchors will actually be evaluated against, not the query root, because
+  // those are not the same thing. `anchorRootFor` redirects a `path` fact to its own `captureRoot`
+  // whenever the query root is an ancestor of it (the monorepo-hook-at-repo-root case), and leaves
+  // a `project` fact bound elsewhere on its own `scopeRoot` on any recall that is not
+  // `restrictToRoot`. Keying the snapshot on the query root alone meant every such fact missed the
+  // cache on every recall and wrote its verdict back under a key the next prefetch would not load
+  // -- silently, since the recomputed verdict is still correct. `retrieval.ts`'s `anchorRootsFor`
+  // computes this set; callers pass its result straight through.
+  const wanted = [...new Set(typeof roots === "string" ? [roots] : roots)];
   const snapshot = new Map<string, { verdict: AnchorVerdict; witness: string | null }>();
+  if (wanted.length === 0) {
+    return snapshot;
+  }
+  const rows = db
+    .prepare<string[], { root: string; anchor: string; verdict: AnchorVerdict; witness: string | null }>(
+      `SELECT root, anchor, verdict, witness FROM anchor_cache WHERE root IN (${wanted.map(() => "?").join(",")})`
+    )
+    .all(...wanted);
   for (const row of rows) {
-    snapshot.set(anchorCacheKey(root, row.anchor), { verdict: row.verdict, witness: row.witness });
+    snapshot.set(anchorCacheKey(row.root, row.anchor), { verdict: row.verdict, witness: row.witness });
   }
   return snapshot;
 }
@@ -1012,7 +1027,15 @@ export function upsertFactLink(db: Db, factIdA: string, factIdB: string, similar
   return { factIdA: a, factIdB: b, similarity, discoveredAt };
 }
 
-/** Every discovered relation in the store, canonical pair order, then newest first. */
+/**
+ * Every discovered relation in the store, canonical pair order, then newest first.
+ *
+ * Rows are not status-aware and cannot be: `fact_links` carries only the FK pair, and its
+ * `ON DELETE CASCADE` fires on a row being deleted, never on a fact being superseded -- which is a
+ * status change, so a link whose other side was later superseded by `mem consolidate --dedup`
+ * survives here intact. Nothing reads these yet, so no surface shows a stale relation today; the
+ * first consumer that does must join `facts` and filter on `status` itself.
+ */
 export function listFactLinks(db: Db): FactLink[] {
   return db
     .prepare<[], FactLinkRow>("SELECT * FROM fact_links ORDER BY discovered_at DESC, fact_id_a, fact_id_b")

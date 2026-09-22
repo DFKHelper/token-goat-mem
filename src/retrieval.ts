@@ -1115,6 +1115,31 @@ export function anchorRootFor(fact: Fact, queryRoot: string): string | null {
 }
 
 /**
+ * The distinct set of roots `anchorRootFor` will actually evaluate `facts`' anchors against, for a
+ * query at `queryRoot`.
+ *
+ * Exists so a caller can prime a persistent anchor cache with the keys the evaluation will really
+ * use. The query root alone is not that set: a `path` fact redirects to its own `captureRoot` when
+ * `queryRoot` is an ancestor, and a `project` fact bound elsewhere stays on its `scopeRoot` unless
+ * the recall is `restrictToRoot`. Pure, and deliberately kept beside `anchorRootFor` so the two
+ * cannot drift -- this module still touches no storage.
+ */
+export function anchorRootsFor(facts: readonly Fact[], queryRoot: string): string[] {
+  const roots = new Set<string>();
+  for (const fact of facts) {
+    if (typeof fact.anchor !== "string" || fact.anchor.trim().length === 0) {
+      continue;
+    }
+    const root = anchorRootFor(fact, queryRoot);
+    if (root !== null) {
+      roots.add(root);
+    }
+  }
+  return [...roots];
+}
+
+
+/**
  * Evaluates `fact`'s anchor against the root it was actually captured under, rather than a bare
  * caller-supplied root. Wraps `anchorRootFor` + `evaluateAnchor` so the one place that knows how to
  * turn "capture root unknown" into `unverified` (rather than handing `evaluateAnchor` a fabricated

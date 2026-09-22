@@ -23,7 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { getGraphScoresForQuery } from "../src/factgraph.js";
-import { retrieve, type RetrievalOptions } from "../src/retrieval.js";
+import { anchorRootsFor, retrieve, type RetrievalOptions } from "../src/retrieval.js";
 import {
   createBufferedAnchorCacheStore,
   getEntityKeysByFact,
@@ -143,7 +143,7 @@ export function buildPipelineContext(dbPath: string, facts: readonly EvalFact[],
     const root = rootMap.get(scenario.root) ?? scenario.root;
     const entityOverlap = getEntityOverlapForQuery(db, scenario.query);
     const graphScores = getGraphScoresForQuery(db, scenario.query, {}, entityOverlap);
-    const anchorCacheStore = createBufferedAnchorCacheStore(prefetchAnchorCache(db, root));
+    const anchorCacheStore = createBufferedAnchorCacheStore(prefetchAnchorCache(db, anchorRootsFor(pipelineFacts, root)));
 
     const options: RetrievalOptions = {
       query: scenario.query,
