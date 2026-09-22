@@ -44,9 +44,10 @@
  * used to compute the new content.
  */
 
+import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { applyEdits, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type JSONPath, type ModificationOptions, type Node } from "jsonc-parser";
 
@@ -872,10 +873,16 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
 // ─────────────────────────────────────────────────────────────────────────── Claude Code: settings.json hooks ───────────────────────────────────────────────────────────────────────────
 
 // These hooks land in `<root>/.claude/settings.json`, which is typically committed and shared with
-// collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call, and the
-// trailing `|| true` forces exit 0 either way (a bare `&&` guard would exit 1 when mem is absent,
-// which a host could still surface as a failed hook), matching the fail-open contract the README
-// documents for this seam: a missing or broken mem must never block a session.
+// collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call so a
+// machine with no mem installed stays silent (the historically fail-open case the README documents
+// for this seam: a missing mem must never block a session). But "mem is on PATH and exits nonzero"
+// is a different case from "mem is absent", and collapsing both into the same silent branch (the
+// old `guard && call || true` shape) hid a real incident: a stale PATH binary rejecting flags a
+// newer `mem init` had written produced 219 silently-swallowed hook failures over five days with no
+// visible signal anywhere. `if guard; then call || fallback; fi` keeps "absent" silent (the `if`
+// condition is false, nothing runs) while giving "present but failed" a fallback that actually
+// prints something the host will show -- `$?` inside the fallback is the failed call's own exit
+// code, captured before the fallback runs.
 //
 // Both read the hook's JSON envelope from stdin (`--hook-stdin`) rather than depending on `jq` or
 // any other tool being on PATH: `mem` parses it itself. `session_id` is a common field on every
@@ -883,17 +890,22 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
 // UserPromptSubmit deltas subtract from -- otherwise the first prompt would re-send everything the
 // session opener already surfaced. A SessionStart envelope carries no prompt, so that recall stays
 // query-less (recency order) exactly as before; UserPromptSubmit's `prompt` field becomes the query.
+//
+// The fallback's output is itself a (bare, fact-less) `TGMEM/2` response with a `footer` line, so a
+// host already rendering that wire format shows the failure instead of nothing.
 const CLAUDE_SESSION_START_COMMAND =
-  'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true';
+  'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi';
 const CLAUDE_USER_PROMPT_SUBMIT_COMMAND =
-  'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || true';
+  'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi';
 
 // `Stop` fires after the user has actually said something -- the two recall events above run
 // before or instead of that -- and carries `transcript_path`, so a scan has a transcript to read.
 // Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block. Runs
-// `--quiet` so a scan never writes into the session it just scanned.
+// `--quiet` so a *successful* scan never writes into the session it just scanned; a failed scan is
+// the one case that still prints -- a plain one-line notice, not `TGMEM/2`, since Stop/PreCompact
+// are not on the recall wire and nothing here parses their stdout as that format.
 const CLAUDE_STOP_COMMAND =
-  'command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || true';
+  'if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || echo "mem scan-session failed (exit $?); run mem doctor"; fi';
 
 // `PreCompact` is the same scan under a different trigger, and it is not redundant with `Stop`:
 // `Stop` fires when a turn ends, so a session that runs long enough to be compacted mid-task has
@@ -906,11 +918,20 @@ const CLAUDE_STOP_COMMAND =
 // turns both events see costs a read and files nothing twice.
 const CLAUDE_PRE_COMPACT_COMMAND = CLAUDE_STOP_COMMAND;
 
-// Every command above shares this guard/subcommand/root wrapper; only the flags between the
-// subcommand and `--root` vary across events and across mem versions (`--hook-stdin` was added to
-// SessionStart after its first release). Matching the wrapper -- not the full literal string --
-// is what lets `looksLikeMemHookCommand` recognise an older or newer mem install's hook as its own.
-const MEM_HOOK_INVOCATION_RE = /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u;
+// Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand
+// and `--root` vary across events, and the wrapper shape itself has varied across mem versions --
+// `command -v mem ... && mem ... || true` before this fix, `if command -v mem ...; then mem ... ||
+// fallback; fi` after it. Two alternatives, not one loosened pattern, so a hybrid string that
+// happens to satisfy pieces of both without being either is not accidentally recognised. Matching
+// the wrapper -- not the full literal string -- is what lets `looksLikeMemHookCommand` recognise an
+// older *or* newer mem install's hook as its own, across both the flag additions this comment used
+// to describe alone and the wrapper-shape change this fix adds.
+const MEM_HOOK_INVOCATION_OLD_RE = /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u;
+const MEM_HOOK_INVOCATION_NEW_RE = /^if command -v mem >\/dev\/null 2>&1; then mem (\S+)\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u;
+
+function matchMemHookInvocation(command: string): RegExpExecArray | null {
+  return MEM_HOOK_INVOCATION_OLD_RE.exec(command) ?? MEM_HOOK_INVOCATION_NEW_RE.exec(command);
+}
 
 /**
  * Whether `command` is mem's own invocation shape for `event` -- same wrapper, same subcommand as
@@ -921,18 +942,187 @@ const MEM_HOOK_INVOCATION_RE = /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b
  */
 function looksLikeMemHookCommand(command: string, event: string): boolean {
   const canonical = CLAUDE_HOOK_EVENTS.find((entry) => entry.event === event)?.command;
-  const canonicalMatch = canonical === undefined ? null : MEM_HOOK_INVOCATION_RE.exec(canonical);
-  const actualMatch = MEM_HOOK_INVOCATION_RE.exec(command);
+  const canonicalMatch = canonical === undefined ? null : matchMemHookInvocation(canonical);
+  const actualMatch = matchMemHookInvocation(command);
   return canonicalMatch !== null && actualMatch !== null && canonicalMatch[1] === actualMatch[1];
 }
 
+/**
+ * The subcommand and flags a mem-authored hook command actually invokes -- `null` if `command`
+ * doesn't contain the `&&`/`then` + `mem <subcommand> ... --root` shape either wrapper writes.
+ * Anchored on `&&`/`then` immediately before `mem` so the earlier `command -v mem` in the same
+ * string is never mistaken for the invocation itself. Used to check a command (whether the one
+ * `CLAUDE_HOOK_EVENTS` is about to write, or one already sitting in a settings.json this build did
+ * not write) against what a candidate `mem` binary's own `--help` output actually supports --
+ * derived from the command text itself rather than a separately maintained flag list, so it never
+ * drifts from what mem init/doctor really checks.
+ */
+export function parseHookCommandSpec(command: string): { readonly subcommand: string; readonly flags: readonly string[] } | null {
+  const match = /(?:&&|then) mem (\S+)\b(.*?)--root\b/u.exec(command);
+  if (match === null) {
+    return null;
+  }
+  const subcommand = match[1] as string;
+  const flagsPart = match[2] as string;
+  const flags = flagsPart.split(/\s+/u).filter((token) => token.startsWith("--"));
+  return { subcommand, flags };
+}
+
 /** The hook events mem installs, in the order they are written, each with the one command mem stamps under it. */
-const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
+export const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
   { event: "SessionStart", command: CLAUDE_SESSION_START_COMMAND },
   { event: "UserPromptSubmit", command: CLAUDE_USER_PROMPT_SUBMIT_COMMAND },
   { event: "Stop", command: CLAUDE_STOP_COMMAND },
   { event: "PreCompact", command: CLAUDE_PRE_COMPACT_COMMAND },
 ];
+
+// ─────────────────────────────────────────────────────────────────────────── Claude Code: hook-binary capability detection ───────────────────────────────────────────────────────────────────────────
+//
+// A hook command being written (or already sitting) in settings.json says nothing about whether the
+// `mem` binary Claude Code will actually invoke at hook time understands it -- that binary is
+// resolved from PATH at run time, by a shell, completely independently of which mem build produced
+// this process. A newer `mem init` writing `--hook-stdin`/`scan-session` while an older `mem` sits
+// on PATH is exactly the five-day incident this fix responds to: the write succeeded, the file was
+// byte-for-byte correct, and every hook still failed, silently, because nothing checked the *other*
+// binary.
+//
+// Capability is checked by running the candidate binary's own `--help`, not by comparing version
+// numbers: a version-string comparison needs a maintained "hooks need >= x.y.z" constant that goes
+// stale the moment a future release adds another flag, where asking the binary what it actually
+// supports never does.
+
+/** A `mem` binary resolved from PATH, plus the `--version` string it reports (`null` if `--version` itself failed to run). */
+export interface ResolvedMemBinary {
+  readonly path: string;
+  readonly version: string | null;
+}
+
+/** Candidate file names to try in each PATH directory, most-specific first. Only Windows needs more than the bare name -- npm's global bin writes `<name>`, `<name>.cmd`, and `<name>.ps1` shims there, and `<name>.cmd` is the one both cmd.exe and PowerShell resolve `mem` to by default. */
+function candidateBinaryNames(name: string, platform: NodeJS.Platform, pathExt: string): readonly string[] {
+  if (platform !== "win32") {
+    return [name];
+  }
+  const exts = pathExt
+    .split(";")
+    .map((ext) => ext.trim())
+    .filter((ext) => ext.length > 0);
+  const ordered = exts.length > 0 ? exts : [".COM", ".EXE", ".BAT", ".CMD"];
+  return [...ordered.map((ext) => `${name}${ext}`), name];
+}
+
+/**
+ * The absolute path `name` resolves to on PATH, or `null` if no directory in `pathEnv` has a
+ * matching file. Pure PATH-directory scan, not a subprocess (`command -v`/`where`), so it works the
+ * same on every platform this runs on and stays fully testable via `pathEnv`/`pathExt`/`platform`
+ * overrides rather than mutating `process.env` or depending on a shell being present at all.
+ */
+export function resolveBinaryOnPath(
+  name: string,
+  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform } = {}
+): string | null {
+  const platform = opts.platform ?? process.platform;
+  const pathEnv = opts.pathEnv ?? process.env["PATH"] ?? process.env["Path"] ?? "";
+  const pathExt = opts.pathExt ?? process.env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD";
+  const dirs = pathEnv.split(delimiter).filter((dir) => dir.length > 0);
+  const candidates = candidateBinaryNames(name, platform, pathExt);
+  for (const dir of dirs) {
+    for (const candidate of candidates) {
+      const full = join(dir, candidate);
+      try {
+        if (existsSync(full) && statSync(full).isFile()) {
+          return full;
+        }
+      } catch {
+        // Permission error or a race with something deleting `full` mid-scan -- keep scanning
+        // the rest of PATH rather than letting one bad entry abort resolution.
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed
+ * out, or exited nonzero. The command is assembled as one shell string (quoting each token) and run
+ * with `shell: true` rather than passed as an argv array: Windows cannot exec an npm-installed
+ * `.cmd`/`.bat` shim directly (`spawnSync` raises `EINVAL`), and `shell: true` with a separate argv
+ * array is a documented footgun (Node's own DEP0190) because the array elements are concatenated
+ * into the command line unescaped -- quoting them here, once, in the string form avoids both.
+ */
+function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: number): string | null {
+  const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
+  const result = spawnSync(quoted, { encoding: "utf8", timeout: timeoutMs, shell: true });
+  if (result.error !== undefined || result.status !== 0) {
+    return null;
+  }
+  return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+}
+
+/** Resolves `mem` on PATH and its reported version, or `null` if nothing resolves. */
+export function resolveMemBinary(
+  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number } = {}
+): ResolvedMemBinary | null {
+  const path = resolveBinaryOnPath("mem", opts);
+  if (path === null) {
+    return null;
+  }
+  const output = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? 4000);
+  return { path, version: output === null ? null : output.trim() || null };
+}
+
+/** Whether `binPath` accepts `spec`'s subcommand and every one of its flags, determined from its own `--help` output. `missing` names the unsupported subcommand (as its only element) when the subcommand itself doesn't exist, or the unsupported flags otherwise. */
+export function checkHookCapability(
+  binPath: string,
+  spec: { readonly subcommand: string; readonly flags: readonly string[] },
+  timeoutMs = 4000
+): { readonly capable: boolean; readonly missing: readonly string[] } {
+  const help = runMemSubprocess(binPath, [spec.subcommand, "--help"], timeoutMs);
+  if (help === null) {
+    return { capable: false, missing: [spec.subcommand] };
+  }
+  const missing = spec.flags.filter((flag) => !help.includes(flag));
+  return { capable: missing.length === 0, missing };
+}
+
+/** One hook command's capability result: `capable: false` with an empty `missing` means the command's shape couldn't even be parsed (defensive; every command this checks is already known to be mem's own shape). */
+export interface HookCapabilityResult {
+  readonly event: string;
+  readonly command: string;
+  readonly capable: boolean;
+  readonly missing: readonly string[];
+}
+
+/** Full health picture for a set of `{event, command}` hook entries: the resolved `mem` binary (or `null`), and each entry's capability against it. */
+export interface ClaudeHookHealth {
+  readonly bin: ResolvedMemBinary | null;
+  readonly hooks: readonly HookCapabilityResult[];
+}
+
+export function checkClaudeHookHealth(
+  commands: ReadonlyArray<{ readonly event: string; readonly command: string }>,
+  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number } = {}
+): ClaudeHookHealth {
+  const bin = resolveMemBinary(opts);
+  const hooks = commands.map(({ event, command }): HookCapabilityResult => {
+    const spec = parseHookCommandSpec(command);
+    if (bin === null || spec === null) {
+      return { event, command, capable: false, missing: spec === null ? [] : spec.flags };
+    }
+    const { capable, missing } = checkHookCapability(bin.path, spec, opts.timeoutMs ?? 4000);
+    return { event, command, capable, missing };
+  });
+  return { bin, hooks };
+}
+
+/** Human-readable "<subcommand> <missing flags>" (or just "<subcommand>" when the subcommand itself is unsupported), for reporting one incapable hook. */
+export function describeHookGap(command: string, missing: readonly string[]): string {
+  const spec = parseHookCommandSpec(command);
+  const subcommand = spec?.subcommand ?? "?";
+  if (missing.length === 0 || (missing.length === 1 && missing[0] === subcommand)) {
+    return subcommand;
+  }
+  return `${subcommand} ${missing.join(" ")}`;
+}
 
 interface ClaudeHook {
   readonly type: string;
@@ -989,7 +1179,21 @@ function installClaudeSettings(current: string | undefined, path: string): strin
  * `installClaudeHookEvent` inserted from scratch. Surfaced by `claudeCode`'s `installDetail` so an
  * install that quietly absorbs an older install's hook is reported, not silent.
  */
-function claudeHookAdoptions(before: string): string[] {
+export interface InstalledClaudeHook {
+  readonly event: string;
+  readonly command: string;
+  readonly stamped: boolean;
+}
+
+/**
+ * Every mem-authored (stamped, or unstamped-but-adoptable) hook command currently sitting in
+ * `before`'s `hooks` object, one entry per event that has one. The one place that walks
+ * `hooks.<event>[].hooks[]` looking for mem's own shape -- shared by `claudeHookAdoptions` (which
+ * events would be *upgraded* by an install) and `mem doctor`'s hook-health report (which commands
+ * to check a candidate `mem` binary against), so a second traversal of the same structure never
+ * drifts from this one.
+ */
+function installedClaudeHooks(before: string): InstalledClaudeHook[] {
   let parsed: unknown;
   try {
     parsed = parseJsonc(before, [], JSONC_PARSE);
@@ -1000,34 +1204,58 @@ function claudeHookAdoptions(before: string): string[] {
     return [];
   }
   const hooks = parsed["hooks"] as { [key: string]: unknown };
-  const adopted: string[] = [];
+  const result: InstalledClaudeHook[] = [];
   for (const { event } of CLAUDE_HOOK_EVENTS) {
     const eventValue = hooks[event];
     if (!Array.isArray(eventValue)) {
       continue;
     }
-    let hasStamped = false;
-    let hasAdoptable = false;
+    let stampedCommand: string | undefined;
+    let adoptableCommand: string | undefined;
     for (const group of eventValue) {
       if (!isPlainObject(group) || !Array.isArray(group["hooks"])) {
         continue;
       }
       for (const hook of group["hooks"] as unknown[]) {
-        if (!isPlainObject(hook)) {
+        if (!isPlainObject(hook) || typeof hook["command"] !== "string") {
           continue;
         }
         if (isStamped(hook)) {
-          hasStamped = true;
-        } else if (typeof hook["command"] === "string" && looksLikeMemHookCommand(hook["command"], event)) {
-          hasAdoptable = true;
+          stampedCommand = hook["command"];
+        } else if (looksLikeMemHookCommand(hook["command"], event)) {
+          adoptableCommand = hook["command"];
         }
       }
     }
-    if (hasAdoptable && !hasStamped) {
-      adopted.push(event);
+    const command = stampedCommand ?? adoptableCommand;
+    if (command !== undefined) {
+      result.push({ event, command, stamped: stampedCommand !== undefined });
     }
   }
-  return adopted;
+  return result;
+}
+
+function claudeHookAdoptions(before: string): string[] {
+  return installedClaudeHooks(before)
+    .filter((hook) => !hook.stamped)
+    .map((hook) => hook.event);
+}
+
+/**
+ * The mem-authored `SessionStart`/`UserPromptSubmit`/`Stop`/`PreCompact` hook commands actually
+ * sitting in a project's (or, with `user: true`, the user-level) `.claude/settings.json` right now
+ * -- `[]` when the file doesn't exist or has none. What `mem doctor`'s hook-health report checks a
+ * resolved `mem` binary against, since the file on disk (not `CLAUDE_HOOK_EVENTS`, which is what
+ * this build would *write*) is the ground truth for what a real Claude Code session will actually
+ * invoke.
+ */
+export function installedClaudeHookCommands(opts?: WiringOpts): readonly InstalledClaudeHook[] {
+  const { root, homeDir, user } = resolveWiringOpts(opts);
+  const settingsPath = user ? join(homeDir, ".claude", "settings.json") : join(root, ".claude", "settings.json");
+  if (!existsSync(settingsPath)) {
+    return [];
+  }
+  return installedClaudeHooks(readFileSync(settingsPath, "utf8"));
 }
 
 /** Installs mem's stamped `command` under `hooks.<event>` in `text`, returning `text` unchanged when it is already there verbatim. */

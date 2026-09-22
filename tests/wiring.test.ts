@@ -12,12 +12,19 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import {
+  checkClaudeHookHealth,
+  checkHookCapability,
   claudeCode,
+  CLAUDE_HOOK_EVENTS,
   codex,
   copilotCli,
   copilotJetbrains,
   copilotVisualStudio,
   copilotVscode,
+  installedClaudeHookCommands,
+  parseHookCommandSpec,
+  resolveBinaryOnPath,
+  resolveMemBinary,
   vscodeUserDir,
   WiringConflictError,
   WiringUserUnsupportedError,
@@ -104,22 +111,28 @@ describe("claudeCode wiring", () => {
     expect(claudeMd).toMatch(/file-exists|file-absent|file-newer-than|glob-exists|git-tracked|newest-of/);
   });
 
-  it("installs a hook command that cannot exit nonzero when mem is missing from PATH", () => {
+  it("installs a hook command that cannot exit nonzero when mem is missing from PATH, and reports a failure when mem is present but broken", () => {
     claudeCode.install({ root, homeDir: home });
     const settingsPath = join(root, ".claude", "settings.json");
     const settings = JSON.parse(read(settingsPath));
     const command: string = settings.hooks.SessionStart[0].hooks[0].command;
 
-    // Pin the exact guarded string: a `command -v mem` gate short-circuits the call when mem isn't
-    // on PATH, and the trailing `|| true` forces exit 0 even then -- a bare `&&` guard would still
-    // exit 1 in that case, which a host could surface as a failed hook.
+    // Pin the exact guarded string: `command -v mem` gates the call so a machine with no mem stays
+    // silent (the `if` body never runs), but "mem is on PATH and exits nonzero" now falls through to
+    // a `printf` that emits a bare TGMEM/2 response with a footer line -- collapsing that case into
+    // the same silence as "mem absent" is exactly what hid a stale-PATH-binary incident for 5 days.
     expect(command).toBe(
-      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true',
+      'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
     );
-    // The UserPromptSubmit hook carries the identical guard; only the recall flags differ.
+    // The UserPromptSubmit hook carries the identical guard and fallback; only the recall flags differ.
     const promptCommand: string = settings.hooks.UserPromptSubmit[0].hooks[0].command;
     expect(promptCommand).toBe(
-      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || true',
+      'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
+    );
+    // Stop/PreCompact aren't on the TGMEM wire, so their failure fallback is a plain notice instead.
+    const stopCommand: string = settings.hooks.Stop[0].hooks[0].command;
+    expect(stopCommand).toBe(
+      'if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || echo "mem scan-session failed (exit $?); run mem doctor"; fi',
     );
   });
 
@@ -163,6 +176,61 @@ describe("claudeCode wiring", () => {
           expect(result.status, command).toBe(0);
           expect(result.stderr, command).toBe("");
         }
+      },
+    );
+  }
+
+  {
+    // Same bash-resolution dance as the block above, duplicated rather than shared because each
+    // `{ }` here is its own self-contained fixture (matching this file's existing style) -- this one
+    // verifies the *other* half of the fix: mem present on PATH but exiting nonzero must produce a
+    // visible fallback, not the same silence as mem being absent.
+    const bashProbe = spawnSync(
+      "bash",
+      ["-c", 'command -v cygpath >/dev/null 2>&1 && cygpath -w "$(command -v bash)" || command -v bash'],
+      { encoding: "utf8" },
+    );
+    const bashPath = bashProbe.status === 0 ? bashProbe.stdout.trim() : null;
+
+    it.skipIf(bashPath === null)(
+      "a present-but-failing mem produces a visible fallback instead of the same silence as mem being absent",
+      () => {
+        claudeCode.install({ root, homeDir: home });
+        const settingsPath = join(root, ".claude", "settings.json");
+        const settings = JSON.parse(read(settingsPath));
+
+        // A `mem` on PATH that always exits 7 -- present, but broken, the case the old
+        // `... || true` shape collapsed into silence alongside "mem absent".
+        const fakeMemDir = mkdtempSync(join(tmpdir(), "mem-fails-path-"));
+        writeFileSync(join(fakeMemDir, "mem"), "#!/bin/sh\nexit 7\n", "utf8");
+        chmodSync(join(fakeMemDir, "mem"), 0o755);
+
+        const sessionStart = spawnSync(bashPath as string, ["-c", settings.hooks.SessionStart[0].hooks[0].command], {
+          encoding: "utf8",
+          input: "",
+          env: { PATH: fakeMemDir },
+        });
+        expect(sessionStart.status).toBe(0);
+        expect(sessionStart.stdout).toBe("TGMEM/2\nfooter  mem recall failed (exit 7); run mem doctor\n");
+
+        const userPromptSubmit = spawnSync(bashPath as string, ["-c", settings.hooks.UserPromptSubmit[0].hooks[0].command], {
+          encoding: "utf8",
+          input: "",
+          env: { PATH: fakeMemDir },
+        });
+        expect(userPromptSubmit.status).toBe(0);
+        expect(userPromptSubmit.stdout).toBe("TGMEM/2\nfooter  mem recall failed (exit 7); run mem doctor\n");
+
+        // Stop/PreCompact aren't on the TGMEM wire -- a plain one-line notice instead.
+        const stop = spawnSync(bashPath as string, ["-c", settings.hooks.Stop[0].hooks[0].command], {
+          encoding: "utf8",
+          input: "",
+          env: { PATH: fakeMemDir },
+        });
+        expect(stop.status).toBe(0);
+        expect(stop.stdout).toBe("mem scan-session failed (exit 7); run mem doctor\n");
+
+        rmSync(fakeMemDir, { recursive: true, force: true });
       },
     );
   }
@@ -272,7 +340,7 @@ describe("claudeCode wiring", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
     expect(settings.hooks.SessionStart[0].hooks[0].__token_goat_mem).toBe(true);
     expect(settings.hooks.SessionStart[0].hooks[0].command).toBe(
-      'command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true'
+      'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi'
     );
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
     expect(settings.hooks.Stop).toHaveLength(1);
@@ -864,6 +932,39 @@ describe("describe() (dry-run plan)", () => {
     claudeCode.describe({ root, homeDir: home });
     expect(() => read(join(root, ".claude", "settings.json"))).toThrow();
     expect(() => read(join(root, "CLAUDE.md"))).toThrow();
+  });
+
+  it("regression: a stamped hook whose command has drifted from what this build writes reports update, never noop's 'already installed; nothing would change'", () => {
+    // The mirror-image incident this guards against: an older mem installed a stamped hook (no
+    // `--hook-stdin`), and a newer `mem init claude-code --dry-run` must say an update is needed --
+    // reporting `installAction: "noop"` here is exactly what would surface as `mem init`'s
+    // "already installed; nothing would change", which is the sentence that hid the real incident
+    // (a PATH-binary mismatch, not a text mismatch) for five days. This fixture is the *text*-drift
+    // case, kept as a permanent regression guard even though this run of the fix found the
+    // production code already correct here (verified against `installClaudeHookEvent`'s stamped-hook
+    // branch before writing this test).
+    const settingsPath = join(root, ".claude", "settings.json");
+    const stale = {
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+                __token_goat_mem: true,
+              },
+            ],
+          },
+        ],
+      },
+    };
+    seed(settingsPath, `${JSON.stringify(stale, null, 2)}\n`);
+
+    const plan = claudeCode.describe({ root, homeDir: home });
+    const settingsEntry = plan.entries.find((e) => e.path === settingsPath);
+    expect(settingsEntry?.installAction).toBe("update");
+    expect(plan.entries.every((e) => e.installAction === "noop")).toBe(false);
   });
 });
 
@@ -1844,4 +1945,225 @@ describe("regression: integration docs match the markdown mem init actually writ
     }
   });
 
+});
+
+// ─────────────────────────────────────────────────────────────────────────── hook-binary capability detection ───────────────────────────────────────────────────────────────────────────
+
+describe("parseHookCommandSpec", () => {
+  it("extracts subcommand and flags from the new (if/then/fallback) wrapper", () => {
+    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[0]?.command as string)).toEqual({
+      subcommand: "recall",
+      flags: ["--hint-format", "--hook-stdin"],
+    });
+    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[2]?.command as string)).toEqual({
+      subcommand: "scan-session",
+      flags: ["--hook-stdin", "--quiet"],
+    });
+  });
+
+  it("extracts subcommand and flags from the old (command -v && || true) wrapper, without mistaking the leading `command -v mem` for the invocation", () => {
+    expect(
+      parseHookCommandSpec('command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || true')
+    ).toEqual({ subcommand: "recall", flags: ["--hint-format", "--hook-stdin"] });
+  });
+
+  it("returns null for a command with no mem invocation shape", () => {
+    expect(parseHookCommandSpec("echo hello")).toBeNull();
+  });
+});
+
+describe("resolveBinaryOnPath", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-resolve-path-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("finds a POSIX-shaped binary by bare name", () => {
+    writeFileSync(join(dir, "widget"), "#!/bin/sh\n", "utf8");
+    expect(resolveBinaryOnPath("widget", { pathEnv: dir, platform: "linux" })).toBe(join(dir, "widget"));
+  });
+
+  it("finds a Windows shim by trying PATHEXT extensions in order", () => {
+    writeFileSync(join(dir, "widget.cmd"), "@echo off\n", "utf8");
+    expect(resolveBinaryOnPath("widget", { pathEnv: dir, platform: "win32", pathExt: ".COM;.EXE;.BAT;.CMD" })).toBe(join(dir, "widget.CMD"));
+  });
+
+  it("returns null when nothing on PATH matches", () => {
+    expect(resolveBinaryOnPath("widget", { pathEnv: dir, platform: "linux" })).toBeNull();
+  });
+
+  it("returns null for an empty PATH rather than throwing", () => {
+    expect(resolveBinaryOnPath("widget", { pathEnv: "", platform: "linux" })).toBeNull();
+  });
+});
+
+describe("checkHookCapability / checkClaudeHookHealth / resolveMemBinary (against real subprocesses)", () => {
+  let dir: string;
+  const isWindows = process.platform === "win32";
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-capability-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** A real, runnable `mem` shim on `dir`: `--version` prints `version`, and `<subcommand> --help` prints `helpFlags` for every subcommand named in `supportedSubcommands` (an unlisted subcommand exits nonzero, as commander does for an unknown one). */
+  function installShim(version: string, supportedSubcommands: readonly string[], helpFlags: string): void {
+    const body =
+      "#!/usr/bin/env node\n" +
+      "const args = process.argv.slice(2);\n" +
+      `if (args[0] === "--version") { process.stdout.write(${JSON.stringify(`${version}\n`)}); process.exit(0); }\n` +
+      `const supported = ${JSON.stringify(supportedSubcommands)};\n` +
+      'if (supported.includes(args[0]) && args[1] === "--help") { process.stdout.write(' +
+      `${JSON.stringify(`${helpFlags}\n`)}` +
+      "); process.exit(0); }\n" +
+      "process.exit(1);\n";
+    writeFileSync(join(dir, "mem"), body, "utf8");
+    chmodSync(join(dir, "mem"), 0o755);
+    writeFileSync(join(dir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
+  }
+
+  it("resolveMemBinary reports the resolved path and version", () => {
+    installShim("0.4.1", ["recall", "scan-session"], "--hint-format --hook-stdin --delta --quiet");
+    const bin = resolveMemBinary({ pathEnv: dir, platform: isWindows ? "win32" : "linux" });
+    expect(bin?.version).toBe("0.4.1");
+    expect(bin?.path).toBe(isWindows ? join(dir, "mem.CMD") : join(dir, "mem"));
+  });
+
+  it("resolveMemBinary returns null when nothing resolves", () => {
+    expect(resolveMemBinary({ pathEnv: dir, platform: isWindows ? "win32" : "linux" })).toBeNull();
+  });
+
+  it("checkHookCapability reports capable:true when every flag is in the subcommand's --help", () => {
+    installShim("0.4.1", ["recall"], "--hint-format --hook-stdin");
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    const result = checkHookCapability(binPath, { subcommand: "recall", flags: ["--hint-format", "--hook-stdin"] });
+    expect(result).toEqual({ capable: true, missing: [] });
+  });
+
+  it("checkHookCapability names the missing flags when the subcommand exists but lacks one", () => {
+    installShim("0.2.5", ["recall"], "--hint-format");
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    const result = checkHookCapability(binPath, { subcommand: "recall", flags: ["--hint-format", "--hook-stdin"] });
+    expect(result.capable).toBe(false);
+    expect(result.missing).toEqual(["--hook-stdin"]);
+  });
+
+  it("checkHookCapability reports the subcommand itself as missing when it doesn't exist at all", () => {
+    installShim("0.2.5", ["recall"], "--hint-format");
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    const result = checkHookCapability(binPath, { subcommand: "scan-session", flags: ["--hook-stdin", "--quiet"] });
+    expect(result).toEqual({ capable: false, missing: ["scan-session"] });
+  });
+
+  it("checkClaudeHookHealth: an old binary is incapable of --hook-stdin/scan-session, a current one is capable of everything CLAUDE_HOOK_EVENTS writes", () => {
+    installShim("0.2.5", ["recall"], "--hint-format --root");
+    const oldHealth = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
+    expect(oldHealth.bin?.version).toBe("0.2.5");
+    expect(oldHealth.hooks.every((h) => !h.capable)).toBe(true);
+
+    installShim("0.4.1", ["recall", "scan-session"], "--hint-format --hook-stdin --delta --quiet --root");
+    const currentHealth = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
+    expect(currentHealth.bin?.version).toBe("0.4.1");
+    expect(currentHealth.hooks.every((h) => h.capable)).toBe(true);
+  });
+
+  it("checkClaudeHookHealth: bin is null and every hook is incapable when nothing resolves", () => {
+    const health = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
+    expect(health.bin).toBeNull();
+    expect(health.hooks.every((h) => !h.capable)).toBe(true);
+  });
+});
+
+describe("installedClaudeHookCommands", () => {
+  it("returns [] when no settings.json exists", () => {
+    expect(installedClaudeHookCommands({ root, homeDir: home })).toEqual([]);
+  });
+
+  it("reads back exactly what claudeCode.install wrote, per event, marked stamped", () => {
+    claudeCode.install({ root, homeDir: home });
+    const commands = installedClaudeHookCommands({ root, homeDir: home });
+    const events = commands.map((c) => c.event).sort();
+    expect(events).toEqual(["PreCompact", "SessionStart", "Stop", "UserPromptSubmit"]);
+    expect(commands.every((c) => c.stamped)).toBe(true);
+  });
+
+  it("--user reads the user-level settings.json, not the project one", () => {
+    claudeCode.install({ root, homeDir: home, user: true });
+    expect(installedClaudeHookCommands({ root, homeDir: home })).toEqual([]);
+    expect(installedClaudeHookCommands({ root, homeDir: home, user: true }).length).toBeGreaterThan(0);
+  });
+
+  it("reports an old-shape unstamped orphan as unstamped, not silently ignored", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    seed(
+      settingsPath,
+      `${JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              { hooks: [{ type: "command", command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true' }] },
+            ],
+          },
+        },
+        null,
+        2
+      )}\n`
+    );
+    const commands = installedClaudeHookCommands({ root, homeDir: home });
+    expect(commands).toEqual([
+      {
+        event: "SessionStart",
+        command: 'command -v mem >/dev/null 2>&1 && mem recall --hint-format --root "$CLAUDE_PROJECT_DIR" || true',
+        stamped: false,
+      },
+    ]);
+  });
+});
+
+describe("regression: an old-shape orphan hook is adopted (both shapes recognised) and a full uninstall leaves no trace of it behind", () => {
+  it("round-trips: old-shape unstamped orphan on all four events -> install adopts+upgrades every one -> uninstall removes every one cleanly", () => {
+    const settingsPath = join(root, ".claude", "settings.json");
+    const oldShapeFor = (event: string): string => {
+      const flags = event === "UserPromptSubmit" ? "--hint-format --delta" : event === "SessionStart" ? "--hint-format" : "--hook-stdin --quiet";
+      const subcommand = event === "Stop" || event === "PreCompact" ? "scan-session" : "recall";
+      return `command -v mem >/dev/null 2>&1 && mem ${subcommand} ${flags} --root "$CLAUDE_PROJECT_DIR" || true`;
+    };
+    const original = {
+      hooks: Object.fromEntries(
+        ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"].map((event) => [
+          event,
+          [{ hooks: [{ type: "command", command: oldShapeFor(event) }] }],
+        ])
+      ),
+    };
+    seed(settingsPath, `${JSON.stringify(original, null, 2)}\n`);
+
+    const installResult = claudeCode.install({ root, homeDir: home });
+    const settingsChange = installResult.changes.find((c) => c.path === settingsPath);
+    expect(settingsChange?.detail).toContain("adopted a pre-existing SessionStart, UserPromptSubmit, Stop, PreCompact hook");
+    const afterInstall = JSON.parse(read(settingsPath));
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]) {
+      expect(afterInstall.hooks[event]).toHaveLength(1);
+      expect(afterInstall.hooks[event][0].hooks[0].__token_goat_mem).toBe(true);
+      // Upgraded to the new wrapper shape, not left in the old one.
+      expect(afterInstall.hooks[event][0].hooks[0].command).toMatch(/^if command -v mem/u);
+    }
+
+    claudeCode.uninstall({ root, homeDir: home });
+    const afterUninstall = JSON.parse(read(settingsPath));
+    // Every event was mem's own (adopted) hook and nothing else -- uninstall leaves an empty array
+    // per event (the pre-adoption state had exactly one entry, which was mem's), not an orphaned
+    // stamped or unstamped hook of either shape.
+    for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]) {
+      expect(afterUninstall.hooks[event]).toEqual([]);
+    }
+  });
 });

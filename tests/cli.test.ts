@@ -9,9 +9,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -2712,6 +2712,8 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
 describe("mem init/uninstall", () => {
   let toolRoot: string;
   let toolHome: string;
+  let fakeMemDir: string;
+  let originalPath: string | undefined;
 
   beforeEach(() => {
     // Separate fixture dirs from `home` (mem's own TOKEN_GOAT_MEM_HOME data dir) -- these are the
@@ -2720,10 +2722,32 @@ describe("mem init/uninstall", () => {
     toolRoot = mkdtempSync(join(tmpdir(), "mem-cli-wiring-root-"));
     toolHome = mkdtempSync(join(tmpdir(), "mem-cli-wiring-home-"));
     process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
+
+    // `mem init claude-code`'s pre-flight resolves whatever `mem` binary is actually on PATH and
+    // checks it against the hooks it's about to write (see wiring.ts's `checkClaudeHookHealth`).
+    // These tests are about the config-writing behavior, not that check, so a fake shim that always
+    // reports every flag as supported is put ahead of the real PATH -- real end-to-end coverage of
+    // the check itself (a shim that *doesn't* support a flag) lives in its own describe block below.
+    // Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in
+    // this file's PATH-independent init tests still need) resolvable.
+    fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-"));
+    const shimBody =
+      "#!/usr/bin/env node\n" +
+      "const args = process.argv.slice(2);\n" +
+      'if (args[0] === "--version") { process.stdout.write("0.0.0-test-shim\\n"); process.exit(0); }\n' +
+      'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root\\n"); process.exit(0); }\n' +
+      "process.exit(1);\n";
+    writeFileSync(join(fakeMemDir, "mem"), shimBody, "utf8");
+    chmodSync(join(fakeMemDir, "mem"), 0o755);
+    writeFileSync(join(fakeMemDir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
+    originalPath = process.env["PATH"];
+    process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
   });
 
   afterEach(() => {
     delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    process.env["PATH"] = originalPath;
+    rmSync(fakeMemDir, { recursive: true, force: true });
     rmSync(toolRoot, { recursive: true, force: true });
     rmSync(toolHome, { recursive: true, force: true });
   });
@@ -3021,6 +3045,106 @@ describe("mem init/uninstall", () => {
     const uninstallResult = await runCli(["uninstall", "copilot-visual-studio", "--root", toolRoot]);
     expect(uninstallResult.exitCode).toBe(0);
     expect(readFileSync(instructionsPath, "utf8")).toBe(original);
+  });
+
+  describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", () => {
+    // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session`
+    // hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older
+    // build that rejects those flags -- every hook then fails, silently, because nothing compared
+    // the write against the binary that would actually run it. These tests replace the always-
+    // capable fake `mem` this describe block's `beforeEach` puts on PATH with a deliberately
+    // incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
+
+    function installOldMemShim(dir: string): void {
+      // Understands `--version` and a `--help` for `recall`, but its help text is missing
+      // `--hook-stdin`/`--delta`, and it has no `scan-session` subcommand at all -- the exact shape
+      // of the real incident (an install that predates both).
+      const shimBody =
+        "#!/usr/bin/env node\n" +
+        "const args = process.argv.slice(2);\n" +
+        'if (args[0] === "--version") { process.stdout.write("0.2.5\\n"); process.exit(0); }\n' +
+        'if (args[0] === "recall" && args[1] === "--help") { process.stdout.write("--hint-format --root\\n"); process.exit(0); }\n' +
+        "process.exit(1);\n";
+      writeFileSync(join(dir, "mem"), shimBody, "utf8");
+      chmodSync(join(dir, "mem"), 0o755);
+      writeFileSync(join(dir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
+    }
+
+    it("refuses to write hooks an old PATH mem can't run, naming the binary and what it can't run", async () => {
+      rmSync(fakeMemDir, { recursive: true, force: true });
+      fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-old-"));
+      installOldMemShim(fakeMemDir);
+      process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
+
+      const result = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("0.2.5");
+      expect(result.stdout).toMatch(/hook-stdin|scan-session/u);
+      expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+    });
+
+    it("--force writes the hooks anyway", async () => {
+      rmSync(fakeMemDir, { recursive: true, force: true });
+      fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-old-"));
+      installOldMemShim(fakeMemDir);
+      process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
+
+      const result = await runCli(["init", "claude-code", "--root", toolRoot, "--force"]);
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(true);
+    });
+
+    it("--dry-run reports the same refusal instead of silently previewing a write that would be inert", async () => {
+      rmSync(fakeMemDir, { recursive: true, force: true });
+      fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-old-"));
+      installOldMemShim(fakeMemDir);
+      process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
+
+      const result = await runCli(["init", "claude-code", "--root", toolRoot, "--dry-run"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("0.2.5");
+      expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+    });
+
+    it("reports mem missing from PATH distinctly from mem present but incapable", async () => {
+      rmSync(fakeMemDir, { recursive: true, force: true });
+      fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-empty-"));
+      // No `mem`/`mem.cmd` written, and PATH is restricted to just this empty dir (plus node's own
+      // directory, so a child process could still resolve `node` if one were spawned) -- appending
+      // the real inherited PATH here would let this test's result depend on whether *this* machine
+      // happens to have a real `mem` installed globally, which is exactly the non-hermeticity this
+      // fix's own PATH-resolution logic must not have.
+      process.env["PATH"] = `${fakeMemDir}${delimiter}${dirname(process.execPath)}`;
+
+      const result = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("no mem binary found on PATH");
+      expect(result.stdout).not.toContain("0.2.5");
+    });
+
+    it("mem doctor reports the same incompatibility for hooks already installed", async () => {
+      // Install for real with the (capable) shim the outer beforeEach already put on PATH, then swap
+      // in the incapable one -- `doctor` checks whatever settings.json already has, not what this
+      // build would write, so this is the "already installed, binary downgraded since" case.
+      const installed = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(installed.exitCode).toBe(0);
+
+      rmSync(fakeMemDir, { recursive: true, force: true });
+      fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-old-"));
+      installOldMemShim(fakeMemDir);
+      process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
+
+      const originalCwd = process.cwd();
+      process.chdir(toolRoot);
+      try {
+        const doctor = await runCli(["doctor"]);
+        expect(doctor.exitCode).toBe(0);
+        expect(doctor.stdout).toContain("0.2.5");
+        expect(doctor.stdout).toMatch(/hook-stdin|scan-session/u);
+      } finally {
+        process.chdir(originalCwd);
+      }
+    });
   });
 });
 
