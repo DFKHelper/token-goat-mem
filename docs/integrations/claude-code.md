@@ -10,9 +10,12 @@ Once `mem` is on PATH (see Installation below), wire it into Claude Code in one 
 mem init claude-code --root .          # writes .claude/settings.json + CLAUDE.md
 mem init claude-code --user            # writes ~/.claude/settings.json instead (no CLAUDE.md)
 mem init claude-code --dry-run         # preview what would be written, without touching disk
+mem init claude-code --force           # write hooks even if the PATH mem binary can't run them
 ```
 
 This writes exactly the `SessionStart`, `UserPromptSubmit`, `Stop`, and `PreCompact` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten -- except a hook whose command matches mem's own invocation shape for that event, an orphan left by an install that predates stamping, which is adopted in place and stamped instead of treated as a conflict. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
+
+Before writing anything, `mem init claude-code` resolves whatever `mem` binary is actually on PATH (which may not be this same install -- PATH is looked up fresh, not assumed) and checks it against the hooks it's about to write. If that binary can't run them -- missing entirely, or missing a flag/subcommand these hooks need -- `init` refuses and names the binary's path and version instead of writing hooks that would fail silently at session time; pass `--force` to write them anyway. `mem doctor` runs the same check against whatever hooks are already installed, any time you want to re-verify.
 
 The rest of this doc is the manual version -- what `mem init claude-code` does under the hood, and useful if you want to wire it by hand or understand exactly what changed.
 
@@ -74,7 +77,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || true"
+            "command": "if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi"
           }
         ]
       }
@@ -84,7 +87,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "command -v mem >/dev/null 2>&1 && mem recall --hint-format --hook-stdin --delta --root \"$CLAUDE_PROJECT_DIR\" || true"
+            "command": "if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root \"$CLAUDE_PROJECT_DIR\" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi"
           }
         ]
       }
@@ -94,7 +97,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || true"
+            "command": "if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi"
           }
         ]
       }
@@ -104,7 +107,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "command -v mem >/dev/null 2>&1 && mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || true"
+            "command": "if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi"
           }
         ]
       }
@@ -125,7 +128,7 @@ Both run `--quiet` because a capture hook's stdout lands in the session it just 
 
 `PreCompact` runs the same command as `Stop` for a reason `Stop` alone cannot cover: `Stop` fires when a turn ends, so a session long enough to be compacted mid-task has had everything before the compaction boundary summarized away by the time the next `Stop` reads the transcript -- and a session that is killed, closed, or interrupted rather than ending a turn cleanly never fires `Stop` at all, leaving the whole transcript captured by nothing. `PreCompact` is the one event guaranteed to fire while the pre-compaction transcript still exists on disk. Scanning the overlap twice is free: every candidate whose text is already stored is skipped before capture, so the second scan files nothing the first one already did.
 
-`.claude/settings.json` is typically committed and shared, so these hooks also have to work for a collaborator who has never installed mem. The `command -v mem >/dev/null 2>&1 &&` guard skips the call entirely when `mem` isn't on PATH, and the trailing `|| true` forces exit 0 either way -- a bare `&&` guard would still exit 1 (and could be surfaced as a failed hook) when mem is missing. This is the same fail-open contract described above, just enforced at the shell level instead of inside `mem` itself.
+`.claude/settings.json` is typically committed and shared, so these hooks also have to work for a collaborator who has never installed mem. The `command -v mem >/dev/null 2>&1` guard skips the call entirely when `mem` isn't on PATH -- the `if` body never runs, so a machine with no mem stays silent, matching the fail-open contract described above. That is a different case from mem being on PATH and exiting nonzero, which now falls through to a fallback instead of being swallowed the same way: the recall hooks' fallback is a `printf` emitting a bare `TGMEM/2` response with a `footer` line naming the failed exit code, and the capture hooks' (`Stop`/`PreCompact`) fallback is a plain one-line `echo` notice, since those two aren't on the TGMEM wire. Collapsing "present but broken" into "absent" behind a bare `|| true` is what let a stale PATH binary's hooks fail silently for days with nothing to show for it; this fallback is the fix, run `mem doctor` to see which binary PATH actually resolves `mem` to and whether it supports what's installed.
 
 ## Instruction wiring via CLAUDE.md
 
@@ -199,6 +202,7 @@ mem list        # everything stored, one line each
 mem review      # pending / contested / anchor-contradicted facts
 mem show <id>   # full provenance of one fact
 mem forget <id> # soft-delete a stale fact
+mem doctor      # includes hook health: which mem PATH resolves hooks to, and whether it can run them
 ```
 
 If a `remember` is rejected with `possible secret detected`, the fact matched Mem's secret/entropy screen. If it is genuinely not a secret, add the exact value to `.mem/allowlist` in the project root, as the error message instructs.

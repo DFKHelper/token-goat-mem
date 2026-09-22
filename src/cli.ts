@@ -102,10 +102,15 @@ import {
 import { importFromJson, JsonImportError, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
 import { importFromMarkdown, MarkdownImportError, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
+  checkClaudeHookHealth,
+  CLAUDE_HOOK_EVENTS,
+  describeHookGap,
   getToolWiring,
+  installedClaudeHookCommands,
   TOOL_NAMES,
   WiringConflictError,
   WiringUserUnsupportedError,
+  type ClaudeHookHealth,
   type ToolName,
   type WiringOpts,
   type WiringPlan,
@@ -631,6 +636,48 @@ function describeScopePlacement(unreachableRoots: number, unreachableFacts: numb
         `root${unreachableRoots === 1 ? "" : "s"} -- unreachable from any session ` +
         "(`mem list --scope project` / `--scope path` to review, then re-capture or `mem forget`)"
     );
+  }
+  return lines;
+}
+
+/**
+ * `doctor` section for Claude Code hooks: the `mem` binary that actually resolves on PATH (which
+ * may be a different build than the one running this `doctor`), and whether each installed hook
+ * command -- read from disk, not from what this build would write -- can run against it. Checks
+ * both project-level (cwd) and user-level (`--user` install) settings.json, since either or both
+ * may exist and `doctor` takes no `--root`/`--user` of its own.
+ *
+ * This is the check that would have surfaced the 219-hook-failure incident on day one: a stale PATH
+ * binary rejecting a newer install's flags produces a `capable: false` line here on the very first
+ * `mem doctor` run, instead of five days of silent `|| true` swallowing.
+ */
+function describeHookHealth(): string[] {
+  const project = installedClaudeHookCommands({ root: process.cwd() });
+  const user = installedClaudeHookCommands({ root: process.cwd(), user: true });
+  if (project.length === 0 && user.length === 0) {
+    return ["hooks: no Claude Code hooks installed here (`mem init claude-code` to add them)"];
+  }
+  const lines: string[] = [];
+  for (const [label, hooks] of [
+    ["project", project],
+    ["user", user],
+  ] as const) {
+    if (hooks.length === 0) {
+      continue;
+    }
+    const health = checkClaudeHookHealth(hooks);
+    lines.push(
+      health.bin === null
+        ? `hooks (${label}): no mem binary found on PATH -- these hooks are inert`
+        : `hooks (${label}): PATH resolves mem to ${health.bin.path} (${health.bin.version ?? "unknown version"})`
+    );
+    for (const hook of health.hooks) {
+      lines.push(
+        hook.capable
+          ? `  ${hook.event}: ok`
+          : `  ${hook.event}: ${health.bin === null ? "would be inert" : `does not support ${describeHookGap(hook.command, hook.missing)}`}`
+      );
+    }
   }
   return lines;
 }
@@ -1255,6 +1302,32 @@ function formatWiringPlanForInit(plan: WiringPlan): string {
     return "  already installed; nothing would change";
   }
   return plan.entries.map((entry) => `  ${entry.installAction.padEnd(6)} ${entry.path}  (${entry.detail})`).join("\n");
+}
+
+/**
+ * `mem init claude-code`'s pre-flight message when the `mem` binary these hooks would invoke can't
+ * actually run them -- `null` when there is nothing to refuse (a binary was found and every hook it
+ * would run is capable). Named after the binary's own resolved path, not this build's, since that
+ * is the one whose flags matter at hook time; see `checkClaudeHookHealth`'s doc comment for why this
+ * is decided by capability probe rather than a version-number floor.
+ */
+function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
+  if (health.bin === null) {
+    return [
+      "mem: no mem binary found on PATH -- these hooks would be inert",
+      "     install with `npm i -g token-goat-mem`, or re-run with --force to write them anyway",
+    ].join("\n");
+  }
+  const incapable = health.hooks.filter((hook) => !hook.capable);
+  if (incapable.length === 0) {
+    return null;
+  }
+  const gaps = [...new Set(incapable.map((hook) => describeHookGap(hook.command, hook.missing)))];
+  return [
+    `mem: hooks will invoke ${health.bin.path}, which is ${health.bin.version ?? "an unknown version"}`,
+    `     it does not support: ${gaps.join(", ")}`,
+    "     upgrade with `npm i -g token-goat-mem`, or re-run with --force",
+  ].join("\n");
 }
 
 function formatWiringPlanForUninstall(plan: WiringPlan): string {
@@ -2257,6 +2330,7 @@ interface InitCliOptions {
   readonly root?: string;
   readonly user?: boolean;
   readonly dryRun?: boolean;
+  readonly force?: boolean;
 }
 
 interface UninstallCliOptions {
@@ -3620,6 +3694,7 @@ export function buildProgram(): Command {
               relocated.length,
               relocated.reduce((sum, row) => sum + row.c, 0)
             ),
+            ...describeHookHealth(),
           ].join("\n");
         });
         process.stdout.write(`${output}\n`);
@@ -3641,10 +3716,29 @@ export function buildProgram(): Command {
     .option("--root <path>", "Project root to write project-level config into (default: current directory)")
     .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")
     .option("--dry-run", "Print what would be written without touching disk")
+    .option(
+      "--force",
+      "Write Claude Code hooks even if the mem binary on PATH can't run them (skips the pre-flight capability check)"
+    )
     .action(
       guard((tool: string, options: InitCliOptions) => {
-        const wiring = getToolWiring(parseToolName(tool));
+        const toolName = parseToolName(tool);
+        const wiring = getToolWiring(toolName);
         const wiringOpts = toWiringOpts(options);
+        // Only claude-code writes hooks a shell invokes unattended later, on whatever `mem` PATH
+        // resolves to at that later time -- a config text change here can be byte-perfect and the
+        // hooks it wrote can still fail every time, silently, if that binary can't run them. The
+        // other tools' wiring (AGENTS.md instructions, tasks.json) is read and invoked directly by
+        // an agent or a human, not delegated to a `command -v mem && mem ...` shell guard, so they
+        // have no equivalent failure mode this check would catch.
+        if (toolName === "claude-code" && options.force !== true) {
+          const refusal = describeHookHealthRefusal(checkClaudeHookHealth(CLAUDE_HOOK_EVENTS));
+          if (refusal !== null) {
+            process.stdout.write(`${refusal}\n`);
+            process.exitCode = EXIT_USER_ERROR;
+            return;
+          }
+        }
         if (options.dryRun === true) {
           process.stdout.write(`${formatWiringPlanForInit(wiring.describe(wiringOpts))}\n`);
           return;
