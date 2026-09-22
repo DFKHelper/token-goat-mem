@@ -80,6 +80,8 @@ const COLUMNS_WITHOUT_A_MIGRATION: readonly string[] = [
   "audit_log.detail",
   "audit_log.event",
   "audit_log.fact_id",
+  "fact_links.discovered_at",
+  "fact_links.similarity",
   "fact_terms.fact_id",
   "fact_terms.kind",
   "fact_terms.term",

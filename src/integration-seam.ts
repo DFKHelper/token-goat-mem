@@ -617,7 +617,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     // query naming no entity (the common case, since `entityOverlap` above already paid for that
     // check), and a query that *does* name something walks at most two hops of grouped, indexed
     // queries -- no per-fact loop, on the connection already open, within this same ~150ms budget.
-    graphScores = entityOverlap.size > 0 ? getGraphScoresForQuery(db, options.query ?? "") : new Map();
+    graphScores = entityOverlap.size > 0 ? getGraphScoresForQuery(db, options.query ?? "", {}, entityOverlap) : new Map();
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }

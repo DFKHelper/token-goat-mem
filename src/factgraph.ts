@@ -243,9 +243,20 @@ export function propagate(db: Db, seeds: ReadonlyMap<string, number>, opts: Prop
  *
  * Empty whenever the query names no entity: no seed, no graph work, matching
  * `getEntityOverlapForQuery`'s own empty-query short-circuit -- the common case costs nothing.
+ *
+ * `seeds` lets a caller that already paid for `getEntityOverlapForQuery(db, query)` -- both current
+ * callers do, immediately before this call, to decide whether it is even worth calling -- hand the
+ * result straight to `propagate` instead of this function recomputing an identical map on the same
+ * hint-path budget. Omit it and this still works standalone, recomputing exactly as before; passing
+ * a looser, hand-rolled map here would match rows the write path never creates, so the only intended
+ * source is `getEntityOverlapForQuery` itself.
  */
-export function getGraphScoresForQuery(db: Db, query: string, opts: PropagateOptions = {}): Map<string, number> {
-  const seeds = getEntityOverlapForQuery(db, query);
+export function getGraphScoresForQuery(
+  db: Db,
+  query: string,
+  opts: PropagateOptions = {},
+  seeds: ReadonlyMap<string, number> = getEntityOverlapForQuery(db, query)
+): Map<string, number> {
   if (seeds.size === 0) {
     return new Map();
   }

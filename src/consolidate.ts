@@ -21,6 +21,7 @@
  */
 
 import { computeContradictionBucketGroups, computeProjectIdentityGroups, sameContradictionBucket } from "./contradiction.js";
+import { neighbours } from "./factgraph.js";
 import { listFacts, listStaleUnsurfacedFacts, listTermsForFact, normalizeFactText } from "./storage.js";
 import type { Fact } from "./types.js";
 
@@ -199,6 +200,69 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
   }
 
   return clusters;
+}
+
+/**
+ * One discovered relation between two facts, below the duplicate threshold that would merge them --
+ * `findRelatedFactPairs`'s report. Canonical order: `a.id <= b.id`, matching `storage.upsertFactLink`'s
+ * own ordering, so a pair is reported (and later persisted) once regardless of which fact this pass
+ * reaches first.
+ */
+export interface RelatedFactPair {
+  readonly a: Fact;
+  readonly b: Fact;
+  readonly similarity: number;
+}
+
+/**
+ * Facts that share enough topic vocabulary to be worth recording as related, but not enough for the
+ * duplicate pass to merge them -- exactly the population `findDuplicateClusters` computes on every
+ * comparable pair it walks and then discards once a pair falls short of the merge threshold. This
+ * pass does not discard it. It is a second, exhaustive read of the same comparable-pair space
+ * (`comparabilityKey`, `sameContradictionBucket`) rather than a change to `findDuplicateClusters`
+ * itself: that function's greedy single-link walk stops comparing a fact once it joins a cluster, so
+ * its own discarded scores are order-dependent and cannot be trusted as "every sub-threshold pair" --
+ * only a pass that visits every comparable pair once, as this one does, can.
+ *
+ * Same two guards as `findDuplicateClusters`, for the same reason its own comment gives: a pair that
+ * is a live contradiction (same subject+scope, different value) is never a relation to record here
+ * either -- linking a corrected value to its correction would resurrect exactly the bug
+ * `detectContradictions` exists to prevent, one step removed from "duplicate" and landing in
+ * `fact_links` instead of `facts.status`.
+ *
+ * `similarity > 0`, not `>= 0`: a pair sharing no topic terms carries no evidence of any relation
+ * (see `jaccard`'s own doc comment on why an empty-set pair must never read as similar), so there is
+ * nothing to record.
+ */
+export function findRelatedFactPairs(db: Db, upperThreshold: number = DEFAULT_DUPLICATE_THRESHOLD): RelatedFactPair[] {
+  const facts = [...listFacts(db, { status: ["active", "pinned"] })].sort(preferenceOrder);
+  const terms = new Map<string, Set<string>>(facts.map((fact) => [fact.id, topicKeys(db, fact.id)]));
+  const projectGroups = computeProjectIdentityGroups(facts, (fact) => fact.scope);
+  const contradictionGroups = computeContradictionBucketGroups(facts);
+  const pairs: RelatedFactPair[] = [];
+  for (let i = 0; i < facts.length; i += 1) {
+    const left = facts[i];
+    if (left === undefined) {
+      continue;
+    }
+    const leftKey = comparabilityKey(left, projectGroups);
+    const leftTerms = terms.get(left.id) ?? new Set<string>();
+    for (let j = i + 1; j < facts.length; j += 1) {
+      const right = facts[j];
+      if (right === undefined || comparabilityKey(right, projectGroups) !== leftKey) {
+        continue;
+      }
+      if (sameContradictionBucket(left, right, contradictionGroups) && left.value !== right.value) {
+        continue;
+      }
+      const similarity = jaccard(leftTerms, terms.get(right.id) ?? new Set<string>());
+      if (similarity > 0 && similarity < upperThreshold) {
+        const [a, b] = left.id <= right.id ? [left, right] : [right, left];
+        pairs.push({ a, b, similarity });
+      }
+    }
+  }
+  return pairs;
 }
 
 function kindTextKey(fact: Fact): string {
@@ -382,4 +446,77 @@ export function staleCutoff(ageDays: number, now: Date): string {
  */
 export function findStaleFacts(db: Db, cutoffIso: string): Fact[] {
   return listStaleUnsurfacedFacts(db, cutoffIso);
+}
+
+/**
+ * Minimum distinct topic-graph neighbours a fact must have before the graph-staleness signal below
+ * has anything to say about it. With fewer, "most neighbours are superseded" is not a majority, it
+ * is one data point wearing a percentage.
+ */
+export const GRAPH_STALE_MIN_NEIGHBOURS = 2;
+
+/**
+ * Share of a fact's topic-graph neighbours that must be superseded before {@link findGraphStaleFacts}
+ * calls the fact stale by this signal -- a majority, not any single superseded neighbour, since one
+ * corrected fact nearby says nothing about the rest of a cluster.
+ */
+export const GRAPH_STALE_SUPERSEDED_RATIO = 0.5;
+
+/** One fact `findGraphStaleFacts` proposes on the graph signal, with the neighbour counts that produced the proposal so the CLI can print an honest, checkable reason rather than a bare assertion. */
+export interface GraphStaleFact {
+  readonly fact: Fact;
+  readonly supersededNeighbours: number;
+  readonly totalNeighbours: number;
+}
+
+/**
+ * A second, opt-in staleness signal: facts whose topic-graph neighbours (`factgraph.neighbours`,
+ * built from `fact_terms` co-occurrence) have themselves mostly been superseded -- the topic moved
+ * on around this fact even though its own age-and-recall history (`findStaleFacts`) does not yet say
+ * so. `neighbours` reads `fact_terms` directly, not `facts.status`, so a superseded fact's row is
+ * still visible as a neighbour here (its `fact_terms` rows survive a supersede, only a hard delete
+ * cascades them away) -- exactly the history this signal needs to read.
+ *
+ * The brief this was built from named "superseded or retracted" neighbours; this store's
+ * `FactStatus` (`active`/`pending`/`superseded`/`contested`/`pinned`) has no `retracted` state, so
+ * only `superseded` is checked. Flagged here rather than silently narrowed: if a future status is
+ * added for an explicit user retraction, this signal should count it too.
+ *
+ * Absent by default: this is a second signal, never a replacement for `findStaleFacts`, and it is
+ * the CLI's job (not this function's) to decide whether it runs at all -- see `mem consolidate
+ * --stale --include-graph-stale`. `exclude` lets the caller drop facts `findStaleFacts` already
+ * proposed, so a fact never gets two different stale reasons attributed to it.
+ *
+ * Candidates are bounded to the same `cutoffIso` age floor `findStaleFacts` uses, deliberately more
+ * conservative than "any active fact with the right neighbour shape": a fact captured moments ago
+ * should not be supersede-able purely because facts near it in topic space happen to have been
+ * cleaned up first.
+ */
+export function findGraphStaleFacts(db: Db, cutoffIso: string, exclude: ReadonlySet<string> = new Set()): GraphStaleFact[] {
+  const candidates = listFacts(db, { status: "active" }).filter(
+    (fact) => fact.captured_at < cutoffIso && !exclude.has(fact.id)
+  );
+  if (candidates.length === 0) {
+    return [];
+  }
+  // One pass over the whole store's statuses, not one query per candidate's neighbour: the same
+  // batching discipline `findDuplicateClusters` above uses for topic terms.
+  const statusById = new Map(listFacts(db, {}).map((fact) => [fact.id, fact.status]));
+  const results: GraphStaleFact[] = [];
+  for (const fact of candidates) {
+    const neighbourMap = neighbours(db, fact.id);
+    if (neighbourMap.size < GRAPH_STALE_MIN_NEIGHBOURS) {
+      continue;
+    }
+    let supersededCount = 0;
+    for (const neighbourId of neighbourMap.keys()) {
+      if (statusById.get(neighbourId) === "superseded") {
+        supersededCount += 1;
+      }
+    }
+    if (supersededCount / neighbourMap.size >= GRAPH_STALE_SUPERSEDED_RATIO) {
+      results.push({ fact, supersededNeighbours: supersededCount, totalNeighbours: neighbourMap.size });
+    }
+  }
+  return results;
 }

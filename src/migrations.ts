@@ -218,12 +218,36 @@ function textHashBackfillUp(db: Database.Database): void {
   }
 }
 
+/**
+ * Discovered, sub-threshold relations between facts (`mem consolidate --related`) -- pairs similar
+ * enough to share topic vocabulary but not similar enough for the duplicate pass to merge them.
+ * `fact_id_a`/`fact_id_b` are always stored in canonical order (`fact_id_a < fact_id_b`), enforced
+ * by the `CHECK` below and by `storage.upsertFactLink`'s own ordering, not just by convention --
+ * without it, an unordered pair could be written twice (once per side) and every count of "how many
+ * links" would silently double. `ON DELETE CASCADE` on both sides, matching `sources`/`fact_terms`/
+ * `recall_log` above: a link about a fact that no longer exists is not a link about anything.
+ */
+function factLinksUp(db: Database.Database): void {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS fact_links (
+  fact_id_a TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+  fact_id_b TEXT NOT NULL REFERENCES facts(id) ON DELETE CASCADE,
+  similarity REAL NOT NULL,
+  discovered_at TEXT NOT NULL,
+  PRIMARY KEY (fact_id_a, fact_id_b),
+  CHECK (fact_id_a < fact_id_b)
+);
+CREATE INDEX IF NOT EXISTS idx_fact_links_b ON fact_links(fact_id_b);
+`);
+}
+
 /** Every migration, in the order `runMigrations` applies them. Version numbers are dense and start at 1. */
 export const MIGRATIONS: readonly MigrationStep[] = [
   { version: 1, name: "baseline", up: baselineUp },
   { version: 2, name: "facts.text_hash", up: textHashUp },
   { version: 3, name: "anchor_cache", up: anchorCacheUp },
   { version: 4, name: "facts.text_hash backfill", up: textHashBackfillUp },
+  { version: 5, name: "fact_links", up: factLinksUp },
 ];
 
 /**

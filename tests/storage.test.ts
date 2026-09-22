@@ -23,6 +23,8 @@ import {
   deleteSource,
   deleteSourcesForFact,
   deleteSourcesOlderThan,
+  upsertFactLink,
+  listFactLinks,
   getEpoch,
   getUsefulnessCounts,
   insertRecallLog,
@@ -457,6 +459,57 @@ describe("sources CRUD", () => {
     const remaining = listSourcesForFact(db, fact.id);
     expect(remaining).toHaveLength(1);
     expect(remaining[0]?.excerpt).toBe("new");
+  });
+});
+
+describe("fact_links CRUD", () => {
+  it("canonicalizes the pair order regardless of which side is passed first, and does not bump the write epoch", () => {
+    const a = insertFact(db, baseFact({ text: "fact a" }));
+    const b = insertFact(db, baseFact({ text: "fact b" }));
+    const [lower, higher] = a.id <= b.id ? [a, b] : [b, a];
+    const epochBefore = getEpoch(db);
+
+    const link = upsertFactLink(db, higher.id, lower.id, 0.3, "2026-01-01T00:00:00.000Z");
+    expect(link.factIdA).toBe(lower.id);
+    expect(link.factIdB).toBe(higher.id);
+    expect(getEpoch(db)).toBe(epochBefore); // fact_links writes do not touch the epoch, same as sources
+
+    const links = listFactLinks(db);
+    expect(links).toHaveLength(1);
+    expect(links[0]?.factIdA).toBe(lower.id);
+    expect(links[0]?.factIdB).toBe(higher.id);
+  });
+
+  it("stores one row per pair no matter which order is offered, across repeated calls", () => {
+    const a = insertFact(db, baseFact({ text: "fact a" }));
+    const b = insertFact(db, baseFact({ text: "fact b" }));
+
+    upsertFactLink(db, a.id, b.id, 0.2, "2026-01-01T00:00:00.000Z");
+    upsertFactLink(db, b.id, a.id, 0.4, "2026-02-01T00:00:00.000Z"); // reversed order, refreshed similarity
+
+    const links = listFactLinks(db);
+    expect(links).toHaveLength(1);
+    expect(links[0]?.similarity).toBe(0.4);
+    expect(links[0]?.discoveredAt).toBe("2026-02-01T00:00:00.000Z");
+  });
+
+  it("rejects an out-of-order insert at the schema level", () => {
+    const a = insertFact(db, baseFact({ text: "fact a" }));
+    const b = insertFact(db, baseFact({ text: "fact b" }));
+    const [lower, higher] = a.id <= b.id ? [a, b] : [b, a];
+    expect(() =>
+      db
+        .prepare("INSERT INTO fact_links (fact_id_a, fact_id_b, similarity, discovered_at) VALUES (?, ?, ?, ?)")
+        .run(higher.id, lower.id, 0.3, "2026-01-01T00:00:00.000Z")
+    ).toThrow(/CHECK constraint failed/i);
+  });
+
+  it("cascades away with the fact it links, on both sides", () => {
+    const a = insertFact(db, baseFact({ text: "fact a" }));
+    const b = insertFact(db, baseFact({ text: "fact b" }));
+    upsertFactLink(db, a.id, b.id, 0.3, "2026-01-01T00:00:00.000Z");
+    deleteFact(db, a.id);
+    expect(listFactLinks(db)).toHaveLength(0);
   });
 });
 
