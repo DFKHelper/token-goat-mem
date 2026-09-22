@@ -4,7 +4,35 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { _clearAnchorMemoForTests, anchorPathWithinRoot, evaluateAnchor, mentionsAnchorableTarget } from "../src/anchors.js";
+import {
+  _clearAnchorMemoForTests,
+  anchorPathWithinRoot,
+  evaluateAnchor,
+  mentionsAnchorableTarget,
+  type AnchorCacheStore,
+  type AnchorVerdict,
+} from "../src/anchors.js";
+
+/** In-memory `AnchorCacheStore` test double -- mirrors storage.ts's SQLite-backed implementation's (root, anchor) keying without depending on it, matching anchors.ts's own storage-agnostic seam. */
+class FakeAnchorCacheStore implements AnchorCacheStore {
+  private readonly rows = new Map<string, { verdict: AnchorVerdict; witness: string | null }>();
+  get(root: string, anchor: string): { verdict: AnchorVerdict; witness: string | null } | undefined {
+    return this.rows.get(`${root}\u0000${anchor}`);
+  }
+  set(root: string, anchor: string, verdict: AnchorVerdict, witness: string | null): void {
+    this.rows.set(`${root}\u0000${anchor}`, { verdict, witness });
+  }
+}
+
+/** A store whose every method throws, for the "a broken cache must not break recall" contract. */
+class ThrowingAnchorCacheStore implements AnchorCacheStore {
+  get(): { verdict: AnchorVerdict; witness: string | null } | undefined {
+    throw new Error("store read failed");
+  }
+  set(): void {
+    throw new Error("store write failed");
+  }
+}
 
 let root: string;
 
@@ -571,6 +599,96 @@ describe("evaluateAnchor", () => {
       // instead of narrowly targeting budget-exhaustion bailouts, this would still pass, but it
       // confirms genuine unverified verdicts are cached and returned the same way as before.
       expect(evaluateAnchor("file-exists", root, Date.now() + 100_000)).toBe("unverified");
+    });
+  });
+
+  describe("persistent anchor cache (AnchorCacheStore)", () => {
+    it("reuses a persisted verdict when the witness matches, instead of re-evaluating", () => {
+      const store = new FakeAnchorCacheStore();
+      writeFileSync(join(root, "config.json"), "pnpm");
+      expect(evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).toBe("affirmed");
+      const recorded = store.get(root, "file-contains config.json pnpm");
+      expect(recorded).toBeDefined();
+
+      // Overwrite with a deliberately wrong verdict under the *same* witness, then clear only the
+      // in-process memo (simulating a new process, which starts with an empty memo but the same
+      // persistent store). If the wrong verdict comes back, the persisted one was reused rather
+      // than the predicate being re-evaluated for real.
+      store.set(root, "file-contains config.json pnpm", "contradicted", recorded?.witness ?? null);
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).toBe("contradicted");
+    });
+
+    it("re-evaluates instead of reusing once the witness changes (the file's stat changed)", () => {
+      const store = new FakeAnchorCacheStore();
+      writeFileSync(join(root, "config.json"), "pnpm");
+      touch(join(root, "config.json"), "2020-01-01");
+      expect(evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).toBe("affirmed");
+
+      writeFileSync(join(root, "config.json"), "switched to yarn entirely");
+      touch(join(root, "config.json"), "2024-01-01");
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).toBe("contradicted");
+      // The store itself was updated to the fresh witness+verdict, not left pointing at the stale one.
+      const recorded = store.get(root, "file-contains config.json pnpm");
+      expect(recorded?.verdict).toBe("contradicted");
+    });
+
+    it("caches package-version and git-tracked the same way (witness-gated reuse)", () => {
+      const store = new FakeAnchorCacheStore();
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: "18.2.0" } }));
+      expect(evaluateAnchor("package-version package.json react@18.2.0", root, undefined, undefined, store)).toBe("affirmed");
+      const pkgKey = store.get(root, "package-version package.json react@18.2.0");
+      expect(pkgKey).toBeDefined();
+      store.set(root, "package-version package.json react@18.2.0", "contradicted", pkgKey?.witness ?? null);
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("package-version package.json react@18.2.0", root, undefined, undefined, store)).toBe(
+        "contradicted",
+      );
+
+      runGit(["init", "-q"], root);
+      writeFileSync(join(root, "tracked.txt"), "x");
+      runGit(["add", "tracked.txt"], root);
+      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+      expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("affirmed");
+      const gitKey = store.get(root, "git-tracked tracked.txt");
+      expect(gitKey).toBeDefined();
+      store.set(root, "git-tracked tracked.txt", "contradicted", gitKey?.witness ?? null);
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("contradicted");
+    });
+
+    it("never persists a budget-exhausted unverified verdict", () => {
+      const store = new FakeAnchorCacheStore();
+      writeFileSync(join(root, "config.json"), "pnpm");
+      const expiredDeadline = Date.now() - 1;
+      expect(
+        evaluateAnchor("file-contains config.json pnpm", root, expiredDeadline, undefined, store),
+      ).toBe("unverified");
+      expect(store.get(root, "file-contains config.json pnpm")).toBeUndefined();
+    });
+
+    it("never persists a missing-root unverified verdict", () => {
+      const store = new FakeAnchorCacheStore();
+      const missingRoot = join(root, "does-not-exist");
+      expect(evaluateAnchor("file-contains config.json pnpm", missingRoot, undefined, undefined, store)).toBe(
+        "unverified",
+      );
+      expect(store.get(missingRoot, "file-contains config.json pnpm")).toBeUndefined();
+    });
+
+    it("degrades to no caching, never throws, when the store's reads and writes fail", () => {
+      const store = new ThrowingAnchorCacheStore();
+      writeFileSync(join(root, "config.json"), "pnpm");
+      expect(() => evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).not.toThrow();
+      expect(evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).toBe("affirmed");
+    });
+
+    it("behaves exactly as before when no store is passed (default: in-process memo only)", () => {
+      writeFileSync(join(root, "config.json"), "pnpm");
+      expect(evaluateAnchor("file-contains config.json pnpm", root)).toBe("affirmed");
+      writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: "18.2.0" } }));
+      expect(evaluateAnchor("package-version package.json react@18.2.0", root)).toBe("affirmed");
     });
   });
 });

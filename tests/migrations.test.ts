@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 
 import { openDb } from "../src/db.js";
+import { hashFactText } from "../src/factText.js";
 import { MIGRATIONS, runMigrations } from "../src/migrations.js";
 
 let root: string;
@@ -184,6 +185,62 @@ describe("runMigrations on the upgrade path", () => {
           .get() as { n: number }
       ).n;
       expect(indexCount).toBe(1);
+    } finally {
+      reopened.close();
+    }
+  });
+});
+
+describe("facts.text_hash backfill (v4)", () => {
+  it("backfills every NULL text_hash row and leaves a re-run a no-op", () => {
+    // Force the exact pre-v4 shape: text_hash present (v2) but NULL, as every row written before
+    // this migration existed would be.
+    const db = openDb(dbPath);
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)
+       VALUES ('needs-backfill', 'Uses PNPM  not npm.', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1)`
+    ).run();
+    db.pragma("user_version = 3");
+    db.close();
+
+    const reopened = openDb(dbPath);
+    try {
+      const row = reopened.prepare("SELECT text_hash FROM facts WHERE id = ?").get("needs-backfill") as {
+        text_hash: string | null;
+      };
+      expect(row.text_hash).toBe(hashFactText("Uses PNPM  not npm."));
+
+      // Re-running must not touch an already-hashed row (nothing pending at user_version already
+      // at HIGHEST_VERSION), and must not throw.
+      const result = runMigrations(reopened);
+      expect(result.applied).toEqual([]);
+      const rowAgain = reopened.prepare("SELECT text_hash FROM facts WHERE id = ?").get("needs-backfill") as {
+        text_hash: string | null;
+      };
+      expect(rowAgain.text_hash).toBe(hashFactText("Uses PNPM  not npm."));
+    } finally {
+      reopened.close();
+    }
+  });
+
+  it("does not overwrite a hash a later write already computed", () => {
+    // A row inserted directly at user_version 3 (text_hash column exists, but this row's own
+    // insert already set it, unlike the backfill fixture above) must survive the v4 step
+    // unchanged -- the backfill only ever touches `text_hash IS NULL` rows.
+    const db = openDb(dbPath);
+    db.prepare(
+      `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence, text_hash)
+       VALUES ('already-hashed', 'uses pnpm', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1, 'not-a-real-hash')`
+    ).run();
+    db.pragma("user_version = 3");
+    db.close();
+
+    const reopened = openDb(dbPath);
+    try {
+      const row = reopened.prepare("SELECT text_hash FROM facts WHERE id = ?").get("already-hashed") as {
+        text_hash: string | null;
+      };
+      expect(row.text_hash).toBe("not-a-real-hash");
     } finally {
       reopened.close();
     }

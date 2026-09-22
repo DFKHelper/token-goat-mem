@@ -91,7 +91,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/cli.ts` | Entry | Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list) | EXIT_SUCCESS, EXIT_USER_ERROR, EXIT_INTERNAL_ERROR, UsageError, buildProgram |
 | `src/index.ts` | Entry | Library entry point | — |
 | `src/main.ts` | Entry | Package executable | — |
-| `src/anchors.ts` | Retrieval | Anchor evaluation (design plan P3, Section 3, review S1/S4) | AnchorVerdict, clearAnchorCaches, _clearAnchorMemoForTests, isGenuineAbsence, evaluateAnchor |
+| `src/anchors.ts` | Retrieval | Anchor evaluation (design plan P3, Section 3, review S1/S4) | AnchorVerdict, AnchorCacheStore, clearAnchorCaches, _clearAnchorMemoForTests, isGenuineAbsence |
 | `src/contradiction.ts` | Retrieval | Deterministic subject+value contradiction detection (design plan P4, Section 6, review S5/S8) | ContradictionGroup, FactStatusUpdate, ContradictionDetectionResult, computeProjectIdentityGroups, computeContradictionBucketGroups |
 | `src/embeddings.ts` | Retrieval | A concrete `EmbeddingBackend` (retrieval.ts) speaking the OpenAI `/v1/embeddings` wire shape, plus the config plumbing t | EMBED_URL_ENV, EMBED_MODEL_ENV, EMBED_API_KEY_ENV, DEFAULT_EMBED_REQUEST_TIMEOUT_MS, EmbeddingConfig |
 | `src/facets.ts` | Retrieval | Structured facet extraction: the tokens BM25's tokenizer destroys, preserved verbatim | FactFacets, MAX_ENTITIES_PER_FACT, MAX_TOPICS_PER_FACT, normalizeTermKey, extractFacets |
@@ -104,10 +104,11 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/sessionScan.ts` | Capture | Deterministic extraction of durable-preference candidates from a session transcript | MAX_SCANNED_TURNS, MAX_CANDIDATE_LENGTH, Candidate, userTurnText, extractCandidates |
 | `src/db.ts` | Storage | SQLite connection and schema for the `facts` table (design plan Section 3), plus two small infra tables every write path | resolveMemHome, resolveDbPath, openDb, SUPERSEDED_BY_FACT_PREFIX, SUPERSEDED_AS_DUPLICATE_PREFIX |
 | `src/migrations.ts` | Storage | Ordered schema migrations for the mem database, keyed on SQLite's own `PRAGMA user_version` | MigrationStep, MigrationResult, hasColumn, addColumn, MIGRATIONS |
-| `src/storage.ts` | Storage | Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (d | ensureStorageSchema, openStorage, normalizeSubject, normalizeValue, normalizeFactText |
+| `src/storage.ts` | Storage | Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (d | ensureStorageSchema, openStorage, createAnchorCacheStore, clearAnchorCacheStore, BufferedAnchorVerdict |
 | `src/hook-envelope.ts` | Integration | Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin | HOOK_PROMPT_KEYS, HOOK_SESSION_KEY, HOOK_TRANSCRIPT_KEY, HookEnvelope, parseHookEnvelope |
 | `src/integration-seam.ts` | Integration | The token-goat integration seam (design plan Section 4) | TGMEM_PROTOCOL_VERSION, TGMEM_HEADER, FOLLOW_UP_SHOW_DETAIL, FOLLOW_UP_REVIEW, TGMEM_FOOTER_LINE |
 | `src/wiring.ts` | Integration | Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets | WiringOpts, WiringFileAction, WiringChange, WiringResult, WiringPlanEntry |
+| `src/factText.ts` | Support | The normalized-text key `storage.ts` and `migrations.ts` both need for fact deduplication | normalizeFactText, hashFactText |
 | `src/fileUtils.ts` | Support | Shared filesystem error handling for imports | readFileWithErrorMapping, statFileWithErrorMapping |
 | `src/pathUtils.ts` | Support | Case-folds a path for comparison on filesystems that ignore case | normalizePath |
 | `src/projectIdentity.ts` | Support | Repository-relative identity for a project root, so a project-scoped fact survives the path it was captured at | PROJECT_IDENTITY_ENV, clearProjectIdentityCache, normalizeRemoteUrl, resolveProjectIdentity, identityMatches |

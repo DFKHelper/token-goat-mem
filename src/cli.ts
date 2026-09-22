@@ -142,11 +142,12 @@ import {
   countEmbeddedFacts,
   countFactsWithTerms,
   countFacts,
+  createAnchorCacheStore,
+  createBufferedAnchorCacheStore,
   deleteFact,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
-  factsByNormalizedText,
-  normalizeFactText,
+  factsByTextHash,
   getEmbeddingMeta,
   getEntityKeysByFact,
   getEntityOverlapForQuery,
@@ -163,6 +164,8 @@ import {
   markFactsSurfaced,
   markRecallUsed,
   openStorage,
+  persistAnchorVerdicts,
+  prefetchAnchorCache,
   replaceFactTerms,
   resolveFactIdOrPrefix,
   setEmbeddingMeta,
@@ -2268,7 +2271,11 @@ async function runDream(db: Database.Database, options: DreamCliOptions): Promis
   // grounded in retracted premises -- one step removed, the same P3 failure `retrieve()` guards
   // against directly. No `--root` flag exists on this command (see the option below), so freshness
   // evaluates against the current working directory, `resolveRoot`'s own default with no root given.
-  const facts = selectVerifiedFacts(listFacts(db, {}), resolveRoot(undefined));
+  // `db` is still open here (see `withDb`'s caller below, which closes it only after this whole
+  // async command -- including the network call to the configured endpoint -- returns), so this
+  // costs nothing beyond what's already paid: an indexed point lookup per anchor, in exchange for
+  // skipping the anchor's real (filesystem) work whenever a previous call already answered it.
+  const facts = selectVerifiedFacts(listFacts(db, {}), resolveRoot(undefined), undefined, createAnchorCacheStore(db));
   const result = await dream(facts, config, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {});
 
   if (options.json === true) {
@@ -2732,7 +2739,7 @@ export function buildProgram(): Command {
         // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
         // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
         const wantedEntities = options.entity ?? [];
-        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap } = await withDb((db) => ({
+        const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap, anchorCacheSnapshot } = await withDb((db) => ({
           facts: listFacts(db, {}),
           usefulness: getUsefulnessCounts(db),
           embeddingMeta: getEmbeddingMeta(db) ?? null,
@@ -2744,7 +2751,14 @@ export function buildProgram(): Command {
           // the signal BM25 cannot carry: stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts`
           // and then ranks the fact naming that file no higher than one merely using those words.
           entityOverlap: getEntityOverlapForQuery(db, query ?? ""),
+          // One indexed range scan on the connection already open, for the same reason as every
+          // read above: `retrieve()` below must not hold a DB handle across its embedding round
+          // trip, so whatever `anchor_cache` already knows about this root has to be read now.
+          anchorCacheSnapshot: prefetchAnchorCache(db, root),
         }));
+        // Disconnected from storage by construction (see storage.ts's `BufferedAnchorCacheStore`):
+        // `retrieve()` can read and write anchor verdicts through it without ever touching SQLite.
+        const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
         // `null` unless the user configured an embeddings endpoint, in which case ranking fuses a
         // dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's
         // vectors came from a different model, because `cosineSimilarity` would compare the two
@@ -2772,6 +2786,7 @@ export function buildProgram(): Command {
           // for why this is a filter inside `retrieve` rather than a narrower `listFacts` query.
           restrictToRoot: true,
           secretAllowlist: loadAllowlist(root),
+          anchorCacheStore,
           ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
           ...(options.subject !== undefined ? { subject: options.subject } : {}),
           ...(options.scope !== undefined ? { scope: parseFactScope(options.scope) } : {}),
@@ -2812,6 +2827,10 @@ export function buildProgram(): Command {
         try {
           await withDb((db) => {
             markFactsSurfaced(db, ordered.map((result) => result.fact.id), new Date().toISOString());
+            // Same connection, same fail-open contract: any anchor verdict `retrieve()` computed
+            // this call (a fresh evaluation, or a witness mismatch on a prefetched row) is flushed
+            // here rather than opening a second connection for it.
+            persistAnchorVerdicts(db, anchorCacheStore.buffer);
           });
         } catch (error) {
           err(`mem: could not mark facts surfaced -- ${extractErrorMessage(error)}`);
@@ -3025,17 +3044,18 @@ export function buildProgram(): Command {
         const candidates = scanTranscript(transcriptPath);
         const stored = await withDb((db) => {
           const kept: string[] = [];
-          // Built once: the duplicate check below runs per candidate, and rebuilding this inside
-          // the loop would read the whole facts table once per sentence on a hook that fires at
-          // the end of every session.
-          const storedByText = factsByNormalizedText(db);
           for (const candidate of candidates) {
+            // One indexed lookup per candidate (`idx_facts_text_hash`) rather than a whole-table
+            // scan built once up front: a session's candidate count is typically far smaller than
+            // the store's total fact count, so this reads only the rows that could possibly match
+            // instead of the whole facts table (embedding blobs included) on every hook run.
+            //
             // Scoped to this project (or globally, for a global-scope match) via `isBoundToRoot` --
             // the same rule `retrieval.ts` uses to decide what recall may surface -- rather than a
             // second copy of "does this apply here" re-implemented against `scope_root` directly.
             // A text match with an unrelated project's `scope_root` does not count: that
             // project's suggestion (or rejection) must not suppress this one's.
-            const boundMatches = (storedByText.get(normalizeFactText(candidate.text)) ?? []).filter((fact) => isBoundToRoot(fact, root));
+            const boundMatches = factsByTextHash(db, candidate.text).filter((fact) => isBoundToRoot(fact, root));
             if (boundMatches.length > 0) {
               // A restatement of a `pending` suggestion is evidence for `mem review`'s human reader
               // (`recordSighting`'s own doc comment covers the screening/dedup/no-promotion

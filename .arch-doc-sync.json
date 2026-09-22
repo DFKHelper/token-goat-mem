@@ -7,7 +7,7 @@
     ["Capture", ["src/capture.ts", "src/sessionScan.ts", "src/import.ts", "src/exportImport.ts", "src/consolidate.ts", "src/dream.ts"]],
     ["Storage", ["src/db.ts", "src/storage.ts", "src/migrations.ts"]],
     ["Integration", ["src/integration-seam.ts", "src/wiring.ts", "src/hook-envelope.ts"]],
-    ["Support", ["src/types.ts", "src/pathUtils.ts", "src/fileUtils.ts", "src/projectIdentity.ts"]]
+    ["Support", ["src/types.ts", "src/pathUtils.ts", "src/fileUtils.ts", "src/projectIdentity.ts", "src/factText.ts"]]
   ],
   "exclude": []
 }
