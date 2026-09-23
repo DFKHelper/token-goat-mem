@@ -45,7 +45,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -1023,18 +1023,46 @@ export function resolveBinaryOnPath(
   const platform = opts.platform ?? process.platform;
   const pathEnv = opts.pathEnv ?? process.env["PATH"] ?? process.env["Path"] ?? "";
   const pathExt = opts.pathExt ?? process.env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD";
-  const dirs = pathEnv.split(delimiter).filter((dir) => dir.length > 0);
+  const pathDelimiter = platform === "win32" ? ";" : delimiter;
+  const dirs = pathEnv.split(pathDelimiter).filter((dir) => dir.length > 0);
   const candidates = candidateBinaryNames(name, platform, pathExt);
   for (const dir of dirs) {
-    for (const candidate of candidates) {
-      const full = join(dir, candidate);
+    if (platform === "win32") {
+      let entries: string[];
       try {
-        if (existsSync(full) && statSync(full).isFile()) {
-          return full;
-        }
+        entries = readdirSync(dir);
       } catch {
-        // Permission error or a race with something deleting `full` mid-scan -- keep scanning
-        // the rest of PATH rather than letting one bad entry abort resolution.
+        // Directory doesn't exist or is not readable -- continue
+        continue;
+      }
+      const entryMap = new Map<string, string>();
+      for (const entry of entries) {
+        entryMap.set(entry.toLowerCase(), entry);
+      }
+      for (const candidate of candidates) {
+        const actualEntry = entryMap.get(candidate.toLowerCase());
+        if (actualEntry !== undefined) {
+          const full = join(dir, actualEntry);
+          try {
+            if (statSync(full).isFile()) {
+              return full;
+            }
+          } catch {
+            // Permission or race -- continue
+          }
+        }
+      }
+    } else {
+      for (const candidate of candidates) {
+        const full = join(dir, candidate);
+        try {
+          if (existsSync(full) && statSync(full).isFile()) {
+            return full;
+          }
+        } catch {
+          // Permission error or a race with something deleting `full` mid-scan -- keep scanning
+          // the rest of PATH rather than letting one bad entry abort resolution.
+        }
       }
     }
   }

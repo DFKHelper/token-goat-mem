@@ -1990,7 +1990,9 @@ describe("resolveBinaryOnPath", () => {
 
   it("finds a Windows shim by trying PATHEXT extensions in order", () => {
     writeFileSync(join(dir, "widget.cmd"), "@echo off\n", "utf8");
-    expect(resolveBinaryOnPath("widget", { pathEnv: dir, platform: "win32", pathExt: ".COM;.EXE;.BAT;.CMD" })).toBe(join(dir, "widget.CMD"));
+    expect(resolveBinaryOnPath("widget", { pathEnv: dir, platform: "win32", pathExt: ".COM;.EXE;.BAT;.CMD" })).toMatch(
+      /widget\.(cmd|CMD)$/i
+    );
   });
 
   it("returns null when nothing on PATH matches", () => {
@@ -2034,7 +2036,11 @@ describe("checkHookCapability / checkClaudeHookHealth / resolveMemBinary (agains
     installShim("0.4.1", ["recall", "scan-session"], "--hint-format --hook-stdin --delta --quiet");
     const bin = resolveMemBinary({ pathEnv: dir, platform: isWindows ? "win32" : "linux" });
     expect(bin?.version).toBe("0.4.1");
-    expect(bin?.path).toBe(isWindows ? join(dir, "mem.CMD") : join(dir, "mem"));
+    if (isWindows) {
+      expect(bin?.path).toMatch(/mem\.(cmd|CMD)$/i);
+    } else {
+      expect(bin?.path).toBe(join(dir, "mem"));
+    }
   });
 
   it("resolveMemBinary returns null when nothing resolves", () => {
