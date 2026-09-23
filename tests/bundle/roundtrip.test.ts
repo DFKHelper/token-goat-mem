@@ -14,9 +14,9 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -25,23 +25,42 @@ const BUNDLE = fileURLToPath(new URL("../../dist/token-goat-mem.mjs", import.met
 
 let root: string;
 let memHome: string;
+let fakeMemDir: string;
 
 /** Runs the built bundle against an isolated mem home, returning stdout. Throws on a non-zero exit. */
 function runBundle(args: readonly string[]): string {
   return execFileSync(process.execPath, [BUNDLE, ...args], {
     encoding: "utf8",
-    env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome },
+    env: {
+      ...process.env,
+      TOKEN_GOAT_MEM_HOME: memHome,
+      PATH: `${fakeMemDir}${delimiter}${process.env["PATH"] ?? ""}`,
+    },
   });
 }
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-bundle-root-"));
   memHome = mkdtempSync(join(tmpdir(), "mem-bundle-home-"));
+  fakeMemDir = mkdtempSync(join(tmpdir(), "mem-bundle-fake-bin-"));
+
+  // Provide a capable mem shim on PATH so `mem init claude-code` passes preflight in CI environments
+  // where token-goat-mem is not installed globally.
+  const shimBody =
+    "#!/usr/bin/env node\n" +
+    "const args = process.argv.slice(2);\n" +
+    'if (args[0] === "--version") { process.stdout.write("0.4.1-test-shim\\n"); process.exit(0); }\n' +
+    'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root\\n"); process.exit(0); }\n' +
+    "process.exit(1);\n";
+  writeFileSync(join(fakeMemDir, "mem"), shimBody, "utf8");
+  chmodSync(join(fakeMemDir, "mem"), 0o755);
+  writeFileSync(join(fakeMemDir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
 });
 
 afterEach(() => {
   rmSync(root, { recursive: true, force: true });
   rmSync(memHome, { recursive: true, force: true });
+  rmSync(fakeMemDir, { recursive: true, force: true });
 });
 
 describe("init/uninstall round trip through the built bundle", () => {

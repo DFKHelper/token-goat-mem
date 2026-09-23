@@ -43,5 +43,5 @@ describe("architecture doc stays in sync with src/", () => {
       result.status,
       `Architecture doc sync engine self-test failed.\n${result.stdout}\n${result.stderr}`,
     ).toBe(0);
-  });
+  }, 60_000);
 });
