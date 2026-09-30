@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runCli } from "./support/cli.js";
+import { extractSuggestedId, runCli } from "./support/cli.js";
 
 let home: string;
 
@@ -27,9 +27,7 @@ afterEach(() => {
 async function suggest(text: string): Promise<string> {
   const result = await runCli(["suggest", text, "--kind", "preference"]);
   expect(result.exitCode).toBe(0);
-  const id = /suggested \S+ fact (\S+) \(pending\)/u.exec(result.stdout)?.[1];
-  expect(id).toBeDefined();
-  return id as string;
+  return extractSuggestedId(result);
 }
 
 /** The `mem log --fact <id> --event <event>` detail lines for one fact. */

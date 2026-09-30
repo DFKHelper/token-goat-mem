@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
-import { extractRememberedId, runCli, type CliResult } from "./support/cli.js";
+import { extractRememberedId, extractSuggestedId, runCli, type CliResult } from "./support/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { captureSuggested, MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
@@ -5952,11 +5952,7 @@ describe("mem remember reaffirms rather than duplicating", () => {
     // the queue, and the queue kept asking, while `mem consolidate` went on to report the resulting
     // pair as a 1.00 duplicate cluster.
     const suggested = await runCli(["suggest", "we cache the build", "--kind", "decision", "--scope", "global"]);
-    const suggestedMatch = /suggested (?:\S+ )?fact (\S+) \(pending\)/u.exec(suggested.stdout);
-    if (suggestedMatch?.[1] === undefined) {
-      throw new Error(`could not extract fact id from stdout: ${JSON.stringify(suggested.stdout)}`);
-    }
-    const suggestedId = suggestedMatch[1];
+    const suggestedId = extractSuggestedId(suggested);
 
     const result = await runCli(["remember", "we cache the build", "--kind", "decision", "--scope", "global"]);
     expect(result.exitCode).toBe(0);

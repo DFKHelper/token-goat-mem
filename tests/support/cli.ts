@@ -48,7 +48,16 @@ export async function runCli(args: readonly string[]): Promise<CliResult> {
 
 /** Extracts the fact id from the `remember` command's success line. The noun phrase is `<kind> fact` for every kind except `fact` itself, which collapses to one word rather than printing "fact fact" -- so the kind portion has to be optional here, not a required token. */
 export function extractRememberedId(result: CliResult): string {
-  const match = /remembered (?:\S+ )?fact (\S+)/u.exec(result.stdout);
+  return extractCapturedId(result, /remembered (?:\S+ )?fact (\S+)/u);
+}
+
+/** Extracts the pending fact id from the `suggest` command's success line (`suggested <kind> fact <id> (pending)`); same noun-phrase rule as `extractRememberedId`. */
+export function extractSuggestedId(result: CliResult): string {
+  return extractCapturedId(result, /suggested (?:\S+ )?fact (\S+) \(pending\)/u);
+}
+
+function extractCapturedId(result: CliResult, pattern: RegExp): string {
+  const match = pattern.exec(result.stdout);
   if (match?.[1] === undefined) {
     throw new Error(`could not extract fact id from stdout: ${JSON.stringify(result.stdout)}`);
   }
