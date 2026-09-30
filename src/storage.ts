@@ -1501,6 +1501,20 @@ export function countEmbeddedFacts(db: Db, options: { readonly excludeSuperseded
  * stopwords is checked and legitimately has no row, and counting only rows would report it as an
  * unclosable shortfall (see `listFactsNeedingTerms`).
  */
+/**
+ * How many of the decisions and corrections a session can receive (active or pinned) carry a
+ * `why`, out of how many there are. Those two kinds are the ones a later session relitigates when
+ * the reason is missing; `mem doctor` reports the ratio.
+ */
+export function countRationaleCoverage(db: Db): { readonly withWhy: number; readonly total: number } {
+  const row = db
+    .prepare<[], { withWhy: number | null; total: number }>(
+      "SELECT SUM(why IS NOT NULL) AS withWhy, COUNT(*) AS total FROM facts WHERE status IN ('active','pinned') AND kind IN ('decision','correction')"
+    )
+    .get();
+  return { withWhy: row?.withWhy ?? 0, total: row?.total ?? 0 };
+}
+
 export function countFactsWithTerms(db: Db): number {
   return db.prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM facts WHERE terms_checked_at IS NOT NULL").get()?.count ?? 0;
 }

@@ -121,6 +121,10 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   against the same `.mem/allowlist`, since the audit log is as durable as the facts (a refusal is
   logged as `review_blocked_secret`, naming the pattern, never the value); `--reason` with no action
   to attach it to is refused.
+- **`mem doctor` reports why coverage.** A new line counts the active or pinned decisions and
+  corrections that carry a `--why` (`why coverage: 3/5 ...`) and, while any lack one, names
+  `mem edit <id> --why "<reason>"` as the fix. Pending and superseded facts are left out: recall
+  never surfaces them, so their missing reason costs nothing.
 
 ## [0.4.1] - 2026-09-16
 

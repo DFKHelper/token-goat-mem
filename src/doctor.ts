@@ -12,7 +12,7 @@ import { resolveDbPath } from "./db.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
 import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
-import { countEmbeddedFacts, countFacts, countFactsWithTerms, getEmbeddingMeta, getEpoch } from "./storage.js";
+import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { FACT_STATUSES } from "./types.js";
 import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands } from "./wiring.js";
 
@@ -26,6 +26,19 @@ import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands } f
 function describeFacets(factsWithTerms: number, totalFacts: number): string {
   const line = `term coverage: ${factsWithTerms}/${totalFacts} facts`;
   return factsWithTerms < totalFacts ? `${line} (run \`mem facets --backfill\` -- \`mem recall --entity\` cannot match the rest)` : line;
+}
+
+/**
+ * `mem doctor`'s why-coverage line. A decision or correction recalled without its reason is the one
+ * a later session argues with, and no other command says how many of them there are. Only what
+ * recall can surface is counted: a pending or superseded fact's missing reason costs nothing.
+ */
+function describeWhyCoverage(withWhy: number, total: number): string {
+  if (total === 0) {
+    return "why coverage: n/a -- no active or pinned decisions or corrections";
+  }
+  const line = `why coverage: ${withWhy}/${total} active or pinned decisions and corrections carry a reason`;
+  return withWhy < total ? `${line} (add one with \`mem edit <id> --why "<reason>"\`)` : line;
 }
 
 /**
@@ -210,7 +223,7 @@ function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: numbe
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
-    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how much of the store fits in one recall block, and project/path-scoped facts whose root is gone")
+    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how many decisions and corrections carry a why, how much of the store fits in one recall block, and project/path-scoped facts whose root is gone")
     .action(
       guard(async () => {
         const dbPath = resolveDbPath();
@@ -230,6 +243,7 @@ export function registerDoctorCommand(program: Command): void {
           const sourceRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM sources").get()?.c ?? 0;
           const auditRows = db.prepare<[], { c: number }>("SELECT COUNT(*) AS c FROM audit_log").get()?.c ?? 0;
           const epoch = getEpoch(db);
+          const rationale = countRationaleCoverage(db);
           // The same status pair the hint-format recall pool loads (see `--hint-format`'s
           // `listFacts` call): anything else is withheld, so counting it here would overstate
           // what a session can actually receive.
@@ -260,6 +274,7 @@ export function registerDoctorCommand(program: Command): void {
             ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db, { excludeSuperseded: true }), embeddableFacts),
             describeDream(),
             describeFacets(countFactsWithTerms(db), totalFacts),
+            describeWhyCoverage(rationale.withWhy, rationale.total),
             describeHintBudget(recallableFacts, pinnedFacts),
             ...describeScopePlacement(
               unreachable.length,
