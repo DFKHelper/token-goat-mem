@@ -42,6 +42,7 @@
 import { randomUUID } from "node:crypto";
 import type { AnchorCacheStore, AnchorVerdict } from "./anchors.js";
 import { openDb, resolveDbPath } from "./db.js";
+import { getEpoch, writeEpoch } from "./epoch.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
 import { hashFactText, normalizeFactText } from "./factText.js";
@@ -50,6 +51,8 @@ import type { Fact, FactFilter, FactLink, FactUpdate, NewFact, NewSource, Source
 
 /** Connection type, borrowed from db.ts's own return type rather than importing better-sqlite3's types directly -- keeps this module's public surface in lockstep with whatever db.ts actually opens. */
 type Db = ReturnType<typeof openDb>;
+
+export { getEpoch };
 
 /**
  * Ensures every table/column this module and `migrations.ts`'s steps are responsible for exists on
@@ -882,7 +885,7 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
     const next = getEpoch(db) + 1;
     const result = db.prepare(`UPDATE facts SET ${finalSets.join(", ")} WHERE id = ?`).run(...finalParams, next, id);
     if (result.changes > 0) {
-      performEpochUpsert(db, next);
+      writeEpoch(db, next);
       if (patch.text !== undefined) {
         // Terms describe `facts.text`, so an edit that rewrites the text has to re-extract them in
         // the same transaction. Skipping this leaves `mem recall --entity` matching a fact on an
@@ -938,7 +941,7 @@ export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | un
       .prepare("UPDATE facts SET status = ?, prior_status = ?, status_changed_at = ?, epoch = ? WHERE id = ?")
       .run(status, priorStatus, new Date().toISOString(), next, id);
     if (result.changes > 0) {
-      performEpochUpsert(db, next);
+      writeEpoch(db, next);
     }
   });
   tx.immediate(); // read-then-write under WAL; see insertFact.
@@ -1434,11 +1437,6 @@ export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM recall_log WHERE surfaced_at < ?").run(beforeIso).changes;
 }
 
-/** Reads the current write epoch (design plan Section 4), defaulting to `0` on a freshly-initialized database. */
-export function getEpoch(db: Db): number {
-  const row = db.prepare<[], { value: string }>("SELECT value FROM meta WHERE key = 'epoch'").get();
-  return row === undefined ? 0 : Number(row.value);
-}
 
 /** `meta` keys describing the embedding model the vectors in `facts.embedding` were produced by. */
 const EMBEDDING_MODEL_KEY = "embedding_model";
@@ -1536,7 +1534,7 @@ export function clearAllEmbeddings(db: Db): number {
     const next = getEpoch(db) + 1;
     const result = db.prepare("UPDATE facts SET embedding = NULL, epoch = ? WHERE embedding IS NOT NULL").run(next);
     if (result.changes > 0) {
-      performEpochUpsert(db, next);
+      writeEpoch(db, next);
     }
     return result.changes;
   });
@@ -1557,14 +1555,6 @@ export function listFactsNeedingEmbedding(db: Db, options: { readonly all?: bool
 }
 
 /**
- * Performs the actual epoch upsert into the meta table. Extracted to eliminate duplication
- * across `bumpEpoch` and the conditional bumps in `updateFact`/`setFactStatus`.
- */
-function performEpochUpsert(db: Db, next: number): void {
-  db.prepare("INSERT INTO meta (key, value) VALUES ('epoch', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(next));
-}
-
-/**
  * Increments the write epoch by 1 and returns the new value. Callers must run this inside the same
  * transaction as the fact write it accompanies (every exported fact-write function in this module
  * already does), and use the returned value to stamp that write's `facts.epoch` column so a fact's
@@ -1575,6 +1565,6 @@ function performEpochUpsert(db: Db, next: number): void {
 function bumpEpoch(db: Db): number {
   const current = getEpoch(db);
   const next = current + 1;
-  performEpochUpsert(db, next);
+  writeEpoch(db, next);
   return next;
 }

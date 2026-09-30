@@ -358,11 +358,8 @@ export function insertAuditLog(db: Database.Database, entry: AuditLogEntry): voi
   ).run(randomUUID(), entry.event, entry.factId, entry.detail, entry.priorJson ?? null, new Date().toISOString());
 }
 
-// Note: the write-epoch increment/read pair lives in src/storage.ts (`getEpoch` /
-// its private `bumpEpoch`), not here -- storage.ts is the canonical entry point for every
-// fact-table write (insert/update/setStatus/delete) and bumps the epoch atomically alongside
-// each one. An earlier version of this module exported its own `bumpEpoch`; it was removed once
-// storage.ts's writers became the sole callers that needed it, to avoid two independent epoch
-// implementations drifting apart. The `meta` table (seeded above) is still created here too so a
-// caller that opens via bare `openDb()` (without `storage.openStorage()`) still gets a
-// zero-initialized epoch row to read.
+// Note: the write epoch's read/write primitives live in src/epoch.ts, and the policy of when it moves
+// in src/storage.ts (its private `bumpEpoch`) -- storage.ts is the canonical entry point for every
+// fact-table write (insert/update/setStatus/delete) and bumps the epoch atomically alongside each
+// one. The `meta` table (seeded above) is still created here so a caller that opens via bare
+// `openDb()` (without `storage.openStorage()`) still gets a zero-initialized epoch row to read.
