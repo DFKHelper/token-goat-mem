@@ -619,7 +619,7 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   // the write lock up front makes the read-then-write pair sound for concurrent `mem` processes,
   // which is the tool's normal deployment (two agent sessions in two repos, one shared ~/.mem).
   // Every other write path in this module, and every caller that wraps one in an outer transaction
-  // (capture.writeFact, cli's edit/setStatusWithAudit, exportImport's batch), does the same.
+  // (capture.writeFact, cli's edit, reviewActions' setStatusWithAudit, exportImport's batch), does the same.
   tx.immediate();
 
   const row = getFactRow(db, id);
