@@ -57,6 +57,7 @@ import {
   type CaptureSuggestedInput,
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
+import { ageInDays, daysAgoIso } from "./timeUtils.js";
 import {
   assertNonNegativeFlag,
   assertPositiveFlag,
@@ -194,8 +195,6 @@ import { getGraphScoresForQuery } from "./factgraph.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { AuditLogRow } from "./db.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
-
-const MS_PER_DAY = 86_400_000;
 
 /** Default cap on `mem list` output when `--limit` is not given -- see the module doc comment on `retrieve()`'s own `DEFAULT_RECALL_LIMIT` in retrieval.ts for the recall-side analog. */
 const DEFAULT_LIST_LIMIT = 20;
@@ -1638,12 +1637,12 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
     (fact) => !contestedIds.has(fact.id) && isBoundToRoot(fact, root) && evaluateFactFreshness(fact, root) === "contradicted"
   );
 
-  const now = Date.now();
+  const now = new Date();
   const pinsDue = groundTruth.filter((fact) => {
     if (fact.status !== "pinned") {
       return false;
     }
-    const ageDays = (now - Date.parse(statusChangedAt(fact))) / MS_PER_DAY;
+    const ageDays = ageInDays(statusChangedAt(fact), now);
     return Number.isFinite(ageDays) && ageDays >= PIN_RECONFIRM_DAYS;
   });
 
@@ -1761,7 +1760,7 @@ function runRetentionPass(db: Database.Database): string {
   // reports only, and must report on exactly the facts recall will actually downgrade.
   const decayedCount = preferences.filter((fact) => isDecayedBelowGroundTruth(fact, now)).length;
 
-  const supersededCutoff = new Date(now.getTime() - GC_SUPERSEDED_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const supersededCutoff = daysAgoIso(GC_SUPERSEDED_MAX_AGE_DAYS, now);
   // Ordered and cut by when each fact *became* superseded, not when it was captured. Keying the
   // 90-day window on `captured_at` deleted a fact superseded yesterday purely because it had been
   // captured 91 days ago -- destroying the audit trail the soft delete exists to preserve -- and
@@ -1787,13 +1786,13 @@ function runRetentionPass(db: Database.Database): string {
     supersededOrdinal += 1;
   });
 
-  const sourcesCutoff = new Date(now.getTime() - GC_SOURCES_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const sourcesCutoff = daysAgoIso(GC_SOURCES_MAX_AGE_DAYS, now);
   const prunedSources = deleteSourcesOlderThan(db, sourcesCutoff);
 
-  const auditCutoff = new Date(now.getTime() - GC_AUDIT_LOG_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const auditCutoff = daysAgoIso(GC_AUDIT_LOG_MAX_AGE_DAYS, now);
   const prunedAuditRows = db.prepare("DELETE FROM audit_log WHERE created_at < ?").run(auditCutoff).changes;
 
-  const recallLogCutoff = new Date(now.getTime() - GC_RECALL_LOG_MAX_AGE_DAYS * MS_PER_DAY).toISOString();
+  const recallLogCutoff = daysAgoIso(GC_RECALL_LOG_MAX_AGE_DAYS, now);
   const prunedRecallLogRows = deleteRecallLogOlderThan(db, recallLogCutoff);
 
   const epoch = getEpoch(db);

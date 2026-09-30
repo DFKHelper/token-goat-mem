@@ -33,9 +33,8 @@ import { screenForSecrets } from "./capture.js";
 import { resolveContradictions } from "./contradiction.js";
 import { normalizePath } from "./pathUtils.js";
 import { identityMatches, isBoundToRoot } from "./projectIdentity.js";
+import { ageInDays } from "./timeUtils.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
-
-const MS_PER_DAY = 86_400_000;
 
 /**
  * An embedding backend, injected by the caller. `embed` may be sync or async. Whether a given
@@ -844,8 +843,7 @@ export function decayedConfidence(fact: Fact, now: Date): number {
   if (fact.kind !== "preference" || fact.status === "pinned") {
     return fact.confidence;
   }
-  const capturedAtMs = Date.parse(fact.captured_at);
-  const ageDays = (now.getTime() - capturedAtMs) / MS_PER_DAY;
+  const ageDays = ageInDays(fact.captured_at, now);
   if (!Number.isFinite(ageDays) || ageDays <= 0) {
     return fact.confidence;
   }
@@ -1186,7 +1184,7 @@ function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boole
     return false;
   }
   if (options.ageDays !== undefined) {
-    const ageDays = (now.getTime() - Date.parse(fact.captured_at)) / MS_PER_DAY;
+    const ageDays = ageInDays(fact.captured_at, now);
     if (!Number.isFinite(ageDays) || ageDays > options.ageDays) {
       return false;
     }

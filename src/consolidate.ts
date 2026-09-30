@@ -23,12 +23,12 @@
 import { computeContradictionBucketGroups, computeProjectIdentityGroups, sameContradictionBucket } from "./contradiction.js";
 import { neighbours } from "./factgraph.js";
 import { listFacts, listStaleUnsurfacedFacts, listTermsForFact, normalizeFactText } from "./storage.js";
+import { daysAgoIso } from "./timeUtils.js";
 import type { Fact } from "./types.js";
 
 /** Connection type, borrowed the way `src/storage.ts` borrows it, so this module adds no dependency of its own. */
 type Db = Parameters<typeof listTermsForFact>[0];
 
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
 /**
  * Default Jaccard floor for calling two facts duplicates: they must share at least half of their
@@ -436,7 +436,7 @@ export function findCrossProjectDuplicates(db: Db): CrossProjectDuplicateGroup[]
  * it from a second clock reading.
  */
 export function staleCutoff(ageDays: number, now: Date): string {
-  return new Date(now.getTime() - ageDays * MS_PER_DAY).toISOString();
+  return daysAgoIso(ageDays, now);
 }
 
 /**
