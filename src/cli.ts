@@ -36,7 +36,6 @@
 
 import { Command } from "commander";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, evaluateAnchor, extractAnchorableTargets, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
@@ -48,7 +47,6 @@ import {
   CaptureValidationError,
   loadAllowlist,
   parseCapturedAtOrThrow,
-  InvalidAnchorError,
   recordSighting,
   resolveScopeRepo,
   screenForSecrets,
@@ -60,8 +58,23 @@ import {
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import {
+  EXIT_SUCCESS,
+  EXIT_USER_ERROR,
+  exitCodeForError,
+  extractErrorMessage,
+  err,
+  guard,
+  resolveIdArgOrThrow,
+  resolveRoot,
+  UsageError,
+  withDb,
+} from "./cliRuntime.js";
+
+// The exit-code contract is part of cli.ts's public surface (index.ts re-exports it); it is defined in
+// cliRuntime.ts so command modules can share it without importing cli.ts.
+export { EXIT_INTERNAL_ERROR, EXIT_SUCCESS, EXIT_USER_ERROR, UsageError } from "./cliRuntime.js";
+import {
   dream,
-  DreamConfigError,
   dreamEndpointLabel,
   DREAM_API_KEY_ENV,
   DREAM_MODEL_ENV,
@@ -103,8 +116,8 @@ import {
   resolveConfiguredEmbeddingBackend,
   type EmbeddingMeta,
 } from "./embeddings.js";
-import { importFromJson, JsonImportError, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
-import { importFromMarkdown, MarkdownImportError, planImportFromMarkdown, type ImportOutcome } from "./import.js";
+import { importFromJson, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "./exportImport.js";
+import { importFromMarkdown, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
   checkClaudeHookHealth,
   CLAUDE_HOOK_EVENTS,
@@ -112,8 +125,6 @@ import {
   getToolWiring,
   installedClaudeHookCommands,
   TOOL_NAMES,
-  WiringConflictError,
-  WiringUserUnsupportedError,
   type ClaudeHookHealth,
   type ToolName,
   type WiringOpts,
@@ -168,11 +179,9 @@ import {
   listTermsForFact,
   markFactsSurfaced,
   markRecallUsed,
-  openStorage,
   persistAnchorVerdicts,
   prefetchAnchorCache,
   replaceFactTerms,
-  resolveFactIdOrPrefix,
   setEmbeddingMeta,
   setFactStatus,
   updateFact,
@@ -201,27 +210,6 @@ const DEFAULT_LIST_LIMIT = 20;
  */
 const RECALL_SHORT_ID_LENGTH = 8;
 
-// ─────────────────────────────────────────────────────────────────────────── Exit-code contract ───────────────────────────────────────────────────────────────────────────
-
-/** See the module doc comment for the full normative contract. */
-export const EXIT_SUCCESS = 0;
-export const EXIT_USER_ERROR = 1;
-export const EXIT_INTERNAL_ERROR = 2;
-
-/**
- * A user/usage error: the invocation itself was wrong (bad option value, unknown fact id, invalid
- * state transition, ...). Maps to `EXIT_USER_ERROR`; anything else thrown from a command action is
- * treated as internal (`EXIT_INTERNAL_ERROR`).
- */
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "UsageError";
-  }
-}
-
-/** Classifies a thrown error per the exit-code contract: deliberate input-rejection errors are user errors; everything else (sqlite failures, bugs) is internal. */
-/** Renders a stored fact's noun phrase for CLI confirmations. Every kind reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself, where the template degenerates into "fact fact". */
 /** Longest a single before/after value is allowed to be in an audit `detail` line. Long enough to identify the change, short enough that an edited 500-character fact does not turn one audit row into a second copy of the store. */
 const AUDIT_VALUE_PREVIEW_LENGTH = 120;
 
@@ -425,26 +413,9 @@ function undoEdit(db: Database.Database, id: string): string {
   return fact.id;
 }
 
+/** Renders a stored fact's noun phrase for CLI confirmations. Every kind reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself, where the template degenerates into "fact fact". */
 function factNounPhrase(kind: FactKind): string {
   return kind === "fact" ? "fact" : `${kind} fact`;
-}
-
-function exitCodeForError(error: unknown): number {
-  return error instanceof UsageError ||
-    error instanceof CaptureValidationError ||
-    error instanceof InvalidAnchorError ||
-    error instanceof SecretDetectedError ||
-    error instanceof WiringConflictError ||
-    error instanceof WiringUserUnsupportedError ||
-    error instanceof JsonImportError ||
-    error instanceof MarkdownImportError ||
-    // A misconfigured dream endpoint is a typo in an environment variable the user set, so it is
-    // theirs to fix and exits 1. `DreamRequestError` deliberately stays at 2: an endpoint that is
-    // down, slow, or answering with nonsense is neither a bad invocation nor a bug in mem, and 2 is
-    // the closer of the two codes this CLI has -- a caller should retry it, not re-read its flags.
-    error instanceof DreamConfigError
-    ? EXIT_USER_ERROR
-    : EXIT_INTERNAL_ERROR;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── CLI-boundary validation ───────────────────────────────────────────────────────────────────────────
@@ -543,11 +514,6 @@ function parseContextFiles(raw: string | undefined): string[] | undefined {
     .map((file) => file.trim())
     .filter((file) => file.length > 0);
   return files.length > 0 ? files : undefined;
-}
-
-/** Never defaults to ambient `process.cwd()` silently for anchor evaluation inside anchors.ts itself (Section 3) -- but a human-invoked, short-lived CLI command needs *some* root when the caller omits `--root`, and "the directory the command was invoked from" is the only reasonable one. Explicit `--root` always wins. */
-function resolveRoot(explicit: string | undefined): string {
-  return resolvePath(explicit ?? process.cwd());
 }
 
 // ─────────────────────────────────────────────────────────────────────────── DB lifecycle + error handling ───────────────────────────────────────────────────────────────────────────
@@ -818,59 +784,6 @@ async function attachEmbeddingBestEffort(fact: Fact): Promise<void> {
   } catch {
     // Intentionally silent: see the doc comment above.
   }
-}
-
-async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): Promise<T> {
-  const db = openStorage();
-  try {
-    return await fn(db);
-  } finally {
-    db.close();
-  }
-}
-
-function err(message: string): void {
-  process.stderr.write(`${message}\n`);
-}
-
-/**
- * Resolves a fact id argument (full id or git-style short prefix, `resolveFactIdOrPrefix` in
- * storage.ts) to the fact it names, or throws the same `UsageError` shape every id-accepting command
- * already used before short prefixes existed (`no such fact: <id>`), plus a new ambiguity error
- * listing every matching id. Every id-accepting command (`show`, `forget`, `pin`, `edit`, `review
- * --promote`, `review --reject`) should use the resolved fact's own `.id` for any subsequent
- * write/lookup, never the raw user-typed argument.
- */
-function resolveIdArgOrThrow(db: Database.Database, id: string): Fact {
-  const resolution = resolveFactIdOrPrefix(db, id);
-  if (resolution.kind === "not-found") {
-    throw new UsageError(`no such fact: ${id}`);
-  }
-  if (resolution.kind === "ambiguous") {
-    const ids = resolution.matches.map((fact) => fact.id).join(", ");
-    throw new UsageError(`ambiguous id prefix "${id}" matches ${resolution.matches.length} facts: ${ids} -- use more characters`);
-  }
-  return resolution.fact;
-}
-
-function extractErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-/** Wraps a command action so any thrown error maps to one `mem: <message>` stderr line + the contract exit code (1 user error, 2 internal -- see `exitCodeForError`), and success to exit code 0 (unless the handler already set a different `process.exitCode`). Mirrors token-goat's own `cli.ts` guard. */
-function guard(fn: (...args: never[]) => void | Promise<void>): (...args: unknown[]) => Promise<void> {
-  return async (...args: unknown[]): Promise<void> => {
-    process.exitCode = undefined;
-    try {
-      await fn(...(args as never[]));
-      if (process.exitCode === undefined) {
-        process.exitCode = EXIT_SUCCESS;
-      }
-    } catch (error) {
-      err(`mem: ${extractErrorMessage(error)}`);
-      process.exitCode = exitCodeForError(error);
-    }
-  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Formatting ───────────────────────────────────────────────────────────────────────────
