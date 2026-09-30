@@ -8,7 +8,7 @@
  * per-test here so facts written by one test can never leak into another within this file.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -16,56 +16,12 @@ import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
-import { run } from "../src/cli.js";
+import { extractRememberedId, runCli, type CliResult } from "./support/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { captureSuggested, MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 import { _clearAnchorMemoForTests } from "../src/anchors.js";
-
-interface CliResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | undefined;
-}
-
-/**
- * Runs one CLI invocation through the real `run()` entry point, capturing everything written to
- * stdout/stderr instead of letting it hit the real streams, and returning the resulting
- * `process.exitCode`. Resets `process.exitCode` to `undefined` immediately after each call so a
- * command that intentionally exercises the error path (exit code 1) never leaks into the exit code
- * of the vitest process itself.
- */
-async function runCli(args: readonly string[]): Promise<CliResult> {
-  let stdout = "";
-  let stderr = "";
-  const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown): boolean => {
-    stdout += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
-    stderr += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-
-  process.exitCode = undefined;
-  await run(["node", "mem", ...args]);
-  const exitCode = process.exitCode;
-  process.exitCode = undefined;
-
-  stdoutSpy.mockRestore();
-  stderrSpy.mockRestore();
-  return { stdout, stderr, exitCode };
-}
-
-/** Extracts the fact id from the `remember` command's success line. The noun phrase is `<kind> fact` for every kind except `fact` itself, which collapses to one word rather than printing "fact fact" -- so the kind portion has to be optional here, not a required token. */
-function extractRememberedId(result: CliResult): string {
-  const match = /remembered (?:\S+ )?fact (\S+)/u.exec(result.stdout);
-  if (match?.[1] === undefined) {
-    throw new Error(`could not extract fact id from stdout: ${JSON.stringify(result.stdout)}`);
-  }
-  return match[1];
-}
 
 let home: string;
 

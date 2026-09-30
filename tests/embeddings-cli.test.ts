@@ -11,48 +11,20 @@
  * a local failure: it would turn embeddings on for every later test file in the same worker, which
  * is exactly the byte-identical-when-unconfigured property the first block below exists to pin.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { run } from "../src/cli.js";
+import { runCli } from "./support/cli.js";
 import { insertFact, openStorage, getEmbeddingMeta, listFacts } from "../src/storage.js";
 import type { NewFact } from "../src/types.js";
 import { EMBED_API_KEY_ENV, EMBED_MODEL_ENV, EMBED_URL_ENV } from "../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer, type StubEmbeddingServerOptions } from "./support/embedding-server.js";
 import { buildHintFormat } from "../src/integration-seam.js";
 
-
 /** A budget no runner can exceed, so a slow machine cannot empty the hint set and pass the assertion vacuously. */
 const NO_TRUNCATION_BUDGET_MS = 3_600_000;
-
-interface CliResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | undefined;
-}
-
-/** Mirrors tests/cli.test.ts's harness: drives the real `run()` and captures both streams. */
-async function runCli(args: readonly string[]): Promise<CliResult> {
-  let stdout = "";
-  let stderr = "";
-  const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown): boolean => {
-    stdout += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
-    stderr += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  process.exitCode = undefined;
-  await run(["node", "mem", ...args]);
-  const exitCode = process.exitCode;
-  process.exitCode = undefined;
-  stdoutSpy.mockRestore();
-  stderrSpy.mockRestore();
-  return { stdout, stderr, exitCode };
-}
 
 let home: string;
 let root: string;

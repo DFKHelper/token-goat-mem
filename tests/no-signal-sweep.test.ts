@@ -21,39 +21,12 @@
  *     about the world, and reporting it as an empty store is simply false.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { run } from "../src/cli.js";
-
-interface CliResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | undefined;
-}
-
-/** Mirrors tests/cli.test.ts's harness: drives the real `run()` and captures both streams. */
-async function runCli(args: readonly string[]): Promise<CliResult> {
-  let stdout = "";
-  let stderr = "";
-  const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown): boolean => {
-    stdout += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
-    stderr += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  process.exitCode = undefined;
-  await run(["node", "mem", ...args]);
-  const exitCode = process.exitCode;
-  process.exitCode = undefined;
-  stdoutSpy.mockRestore();
-  stderrSpy.mockRestore();
-  return { stdout, stderr, exitCode };
-}
+import { runCli } from "./support/cli.js";
 
 let home: string;
 let root: string;

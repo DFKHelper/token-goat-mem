@@ -7,41 +7,14 @@
  * fact BM25 cannot -- so that case is pinned twice: once as a positive hit, and once as the
  * demonstration that the lexical query alone does not tell the two facts apart.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { run } from "../src/cli.js";
+import { extractRememberedId, runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, listTermsForFact, openStorage } from "../src/storage.js";
-
-interface CliResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | undefined;
-}
-
-/** Mirrors tests/cli.test.ts's harness: drives the real `run()` and captures both streams. */
-async function runCli(args: readonly string[]): Promise<CliResult> {
-  let stdout = "";
-  let stderr = "";
-  const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown): boolean => {
-    stdout += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
-    stderr += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  process.exitCode = undefined;
-  await run(["node", "mem", ...args]);
-  const exitCode = process.exitCode;
-  process.exitCode = undefined;
-  stdoutSpy.mockRestore();
-  stderrSpy.mockRestore();
-  return { stdout, stderr, exitCode };
-}
 
 let home: string;
 let root: string;
@@ -57,15 +30,6 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });
-
-/** Mirrors tests/cli.test.ts's extractor: `mem remember` prints "remembered <noun phrase> <id>". */
-function extractRememberedId(result: CliResult): string {
-  const match = /remembered (?:\S+ )?fact (\S+)/u.exec(result.stdout);
-  if (match?.[1] === undefined) {
-    throw new Error(`could not extract fact id from stdout: ${JSON.stringify(result.stdout)}`);
-  }
-  return match[1];
-}
 
 async function remember(text: string, extra: readonly string[] = []): Promise<string> {
   const result = await runCli(["remember", text, "--kind", "fact", "--scope", "project", "--root", root, ...extra]);

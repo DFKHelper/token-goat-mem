@@ -11,13 +11,13 @@
  * loser is still in the store as `superseded`, with an audit row saying which pass moved it and
  * why.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 
-import { run } from "../src/cli.js";
+import { runCli } from "./support/cli.js";
 import {
   DEFAULT_DUPLICATE_THRESHOLD,
   DEFAULT_STALE_AGE_DAYS,
@@ -481,33 +481,6 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
 });
 
 // ── End-to-end: the real CLI ────────────────────────────────────────────────────────────────────
-
-interface CliResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number | undefined;
-}
-
-/** Mirrors tests/cli.test.ts's harness: drives the real `run()` and captures both streams. */
-async function runCli(args: readonly string[]): Promise<CliResult> {
-  let stdout = "";
-  let stderr = "";
-  const stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown): boolean => {
-    stdout += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  const stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown): boolean => {
-    stderr += chunk instanceof Buffer ? chunk.toString("utf8") : String(chunk);
-    return true;
-  });
-  process.exitCode = undefined;
-  await run(["node", "mem", ...args]);
-  const exitCode = process.exitCode;
-  process.exitCode = undefined;
-  stdoutSpy.mockRestore();
-  stderrSpy.mockRestore();
-  return { stdout, stderr, exitCode };
-}
 
 describe("mem consolidate (end to end)", () => {
   let home: string;
