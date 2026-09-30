@@ -116,3 +116,24 @@ export function resolveIdArgOrThrow(db: Database.Database, id: string): Fact {
   }
   return resolution.fact;
 }
+
+// ─────────────────────────────────────────────────────────────────────────── Flag validation ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Rejects a numeric flag below 1. Numeric flags are parsed with `parseInt`, so a non-numeric
+ * argument arrives as `NaN` and is rejected here too; `undefined` -- the flag was not given -- passes.
+ * `expected` completes the message ("--limit must be a positive integer") so each flag keeps the
+ * wording its users and tests already see.
+ */
+export function assertPositiveFlag(flag: string, value: number | undefined, expected = "a positive integer"): void {
+  if (value !== undefined && (!Number.isFinite(value) || value < 1)) {
+    throw new UsageError(`${flag} must be ${expected}`);
+  }
+}
+
+/** `assertPositiveFlag` for a flag where 0 is meaningful (an epoch, a count to skip). */
+export function assertNonNegativeFlag(flag: string, value: number | undefined): void {
+  if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+    throw new UsageError(`${flag} must be a non-negative integer`);
+  }
+}

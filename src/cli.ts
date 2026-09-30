@@ -58,6 +58,8 @@ import {
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import {
+  assertNonNegativeFlag,
+  assertPositiveFlag,
   EXIT_SUCCESS,
   EXIT_USER_ERROR,
   exitCodeForError,
@@ -2660,17 +2662,11 @@ export function buildProgram(): Command {
       guard(async (query: string | undefined, options: RecallCliOptions) => {
         const hintStyle = options.hintStyle !== undefined ? parseHintStyle(options.hintStyle) : "full";
 
-        if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) {
-          throw new UsageError("--limit must be a positive integer");
-        }
+        assertPositiveFlag("--limit", options.limit);
 
-        if (options.ageDays !== undefined && (!Number.isFinite(options.ageDays) || options.ageDays <= 0)) {
-          throw new UsageError("--age-days must be a positive number");
-        }
+        assertPositiveFlag("--age-days", options.ageDays, "a positive number");
 
-        if (options.sinceEpoch !== undefined && (!Number.isFinite(options.sinceEpoch) || options.sinceEpoch < 0)) {
-          throw new UsageError("--since-epoch must be a non-negative integer");
-        }
+        assertNonNegativeFlag("--since-epoch", options.sinceEpoch);
 
         if (options.contextFiles !== undefined && options.hintFormat !== true) {
           throw new UsageError("--context-files requires --hint-format");
@@ -2934,9 +2930,7 @@ export function buildProgram(): Command {
     )
     .action(
       guard(async (options: ListCliOptions) => {
-        if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) {
-          throw new UsageError("--limit must be a positive integer");
-        }
+        assertPositiveFlag("--limit", options.limit);
         const filter: FactFilter = {
           ...(options.kind !== undefined ? { kind: parseFactKind(options.kind) } : {}),
           ...(options.status !== undefined ? { status: parseFactStatusList(options.status) } : {}),
@@ -3394,9 +3388,7 @@ export function buildProgram(): Command {
           throw new UsageError(`--${actions.join(" and --")} cannot be used together`);
         }
 
-        if (options.sinceEpoch !== undefined && (!Number.isFinite(options.sinceEpoch) || options.sinceEpoch < 0)) {
-          throw new UsageError("--since-epoch must be a non-negative integer");
-        }
+        assertNonNegativeFlag("--since-epoch", options.sinceEpoch);
 
         if (options.promote !== undefined) {
           const id = options.promote;
@@ -3451,9 +3443,7 @@ export function buildProgram(): Command {
     .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
       guard(async (options: DreamCliOptions & { readonly timeout?: number }) => {
-        if (options.timeout !== undefined && (!Number.isFinite(options.timeout) || options.timeout <= 0)) {
-          throw new UsageError("--timeout must be a positive integer (milliseconds)");
-        }
+        assertPositiveFlag("--timeout", options.timeout, "a positive integer (milliseconds)");
         const output = await withDb((db) =>
           runDream(db, { ...options, ...(options.timeout !== undefined ? { timeoutMs: options.timeout } : {}) })
         );
@@ -3513,9 +3503,7 @@ export function buildProgram(): Command {
         // Before the config read on purpose: a malformed flag is a mistake in the invocation itself,
         // and reporting the environment problem first hides it behind an error the user cannot act
         // on until they have already fixed this one.
-        if (options.limit !== undefined && (!Number.isFinite(options.limit) || options.limit < 1)) {
-          throw new UsageError("--limit must be a positive integer");
-        }
+        assertPositiveFlag("--limit", options.limit);
 
         const config = readEmbeddingConfigForCommand();
         const backend = resolveConfiguredEmbeddingBackend(process.env);
