@@ -86,6 +86,14 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   sentence stays one row with every later statement audited as a reaffirm, and nothing reports
   SQLITE_BUSY. Verified by opening the database with a zero busy timeout: recall's surfaced-marking
   write then reports a locked database, and the test fails.
+- **`mem log`: the store-wide audit timeline.** `mem show <id>` could read one fact's audit trail,
+  but only once you knew which fact to ask about; "what did the agent change in my memory this
+  week?" had no answer. `mem log` lists every audit row newest first, each prefixed with a pasteable
+  short fact id, with `--fact`, `--event` (exact name or `capture`-style family), `--age-days`,
+  `--limit`, and `--json`. `--fact` also resolves ids `gc` has hard-deleted, because audit rows
+  are kept for 180 days and superseded facts for 90, and it reports a prefix shared by a live and a
+  deleted fact as ambiguous instead of showing only the live one. `mem show`'s history block now
+  renders through the same formatter.
 
 ## [0.4.1] - 2026-09-16
 

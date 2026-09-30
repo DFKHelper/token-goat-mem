@@ -108,13 +108,48 @@ export function resolveRoot(explicit: string | undefined): string {
 export function resolveIdArgOrThrow(db: Database.Database, id: string): Fact {
   const resolution = resolveFactIdOrPrefix(db, id);
   if (resolution.kind === "not-found") {
-    throw new UsageError(`no such fact: ${id}`);
+    throw noSuchFactError(id);
   }
   if (resolution.kind === "ambiguous") {
-    const ids = resolution.matches.map((fact) => fact.id).join(", ");
-    throw new UsageError(`ambiguous id prefix "${id}" matches ${resolution.matches.length} facts: ${ids} -- use more characters`);
+    throw ambiguousIdError(id, resolution.matches.map((fact) => fact.id));
   }
   return resolution.fact;
+}
+
+/** The `no such fact` usage error, shared by every resolver so the wording cannot fork. */
+export function noSuchFactError(id: string): UsageError {
+  return new UsageError(`no such fact: ${id}`);
+}
+
+/** The ambiguous-prefix usage error, listing every candidate so the user can pick a longer prefix. */
+export function ambiguousIdError(id: string, matches: readonly string[]): UsageError {
+  return new UsageError(`ambiguous id prefix "${id}" matches ${matches.length} facts: ${matches.join(", ")} -- use more characters`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────── Listing output ───────────────────────────────────────────────────────────────────────────
+
+/** Rows a listing command (`list`, `recall`, `log`) prints when `--limit` is not given. */
+export const DEFAULT_LIST_LIMIT = 20;
+
+/**
+ * Characters of a fact id a listing (`recall`, `log`) prints ahead of each line.
+ *
+ * Recall's footer says `mem show <id> for detail`, but the 0.2.2 change that replaced the per-line
+ * CTA with one shared footer also removed the only place an id was ever printed -- leaving the
+ * footer instructing the user to use something the command never showed them. Eight hex characters
+ * is the same git-style prefix `resolveFactIdOrPrefix` already resolves, so the printed handle can
+ * be pasted straight back into `show`, `forget`, `edit`, or `log --fact`; an ambiguous prefix is
+ * reported with its candidates rather than silently resolving to the wrong fact.
+ */
+export const SHORT_ID_LENGTH = 8;
+
+export function shortFactId(id: string): string {
+  return id.slice(0, SHORT_ID_LENGTH);
+}
+
+/** The line a listing appends when `--limit` cut it short, so a capped list never reads as complete. */
+export function truncationNotice(shown: number, total: number): string {
+  return `showing ${shown} of ${total} -- use --limit to see more\n`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── Flag validation ───────────────────────────────────────────────────────────────────────────

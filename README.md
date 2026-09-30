@@ -223,7 +223,7 @@ mem remember "switched to bun" --kind preference --subject package-manager --val
 # remembered preference fact 21a1330e-95d3-453c-81f0-49c792e1488f
 
 mem recall
-# stored pref (unverified, 2026-07): switched to bun
+# 21a1330e  stored pref (unverified, 2026-07): switched to bun
 # mem show <id> for detail
 ```
 
@@ -236,7 +236,17 @@ mem epoch --gc
 mem list
 # 21a1330e-...  [preference/active] package-manager=bun  switched to bun
 # 79bce136-...  [preference/superseded] package-manager=pnpm  uses pnpm, not npm
+
+mem log
+# [2026-07-14T09:12:05.310Z] 79bce136  epoch_contradiction: Superseded by fact 21a1330e-... on subject "package-manager" (scope=global): value "pnpm" superseded by newer/higher-provenance value "bun".
+# [2026-07-14T09:11:48.902Z] 21a1330e  capture_explicit: stored active preference fact (scope=global)
+# [2026-07-14T09:11:40.127Z] 79bce136  capture_explicit: stored active preference fact (scope=global)
 ```
+
+`mem log` is the audit trail for the whole store, newest first: every capture, edit, pin, forget,
+review decision, and import. Narrow it with `--fact <id>` (which also finds facts `gc` has since
+deleted), `--event <name>` (`--event capture` matches the whole `capture_*` family), and
+`--age-days <n>`.
 
 Anchored facts are re-validated on every recall. An anchor that tests false excludes the fact from ground truth and routes it to review:
 
@@ -244,7 +254,7 @@ Anchored facts are re-validated on every recall. An anchor that tests false excl
 mem remember "repo has a yarn.lock" --kind fact --anchor "file-exists yarn.lock" --scope project --root .
 
 mem recall --root . --scope project
-# fact (contradicted, excluded): repo has a yarn.lock
+# 888ba2c0  fact (contradicted, excluded): repo has a yarn.lock
 # mem show <id> for detail; mem review to resolve contested/pending
 
 mem review --root .

@@ -58,9 +58,11 @@ import {
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import { ageInDays, daysAgoIso } from "./timeUtils.js";
+import { formatAuditLine, registerLogCommand } from "./timeline.js";
 import {
   assertNonNegativeFlag,
   assertPositiveFlag,
+  DEFAULT_LIST_LIMIT,
   EXIT_SUCCESS,
   EXIT_USER_ERROR,
   exitCodeForError,
@@ -69,6 +71,8 @@ import {
   guard,
   resolveIdArgOrThrow,
   resolveRoot,
+  shortFactId,
+  truncationNotice,
   UsageError,
   withDb,
 } from "./cliRuntime.js";
@@ -195,21 +199,6 @@ import { getGraphScoresForQuery } from "./factgraph.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { AuditLogRow } from "./db.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
-
-/** Default cap on `mem list` output when `--limit` is not given -- see the module doc comment on `retrieve()`'s own `DEFAULT_RECALL_LIMIT` in retrieval.ts for the recall-side analog. */
-const DEFAULT_LIST_LIMIT = 20;
-
-/**
- * How much of a fact id `mem recall` prints ahead of each result line.
- *
- * Recall's footer says `mem show <id> for detail`, but the 0.2.2 change that replaced the per-line
- * CTA with one shared footer also removed the only place an id was ever printed -- leaving the
- * footer instructing the user to use something the command never showed them. Eight hex characters
- * is the same git-style prefix `resolveFactIdOrPrefix` already resolves, so the printed handle is
- * directly pasteable; an ambiguous prefix is reported by that resolver with its candidates rather
- * than silently resolving to the wrong fact.
- */
-const RECALL_SHORT_ID_LENGTH = 8;
 
 /** Longest a single before/after value is allowed to be in an audit `detail` line. Long enough to identify the change, short enough that an edited 500-character fact does not turn one audit row into a second copy of the store. */
 const AUDIT_VALUE_PREVIEW_LENGTH = 120;
@@ -895,7 +884,7 @@ function formatFactDetail(
   if (history.length > 0) {
     lines.push("history:");
     for (const entry of history) {
-      lines.push(`  - [${entry.createdAt}] ${entry.event}: ${entry.detail}`);
+      lines.push(`  - ${formatAuditLine(entry)}`);
     }
   }
   if (related !== null) {
@@ -2891,7 +2880,7 @@ export function buildProgram(): Command {
           process.stdout.write("note: query matched no fact text -- showing most recent instead\n");
         }
         for (const result of ordered) {
-          process.stdout.write(`${result.fact.id.slice(0, RECALL_SHORT_ID_LENGTH)}  ${result.display}\n`);
+          process.stdout.write(`${shortFactId(result.fact.id)}  ${result.display}\n`);
         }
         if (hintStyle !== "terse") {
           // The review clause only when something on screen actually needs resolving. Unlike the
@@ -2903,7 +2892,7 @@ export function buildProgram(): Command {
           process.stdout.write(`${FOLLOW_UP_SHOW_DETAIL}${needsReview ? `; ${FOLLOW_UP_REVIEW}` : ""}\n`);
         }
         if (shownNonWithheld < totalNonWithheld) {
-          process.stdout.write(`showing ${shownNonWithheld} of ${totalNonWithheld} -- use --limit to see more\n`);
+          process.stdout.write(truncationNotice(shownNonWithheld, totalNonWithheld));
         }
         // Silent otherwise: a budget-limited "unverified" looks identical on the line above to a
         // genuine one, and without this an affirmed fact that silently degraded to a hint (or a
@@ -2938,7 +2927,7 @@ export function buildProgram(): Command {
         };
         const facts = await withDb((db) => listFacts(db, filter));
         const total = facts.length;
-        const effectiveLimit = options.limit !== undefined && Number.isFinite(options.limit) ? options.limit : DEFAULT_LIST_LIMIT;
+        const effectiveLimit = options.limit ?? DEFAULT_LIST_LIMIT;
         const shown = facts.slice(0, effectiveLimit);
         const truncated = total > shown.length;
         if (options.json === true) {
@@ -2964,10 +2953,12 @@ export function buildProgram(): Command {
           process.stdout.write(`${formatFactSummary(fact)}\n`);
         }
         if (truncated) {
-          process.stdout.write(`showing ${shown.length} of ${total} -- use --limit to see more\n`);
+          process.stdout.write(truncationNotice(shown.length, total));
         }
       })
     );
+
+  registerLogCommand(program);
 
   program
     .command("show <id>")

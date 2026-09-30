@@ -247,24 +247,72 @@ export interface AuditLogRow extends AuditLogEntry {
   readonly createdAt: string;
 }
 
+/** Which audit rows a read wants. Every field narrows; an empty filter is the whole log. */
+export interface AuditLogFilter {
+  readonly factId?: string;
+  /**
+   * An event name, matched exactly or as a family: `capture` matches `capture` and every
+   * `capture_*` event, but not `captured`. Event names are `_`-segmented, so the family is the
+   * unit a reader actually asks about ("what did capture do?").
+   */
+  readonly event?: string;
+  /** Inclusive ISO-8601 lower bound on `created_at`. */
+  readonly since?: string;
+}
+
+export interface AuditLogReadOptions {
+  readonly limit?: number;
+  readonly newestFirst?: boolean;
+}
+
+interface AuditLogDbRow {
+  event: string;
+  fact_id: string | null;
+  detail: string;
+  created_at: string;
+  prior_json: string | null;
+}
+
+/** The one WHERE clause both the list and the count build from, so they can never disagree on a total. */
+function auditLogWhere(filter: AuditLogFilter): { sql: string; params: string[] } {
+  const clauses: string[] = [];
+  const params: string[] = [];
+  if (filter.factId !== undefined) {
+    clauses.push("fact_id = ?");
+    params.push(filter.factId);
+  }
+  if (filter.event !== undefined) {
+    clauses.push("(event = ? OR substr(event, 1, length(?) + 1) = ? || '_')");
+    params.push(filter.event, filter.event, filter.event);
+  }
+  if (filter.since !== undefined) {
+    clauses.push("created_at >= ?");
+    params.push(filter.since);
+  }
+  return { sql: clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`, params };
+}
+
 /**
- * Every audit row for one fact, oldest first.
+ * Audit rows matching `filter`, oldest first unless `newestFirst`.
  *
  * The audit log has recorded each capture, edit, pin, and status change since the first release,
- * and until this existed nothing could read it back: the trail a memory tool keeps so its own
- * output can be trusted was write-only. That is most acute for `mem edit`, which overwrites text in
- * place -- the prior wording lives nowhere else once the row is updated.
+ * and until `mem show` read it back nothing could: the trail a memory tool keeps so its own output
+ * can be trusted was write-only. That is most acute for `mem edit`, which overwrites text in place
+ * -- the prior wording lives nowhere else once the row is updated.
  *
  * `rowid` breaks ties because `created_at` is an ISO string at millisecond resolution and two rows
  * written inside one transaction can share it exactly.
  */
-export function listAuditLogForFact(db: Database.Database, factId: string): AuditLogRow[] {
+export function listAuditLog(db: Database.Database, filter: AuditLogFilter = {}, options: AuditLogReadOptions = {}): AuditLogRow[] {
+  const where = auditLogWhere(filter);
+  const direction = options.newestFirst === true ? "DESC" : "ASC";
+  const limit = options.limit !== undefined ? " LIMIT ?" : "";
+  const params: (string | number)[] = options.limit !== undefined ? [...where.params, options.limit] : where.params;
   return db
-    .prepare<
-      [string],
-      { event: string; fact_id: string | null; detail: string; created_at: string; prior_json: string | null }
-    >("SELECT event, fact_id, detail, prior_json, created_at FROM audit_log WHERE fact_id = ? ORDER BY created_at ASC, rowid ASC")
-    .all(factId)
+    .prepare<(string | number)[], AuditLogDbRow>(
+      `SELECT event, fact_id, detail, prior_json, created_at FROM audit_log${where.sql} ORDER BY created_at ${direction}, rowid ${direction}${limit}`
+    )
+    .all(...params)
     .map((row) => ({
       event: row.event,
       factId: row.fact_id,
@@ -272,6 +320,32 @@ export function listAuditLogForFact(db: Database.Database, factId: string): Audi
       createdAt: row.created_at,
       ...(row.prior_json !== null ? { priorJson: row.prior_json } : {}),
     }));
+}
+
+/** How many audit rows match `filter` -- the `total` a truncated `listAuditLog` read reports against. */
+export function countAuditLog(db: Database.Database, filter: AuditLogFilter = {}): number {
+  const where = auditLogWhere(filter);
+  return db.prepare<string[], { n: number }>(`SELECT COUNT(*) AS n FROM audit_log${where.sql}`).get(...where.params)?.n ?? 0;
+}
+
+/** Every audit row for one fact, oldest first -- the `history` block `mem show` prints. */
+export function listAuditLogForFact(db: Database.Database, factId: string): AuditLogRow[] {
+  return listAuditLog(db, { factId });
+}
+
+/**
+ * The distinct fact ids the audit log names that start with `prefix`. `gc` hard-deletes superseded
+ * facts after 90 days but keeps their audit rows for 180, so for that window the log is the only
+ * place a fact id still resolves -- and "what happened to the fact I forgot?" is exactly the
+ * question asked about a fact that no longer exists.
+ */
+export function listAuditLogFactIdsByPrefix(db: Database.Database, prefix: string): string[] {
+  return db
+    .prepare<[string, string], { fact_id: string }>(
+      "SELECT DISTINCT fact_id FROM audit_log WHERE fact_id IS NOT NULL AND substr(fact_id, 1, length(?)) = ? ORDER BY fact_id"
+    )
+    .all(prefix, prefix)
+    .map((row) => row.fact_id);
 }
 
 /**

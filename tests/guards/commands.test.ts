@@ -22,6 +22,7 @@ const EXPECTED_COMMANDS = [
   "import",
   "init",
   "list",
+  "log",
   "pin",
   "recall",
   "remember",

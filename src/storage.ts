@@ -660,6 +660,11 @@ const MIN_ID_PREFIX_LEN = 4;
 /** Fact ids are UUIDs (hex digits and dashes only); a `--` prefix scan is only attempted for input that could plausibly be one. */
 export const ID_PREFIX_PATTERN = /^[0-9a-fA-F-]+$/;
 
+/** Whether `idOrPrefix` is long enough and shaped enough to be tried as a short id prefix. Shared by every resolver (live facts, `log --fact` over the audit log) so they agree on what counts as a prefix. */
+export function isPlausibleIdPrefix(idOrPrefix: string): boolean {
+  return idOrPrefix.length >= MIN_ID_PREFIX_LEN && ID_PREFIX_PATTERN.test(idOrPrefix);
+}
+
 /** Escapes `%`, `_`, and `\` (the SQL `LIKE` wildcard/escape characters) so a caller-supplied prefix can never be interpreted as a wildcard pattern -- defensive, since real UUID characters never contain any of these. */
 function escapeLikePattern(value: string): string {
   return value.replace(/[\\%_]/g, (char) => `\\${char}`);
@@ -676,7 +681,7 @@ export function resolveFactIdOrPrefix(db: Db, idOrPrefix: string): IdResolution 
   if (exact !== undefined) {
     return { kind: "found", fact: rowToFact(exact) };
   }
-  if (idOrPrefix.length < MIN_ID_PREFIX_LEN || !ID_PREFIX_PATTERN.test(idOrPrefix)) {
+  if (!isPlausibleIdPrefix(idOrPrefix)) {
     return { kind: "not-found" };
   }
   const rows = db
