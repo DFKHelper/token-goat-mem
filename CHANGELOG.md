@@ -77,6 +77,15 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   count, so a false positive restated across sessions would climb it. Only shapes that assert the
   reversal in their own words qualify; anything subtler is what `mem remember --kind correction` is
   for.
+- **A cross-process concurrency test.** mem has no daemon: every command is a short-lived process
+  contending for one WAL database under `BEGIN IMMEDIATE`, and no in-process test can exercise that,
+  because a single `Database` handle serialises everything by construction.
+  `tests/bundle/concurrency.test.ts` runs six workers of the built bundle against one store that does
+  not exist yet, so schema creation races too. Each worker interleaves unique `remember`s, a
+  `remember` of one shared sentence, and `recall`s. The test asserts no write is lost, the shared
+  sentence stays one row with every later statement audited as a reaffirm, and nothing reports
+  SQLITE_BUSY. Verified by opening the database with a zero busy timeout: recall's surfaced-marking
+  write then reports a locked database, and the test fails.
 
 ## [0.4.1] - 2026-09-16
 
