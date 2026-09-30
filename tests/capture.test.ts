@@ -197,6 +197,17 @@ describe("captureExplicit (happy path)", () => {
     expect(fact.source_ref).toBe("src/components/very-long-nested-directory-name/AnotherComponent.tsx:42");
   });
 
+  it("does not false-positive the generic heuristic on a Windows transcript sourceRef whose session UUID is high-entropy", () => {
+    // `mem scan-session` stamps `<transcript path>#turn<n>`, and Claude Code names a transcript
+    // after its session UUID. On POSIX the whole path is one slash-bearing token and is exempt; on
+    // Windows `\` is outside GENERIC_TOKEN's alphabet, so the bare UUID was scored on its own, and
+    // this one (3.875 bits) blocked every suggestion its Stop hook filed.
+    const sourceRef =
+      "C:\\Users\\dev\\.claude\\projects\\C--Projects-site\\e2cc87d1-b0a9-4f05-b132-40438b48d4d6.jsonl#turn3";
+    const { fact } = captureExplicit(db, { text: "uses this component", kind: "fact", sourceRef, root });
+    expect(fact.source_ref).toBe(sourceRef);
+  });
+
   it("still catches a named secret pattern embedded in a sourceRef", () => {
     expect(() =>
       captureExplicit(db, {

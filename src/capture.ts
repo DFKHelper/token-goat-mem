@@ -249,7 +249,8 @@ function shannonEntropy(value: string): number {
  * includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` or
  * `src/very/long/path.ts:123` argument over ~32 chars can exceed the entropy threshold purely from
  * directory-name variety, with no secret present at all. The exemption only applies to a matched
- * token that contains "/" -- a prefix-less high-entropy secret with no path separator (an
+ * token that contains "/" (a Windows `\` counts as "/" here, since `mem scan-session` stamps a
+ * native transcript path) -- a prefix-less high-entropy secret with no path separator (an
  * unlabeled credential with no recognized `SECRET_PATTERNS` prefix) is still caught by the entropy
  * fallback. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields
  * regardless.
@@ -335,8 +336,12 @@ function scanField(field: string, value: string): SecretMatch[] {
   }
 
   const exemptField = GENERIC_ENTROPY_EXEMPT_FIELDS.has(field);
+  // A Windows path's `\` is outside GENERIC_TOKEN's alphabet, so without this a
+  // `C:\...\<session-uuid>.jsonl#turn3` sourceRef splits into bare, slash-free segments and a
+  // high-entropy session UUID loses the path exemption it gets on POSIX.
+  const genericValue = exemptField ? value.replaceAll("\\", "/") : value;
   GENERIC_TOKEN.lastIndex = 0;
-  let g = GENERIC_TOKEN.exec(value);
+  let g = GENERIC_TOKEN.exec(genericValue);
   while (g !== null) {
     const token = g[0];
     if (
@@ -349,7 +354,7 @@ function scanField(field: string, value: string): SecretMatch[] {
     ) {
       matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
     }
-    g = GENERIC_TOKEN.exec(value);
+    g = GENERIC_TOKEN.exec(genericValue);
   }
 
   return matches;

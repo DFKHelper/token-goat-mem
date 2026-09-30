@@ -6,6 +6,14 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem scan-session` no longer blocks a Windows session's suggestions as a "secret".** It stamps
+  each suggestion's `sourceRef` with the native transcript path, and Claude Code names a transcript
+  after its session UUID. The generic high-entropy check exempts path-shaped tokens by their `/`,
+  but a Windows `\` split the path into bare segments, so any session whose UUID scored above the
+  entropy cutoff (about 40% of them) had every suggestion rejected as
+  `capture_suggested_blocked_secret`. A `\` in `sourceRef` and `anchor` now counts as a path
+  separator for that check; named secret patterns still run against the raw value.
+
 - **Audit details no longer read "stored active fact fact".** The capture confirmations stopped
   doubling the noun for `--kind fact` in an earlier release, but the audit details capture writes
   (`stored active`, `stored pending`, `restated`) kept their own `<kind> fact` templates, so
