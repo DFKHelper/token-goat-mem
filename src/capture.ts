@@ -55,7 +55,7 @@ import {
   reaffirmFact,
   setFactStatus,
 } from "./storage.js";
-import { FACT_KINDS, FACT_SCOPES } from "./types.js";
+import { FACT_KINDS, FACT_SCOPES, factNounPhrase } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
 const SOURCE_TYPES: readonly FactSourceType[] = ["user", "derived"];
@@ -1124,7 +1124,7 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
       insertAuditLog(db, {
         event: "capture_reaffirmed",
         factId: refreshed.id,
-        detail: `restated ${refreshed.kind} fact (scope=${refreshed.scope}); ${refreshedFields.join("; ")}`,
+        detail: `restated ${factNounPhrase(refreshed.kind)} (scope=${refreshed.scope}); ${refreshedFields.join("; ")}`,
       });
       return { fact: refreshed, reaffirmed: true };
     }
@@ -1179,7 +1179,7 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
       insertAuditLog(db, {
         event: "capture_reaffirmed_pending_promoted",
         factId: promoted.id,
-        detail: `restated ${promoted.kind} fact (scope=${promoted.scope}); ${refreshedFields.join("; ")}`,
+        detail: `restated ${factNounPhrase(promoted.kind)} (scope=${promoted.scope}); ${refreshedFields.join("; ")}`,
       });
       return {
         fact: promoted,
@@ -1189,7 +1189,7 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
       };
     }
 
-    return { fact: writeFact(db, newFact, "capture_explicit", (f) => `stored active ${f.kind} fact (scope=${f.scope})`) };
+    return { fact: writeFact(db, newFact, "capture_explicit", (f) => `stored active ${factNounPhrase(f.kind)} (scope=${f.scope})`) };
   });
   // BEGIN IMMEDIATE, for the same reason as `writeFact`: this reads (`findReaffirmableFact`) before
   // it writes, and once this outer transaction is open, the nested `writeFact` transaction it may
@@ -1258,7 +1258,7 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
     db,
     newFact,
     "capture_suggested",
-    (f) => `stored pending ${f.kind} fact (source_type=${f.source_type}, scope=${f.scope})`,
+    (f) => `stored pending ${factNounPhrase(f.kind)} (source_type=${f.source_type}, scope=${f.scope})`,
     input.sourceExcerpt
   );
   return { fact };

@@ -167,6 +167,6 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/pathUtils.ts` | Support | Case-folds a path for comparison on filesystems that ignore case | normalizePath |
 | `src/projectIdentity.ts` | Support | Repository-relative identity for a project root, so a project-scoped fact survives the path it was captured at | PROJECT_IDENTITY_ENV, clearProjectIdentityCache, normalizeRemoteUrl, resolveProjectIdentity, identityMatches |
 | `src/timeUtils.ts` | Support | Day arithmetic shared by every age-based rule in mem: recall's `--age-days` window, preference decay, pin reconfirmation | MS_PER_DAY, daysAgoIso, ageInDays |
-| `src/types.ts` | Support | Shared domain types for token-goat-mem | FACT_KINDS, FactKind, FACT_SCOPES, FactScope, FactSourceType |
+| `src/types.ts` | Support | Shared domain types for token-goat-mem | FACT_KINDS, FactKind, factNounPhrase, FACT_SCOPES, FactScope |
 
 <!-- ARCH_COMPONENTS_END -->

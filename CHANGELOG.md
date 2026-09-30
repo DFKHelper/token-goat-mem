@@ -6,6 +6,10 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **Audit details no longer read "stored active fact fact".** The capture confirmations stopped
+  doubling the noun for `--kind fact` in an earlier release, but the audit details capture writes
+  (`stored active`, `stored pending`, `restated`) kept their own `<kind> fact` templates, so
+  `mem show` and `mem log` still printed "fact fact". Both now render through one shared noun helper.
 - **A rejected suggestion came back as `pending` once the garbage collector pruned its tombstone.**
   `mem review --reject` marks a fact `superseded`, and the retention pass hard-deletes superseded rows
   past 90 days or 1000 rows. Nothing distinguished a rejection from an ordinary contradiction loser.

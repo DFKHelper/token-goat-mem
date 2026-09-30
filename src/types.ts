@@ -11,6 +11,15 @@
 export const FACT_KINDS = ["preference", "decision", "fact", "correction"] as const;
 export type FactKind = (typeof FACT_KINDS)[number];
 
+/**
+ * A fact's noun phrase in user-facing text: CLI confirmations and audit details alike. Every kind
+ * reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself,
+ * where the template degenerates into "fact fact".
+ */
+export function factNounPhrase(kind: FactKind): string {
+  return kind === "fact" ? "fact" : `${kind} fact`;
+}
+
 /** Coarse applicability of a fact. Not a literal path — an enum bucket. */
 export const FACT_SCOPES = ["global", "project", "path"] as const;
 export type FactScope = (typeof FACT_SCOPES)[number];

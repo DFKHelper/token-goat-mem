@@ -196,7 +196,7 @@ import {
 } from "./storage.js";
 import { extractFacets } from "./facets.js";
 import { getGraphScoresForQuery } from "./factgraph.js";
-import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
+import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES, factNounPhrase } from "./types.js";
 import type { AuditLogRow } from "./db.js";
 import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Source } from "./types.js";
 
@@ -401,11 +401,6 @@ function undoEdit(db: Database.Database, id: string): string {
   // BEGIN IMMEDIATE: `updateFact` reads before writing; see storage.insertFact.
   tx.immediate();
   return fact.id;
-}
-
-/** Renders a stored fact's noun phrase for CLI confirmations. Every kind reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself, where the template degenerates into "fact fact". */
-function factNounPhrase(kind: FactKind): string {
-  return kind === "fact" ? "fact" : `${kind} fact`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────── CLI-boundary validation ───────────────────────────────────────────────────────────────────────────

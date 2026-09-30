@@ -3154,6 +3154,27 @@ describe("capture confirmations never print a doubled noun (regression: `remembe
 
     expect(extractRememberedId(result)).toMatch(/^[0-9a-f-]{36}$/u);
   });
+
+  it("applies the same collapse to the audit trail every capture path writes", async () => {
+    // The audit details were built from their own `${kind} fact` templates in capture.ts, so the
+    // confirmation fix above never reached them: `mem log` still read "stored active fact fact".
+    // Covers the explicit, reaffirmed, pending, and reaffirmed-while-pending captures.
+    expect((await runCli(["remember", "a plain fact", "--kind", "fact"])).exitCode).toBe(0);
+    expect((await runCli(["remember", "a plain fact", "--kind", "fact"])).exitCode).toBe(0);
+    expect((await runCli(["suggest", "a plain candidate", "--kind", "fact"])).exitCode).toBe(0);
+    expect((await runCli(["remember", "a plain candidate", "--kind", "fact"])).exitCode).toBe(0);
+    expect((await runCli(["remember", "a typed decision", "--kind", "decision"])).exitCode).toBe(0);
+
+    const log = JSON.parse((await runCli(["log", "--json"])).stdout) as { entries: { event: string; detail: string }[] };
+    const details = new Map(log.entries.map((entry) => [entry.event, entry.detail]));
+
+    expect([...details.keys()].sort()).toEqual(["capture_explicit", "capture_reaffirmed", "capture_reaffirmed_pending_promoted", "capture_suggested"]);
+    expect(log.entries.map((entry) => entry.detail).join("\n")).not.toContain("fact fact");
+    expect(log.entries.find((entry) => entry.event === "capture_explicit")?.detail).toBe("stored active decision fact (scope=global)");
+    expect(details.get("capture_suggested")).toMatch(/^stored pending fact \(source_type=/u);
+    expect(details.get("capture_reaffirmed")).toMatch(/^restated fact \(scope=global\); /u);
+    expect(details.get("capture_reaffirmed_pending_promoted")).toMatch(/^restated fact \(scope=global\); /u);
+  });
 });
 
 describe("mem --version (regression: the shipped bundle reports package.json's version)", () => {
