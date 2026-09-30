@@ -9,13 +9,14 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 
+import { CAPABLE_MEM_SHIM, OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
 import { extractRememberedId, extractSuggestedId, runCli, type CliResult } from "./support/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
@@ -2704,15 +2705,7 @@ describe("mem init/uninstall", () => {
     // Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in
     // this file's PATH-independent init tests still need) resolvable.
     fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-"));
-    const shimBody =
-      "#!/usr/bin/env node\n" +
-      "const args = process.argv.slice(2);\n" +
-      'if (args[0] === "--version") { process.stdout.write("0.0.0-test-shim\\n"); process.exit(0); }\n' +
-      'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root\\n"); process.exit(0); }\n' +
-      "process.exit(1);\n";
-    writeFileSync(join(fakeMemDir, "mem"), shimBody, "utf8");
-    chmodSync(join(fakeMemDir, "mem"), 0o755);
-    writeFileSync(join(fakeMemDir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
+    writeFakeMem(fakeMemDir, CAPABLE_MEM_SHIM);
     originalPath = process.env["PATH"];
     process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
   });
@@ -3042,18 +3035,8 @@ describe("mem init/uninstall", () => {
     // incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
 
     function installOldMemShim(dir: string): void {
-      // Understands `--version` and a `--help` for `recall`, but its help text is missing
-      // `--hook-stdin`/`--delta`, and it has no `scan-session` subcommand at all -- the exact shape
-      // of the real incident (an install that predates both).
-      const shimBody =
-        "#!/usr/bin/env node\n" +
-        "const args = process.argv.slice(2);\n" +
-        'if (args[0] === "--version") { process.stdout.write("0.2.5\\n"); process.exit(0); }\n' +
-        'if (args[0] === "recall" && args[1] === "--help") { process.stdout.write("--hint-format --root\\n"); process.exit(0); }\n' +
-        "process.exit(1);\n";
-      writeFileSync(join(dir, "mem"), shimBody, "utf8");
-      chmodSync(join(dir, "mem"), 0o755);
-      writeFileSync(join(dir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
+      // The exact shape of the real incident: an install that predates `--hook-stdin`/`--delta` and `scan-session`.
+      writeFakeMem(dir, OLD_MEM_SHIM);
     }
 
     it("refuses to write hooks an old PATH mem can't run, naming the binary and what it can't run", async () => {

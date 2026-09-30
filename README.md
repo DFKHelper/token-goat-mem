@@ -81,6 +81,8 @@ npm link
 
 No daemon, no tray icon, no setup wizard. Mem is a short-lived CLI process.
 
+A global install (and every upgrade) also wires mem's Claude Code hooks into your user-level `~/.claude/settings.json` by running `mem init claude-code --user`, so recall works in every project without a separate step. It is idempotent -- unrelated settings are kept, and hooks an older mem wrote are refreshed -- and it never fails the install: if the `mem` on your PATH cannot run the hooks yet, nothing is written and `mem init claude-code --user` finishes the job. npm hides install-script output unless you pass `--foreground-scripts`; `mem doctor` shows hook health either way. Set `TOKEN_GOAT_MEM_SKIP_HOOKS=1` to skip it. Installing from source (`npm install` in a clone) never touches your settings.
+
 ### Verify the install
 
 ```

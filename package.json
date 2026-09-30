@@ -28,6 +28,7 @@
     "arch:check": "node scripts/sync-arch-docs.mjs --check",
     "arch:write": "node scripts/sync-arch-docs.mjs --write",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepare": "git config core.hooksPath .githooks || true"
   },
   "keywords": [
@@ -47,6 +48,7 @@
   ],
   "files": [
     "dist/",
+    "scripts/postinstall.mjs",
     "README.md",
     "LICENSE"
   ],
