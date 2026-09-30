@@ -141,6 +141,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | --- | --- | --- | --- |
 | `src/cli.ts` | Entry | Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list) | buildProgram, run |
 | `src/cliRuntime.ts` | Entry | The runtime every `mem` command action shares: the exit-code contract, the error-to-exit-code mapping, the `guard` wrapp | EXIT_SUCCESS, EXIT_USER_ERROR, EXIT_INTERNAL_ERROR, UsageError, exitCodeForError |
+| `src/doctor.ts` | Entry | `mem doctor`: the read-only environment and store health check | registerDoctorCommand |
 | `src/index.ts` | Entry | Library entry point | — |
 | `src/main.ts` | Entry | Package executable | — |
 | `src/timeline.ts` | Entry | `mem log`: the store-wide audit timeline, newest first | formatAuditLine, resolveLoggedFactId, registerLogCommand |

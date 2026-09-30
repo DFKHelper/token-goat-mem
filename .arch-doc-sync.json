@@ -2,7 +2,7 @@
   "doc": "ARCHITECTURE.md",
   "patterns": ["src/*.ts"],
   "layers": [
-    ["Entry", ["src/main.ts", "src/cli.ts", "src/cliRuntime.ts", "src/timeline.ts", "src/index.ts"]],
+    ["Entry", ["src/main.ts", "src/cli.ts", "src/cliRuntime.ts", "src/timeline.ts", "src/doctor.ts", "src/index.ts"]],
     ["Retrieval", ["src/retrieval.ts", "src/embeddings.ts", "src/anchors.ts", "src/contradiction.ts", "src/facets.ts", "src/factgraph.ts"]],
     ["Capture", ["src/capture.ts", "src/sessionScan.ts", "src/import.ts", "src/exportImport.ts", "src/consolidate.ts", "src/dream.ts", "src/reviewActions.ts"]],
     ["Storage", ["src/db.ts", "src/storage.ts", "src/migrations.ts"]],
