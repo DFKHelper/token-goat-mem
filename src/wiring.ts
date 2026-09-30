@@ -925,17 +925,27 @@ const CLAUDE_PRE_COMPACT_COMMAND =
 
 // Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand
 // and `--root` vary across events, and the wrapper shape itself has varied across mem versions --
-// `command -v mem ... && mem ... || true` before this fix, `if command -v mem ...; then mem ... ||
-// fallback; fi` after it. Two alternatives, not one loosened pattern, so a hybrid string that
-// happens to satisfy pieces of both without being either is not accidentally recognised. Matching
-// the wrapper -- not the full literal string -- is what lets `looksLikeMemHookCommand` recognise an
-// older *or* newer mem install's hook as its own, across both the flag additions this comment used
-// to describe alone and the wrapper-shape change this fix adds.
-const MEM_HOOK_INVOCATION_OLD_RE = /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u;
-const MEM_HOOK_INVOCATION_NEW_RE = /^if command -v mem >\/dev\/null 2>&1; then mem (\S+)\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u;
+// a bare, unguarded `mem ... --root "$CLAUDE_PROJECT_DIR"` first, then `command -v mem ... && mem
+// ... || true`, then `if command -v mem ...; then mem ... || fallback; fi`. Exact alternatives, not
+// one loosened pattern, so a hybrid string that happens to satisfy pieces of several without being
+// any of them is not accidentally recognised. Each captures the subcommand, then the text between it
+// and `--root` (the flags). Matching the wrapper -- not the full literal string -- is what lets
+// `looksLikeMemHookCommand` recognise an older *or* newer mem install's hook as its own, and
+// `parseHookCommandSpec` read the flags of any of them.
+const MEM_HOOK_INVOCATION_SHAPES: readonly RegExp[] = [
+  /^mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR"$/u,
+  /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u,
+  /^if command -v mem >\/dev\/null 2>&1; then mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
+];
 
 function matchMemHookInvocation(command: string): RegExpExecArray | null {
-  return MEM_HOOK_INVOCATION_OLD_RE.exec(command) ?? MEM_HOOK_INVOCATION_NEW_RE.exec(command);
+  for (const shape of MEM_HOOK_INVOCATION_SHAPES) {
+    const match = shape.exec(command);
+    if (match !== null) {
+      return match;
+    }
+  }
+  return null;
 }
 
 /**
@@ -958,17 +968,17 @@ function looksLikeMemHookCommand(command: string, event: string): boolean {
 }
 
 /**
- * The subcommand and flags a mem-authored hook command actually invokes -- `null` if `command`
- * doesn't contain the `&&`/`then` + `mem <subcommand> ... --root` shape either wrapper writes.
- * Anchored on `&&`/`then` immediately before `mem` so the earlier `command -v mem` in the same
- * string is never mistaken for the invocation itself. Used to check a command (whether the one
+ * The subcommand and flags a mem-authored hook command actually invokes -- `null` if `command` is
+ * none of the wrapper shapes `matchMemHookInvocation` knows, so recognising a hook as mem's and
+ * reading its flags can never disagree. Each shape anchors `mem` after its own guard, so the earlier
+ * `command -v mem` in the same string is never mistaken for the invocation. Used to check a command (whether the one
  * `CLAUDE_HOOK_EVENTS` is about to write, or one already sitting in a settings.json this build did
  * not write) against what a candidate `mem` binary's own `--help` output actually supports --
  * derived from the command text itself rather than a separately maintained flag list, so it never
  * drifts from what mem init/doctor really checks.
  */
 export function parseHookCommandSpec(command: string): { readonly subcommand: string; readonly flags: readonly string[] } | null {
-  const match = /(?:&&|then) mem (\S+)\b(.*?)--root\b/u.exec(command);
+  const match = matchMemHookInvocation(command);
   if (match === null) {
     return null;
   }
@@ -1160,10 +1170,17 @@ export function checkClaudeHookHealth(
   return { bin, hooks };
 }
 
-/** Human-readable "<subcommand> <missing flags>" (or just "<subcommand>" when the subcommand itself is unsupported), for reporting one incapable hook. */
+/**
+ * Human-readable "<subcommand> <missing flags>" (or just "<subcommand>" when the subcommand itself is
+ * unsupported), for reporting one incapable hook; a stamped command in no shape mem recognises names
+ * its remedy instead of a placeholder subcommand.
+ */
 export function describeHookGap(command: string, missing: readonly string[]): string {
   const spec = parseHookCommandSpec(command);
-  const subcommand = spec?.subcommand ?? "?";
+  if (spec === null) {
+    return "this command shape (re-run `mem init claude-code` to rewrite it)";
+  }
+  const { subcommand } = spec;
   if (missing.length === 0 || (missing.length === 1 && missing[0] === subcommand)) {
     return subcommand;
   }

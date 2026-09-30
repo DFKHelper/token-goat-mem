@@ -21,6 +21,7 @@ import {
   copilotJetbrains,
   copilotVisualStudio,
   copilotVscode,
+  describeHookGap,
   installedClaudeHookCommands,
   opencode,
   parseHookCommandSpec,
@@ -2023,8 +2024,23 @@ describe("parseHookCommandSpec", () => {
     ).toEqual({ subcommand: "recall", flags: ["--hint-format", "--hook-stdin"] });
   });
 
+  it("extracts subcommand and flags from the bare, unguarded shape the first `mem init` stamped", () => {
+    // Still live in installs that predate the `command -v` guard, including this repository's own
+    // .claude/settings.json; `mem doctor` read it as unparseable and reported "does not support ?".
+    expect(parseHookCommandSpec('mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"')).toEqual({
+      subcommand: "recall",
+      flags: ["--hint-format"],
+    });
+  });
+
   it("returns null for a command with no mem invocation shape", () => {
     expect(parseHookCommandSpec("echo hello")).toBeNull();
+  });
+});
+
+describe("describeHookGap", () => {
+  it("names the remedy for a command it cannot parse instead of printing a placeholder subcommand", () => {
+    expect(describeHookGap("echo hello", [])).toBe("this command shape (re-run `mem init claude-code` to rewrite it)");
   });
 });
 

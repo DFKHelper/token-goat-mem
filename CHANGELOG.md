@@ -6,6 +6,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem doctor` no longer reports `does not support ?` for the earliest hook shape.** The first `mem init claude-code` stamped a bare, unguarded `mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"`; the flag parser only knew the two guarded wrappers, so doctor read that hook as unparseable and printed a placeholder subcommand. Recognising a hook as mem's and reading its flags now share one list of wrapper shapes, so they cannot disagree, and a stamped command in no known shape names its remedy (`re-run mem init claude-code`) instead of `?`.
 - **`mem scan-session` no longer blocks a Windows session's suggestions as a "secret".** It stamps
   each suggestion's `sourceRef` with the native transcript path, and Claude Code names a transcript
   after its session UUID. The generic high-entropy check exempts path-shaped tokens by their `/`,
