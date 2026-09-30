@@ -117,3 +117,16 @@ export function readStreamWithTimeout(
     stream.resume();
   });
 }
+
+/**
+ * `--hook-stdin`: the hook envelope from stdin, or an empty envelope when stdin is a TTY, unreadable,
+ * not JSON, or simply slow to close. Never throws -- see this module's header for why a hook that
+ * errors is worse than one that returns unranked facts.
+ */
+export async function readHookEnvelope(): Promise<HookEnvelope> {
+  try {
+    return parseHookEnvelope(await readStreamWithTimeout(process.stdin));
+  } catch {
+    return {};
+  }
+}

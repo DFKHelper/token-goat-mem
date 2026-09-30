@@ -40,18 +40,14 @@ import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, evaluateAnchor, extractAnchorableTargets, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
 import {
-  buildScreenedExcerpt,
   captureExplicit,
   captureSuggested,
-  CaptureValidationError,
   loadAllowlist,
   parseCapturedAtOrThrow,
-  recordSighting,
   resolveScopeRepo,
   screenForSecrets,
   screenInputOrThrow,
   screenReviewReasonOrThrow,
-  SecretDetectedError,
   validateFactEditOrThrow,
   type CaptureExplicitInput,
   type CaptureSuggestedInput,
@@ -146,8 +142,8 @@ import {
   FOLLOW_UP_SHOW_DETAIL,
   type HintFormatOptions,
 } from "./integration-seam.js";
-import { parseHookEnvelope, readStreamWithTimeout, type HookEnvelope } from "./hook-envelope.js";
-import { scanTranscript } from "./sessionScan.js";
+import { readHookEnvelope, type HookEnvelope } from "./hook-envelope.js";
+import { fileTranscriptSuggestions } from "./sessionCapture.js";
 import {
   anchorRootFor,
   anchorRootsFor,
@@ -167,7 +163,6 @@ import {
   deleteFact,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
-  factsByTextHash,
   getEmbeddingMeta,
   getEntityKeysByFact,
   getEntityOverlapForQuery,
@@ -455,19 +450,6 @@ function parseToolName(raw: string): ToolName {
     throw new UsageError(`invalid tool "${raw}" (expected one of ${TOOL_NAMES.join(", ")})`);
   }
   return raw as ToolName;
-}
-
-/**
- * `--hook-stdin`: the hook envelope from stdin, or an empty envelope when stdin is a TTY, unreadable,
- * not JSON, or simply slow to close. Never throws -- see hook-envelope.ts for why a hook that
- * errors is worse than one that returns unranked facts.
- */
-async function readHookEnvelope(): Promise<HookEnvelope> {
-  try {
-    return parseHookEnvelope(await readStreamWithTimeout(process.stdin));
-  } catch {
-    return {};
-  }
 }
 
 /**
@@ -2671,64 +2653,7 @@ export function buildProgram(): Command {
           throw new UsageError("scan-session cannot bind facts to a file: use `mem remember --scope path --path <file>` instead");
         }
         const root = resolveRoot(options.root);
-        const candidates = scanTranscript(transcriptPath);
-        const stored = await withDb((db) => {
-          const kept: string[] = [];
-          for (const candidate of candidates) {
-            // One indexed lookup per candidate (`idx_facts_text_hash`) rather than a whole-table
-            // scan built once up front: a session's candidate count is typically far smaller than
-            // the store's total fact count, so this reads only the rows that could possibly match
-            // instead of the whole facts table (embedding blobs included) on every hook run.
-            //
-            // Scoped to this project (or globally, for a global-scope match) via `isBoundToRoot` --
-            // the same rule `retrieval.ts` uses to decide what recall may surface -- rather than a
-            // second copy of "does this apply here" re-implemented against `scope_root` directly.
-            // A text match with an unrelated project's `scope_root` does not count: that
-            // project's suggestion (or rejection) must not suppress this one's.
-            const boundMatches = factsByTextHash(db, candidate.text).filter((fact) => isBoundToRoot(fact, root));
-            if (boundMatches.length > 0) {
-              // A restatement of a `pending` suggestion is evidence for `mem review`'s human reader
-              // (`recordSighting`'s own doc comment covers the screening/dedup/no-promotion
-              // contract) -- a match against anything else (active, superseded, ...) has no
-              // pending row to record a sighting against, and this candidate is simply already
-              // known, exactly as before.
-              for (const fact of boundMatches) {
-                if (fact.status === "pending") {
-                  recordSighting(db, fact.id, candidate.context, root);
-                }
-              }
-              continue;
-            }
-            // The whole turn is genuinely larger than the sentence captured as the fact, which is
-            // exactly the provenance gap `sources` exists to close -- screened separately because a
-            // turn can carry a secret the extracted sentence did not (see buildScreenedExcerpt doc).
-            // `null` (screened positive) means no source row, never a blocked capture.
-            const sourceExcerpt = buildScreenedExcerpt(candidate.context, root, candidate.text);
-            try {
-              const { fact } = captureSuggested(db, {
-                text: candidate.text,
-                kind: candidate.kind,
-                scope,
-                root,
-                sourceRef: `${transcriptPath}#turn${candidate.turnIndex}`,
-                ...(sourceExcerpt !== null ? { sourceExcerpt } : {}),
-                ...(candidate.capturedAt !== undefined ? { capturedAt: candidate.capturedAt } : {}),
-              });
-              kept.push(fact.id);
-            } catch (error) {
-              // One rejected candidate must not abandon the rest. `captureSuggested` throws for
-              // secret screening and for validation, and a transcript is exactly where a pasted
-              // credential shows up -- that rejection is the screening working, not a scan failure.
-              // Any other error (SqliteError, disk full, readonly store) is a real failure and
-              // must not be silently swallowed.
-              if (error instanceof CaptureValidationError || error instanceof SecretDetectedError) {
-                continue;
-              }
-              throw error;
-            }
-          }
-          return kept;
-        });
+        const stored = await withDb((db) => fileTranscriptSuggestions(db, { transcriptPath, root, scope }));
         if (options.quiet === true) {
           return;
         }
