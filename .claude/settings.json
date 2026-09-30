@@ -5,7 +5,40 @@
         "hooks": [
           {
             "type": "command",
-            "command": "mem recall --hint-format --root \"$CLAUDE_PROJECT_DIR\"",
+            "command": "if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi",
+            "__token_goat_mem": true
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root \"$CLAUDE_PROJECT_DIR\" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi",
+            "__token_goat_mem": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || echo \"mem reflect failed (exit $?); run mem doctor\"; fi",
+            "__token_goat_mem": true
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi",
             "__token_goat_mem": true
           }
         ]

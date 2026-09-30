@@ -62,6 +62,13 @@ Add `--why "<reason>"` to a decision or correction so a later session reads the
 reason before relitigating it.
 Add `--anchor "<predicate> <args>"` when a fact can be re-verified later instead
 of staying caveated forever, e.g. `--anchor "file-exists pnpm-lock.yaml"`.
-Predicates: file-exists, file-absent, file-newer-than, glob-exists, git-tracked,
-newest-of. The anchor path must stay inside --root (no "..", no absolute path).
+Predicates: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists,
+git-branch-is, git-tracked, package-version, valid-until, newest-of.
+The anchor path must stay inside --root (no "..", no absolute path).
+
+When a fact you recalled actually informed the work, mark it: a recall's
+footer line carries a ready-to-run `mem used ... --session-id ...`
+invocation naming exactly the facts and session that recall logged under --
+run that line verbatim rather than composing your own. Recall ranks partly
+on this signal, and nothing else produces it.
 <!-- token-goat-mem:claude-code:end -->
