@@ -1,7 +1,8 @@
 /**
  * Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes
  * exactly the config snippets those guides document (Claude Code's `settings.json` hook +
- * `CLAUDE.md` instructions, Codex/Copilot CLI's `AGENTS.md` instructions, Copilot VS Code's
+ * `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also
+ * at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's
  * `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's
  * `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and
  * only that.
@@ -14,7 +15,7 @@
  *   replaces everything between an existing pair (upgrade in place) or appends a new marked block at
  *   end of file; uninstall strips the marked block plus the one separator newline install adds,
  *   leaving everything else untouched.
- * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, and `copilot-vscode`;
+ * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`;
  *   `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` --
  *   neither reads `AGENTS.md`, so they share a block in their own file instead of joining the
  *   `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of
@@ -1845,6 +1846,23 @@ export const copilotCli: ToolWiring = makeToolWiring(({ root, user }) => {
   return [sharedMarkdownFile(agentsMdPath, "copilot-cli", AGENTS_MD_SHARED_BODY)];
 });
 
+/**
+ * opencode reads the first project `AGENTS.md` it finds walking up from the working directory, plus
+ * one global rules file, so it joins the shared `AGENTS.md` block at project level and has a real
+ * user-level target too. The global file is `<xdgConfig>/opencode/AGENTS.md`, and opencode resolves
+ * xdgConfig through xdg-basedir, which has no Windows branch: it is `~/.config` on every platform,
+ * never `%APPDATA%`. `XDG_CONFIG_HOME` is deliberately not consulted, for the same reason
+ * `vscodeUserDir` ignores `%APPDATA%`: user paths derive only from the injected `homeDir`, so tests
+ * stay isolated.
+ */
+export function opencodeUserAgentsMd(homeDir: string): string {
+  return join(homeDir, ".config", "opencode", "AGENTS.md");
+}
+
+export const opencode: ToolWiring = makeToolWiring(({ root, homeDir, user }) => [
+  sharedMarkdownFile(user ? opencodeUserAgentsMd(homeDir) : join(root, "AGENTS.md"), "opencode", AGENTS_MD_SHARED_BODY),
+]);
+
 export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir, user }) => {
   const keybindingsPath = join(vscodeUserDir(homeDir), "keybindings.json");
   const keybindingsEntry: ManagedFile = {
@@ -1893,6 +1911,7 @@ export const TOOL_NAMES = [
   "copilot-vscode",
   "copilot-visual-studio",
   "copilot-jetbrains",
+  "opencode",
 ] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
@@ -1910,5 +1929,7 @@ export function getToolWiring(name: ToolName): ToolWiring {
       return copilotVisualStudio;
     case "copilot-jetbrains":
       return copilotJetbrains;
+    case "opencode":
+      return opencode;
   }
 }

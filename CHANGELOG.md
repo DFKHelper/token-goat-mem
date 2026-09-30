@@ -98,6 +98,12 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   are kept for 180 days and superseded facts for 90, and it reports a prefix shared by a live and a
   deleted fact as ambiguous instead of showing only the live one. `mem show`'s history block now
   renders through the same formatter.
+- **`mem init opencode`.** opencode reads `AGENTS.md`, so a project install joins the shared,
+  reference-counted "## Memory" block codex, copilot-cli and copilot-vscode already write there.
+  Unlike those three, opencode also has a global rules file, so `--user` is supported: it writes
+  `~/.config/opencode/AGENTS.md`. That path is the same on Windows, because opencode resolves its
+  config directory through xdg-basedir, which has no `%APPDATA%` branch. See
+  `docs/integrations/opencode.md`.
 
 ## [0.4.1] - 2026-09-16
 

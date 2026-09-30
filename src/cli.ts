@@ -3755,7 +3755,7 @@ export function buildProgram(): Command {
         "A tool with more than one managed file computes every file's next content before writing any of them, so a " +
         "hand-written entry that conflicts with mem's aborts the whole install before a single file is touched -- never a " +
         "partial write. Add `*.token-goat-mem.bak` to this project's .gitignore: install takes a one-time snapshot of any " +
-        "pre-existing file before its first write. Installing both an AGENTS.md tool (codex/copilot-cli/copilot-vscode) and " +
+        "pre-existing file before its first write. Installing both an AGENTS.md tool (codex/copilot-cli/copilot-vscode/opencode) and " +
         "a copilot-instructions.md tool (copilot-visual-studio/copilot-jetbrains) writes mem's block into both files, which " +
         "VS Code and Copilot CLI both read -- harmless, just redundant tokens."
     )

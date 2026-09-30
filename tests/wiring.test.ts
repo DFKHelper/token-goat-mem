@@ -22,6 +22,7 @@ import {
   copilotVisualStudio,
   copilotVscode,
   installedClaudeHookCommands,
+  opencode,
   parseHookCommandSpec,
   resolveBinaryOnPath,
   resolveMemBinary,
@@ -705,6 +706,45 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
       // ...but the unrelated, pre-existing orphaned content is left untouched, not swallowed.
       expect(afterUninstall).toContain("orphaned, no end marker for this one");
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────── opencode ───────────────────────────────────────────────────────────────────────────
+
+describe("opencode wiring (AGENTS.md shared block, project or user level)", () => {
+  const userAgentsMd = (): string => join(home, ".config", "opencode", "AGENTS.md");
+
+  it("a project install joins the same AGENTS.md block codex writes: one \"## Memory\" section, both tools listed", () => {
+    codex.install({ root, homeDir: home });
+    opencode.install({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).toContain("<!-- token-goat-mem:start tools=codex,opencode -->");
+    expect(agentsMd.split("## Memory").length - 1).toBe(1);
+
+    opencode.uninstall({ root, homeDir: home });
+    expect(read(join(root, "AGENTS.md"))).toContain("<!-- token-goat-mem:start tools=codex -->");
+  });
+
+  it("--user writes opencode's global AGENTS.md under homeDir/.config/opencode on every platform, leaving the project untouched", () => {
+    // opencode resolves its global config through xdg-basedir, which has no Windows branch: it is
+    // ~/.config/opencode there too, never %APPDATA%.
+    opencode.install({ root, homeDir: home, user: true });
+
+    expect(read(userAgentsMd())).toContain("<!-- token-goat-mem:start tools=opencode -->");
+    expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
+
+    opencode.uninstall({ root, homeDir: home, user: true });
+    expect(existsSync(userAgentsMd())).toBe(false);
+  });
+
+  it("--user uninstall leaves a hand-written global AGENTS.md exactly as it was", () => {
+    seed(userAgentsMd(), "# My global rules\n\n- prefer small diffs\n");
+    opencode.install({ root, homeDir: home, user: true });
+    expect(read(userAgentsMd())).toContain("## Memory");
+
+    opencode.uninstall({ root, homeDir: home, user: true });
+    expect(read(userAgentsMd())).toBe("# My global rules\n\n- prefer small diffs\n");
   });
 });
 

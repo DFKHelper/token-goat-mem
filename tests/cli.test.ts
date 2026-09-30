@@ -2913,6 +2913,19 @@ describe("mem init/uninstall", () => {
     expect(afterUninstallCodex).toContain("mem recall --hint-format --root .");
   });
 
+  it("init opencode --user writes opencode's global AGENTS.md under the wiring home, and uninstall removes it", async () => {
+    const globalAgentsMd = join(toolHome, ".config", "opencode", "AGENTS.md");
+
+    const init = await runCli(["init", "opencode", "--user", "--root", toolRoot]);
+    expect(init.exitCode).toBe(0);
+    expect(readFileSync(globalAgentsMd, "utf8")).toContain("<!-- token-goat-mem:start tools=opencode -->");
+    expect(existsSync(join(toolRoot, "AGENTS.md"))).toBe(false);
+
+    const uninstall = await runCli(["uninstall", "opencode", "--user", "--root", toolRoot]);
+    expect(uninstall.exitCode).toBe(0);
+    expect(existsSync(globalAgentsMd)).toBe(false);
+  });
+
   it("init codex, copilot-cli, and copilot-vscode against the same AGENTS.md produces exactly one shared section tracking all three; uninstalling one at a time correctly decrements to zero", async () => {
     const agentsMdPath = join(toolRoot, "AGENTS.md");
 
