@@ -900,24 +900,28 @@ const CLAUDE_USER_PROMPT_SUBMIT_COMMAND =
   'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi';
 
 // `Stop` fires after the user has actually said something -- the two recall events above run
-// before or instead of that -- and carries `transcript_path`, so a scan has a transcript to read.
-// Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block. Runs
-// `--quiet` so a *successful* scan never writes into the session it just scanned; a failed scan is
-// the one case that still prints -- a plain one-line notice, not `TGMEM/2`, since Stop/PreCompact
-// are not on the recall wire and nothing here parses their stdout as that format.
+// before or instead of that -- and carries `transcript_path`, so there is a transcript to read.
+// Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block.
+// `mem reflect` files the transcript's durable statements as pending (the same scan `scan-session`
+// runs) and, only when that run filed something new, blocks the stop with a worklist so the agent
+// that said them resolves each one -- updating an existing fact before creating another. Otherwise
+// it prints nothing. A failure prints a plain one-line notice, not `TGMEM/2`: Stop/PreCompact are
+// not on the recall wire and nothing here parses their stdout as that format.
 const CLAUDE_STOP_COMMAND =
-  'if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || echo "mem scan-session failed (exit $?); run mem doctor"; fi';
+  'if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root "$CLAUDE_PROJECT_DIR" || echo "mem reflect failed (exit $?); run mem doctor"; fi';
 
-// `PreCompact` is the same scan under a different trigger, and it is not redundant with `Stop`:
+// `PreCompact` is the same filing under a different trigger, and it is not redundant with `Stop`:
 // `Stop` fires when a turn ends, so a session that runs long enough to be compacted mid-task has
 // had everything before the compaction boundary summarized away -- and if that session is later
 // killed, closed, or interrupted rather than ending a turn cleanly, `Stop` never fires at all and
 // the whole transcript is captured by nothing. `PreCompact` is the one event guaranteed to fire
 // while the pre-compaction transcript still exists on disk, and it carries `transcript_path` for
-// the same reason `Stop` does. Identical command: the scan is idempotent -- every candidate whose
-// text is already stored, and bound to this project, is skipped before capture -- so re-scanning the
-// turns both events see costs a read and files nothing twice.
-const CLAUDE_PRE_COMPACT_COMMAND = CLAUDE_STOP_COMMAND;
+// the same reason `Stop` does. It files only (`--quiet`): a compaction has no agent turn to answer
+// a worklist. What it files is a sighting by the time `Stop` scans the same turns, so nothing is
+// filed twice -- and `Stop` does not prompt for it either, since the agent past the compaction
+// boundary no longer holds the context to judge it; it waits in `mem reflect` / `mem review`.
+const CLAUDE_PRE_COMPACT_COMMAND =
+  'if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || echo "mem scan-session failed (exit $?); run mem doctor"; fi';
 
 // Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand
 // and `--root` vary across events, and the wrapper shape itself has varied across mem versions --
@@ -935,17 +939,22 @@ function matchMemHookInvocation(command: string): RegExpExecArray | null {
 }
 
 /**
- * Whether `command` is mem's own invocation shape for `event` -- same wrapper, same subcommand as
- * `CLAUDE_HOOK_EVENTS` currently writes for that event, allowing for flags that have been added or
- * dropped since. Used to recognise an unstamped hook left behind by a pre-STAMP_KEY (or otherwise
- * older) mem install as mem's own, rather than a stranger's hand-written entry that merely mentions
- * `mem`.
+ * Whether `command` is mem's own invocation shape for `event` -- same wrapper, and either the
+ * subcommand `CLAUDE_HOOK_EVENTS` currently writes for that event or one an older mem wrote there
+ * (`legacySubcommands`), allowing for flags that have been added or dropped since. Used to recognise
+ * an unstamped hook left behind by a pre-STAMP_KEY (or otherwise older) mem install as mem's own,
+ * rather than a stranger's hand-written entry that merely mentions `mem`; without the legacy list an
+ * old `scan-session` Stop hook would be left beside the new `reflect` one and both would run.
  */
 function looksLikeMemHookCommand(command: string, event: string): boolean {
-  const canonical = CLAUDE_HOOK_EVENTS.find((entry) => entry.event === event)?.command;
-  const canonicalMatch = canonical === undefined ? null : matchMemHookInvocation(canonical);
+  const entry = CLAUDE_HOOK_EVENTS.find((candidate) => candidate.event === event);
+  const canonicalMatch = entry === undefined ? null : matchMemHookInvocation(entry.command);
   const actualMatch = matchMemHookInvocation(command);
-  return canonicalMatch !== null && actualMatch !== null && canonicalMatch[1] === actualMatch[1];
+  if (entry === undefined || canonicalMatch === null || actualMatch === null) {
+    return false;
+  }
+  const subcommand = actualMatch[1] as string;
+  return subcommand === canonicalMatch[1] || (entry.legacySubcommands?.includes(subcommand) ?? false);
 }
 
 /**
@@ -969,11 +978,19 @@ export function parseHookCommandSpec(command: string): { readonly subcommand: st
   return { subcommand, flags };
 }
 
-/** The hook events mem installs, in the order they are written, each with the one command mem stamps under it. */
-export const CLAUDE_HOOK_EVENTS: ReadonlyArray<{ readonly event: string; readonly command: string }> = [
+/**
+ * The hook events mem installs, in the order they are written, each with the one command mem stamps
+ * under it and any subcommand an older mem ran there, so an unstamped hook of that older shape is
+ * adopted and rewritten rather than left running beside the new one.
+ */
+export const CLAUDE_HOOK_EVENTS: ReadonlyArray<{
+  readonly event: string;
+  readonly command: string;
+  readonly legacySubcommands?: readonly string[];
+}> = [
   { event: "SessionStart", command: CLAUDE_SESSION_START_COMMAND },
   { event: "UserPromptSubmit", command: CLAUDE_USER_PROMPT_SUBMIT_COMMAND },
-  { event: "Stop", command: CLAUDE_STOP_COMMAND },
+  { event: "Stop", command: CLAUDE_STOP_COMMAND, legacySubcommands: ["scan-session"] },
   { event: "PreCompact", command: CLAUDE_PRE_COMPACT_COMMAND },
 ];
 

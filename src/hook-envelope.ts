@@ -27,6 +27,13 @@ export const HOOK_SESSION_KEY = "session_id";
  */
 export const HOOK_TRANSCRIPT_KEY = "transcript_path";
 
+/**
+ * Key Claude Code sets to `true` on a `Stop` envelope when the agent is already continuing because
+ * a Stop hook blocked. A Stop hook that blocks again on it never lets the session end, so
+ * `mem reflect` stands down whenever it is set.
+ */
+export const HOOK_STOP_ACTIVE_KEY = "stop_hook_active";
+
 export interface HookEnvelope {
   /** Session identifier, when the envelope carried a non-empty string under `session_id`. */
   readonly sessionId?: string;
@@ -34,6 +41,8 @@ export interface HookEnvelope {
   readonly prompt?: string;
   /** Session transcript path, when the envelope carried a non-empty string under `transcript_path`. */
   readonly transcriptPath?: string;
+  /** Whether a Stop hook already continued this agent, when the envelope carried a real boolean under `stop_hook_active`. */
+  readonly stopHookActive?: boolean;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -65,10 +74,12 @@ export function parseHookEnvelope(raw: string): HookEnvelope {
     }
   }
   const transcriptPath = nonEmptyString(record[HOOK_TRANSCRIPT_KEY]);
+  const stopHookActive = record[HOOK_STOP_ACTIVE_KEY];
   return {
     ...(sessionId !== undefined ? { sessionId } : {}),
     ...(prompt !== undefined ? { prompt } : {}),
     ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+    ...(typeof stopHookActive === "boolean" ? { stopHookActive } : {}),
   };
 }
 

@@ -144,6 +144,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/doctor.ts` | Entry | `mem doctor`: the read-only environment and store health check | registerDoctorCommand |
 | `src/index.ts` | Entry | Library entry point | — |
 | `src/main.ts` | Entry | Package executable | — |
+| `src/reflect.ts` | Entry | `mem reflect`: the end-of-session worklist that turns pending suggestions into decisions, update-before-create | registerReflectCommand |
 | `src/timeline.ts` | Entry | `mem log`: the store-wide audit timeline, newest first | formatAuditLine, resolveLoggedFactId, registerLogCommand |
 | `src/anchors.ts` | Retrieval | Anchor evaluation (design plan P3, Section 3, review S1/S4) | AnchorVerdict, AnchorCacheStore, clearAnchorCaches, _clearAnchorMemoForTests, isGenuineAbsence |
 | `src/contradiction.ts` | Retrieval | Deterministic subject+value contradiction detection (design plan P4, Section 6, review S5/S8) | ContradictionGroup, FactStatusUpdate, ContradictionDetectionResult, computeProjectIdentityGroups, computeContradictionBucketGroups |
@@ -158,12 +159,12 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/exportImport.ts` | Capture | `mem import --from-json <path>` -- the full-fidelity counterpart to `mem import --from-md` (src/import.ts) | JSON_EXPORT_SCHEMA_VERSION, MAX_IMPORT_FILE_SIZE_BYTES, JsonImportError, planImportFromJson, ImportFromJsonOptions |
 | `src/import.ts` | Capture | `mem import --from-md <path>` -- the mem-side half of the "advisory CLAUDE.md->mem migration probe" (the other half, `to | MarkdownImportError, MarkdownBullet, extractMarkdownBullets, ImportFromMarkdownOptions, ImportCandidate |
 | `src/reviewActions.ts` | Capture | The status transitions a human drives through `mem review` (promote, reject, undo a rejection), and the two primitives e | setStatusWithAudit, REVIEW_RESOLVABLE_STATUSES, reconcileContradictions, PromotionOutcome, promotePending |
-| `src/sessionCapture.ts` | Capture | Files a session transcript's durable-statement candidates as pending suggestions -- the store side of `mem scan-session` | FileTranscriptOptions, fileTranscriptSuggestions |
+| `src/sessionCapture.ts` | Capture | Files a session transcript's durable-statement candidates as pending suggestions -- the store side of `mem scan-session` | transcriptSourceRefPrefix, FileTranscriptOptions, fileTranscriptSuggestions |
 | `src/sessionScan.ts` | Capture | Deterministic extraction of durable-preference candidates from a session transcript | MAX_SCANNED_TURNS, MAX_CANDIDATE_LENGTH, Candidate, userTurnText, extractCandidates |
 | `src/db.ts` | Storage | SQLite connection and schema for the `facts` table (design plan Section 3), plus two small infra tables every write path | resolveMemHome, resolveDbPath, openDb, SUPERSEDED_BY_FACT_PREFIX, SUPERSEDED_AS_DUPLICATE_PREFIX |
 | `src/migrations.ts` | Storage | Ordered schema migrations for the mem database, keyed on SQLite's own `PRAGMA user_version` | MigrationStep, MigrationResult, hasColumn, addColumn, MIGRATIONS |
 | `src/storage.ts` | Storage | Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (d | ensureStorageSchema, openStorage, createAnchorCacheStore, clearAnchorCacheStore, BufferedAnchorVerdict |
-| `src/hook-envelope.ts` | Integration | Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin | HOOK_PROMPT_KEYS, HOOK_SESSION_KEY, HOOK_TRANSCRIPT_KEY, HookEnvelope, parseHookEnvelope |
+| `src/hook-envelope.ts` | Integration | Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin | HOOK_PROMPT_KEYS, HOOK_SESSION_KEY, HOOK_TRANSCRIPT_KEY, HOOK_STOP_ACTIVE_KEY, HookEnvelope |
 | `src/integration-seam.ts` | Integration | The token-goat integration seam (design plan Section 4) | TGMEM_PROTOCOL_VERSION, TGMEM_HEADER, FOLLOW_UP_SHOW_DETAIL, FOLLOW_UP_REVIEW, TGMEM_FOOTER_LINE |
 | `src/wiring.ts` | Integration | Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets | WiringOpts, WiringFileAction, WiringChange, WiringResult, WiringPlanEntry |
 | `src/factText.ts` | Support | The normalized-text key `storage.ts` and `migrations.ts` both need for fact deduplication | normalizeFactText, hashFactText |

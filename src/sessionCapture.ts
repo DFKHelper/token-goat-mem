@@ -13,6 +13,15 @@ import { scanTranscript } from "./sessionScan.js";
 import { factsByTextHash } from "./storage.js";
 import type { FactScope } from "./types.js";
 
+/**
+ * The `source_ref` prefix every suggestion filed from `transcriptPath` carries (`<path>#turn<n>`),
+ * so "which pending facts came from this transcript" is a prefix test against the same string the
+ * filer wrote rather than a second copy of its format.
+ */
+export function transcriptSourceRefPrefix(transcriptPath: string): string {
+  return `${transcriptPath}#turn`;
+}
+
 export interface FileTranscriptOptions {
   readonly transcriptPath: string;
   /** Project root the captured facts bind to. */
@@ -66,7 +75,7 @@ export function fileTranscriptSuggestions(db: Database.Database, options: FileTr
         kind: candidate.kind,
         scope,
         root,
-        sourceRef: `${transcriptPath}#turn${candidate.turnIndex}`,
+        sourceRef: `${transcriptSourceRefPrefix(transcriptPath)}${candidate.turnIndex}`,
         ...(sourceExcerpt !== null ? { sourceExcerpt } : {}),
         ...(candidate.capturedAt !== undefined ? { capturedAt: candidate.capturedAt } : {}),
       });

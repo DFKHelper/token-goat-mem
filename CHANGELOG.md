@@ -98,6 +98,14 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   are kept for 180 days and superseded facts for 90, and it reports a prefix shared by a live and a
   deleted fact as ambiguous instead of showing only the live one. `mem show`'s history block now
   renders through the same formatter.
+- **`mem reflect`: resolve pending suggestions while the agent still knows what it meant.**
+  `mem scan-session` files every durable-sounding sentence as `pending` and stops there, so the
+  queue only grew, and the one party that knew whether "never commit generated files" restated,
+  changed, or added to a stored fact -- the agent that said it -- had moved on. `mem reflect` lists
+  each pending suggestion beside the live facts it most resembles, with the resolutions in the order
+  to try them: update the related fact first, promote as new only when nothing covers it, reject
+  otherwise. `--transcript` files a transcript and lists only its suggestions; `--hook-stdin` is the
+  new `Stop` hook (below).
 - **`mem init opencode`.** opencode reads `AGENTS.md`, so a project install joins the shared,
   reference-counted "## Memory" block codex, copilot-cli and copilot-vscode already write there.
   Unlike those three, opencode also has a global rules file, so `--user` is supported: it writes
@@ -125,6 +133,16 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   corrections that carry a `--why` (`why coverage: 3/5 ...`) and, while any lack one, names
   `mem edit <id> --why "<reason>"` as the fix. Pending and superseded facts are left out: recall
   never surfaces them, so their missing reason costs nothing.
+
+### Changed
+
+- **The Claude Code `Stop` hook runs `mem reflect` instead of `mem scan-session --quiet`.** It files
+  the transcript exactly as before, then blocks the stop with the `mem reflect` worklist as the
+  reason -- but only for suggestions that run filed, so a second stop over the same transcript is
+  silent, and never while `stop_hook_active` is set. `PreCompact` keeps `scan-session --quiet`: a
+  compaction has no agent turn to answer a worklist. Re-running `mem init claude-code` adopts an
+  unstamped `scan-session` Stop hook from an older install and rewrites it in place rather than
+  leaving both to run; `mem doctor` names `reflect` as the one subcommand an older PATH binary lacks.
 
 ## [0.4.1] - 2026-09-16
 

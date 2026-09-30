@@ -8,6 +8,7 @@
  * normative exit-code contract is documented in cli.ts's module doc comment.
  */
 
+import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 
@@ -95,6 +96,21 @@ export async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): 
 /** Never defaults to ambient `process.cwd()` silently for anchor evaluation inside anchors.ts itself (Section 3) -- but a human-invoked, short-lived CLI command needs *some* root when the caller omits `--root`, and "the directory the command was invoked from" is the only reasonable one. Explicit `--root` always wins. */
 export function resolveRoot(explicit: string | undefined): string {
   return resolvePath(explicit ?? process.cwd());
+}
+
+/**
+ * Throws a `UsageError` when a transcript the caller named with `--transcript` cannot be read. Only
+ * for an explicit path: there a missing file is a typo in *this* invocation, whereas a hook's
+ * envelope path is background convenience that must fail open (`scanTranscript` swallows the same
+ * error for it, deliberately). Checked up front so "nothing found" can never stand in for a scan
+ * that never ran.
+ */
+export function assertTranscriptReadable(command: string, transcriptPath: string): void {
+  try {
+    readFileSync(transcriptPath, "utf8");
+  } catch (error) {
+    throw new UsageError(`${command}: cannot read transcript "${transcriptPath}" (${extractErrorMessage(error)})`);
+  }
 }
 
 /**

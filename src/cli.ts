@@ -35,7 +35,6 @@
  */
 
 import { Command } from "commander";
-import { readFileSync } from "node:fs";
 import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, evaluateAnchor, extractAnchorableTargets, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
@@ -55,6 +54,7 @@ import {
 import { detectContradictions } from "./contradiction.js";
 import { ageInDays, daysAgoIso } from "./timeUtils.js";
 import { registerDoctorCommand } from "./doctor.js";
+import { registerReflectCommand } from "./reflect.js";
 import { findRelatedFacts, type RelatedFact } from "./related.js";
 import { formatAuditLine, registerLogCommand } from "./timeline.js";
 import {
@@ -66,6 +66,7 @@ import {
 } from "./reviewActions.js";
 import {
   assertNonNegativeFlag,
+  assertTranscriptReadable,
   assertPositiveFlag,
   DEFAULT_LIST_LIMIT,
   EXIT_SUCCESS,
@@ -2498,6 +2499,7 @@ export function buildProgram(): Command {
     );
 
   registerLogCommand(program);
+  registerReflectCommand(program);
 
   program
     .command("show <id>")
@@ -2592,17 +2594,9 @@ export function buildProgram(): Command {
         if (transcriptPath === undefined) {
           throw new UsageError("scan-session needs a transcript: pass --transcript <path> or --hook-stdin");
         }
-        // Only when the caller named the transcript explicitly: a missing/unreadable file is then a
-        // typo in *this* invocation, not the Stop/PreCompact hook's background convenience, which
-        // must stay silent and fail open (scanTranscript below swallows the same error for that path,
-        // deliberately). Reported here rather than left to scanTranscript's catch-and-return-[] so
-        // that "no new durable statements found" cannot stand in for a scan that never ran.
+        // Only when the caller named the transcript explicitly; the hook path fails open.
         if (options.transcript !== undefined) {
-          try {
-            readFileSync(transcriptPath, "utf8");
-          } catch (error) {
-            throw new UsageError(`scan-session: cannot read transcript "${transcriptPath}" (${extractErrorMessage(error)})`);
-          }
+          assertTranscriptReadable("scan-session", transcriptPath);
         }
         const scope = parseFactScope(options.scope ?? "project");
         if (scope === "path") {

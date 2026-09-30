@@ -1,7 +1,7 @@
 /**
  * Which live facts share the most entities and topics with a given fact -- the one similarity
- * lookup behind `mem show --related` and `mem review`'s "may contradict" line, so both agree on
- * what counts as related.
+ * lookup behind `mem show --related`, `mem review`'s "may contradict" line, and the related facts
+ * `mem reflect` lists beside each pending suggestion, so all three agree on what counts as related.
  */
 
 import type Database from "better-sqlite3";

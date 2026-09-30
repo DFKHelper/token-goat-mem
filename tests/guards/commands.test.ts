@@ -25,6 +25,7 @@ const EXPECTED_COMMANDS = [
   "log",
   "pin",
   "recall",
+  "reflect",
   "remember",
   "review",
   "scan-session",
