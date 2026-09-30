@@ -65,7 +65,7 @@ const MAX_TEXT_LENGTH = 500;
 const MAX_SUBJECT_LENGTH = 100;
 const MAX_VALUE_LENGTH = 500;
 const MAX_SOURCE_REF_LENGTH = 500;
-const MAX_WHY_LENGTH = 500;
+const MAX_RATIONALE_LENGTH = 500;
 
 /**
  * Longest excerpt persisted to `sources.excerpt` (see storage.ts's Source doc: "Never the full
@@ -652,20 +652,32 @@ export function validateAnchorSyntax(anchor: string): void {
 }
 
 /**
- * A `why` is optional, but one that is present must say something: an empty reason would render as
- * `why: ` on every recall, and an over-long one is a pasted transcript, not a rationale (the same
- * design principle 7a limit `text` has). `null` clears it and is always allowed.
+ * A rationale (a fact's `why`, a review decision's `reason`) is optional, but one that is present
+ * must say something: an empty one would render as `why: ` on every recall, and an over-long one is
+ * a pasted transcript, not a rationale (the same design principle 7a limit `text` has). `null`
+ * clears a `why` and is always allowed.
  */
-function validateWhyOrThrow(why: string | null | undefined): void {
-  if (typeof why !== "string") {
+function validateRationaleOrThrow(label: "why" | "reason", rationale: string | null | undefined): void {
+  if (typeof rationale !== "string") {
     return;
   }
-  if (why.trim().length === 0) {
-    throw new CaptureValidationError("why (--why), if provided, must not be empty");
+  if (rationale.trim().length === 0) {
+    throw new CaptureValidationError(`${label} (--${label}), if provided, must not be empty`);
   }
-  if (why.trim().length > MAX_WHY_LENGTH) {
-    throw new CaptureValidationError(`why exceeds ${MAX_WHY_LENGTH} characters`);
+  if (rationale.trim().length > MAX_RATIONALE_LENGTH) {
+    throw new CaptureValidationError(`${label} exceeds ${MAX_RATIONALE_LENGTH} characters`);
   }
+}
+
+/**
+ * Validates and secret-screens a `mem review --reason`, returning it trimmed. The reason is stored in
+ * the audit log, which is as durable as the fact table, so it gets the same deny-by-default screening
+ * (and the same `.mem/allowlist` escape hatch) a fact's own text does.
+ */
+export function screenReviewReasonOrThrow(db: Database.Database, reason: string, root: string): string {
+  validateRationaleOrThrow("reason", reason);
+  refuseSecretsOrThrow(db, screenForSecrets({ reason }, loadAllowlist(root)), "review");
+  return reason.trim();
 }
 
 /**
@@ -717,7 +729,7 @@ export function validateFactFieldsOrThrow(patch: {
   readonly value?: string | null;
   readonly why?: string | null;
 }): void {
-  validateWhyOrThrow(patch.why);
+  validateRationaleOrThrow("why", patch.why);
   if (patch.text !== undefined) {
     const text = patch.text.trim();
     if (text.length === 0) {
@@ -911,7 +923,7 @@ function validateCommonInput(input: CaptureExplicitInput): { text: string; root:
   if (input.anchor !== undefined && input.anchor.trim().length > 0) {
     validateAnchorSyntax(input.anchor.trim());
   }
-  validateWhyOrThrow(input.why);
+  validateRationaleOrThrow("why", input.why);
 
   const root = input.root.trim();
   if (root.length === 0) {
@@ -936,15 +948,29 @@ export function screenInputOrThrow(
   // SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy
   // fallback, so the legitimate "<path>:<line>" false-positive is still avoided without leaving a
   // prefix-less secret unscreened.
-  const matches = screenFactFields(input, allowlist);
-  if (matches.length > 0) {
-    insertAuditLog(db, {
-      event: `${auditEvent}_blocked_secret`,
-      factId,
-      detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
-    });
-    throw new SecretDetectedError(matches);
+  refuseSecretsOrThrow(db, screenFactFields(input, allowlist), auditEvent, factId);
+}
+
+/**
+ * The one place a screened write is refused: records `<auditEvent>_blocked_secret` (field and pattern
+ * names only, never the matched value) and throws. Shared so every refusal leaves the same trail and
+ * `SecretDetectedError` keeps a single message.
+ */
+function refuseSecretsOrThrow(
+  db: Database.Database,
+  matches: readonly SecretMatch[],
+  auditEvent: string,
+  factId: string | null = null
+): void {
+  if (matches.length === 0) {
+    return;
   }
+  insertAuditLog(db, {
+    event: `${auditEvent}_blocked_secret`,
+    factId,
+    detail: `blocked: ${matches.map((match) => `${match.field}/${match.patternName}`).join(", ")}`,
+  });
+  throw new SecretDetectedError(matches);
 }
 
 /**

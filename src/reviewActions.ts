@@ -90,7 +90,16 @@ function unkeyedPromotionNote(id: string): string {
   );
 }
 
-export function promotePending(db: Database.Database, id: string): PromotionOutcome {
+/**
+ * Appends a reviewer's `--reason` to a transition's audit detail, so `mem log` shows why the call was
+ * made beside what it did. The caller has already validated and screened it (capture.ts's
+ * `screenReviewReasonOrThrow`).
+ */
+function withReason(detail: string, reason: string | undefined): string {
+  return reason === undefined ? detail : `${detail}; reason: ${reason}`;
+}
+
+export function promotePending(db: Database.Database, id: string, reason?: string): PromotionOutcome {
   const fact = resolveIdArgOrThrow(db, id);
   // `detectContradictions` is run over the same pool `formatReview` derives its `contested` bucket
   // from -- active/pinned/contested -- and read before any status is written below, for the same
@@ -126,7 +135,7 @@ export function promotePending(db: Database.Database, id: string): PromotionOutc
       fact.id,
       restored,
       "review_promote",
-      `resolved contested contradiction in this fact's favor via explicit review (restored to ${restored})`
+      withReason(`resolved contested contradiction in this fact's favor via explicit review (restored to ${restored})`, reason)
     );
     for (const rival of rivals) {
       setStatusWithAudit(
@@ -134,14 +143,23 @@ export function promotePending(db: Database.Database, id: string): PromotionOutc
         rival.id,
         "superseded",
         "review_promote",
-        `${SUPERSEDED_BY_FACT_PREFIX}${fact.id}: contested contradiction resolved in that fact's favor via explicit review.`
+        withReason(
+          `${SUPERSEDED_BY_FACT_PREFIX}${fact.id}: contested contradiction resolved in that fact's favor via explicit review.`,
+          reason
+        )
       );
     }
     // A contested fact is keyed by construction -- it only reached a contradiction group by having a
     // subject -- so the unkeyed caveat below cannot apply to this branch.
     return { id: fact.id };
   }
-  setStatusWithAudit(db, fact.id, "active", "review_promote", "promoted pending fact to active via explicit review");
+  setStatusWithAudit(
+    db,
+    fact.id,
+    "active",
+    "review_promote",
+    withReason("promoted pending fact to active via explicit review", reason)
+  );
   const unkeyed = fact.subject === null || fact.subject === undefined;
   return { id: fact.id, ...(unkeyed ? { note: unkeyedPromotionNote(fact.id) } : {}) };
 }
@@ -153,7 +171,7 @@ export function promotePending(db: Database.Database, id: string): PromotionOutc
  * pass runs afterwards to reinstate any survivor that is no longer contested -- otherwise the
  * survivor would stay withheld with nothing left to contest it until the next `mem epoch --gc`.
  */
-export function rejectPending(db: Database.Database, id: string): string {
+export function rejectPending(db: Database.Database, id: string, reason?: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   // Same live-derived definition of "contested" as `promotePending`, and for the same reason: a
   // precedence tie `formatReview` already shows as contested may not have persisted that status yet.
@@ -172,7 +190,7 @@ export function rejectPending(db: Database.Database, id: string): string {
     fact.id,
     "superseded",
     "review_reject",
-    `rejected ${fact.status} fact (superseded) via explicit review`
+    withReason(`rejected ${fact.status} fact (superseded) via explicit review`, reason)
   );
   if (isContested) {
     reconcileContradictions(db, "review_reject");
@@ -201,7 +219,7 @@ const REVIEW_REJECT_EVENT = "review_reject";
  * slip in a review queue. A superseded fact that got there any other way is refused by name, so the
  * error says which mechanism claimed it rather than silently doing nothing.
  */
-export function undoReject(db: Database.Database, id: string): string {
+export function undoReject(db: Database.Database, id: string, reason?: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   if (fact.status !== "superseded") {
     throw new UsageError(`fact ${fact.id} is not rejected (status=${fact.status}) -- there is nothing to undo`);
@@ -215,7 +233,13 @@ export function undoReject(db: Database.Database, id: string): string {
     );
   }
   const restored = fact.prior_status ?? "pending";
-  setStatusWithAudit(db, fact.id, restored, "review_undo", `undid review rejection, restored to ${restored}`);
+  setStatusWithAudit(
+    db,
+    fact.id,
+    restored,
+    "review_undo",
+    withReason(`undid review rejection, restored to ${restored}`, reason)
+  );
   if (restored === "contested") {
     reconcileContradictions(db, "review_undo");
   }

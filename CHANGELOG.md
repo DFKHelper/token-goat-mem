@@ -114,6 +114,13 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   survives `mem export`/`mem import --from-json`. The installed "## Memory" blocks now ask for a
   `--why` on decisions and corrections. Stored in a new nullable `why` column (schema v6); every
   existing fact reads as having no recorded reason.
+- **A review decision can carry its reason.** `mem review --promote/--reject/--undo <id> --reason
+  "<text>"` appends `; reason: <text>` to that transition's audit row (and, for a contested
+  promotion, to each rival's supersession row), so `mem log --fact <id>` answers "why was this
+  rejected?" later. Validated like `--why` (non-empty, at most 500 characters) and secret-screened
+  against the same `.mem/allowlist`, since the audit log is as durable as the facts (a refusal is
+  logged as `review_blocked_secret`, naming the pattern, never the value); `--reason` with no action
+  to attach it to is refused.
 
 ## [0.4.1] - 2026-09-16
 

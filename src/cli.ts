@@ -50,6 +50,7 @@ import {
   resolveScopeRepo,
   screenForSecrets,
   screenInputOrThrow,
+  screenReviewReasonOrThrow,
   SecretDetectedError,
   validateFactEditOrThrow,
   type CaptureExplicitInput,
@@ -2117,6 +2118,7 @@ interface ReviewCliOptions {
   readonly promote?: string;
   readonly reject?: string;
   readonly undo?: string;
+  readonly reason?: string;
   readonly root?: string;
   readonly summary?: boolean;
   readonly section?: string;
@@ -3169,6 +3171,7 @@ export function buildProgram(): Command {
     .option("--promote <id>", "Promote a pending fact to active")
     .option("--reject <id>", "Reject a pending fact (marks superseded)")
     .option("--undo <id>", "Reverse a `--reject`, restoring the fact to the status it had before")
+    .option("--reason <text>", "Why, recorded on the --promote/--reject/--undo audit row (shown by `mem log`)")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: current directory)")
     .option("--summary", "Print counts per bucket (pending/contested/contradicted/pins/unanchored) instead of full listings")
     .option("--section <pending|contested|contradicted|pins|unanchored>", "Only show one bucket's full listing")
@@ -3181,10 +3184,16 @@ export function buildProgram(): Command {
         }
 
         assertNonNegativeFlag("--since-epoch", options.sinceEpoch);
+        if (options.reason !== undefined && actions.length === 0) {
+          throw new UsageError("--reason requires --promote, --reject, or --undo");
+        }
+        const reasonText = options.reason;
+        const screenedReason = (db: Database.Database): string | undefined =>
+          reasonText === undefined ? undefined : screenReviewReasonOrThrow(db, reasonText, resolveRoot(options.root));
 
         if (options.promote !== undefined) {
           const id = options.promote;
-          const outcome = await withDb((db) => promotePending(db, id));
+          const outcome = await withDb((db) => promotePending(db, id, screenedReason(db)));
           process.stdout.write(`promoted ${outcome.id}\n`);
           if (outcome.note !== undefined) {
             process.stdout.write(`${outcome.note}\n`);
@@ -3193,13 +3202,13 @@ export function buildProgram(): Command {
         }
         if (options.reject !== undefined) {
           const id = options.reject;
-          const resolved = await withDb((db) => rejectPending(db, id));
+          const resolved = await withDb((db) => rejectPending(db, id, screenedReason(db)));
           process.stdout.write(`rejected ${resolved}\n`);
           return;
         }
         if (options.undo !== undefined) {
           const id = options.undo;
-          const resolved = await withDb((db) => undoReject(db, id));
+          const resolved = await withDb((db) => undoReject(db, id, screenedReason(db)));
           process.stdout.write(`restored ${resolved}\n`);
           return;
         }
