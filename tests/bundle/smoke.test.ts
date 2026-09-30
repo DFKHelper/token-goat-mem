@@ -9,38 +9,21 @@
  * stderr. A build can be broken in every one of those ways with all 550-odd in-process tests green.
  */
 
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const BUNDLE = fileURLToPath(new URL("../../dist/token-goat-mem.mjs", import.meta.url));
-
-interface BundleResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number;
-}
+import { BUNDLE_PATH as BUNDLE, runBundleSync, type BundleResult } from "../support/bundle.js";
 
 let memHome: string;
 let root: string;
 
 /** Runs the bundle against an isolated mem home, capturing both streams and the exit code rather than throwing. */
 function runBundle(args: readonly string[]): BundleResult {
-  try {
-    const stdout = execFileSync(process.execPath, [BUNDLE, ...args], {
-      encoding: "utf8",
-      env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    return { stdout, stderr: "", exitCode: 0 };
-  } catch (error) {
-    const failure = error as { stdout?: string; stderr?: string; status?: number };
-    return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", exitCode: failure.status ?? 1 };
-  }
+  return runBundleSync(args, { home: memHome });
 }
 
 beforeEach(() => {

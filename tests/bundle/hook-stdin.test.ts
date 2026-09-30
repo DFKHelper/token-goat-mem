@@ -5,39 +5,22 @@
  * vitest's, not a pipe -- so this file is the only place the stdin contract is exercised as shipped.
  */
 
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const BUNDLE = fileURLToPath(new URL("../../dist/token-goat-mem.mjs", import.meta.url));
-
-interface BundleResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly exitCode: number;
-}
+import { runBundleSync, type BundleResult } from "../support/bundle.js";
 
 let memHome: string;
 let root: string;
 
 /** Runs the bundle against an isolated mem home with `stdin` piped in, capturing both streams (on exit 0 too -- a fail-open note on stderr is part of what this file asserts) and the exit code. */
 function runBundle(args: readonly string[], stdin = ""): BundleResult {
-  const result = spawnSync(process.execPath, [BUNDLE, ...args], {
-    encoding: "utf8",
-    // No truncation budget: under a loaded runner the 150ms default blows and the seam returns an
-    // empty hint set by design, which would turn every selection assertion here into a timing one.
-    env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome, TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS: "3600000" },
-    input: stdin,
-    stdio: ["pipe", "pipe", "pipe"],
-  });
-  if (result.error !== undefined) {
-    throw result.error;
-  }
-  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status ?? 1 };
+  // No truncation budget: under a loaded runner the 150ms default blows and the seam returns an
+  // empty hint set by design, which would turn every selection assertion here into a timing one.
+  return runBundleSync(args, { home: memHome, stdin, env: { TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS: "3600000" } });
 }
 
 /** The `id=` values of the TGMEM fact-lines in `stdout`, in order. */

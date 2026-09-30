@@ -23,12 +23,11 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const BUNDLE = fileURLToPath(new URL("../../dist/token-goat-mem.mjs", import.meta.url));
+import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
 
 /** Parallel processes. Enough to keep several writers queued on the lock at once on a 2-core CI runner. */
 const WORKERS = 6;
