@@ -104,6 +104,16 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   `~/.config/opencode/AGENTS.md`. That path is the same on Windows, because opencode resolves its
   config directory through xdg-basedir, which has no `%APPDATA%` branch. See
   `docs/integrations/opencode.md`.
+- **A fact can carry its reason.** A stored decision without its rationale is the one a later
+  session is most tempted to relitigate: "the build uses esbuild" invites "why not tsc?", where the
+  reason answers it before it is asked. `mem remember`/`mem suggest --why "<reason>"` records one
+  (optional, at most 500 characters, secret-screened like every other stored field), `mem edit
+  --why` changes it and `--why ""` clears it (both reversible with `--undo`), and restating a fact
+  with a new reason replaces the stored one and logs `why updated`. The reason rides on the recalled
+  display line as `(why: ...)` so the agent reading recall sees it too, except in terse mode, and
+  survives `mem export`/`mem import --from-json`. The installed "## Memory" blocks now ask for a
+  `--why` on decisions and corrections. Stored in a new nullable `why` column (schema v6); every
+  existing fact reads as having no recorded reason.
 
 ## [0.4.1] - 2026-09-16
 

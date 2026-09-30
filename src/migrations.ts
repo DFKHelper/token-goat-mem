@@ -242,6 +242,16 @@ CREATE INDEX IF NOT EXISTS idx_fact_links_b ON fact_links(fact_id_b);
 `);
 }
 
+/**
+ * The rationale behind a fact -- chiefly a decision or correction -- recorded beside it so a later
+ * session reads the reason with the claim instead of relitigating it. Nullable with no backfill:
+ * every row written before this column existed was captured without one, which is exactly what
+ * NULL means.
+ */
+function factWhyUp(db: Database.Database): void {
+  addColumn(db, "facts", "why", "TEXT");
+}
+
 /** Every migration, in the order `runMigrations` applies them. Version numbers are dense and start at 1. */
 export const MIGRATIONS: readonly MigrationStep[] = [
   { version: 1, name: "baseline", up: baselineUp },
@@ -249,6 +259,7 @@ export const MIGRATIONS: readonly MigrationStep[] = [
   { version: 3, name: "anchor_cache", up: anchorCacheUp },
   { version: 4, name: "facts.text_hash backfill", up: textHashBackfillUp },
   { version: 5, name: "fact_links", up: factLinksUp },
+  { version: 6, name: "facts.why", up: factWhyUp },
 ];
 
 /**

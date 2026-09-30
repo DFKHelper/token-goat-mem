@@ -973,7 +973,10 @@ function buildDisplay(
   const label = terse ? TERSE_KIND_LABEL[fact.kind] : KIND_LABEL[fact.kind];
   // Once, above every branch: the body is the same string in all seven of them, and eliding at each
   // return would leave the next branch added here the one that quietly emits 500 characters.
-  const body = terse ? elideForTerse(fact.text) : fact.text;
+  // The reason rides on the body so every branch carries it; terse mode drops it with the rest of
+  // the ceremony, since a terse line is a budget-bound reminder, not the place a decision is argued.
+  const reason = !terse && typeof fact.why === "string" ? ` (why: ${fact.why})` : "";
+  const body = (terse ? elideForTerse(fact.text) : fact.text) + reason;
   const showCommand = `mem show ${fact.id}`;
   const withCta = (text: string, cta: string): string => (includeCta ? `${text} — ${cta}` : text);
 

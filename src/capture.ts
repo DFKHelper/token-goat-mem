@@ -55,6 +55,7 @@ import {
   reaffirmFact,
   setFactStatus,
 } from "./storage.js";
+import type { RestatementUpdates } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, factNounPhrase } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, NewFact } from "./types.js";
 
@@ -64,6 +65,7 @@ const MAX_TEXT_LENGTH = 500;
 const MAX_SUBJECT_LENGTH = 100;
 const MAX_VALUE_LENGTH = 500;
 const MAX_SOURCE_REF_LENGTH = 500;
+const MAX_WHY_LENGTH = 500;
 
 /**
  * Longest excerpt persisted to `sources.excerpt` (see storage.ts's Source doc: "Never the full
@@ -650,6 +652,52 @@ export function validateAnchorSyntax(anchor: string): void {
 }
 
 /**
+ * A `why` is optional, but one that is present must say something: an empty reason would render as
+ * `why: ` on every recall, and an over-long one is a pasted transcript, not a rationale (the same
+ * design principle 7a limit `text` has). `null` clears it and is always allowed.
+ */
+function validateWhyOrThrow(why: string | null | undefined): void {
+  if (typeof why !== "string") {
+    return;
+  }
+  if (why.trim().length === 0) {
+    throw new CaptureValidationError("why (--why), if provided, must not be empty");
+  }
+  if (why.trim().length > MAX_WHY_LENGTH) {
+    throw new CaptureValidationError(`why exceeds ${MAX_WHY_LENGTH} characters`);
+  }
+}
+
+/**
+ * The free-text fact fields secret screening covers. One list for every whole-fact write path
+ * (capture and both JSON-import passes), so a new stored column cannot be screened on one path and
+ * stored unscreened by another. `mem edit` screens per edited field instead (cli.ts's
+ * `AUDIT_SCREENED_FIELDS`).
+ */
+export interface ScreenableFactFields {
+  readonly text: string;
+  readonly subject?: string | null | undefined;
+  readonly value?: string | null | undefined;
+  readonly anchor?: string | null | undefined;
+  readonly sourceRef?: string | null | undefined;
+  readonly why?: string | null | undefined;
+}
+
+export function screenFactFields(fields: ScreenableFactFields, allowlist: readonly string[]): SecretMatch[] {
+  return screenForSecrets(
+    {
+      text: fields.text,
+      subject: fields.subject,
+      value: fields.value,
+      anchor: fields.anchor,
+      sourceRef: fields.sourceRef,
+      why: fields.why,
+    },
+    allowlist
+  );
+}
+
+/**
  * Applies the field-level guards `mem remember`/`captureExplicit` enforce (length limits,
  * emptiness, subject/value pairing) to a patch of fact fields, WITHOUT the CLI-facing
  * anchor-syntax arity check (see `validateAnchorSyntax`). Only validates fields actually present in
@@ -667,7 +715,9 @@ export function validateFactFieldsOrThrow(patch: {
   readonly text?: string;
   readonly subject?: string | null;
   readonly value?: string | null;
+  readonly why?: string | null;
 }): void {
+  validateWhyOrThrow(patch.why);
   if (patch.text !== undefined) {
     const text = patch.text.trim();
     if (text.length === 0) {
@@ -728,6 +778,7 @@ export function validateFactEditOrThrow(patch: {
   readonly subject?: string | null;
   readonly value?: string | null;
   readonly anchor?: string | null;
+  readonly why?: string | null;
 }): void {
   validateFactFieldsOrThrow(patch);
   if (typeof patch.anchor === "string" && patch.anchor.trim().length > 0) {
@@ -749,6 +800,8 @@ export interface CaptureExplicitInput {
   readonly anchor?: string;
   readonly scope?: FactScope;
   readonly sourceRef?: string;
+  /** The rationale behind the fact -- see `Fact.why`. */
+  readonly why?: string;
   /** Project root, used to resolve `.mem/allowlist` and (for project/path scope) recorded as the fact's `scopeRoot`. Required, never defaulted to ambient `process.cwd()` (matches src/anchors.ts's explicit-root discipline). */
   readonly root: string;
   /**
@@ -858,6 +911,7 @@ function validateCommonInput(input: CaptureExplicitInput): { text: string; root:
   if (input.anchor !== undefined && input.anchor.trim().length > 0) {
     validateAnchorSyntax(input.anchor.trim());
   }
+  validateWhyOrThrow(input.why);
 
   const root = input.root.trim();
   if (root.length === 0) {
@@ -882,16 +936,7 @@ export function screenInputOrThrow(
   // SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy
   // fallback, so the legitimate "<path>:<line>" false-positive is still avoided without leaving a
   // prefix-less secret unscreened.
-  const matches = screenForSecrets(
-    {
-      text: input.text,
-      subject: input.subject,
-      value: input.value,
-      anchor: input.anchor,
-      sourceRef: input.sourceRef,
-    },
-    allowlist
-  );
+  const matches = screenFactFields(input, allowlist);
   if (matches.length > 0) {
     insertAuditLog(db, {
       event: `${auditEvent}_blocked_secret`,
@@ -934,6 +979,37 @@ export function parseCapturedAtOrThrow(raw: string): string {
   return parsed.toISOString();
 }
 
+/**
+ * What a restatement carries onto the fact it reaffirms, and the audit phrase for each field it
+ * actually changed. The user's latest statement wins: an anchor, source ref, or why on the
+ * restatement replaces the stored one, and a field the restatement omits says nothing new and leaves
+ * the stored value alone. Shared by both of `captureExplicit`'s reaffirm paths (a live fact, and a
+ * pending one the restatement promotes) so they cannot disagree about which fields that covers.
+ */
+function restatementUpdates(newFact: NewFact, prior: Fact): { updates: RestatementUpdates; changed: string[] } {
+  const updates: { anchor?: string; sourceRef?: string; why?: string } = {};
+  const changed: string[] = [];
+  if (typeof newFact.anchor === "string") {
+    updates.anchor = newFact.anchor;
+    if (newFact.anchor !== prior.anchor) {
+      changed.push("anchor updated");
+    }
+  }
+  if (typeof newFact.source_ref === "string") {
+    updates.sourceRef = newFact.source_ref;
+    if (newFact.source_ref !== prior.source_ref) {
+      changed.push("source ref updated");
+    }
+  }
+  if (typeof newFact.why === "string") {
+    updates.why = newFact.why;
+    if (newFact.why !== (prior.why ?? null)) {
+      changed.push("why updated");
+    }
+  }
+  return { updates, changed };
+}
+
 function applyOptionalFields(
   target: NewFact,
   input: CaptureExplicitInput,
@@ -950,6 +1026,9 @@ function applyOptionalFields(
   }
   if (input.sourceRef !== undefined && input.sourceRef.trim().length > 0) {
     target.source_ref = input.sourceRef.trim();
+  }
+  if (input.why !== undefined) {
+    target.why = input.why.trim();
   }
   // Recorded for every scope, not just `path`/`project`: `retrieval.ts`'s `anchorRootFor` needs a
   // capture-time root to evaluate a `scope="path"` fact's anchor against (its `scopeRoot` is the
@@ -1105,22 +1184,12 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
       // replaces whatever the existing row had, rather than being silently discarded (see
       // reaffirmFact's doc comment). Omitted here means "say nothing new" -- the existing value,
       // anchor included, is left untouched.
-      const anchorChanged = newFact.anchor !== undefined && newFact.anchor !== existing.anchor;
-      const sourceRefChanged = newFact.source_ref !== undefined && newFact.source_ref !== existing.source_ref;
-      const refreshed = reaffirmFact(db, existing.id, new Date(), {
-        ...(newFact.anchor !== undefined && newFact.anchor !== null ? { anchor: newFact.anchor } : {}),
-        ...(newFact.source_ref !== undefined && newFact.source_ref !== null ? { sourceRef: newFact.source_ref } : {}),
-      });
+      const restated = restatementUpdates(newFact, existing);
+      const refreshed = reaffirmFact(db, existing.id, new Date(), restated.updates);
       if (refreshed === undefined) {
         throw new CaptureValidationError(`fact ${existing.id} vanished while being reaffirmed`);
       }
-      const refreshedFields = ["captured_at and confidence refreshed"];
-      if (anchorChanged) {
-        refreshedFields.push("anchor updated");
-      }
-      if (sourceRefChanged) {
-        refreshedFields.push("source ref updated");
-      }
+      const refreshedFields = ["captured_at and confidence refreshed", ...restated.changed];
       insertAuditLog(db, {
         event: "capture_reaffirmed",
         factId: refreshed.id,
@@ -1140,12 +1209,8 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
     // `status_changed_at`, and audit entry rather than being silently left stranded in the queue.
     const [primary, ...duplicates] = findReaffirmablePendingFacts(db, newFact);
     if (primary !== undefined) {
-      const anchorChanged = newFact.anchor !== undefined && newFact.anchor !== primary.anchor;
-      const sourceRefChanged = newFact.source_ref !== undefined && newFact.source_ref !== primary.source_ref;
-      const refreshed = reaffirmFact(db, primary.id, new Date(), {
-        ...(newFact.anchor !== undefined && newFact.anchor !== null ? { anchor: newFact.anchor } : {}),
-        ...(newFact.source_ref !== undefined && newFact.source_ref !== null ? { sourceRef: newFact.source_ref } : {}),
-      });
+      const restated = restatementUpdates(newFact, primary);
+      const refreshed = reaffirmFact(db, primary.id, new Date(), restated.updates);
       if (refreshed === undefined) {
         throw new CaptureValidationError(`fact ${primary.id} vanished while being reaffirmed`);
       }
@@ -1166,13 +1231,7 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
             "sentence, superseded when the primary was promoted via explicit restatement.",
         });
       }
-      const refreshedFields = ["captured_at and confidence refreshed", "promoted from pending to active"];
-      if (anchorChanged) {
-        refreshedFields.push("anchor updated");
-      }
-      if (sourceRefChanged) {
-        refreshedFields.push("source ref updated");
-      }
+      const refreshedFields = ["captured_at and confidence refreshed", "promoted from pending to active", ...restated.changed];
       if (duplicates.length > 0) {
         refreshedFields.push(`${duplicates.length} duplicate pending suggestion${duplicates.length === 1 ? "" : "s"} superseded`);
       }

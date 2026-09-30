@@ -244,7 +244,7 @@ function auditValuePreview(value: string | number | null | undefined): string {
  * `undoEdit` replays through `updateFact`. One list here means a field added to `FactUpdate` only
  * has to be added once for all three to pick it up, instead of three lists silently drifting apart.
  */
-const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "scope", "scopeRoot", "scopeRepo", "captureRoot", "status", "confidence"] as const;
+const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "why", "scope", "scopeRoot", "scopeRepo", "captureRoot", "status", "confidence"] as const;
 type EditableFactField = (typeof EDITABLE_FACT_FIELDS)[number];
 
 function isEditableFactField(field: string): field is EditableFactField {
@@ -257,7 +257,7 @@ function isEditableFactField(field: string): field is EditableFactField {
  * enums, `scopeRoot`/`scopeRepo` are filesystem paths, and `confidence` is a number: none of those
  * are worth running through pattern/entropy screening.
  */
-const AUDIT_SCREENED_FIELDS: ReadonlySet<EditableFactField> = new Set(["text", "subject", "value", "anchor"]);
+const AUDIT_SCREENED_FIELDS: ReadonlySet<EditableFactField> = new Set(["text", "subject", "value", "anchor", "why"]);
 
 /**
  * Prefix stamped onto a prior value that tripped secret screening on its way into the audit log.
@@ -858,6 +858,7 @@ function formatFactDetail(
     `scope: ${fact.scope}${scopeRoot !== null ? ` (${scopeRoot})` : ""}`,
     `source_type: ${fact.source_type}`,
     `source_ref: ${fact.source_ref ?? "(none)"}`,
+    `why: ${fact.why ?? "(none)"}`,
     `captured_at: ${fact.captured_at}`,
     `anchor: ${fact.anchor ?? "(none)"}  freshness=${freshness}`,
     confidenceLine,
@@ -976,6 +977,7 @@ interface ExportedFactJson {
   readonly captureRoot: string | null;
   readonly source_type: Fact["source_type"];
   readonly source_ref: string | null;
+  readonly why: string | null;
   readonly captured_at: string;
   readonly anchor: string | null;
   readonly status: FactStatus;
@@ -1010,6 +1012,7 @@ function factToExportJson(
     captureRoot: fact.captureRoot ?? null,
     source_type: fact.source_type,
     source_ref: fact.source_ref,
+    why: fact.why ?? null,
     captured_at: fact.captured_at,
     anchor: fact.anchor,
     status: fact.status,
@@ -2141,6 +2144,7 @@ interface RememberCliOptions {
   readonly anchor?: string;
   readonly scope: string;
   readonly sourceRef?: string;
+  readonly why?: string;
   readonly root?: string;
   readonly path?: string;
 }
@@ -2237,6 +2241,7 @@ interface EditCliOptions {
   readonly subject?: string;
   readonly value?: string;
   readonly anchor?: string;
+  readonly why?: string;
   readonly scope?: string;
   readonly root?: string;
   readonly path?: string;
@@ -2395,6 +2400,7 @@ export function buildProgram(): Command {
     .option("--anchor <predicate>", "Read-only anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "global, project, or path", "global")
     .option("--source-ref <ref>", "Reference to the originating conversation/message")
+    .option("--why <reason>", "Why this holds -- the reason a later session should not relitigate it (shown beside the fact on recall)")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
     .option("--path <file>", "File or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
     .action(
@@ -2412,6 +2418,7 @@ export function buildProgram(): Command {
           ...(options.value !== undefined ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+          ...(options.why !== undefined ? { why: options.why } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
         const { fact, reaffirmed, promotedFromPending, supersededPendingDuplicateCount } = await withDb((db) =>
@@ -2447,6 +2454,7 @@ export function buildProgram(): Command {
     .option("--anchor <predicate>", "Read-only anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "global, project, or path", "global")
     .option("--source-ref <ref>", "Reference to the originating conversation/message")
+    .option("--why <reason>", "Why this holds -- the reason a later session should not relitigate it (shown beside the fact on recall)")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
     .option("--path <file>", "File or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
     .action(
@@ -2464,6 +2472,7 @@ export function buildProgram(): Command {
           ...(options.value !== undefined ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+          ...(options.why !== undefined ? { why: options.why } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
         const { fact, sighted, alreadyKnown } = await withDb((db) => captureSuggested(db, input));
@@ -3247,11 +3256,12 @@ export function buildProgram(): Command {
 
   program
     .command("edit <id>")
-    .description("Change a fact's text, subject/value, anchor, or scope")
+    .description("Change a fact's text, subject/value, anchor, why, or scope")
     .option("--text <text>", "New fact text")
     .option("--subject <key>", "New normalized subject key (requires --value)")
     .option("--value <value>", "New value for the subject (requires --subject)")
     .option("--anchor <predicate>", "New anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
+    .option("--why <reason>", "New reason the fact holds; an empty string clears it")
     .option("--scope <scope>", "New scope: global, project, or path")
     .option("--root <path>", "Project root for .mem/allowlist and (if --scope is given) scope binding (default: current directory)")
     .option("--path <file>", "File or directory to bind to, resolved against --root (required when --scope path, rejected otherwise)")
@@ -3259,7 +3269,7 @@ export function buildProgram(): Command {
     .option("--undo", "Reverse the most recent edit to this fact, restoring the fields it touched")
     .action(
       guard(async (id: string, options: EditCliOptions) => {
-        const fieldOptionsUsed = (["text", "subject", "value", "anchor", "scope"] as const).filter(
+        const fieldOptionsUsed = (["text", "subject", "value", "anchor", "why", "scope"] as const).filter(
           (name) => options[name] !== undefined
         );
         if (options.undo === true) {
@@ -3292,6 +3302,8 @@ export function buildProgram(): Command {
           ...(hasSubject ? { subject: options.subject } : {}),
           ...(hasValue ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
+          // An empty --why is how a reason is removed, the way an edit clears any optional field.
+          ...(options.why !== undefined ? { why: options.why.trim() === "" ? null : options.why.trim() } : {}),
           ...(scope !== undefined ? { scope } : {}),
           ...(scope !== undefined
             ? { scopeRoot: scope === "global" ? null : scope === "path" ? pathScopeRoot : root }
@@ -3310,7 +3322,7 @@ export function buildProgram(): Command {
           ...(scope !== undefined || options.anchor !== undefined ? { captureRoot: root } : {}),
         };
         if (Object.keys(patch).length === 0) {
-          throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --scope");
+          throw new UsageError("nothing to edit -- provide at least one of --text, --subject/--value, --anchor, --why, --scope");
         }
         validateFactEditOrThrow(patch);
 
@@ -3325,6 +3337,7 @@ export function buildProgram(): Command {
               subject: patch.subject,
               value: patch.value,
               anchor: patch.anchor,
+              why: patch.why,
               root,
             } as CaptureExplicitInput,
             root,

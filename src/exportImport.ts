@@ -24,7 +24,7 @@ import { isAbsolute, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot } from "./anchors.js";
-import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenForSecrets, validateFactFieldsOrThrow } from "./capture.js";
+import { CaptureValidationError, InvalidAnchorError, loadAllowlist, screenFactFields, validateFactFieldsOrThrow } from "./capture.js";
 import { insertAuditLog, SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
@@ -329,6 +329,13 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   } else if (obj["source_ref"] === null) {
     newFact.source_ref = null;
   }
+  // Absent on any export written before the column existed, which leaves the fact with no recorded
+  // reason -- the same as a capture that never passed --why.
+  if (typeof obj["why"] === "string") {
+    newFact.why = obj["why"];
+  } else if (obj["why"] === null) {
+    newFact.why = null;
+  }
   if (typeof obj["captured_at"] === "string") {
     newFact.captured_at = obj["captured_at"];
   }
@@ -375,9 +382,12 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     // Plain conditional assignment (not spreading possibly-`undefined` values into the literal),
     // same discipline as this file's own newFact construction above: tsconfig's
     // exactOptionalPropertyTypes rejects writing `undefined` into an optional `string | null` field.
-    const fieldsPatch: { text?: string; subject?: string | null; value?: string | null } = {
+    const fieldsPatch: { text?: string; subject?: string | null; value?: string | null; why?: string | null } = {
       text: newFact.text,
     };
+    if (newFact.why !== undefined) {
+      fieldsPatch.why = newFact.why;
+    }
     if (newFact.subject !== undefined) {
       fieldsPatch.subject = newFact.subject;
     }
@@ -518,16 +528,7 @@ export function planImportFromJson(options: { readonly path: string; readonly ro
     // can reproduce the real import's refusal reason verbatim. Duplicate-id detection is the one
     // check it cannot reproduce -- that needs the store -- and `formatImportResult` says so rather
     // than letting a clean-looking plan imply there is nothing left to find.
-    const matches = screenForSecrets(
-      {
-        text: entry.newFact.text,
-        subject: entry.newFact.subject,
-        value: entry.newFact.value,
-        anchor: entry.newFact.anchor,
-        sourceRef: entry.newFact.source_ref,
-      },
-      allowlist
-    );
+    const matches = screenFactFields({ ...entry.newFact, sourceRef: entry.newFact.source_ref }, allowlist);
     if (matches.length > 0) {
       return {
         status: "skipped_error",
@@ -642,16 +643,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
       });
       return;
     }
-    const matches = screenForSecrets(
-      {
-        text: entry.newFact.text,
-        subject: entry.newFact.subject,
-        value: entry.newFact.value,
-        anchor: entry.newFact.anchor,
-        sourceRef: entry.newFact.source_ref,
-      },
-      allowlist
-    );
+    const matches = screenFactFields({ ...entry.newFact, sourceRef: entry.newFact.source_ref }, allowlist);
     if (matches.length > 0) {
       skips.push({
         index,

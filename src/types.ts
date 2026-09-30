@@ -103,6 +103,13 @@ export interface Fact {
   readonly captured_at: string;
   /** Read-only filesystem/git predicate string (Section 3), or null if the fact has no anchor. */
   readonly anchor: string | null;
+  /**
+   * The rationale behind the fact -- chiefly a decision's or a correction's reason -- or null when
+   * none was recorded. Surfaced beside the claim so a later session reads why it holds instead of
+   * relitigating it. Optional for the same fixture back-compat reason as `epoch` below; storage.ts's
+   * `rowToFact` always populates it from the real `facts.why` column.
+   */
+  readonly why?: string | null;
   readonly status: FactStatus;
   /** Confidence in [0, 1]. */
   readonly confidence: number;
@@ -210,6 +217,8 @@ export interface NewFact {
   /** ISO 8601 timestamp. Defaults to `new Date().toISOString()` when omitted. */
   captured_at?: string;
   anchor?: string | null;
+  /** See `Fact.why`. Defaults to `null` when omitted. */
+  why?: string | null;
   /** Defaults to `'active'` when omitted. */
   status?: FactStatus;
   /** Defaults to `1.0` when omitted. */
@@ -245,6 +254,7 @@ export interface FactUpdate {
    */
   captureRoot?: string | null;
   anchor?: string | null;
+  why?: string | null;
   status?: FactStatus;
   confidence?: number;
   embedding?: Float32Array | null;

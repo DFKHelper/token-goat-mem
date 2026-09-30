@@ -381,6 +381,13 @@ function scopeBindingMatchesCandidate(
   return scope === "project" && factScopeRepo !== null && factScopeRepo === candidateScopeRepo;
 }
 
+/** The fields a restatement carries that replace the reaffirmed fact's own; `undefined` leaves a field untouched. */
+export interface RestatementUpdates {
+  readonly anchor?: string;
+  readonly sourceRef?: string;
+  readonly why?: string;
+}
+
 /**
  * Restarts a fact's clock: `captured_at` moves to now and confidence is restored to full.
  *
@@ -391,7 +398,7 @@ function scopeBindingMatchesCandidate(
  * Narrow on purpose rather than a `captured_at` field on {@link FactUpdate}: that clock decides
  * decay and precedence, and `mem edit` has no business moving it.
  *
- * Also applies `updates.anchor`/`updates.sourceRef` when the caller restates the same fact
+ * Also applies `updates.anchor`/`updates.sourceRef`/`updates.why` when the caller restates the same fact
  * carrying a new one.
  *
  * The user's latest statement wins, for the same reason `captured_at` and `confidence` already
@@ -405,7 +412,7 @@ export function reaffirmFact(
   db: Db,
   id: string,
   at: Date = new Date(),
-  updates: { anchor?: string; sourceRef?: string } = {}
+  updates: RestatementUpdates = {}
 ): Fact | undefined {
   const tx = db.transaction((): Fact | undefined => {
     const epoch = bumpEpoch(db);
@@ -418,6 +425,10 @@ export function reaffirmFact(
     if (updates.sourceRef !== undefined) {
       sets.push("source_ref = ?");
       params.push(updates.sourceRef);
+    }
+    if (updates.why !== undefined) {
+      sets.push("why = ?");
+      params.push(updates.why);
     }
     params.push(id);
     const changed = db.prepare(`UPDATE facts SET ${sets.join(", ")} WHERE id = ?`).run(...params).changes;
@@ -480,6 +491,7 @@ interface FactRow {
   terms_checked_at: string | null;
   sightings: number;
   text_hash: string | null;
+  why: string | null;
 }
 
 function rowToFact(row: FactRow): Fact {
@@ -497,6 +509,7 @@ function rowToFact(row: FactRow): Fact {
     source_ref: row.source_ref,
     captured_at: row.captured_at,
     anchor: row.anchor,
+    why: row.why,
     status: row.status as Fact["status"],
     confidence: row.confidence,
     embedding: row.embedding === null ? null : unpackEmbedding(row.embedding),
@@ -537,8 +550,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
   const embeddingBlob = fact.embedding === undefined || fact.embedding === null ? null : packEmbedding(fact.embedding);
 
   const insert = db.prepare(
-    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at, sightings, text_hash)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, scope_repo, capture_root, source_type, source_ref, captured_at, anchor, status, confidence, embedding, epoch, status_changed_at, prior_status, last_surfaced_at, terms_checked_at, sightings, text_hash, why)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const tx = db.transaction((): void => {
@@ -594,7 +607,8 @@ export function insertFact(db: Db, fact: NewFact): Fact {
       // needs to preserve a nonzero count. Only `recordSighting` (src/capture.ts) increments it,
       // strictly after this row already exists.
       0,
-      hashFactText(fact.text)
+      hashFactText(fact.text),
+      fact.why ?? null
     );
     replaceFactTermsInternal(db, id, extractFacets(fact.text), false);
   });
@@ -825,6 +839,10 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
   if (patch.anchor !== undefined) {
     sets.push("anchor = ?");
     params.push(patch.anchor);
+  }
+  if (patch.why !== undefined) {
+    sets.push("why = ?");
+    params.push(patch.why);
   }
   if (patch.status !== undefined) {
     sets.push("status = ?");

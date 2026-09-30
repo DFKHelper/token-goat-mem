@@ -33,7 +33,7 @@ All memory operations are explicit and auditable:
 - `mem forget <id>` — soft-delete a fact (marks superseded, kept for audit) and audit-log it
 - `mem pin <id>` — exempt a fact from time-decay (still subject to anchor-contradiction checks) and reserve it one of the 2 `--hint-format` slots held for pinned facts ahead of the per-kind caps; past those two, pins compete on relevance like anything else
 - `mem used <id...> --session-id <id>` — record that facts recalled in that session were actually useful; feeds recall ranking as a third RRF rank list
-- `mem edit <id>` — modify fact text, subject/value, anchor, or scope (`--force` is required for a `source_type=user` fact and is recorded in the audit log; `--undo` reverses the most recent edit, restoring only the fields it touched)
+- `mem edit <id>` — modify fact text, subject/value, anchor, why (`--why ""` clears it), or scope (`--force` is required for a `source_type=user` fact and is recorded in the audit log; `--undo` reverses the most recent edit, restoring only the fields it touched)
 - `mem show <id>` — view a fact and its full provenance, including `history`: every audit row for the fact, oldest first. An edited fact's previous text is recorded there in full and nowhere else, since `mem edit` overwrites in place
 - `mem list` — all facts, filtered by status/kind/subject/scope
 - `mem log` — the store-wide audit timeline, newest first, each line prefixed with the fact's short id (`--fact <id>` narrows to one fact and also resolves facts `gc` has deleted, since audit rows outlive them; `--event <name>` matches an event or its `<name>_*` family; `--age-days`, `--limit`, `--json`)

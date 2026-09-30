@@ -50,6 +50,8 @@ token-goat-mem is installed (`mem` on PATH).
   `mem remember "<short fact>" --kind preference|decision|fact|correction
   --scope project --root .`. Use --subject/--value for anything that can be
   contradicted later.
+- Add `--why "<reason>"` to a decision or correction so a later session
+  reads the reason before relitigating it.
 - Add `--anchor "<predicate> <args>"` when a fact can be re-verified later
   instead of staying caveated forever, e.g.
   `--anchor "file-exists pnpm-lock.yaml"`. Predicates: file-exists,
