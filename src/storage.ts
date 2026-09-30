@@ -1568,3 +1568,21 @@ function bumpEpoch(db: Db): number {
   writeEpoch(db, next);
   return next;
 }
+
+
+/**
+ * Moves the epoch strictly past both its current value and `floor`, returning the new value.
+ *
+ * The one write that replaces the whole store rather than a fact in it -- `mem restore` -- needs
+ * this: the restored file carries its own, possibly lower, epoch, and a cache keyed on the epoch
+ * (token-goat's) would otherwise keep serving what it cached before the restore. `floor` is the
+ * epoch the store had before it was replaced.
+ */
+export function advanceEpochPast(db: Db, floor: number): number {
+  const tx = db.transaction((): number => {
+    const next = Math.max(getEpoch(db), floor) + 1;
+    writeEpoch(db, next);
+    return next;
+  });
+  return tx.immediate(); // read-then-write under WAL (getEpoch reads); see insertFact.
+}

@@ -10,6 +10,7 @@ import { describe, it, expect } from "vitest";
 import { buildProgram } from "../../src/cli.js";
 
 const EXPECTED_COMMANDS = [
+  "backup",
   "consolidate",
   "doctor",
   "dream",
@@ -27,6 +28,7 @@ const EXPECTED_COMMANDS = [
   "recall",
   "reflect",
   "remember",
+  "restore",
   "review",
   "scan-session",
   "show",

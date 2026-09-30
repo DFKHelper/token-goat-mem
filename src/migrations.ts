@@ -263,6 +263,15 @@ export const MIGRATIONS: readonly MigrationStep[] = [
 ];
 
 /**
+ * Whether `db` is behind the newest migration -- i.e. whether `runMigrations` is about to rewrite it.
+ * Read before migrating so src/backup.ts can copy the store as it was first.
+ */
+export function hasPendingMigrations(db: Database.Database): boolean {
+  const from = db.pragma("user_version", { simple: true }) as number;
+  return MIGRATIONS.some((step) => step.version > from);
+}
+
+/**
  * Stamps `PRAGMA user_version`. `PRAGMA user_version = N` cannot be parameterised -- SQLite only
  * accepts a literal there -- so this is the one place that pragma is ever written, and it refuses
  * anything but a non-negative integer this module produced itself (a `MigrationStep.version`),

@@ -22,3 +22,16 @@ export function ageInDays(from: string | number, now: Date): number {
   const fromMs = typeof from === "number" ? from : Date.parse(from);
   return (now.getTime() - fromMs) / MS_PER_DAY;
 }
+
+/** A compact, human-readable age (`<1m`, `5m`, `3h`, `2d`) for status lines such as `mem doctor`'s. */
+export function formatAge(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) {
+    return "<1m";
+  }
+  if (minutes < 60) {
+    return `${String(minutes)}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${String(hours)}h` : `${String(Math.floor(ms / MS_PER_DAY))}d`;
+}

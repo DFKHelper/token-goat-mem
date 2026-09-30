@@ -11,7 +11,7 @@ import { join } from "node:path";
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
-import { readFileWithErrorMapping, statFileWithErrorMapping } from "../../src/fileUtils.js";
+import { formatBytes, readFileWithErrorMapping, statFileWithErrorMapping } from "../../src/fileUtils.js";
 
 class TestError extends Error {
   constructor(message: string) {
@@ -89,5 +89,15 @@ describe("statFileWithErrorMapping", () => {
   it("maps ENOENT through the same message as the read path", () => {
     const path = join(dir, "missing.txt");
     expect(() => statFileWithErrorMapping(path, TestError)).toThrow(`file not found: ${path}`);
+  });
+});
+
+describe("formatBytes", () => {
+  it("uses binary units with one decimal once past a kibibyte", () => {
+    expect(formatBytes(0)).toBe("0 B");
+    expect(formatBytes(1023)).toBe("1023 B");
+    expect(formatBytes(1536)).toBe("1.5 KiB");
+    expect(formatBytes(5 * 1024 * 1024)).toBe("5.0 MiB");
+    expect(formatBytes(3 * 1024 ** 3)).toBe("3.0 GiB");
   });
 });

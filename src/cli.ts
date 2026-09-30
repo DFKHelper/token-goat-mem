@@ -53,6 +53,7 @@ import {
 } from "./capture.js";
 import { detectContradictions } from "./contradiction.js";
 import { ageInDays, daysAgoIso } from "./timeUtils.js";
+import { registerBackupCommands } from "./backupCommands.js";
 import { registerDoctorCommand } from "./doctor.js";
 import { registerReflectCommand } from "./reflect.js";
 import { findRelatedFacts, type RelatedFact } from "./related.js";
@@ -3174,6 +3175,7 @@ export function buildProgram(): Command {
     );
 
   registerDoctorCommand(program);
+  registerBackupCommands(program);
 
   program
     .command("init <tool>")

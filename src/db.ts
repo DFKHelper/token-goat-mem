@@ -18,45 +18,15 @@
 
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
-import { runMigrations } from "./migrations.js";
-import { chmodSync, mkdirSync } from "node:fs";
+import { hasPendingMigrations, runMigrations } from "./migrations.js";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+
+import { snapshotOnOpen } from "./backup.js";
+import { MEM_DB_MODE, MEM_HOME_MODE, restrictPermissions } from "./fileUtils.js";
 
 const DB_FILE_NAME = "mem.db";
-
-/**
- * Permissions mem forces on its own home directory and database file on POSIX systems.
- *
- * Facts are exactly the class of data that must not be world-readable: project internals, decisions,
- * and whatever personal detail survived capture-time secret screening (which targets credentials, not
- * PII). Left to a default umask of 022 the directory would be 0755 and the database 0644 -- readable
- * by every local account on a shared host -- so the mode is stated here rather than inherited.
- *
- * Windows is excluded deliberately: `chmod` there only toggles the read-only bit and would say
- * nothing about who can read the file, while the profile ACL `~/.mem` inherits already restricts it
- * to the owning user.
- */
-const MEM_HOME_MODE = 0o700;
-const MEM_DB_MODE = 0o600;
-
-/**
- * Tightens `path` to `mode`, or does nothing on Windows or if the chmod is refused.
- *
- * Best-effort by design: a database mem can open but cannot chmod (an unusual ownership or mount
- * setup) is still a working database, and failing the whole CLI over a permission hardening step
- * would trade a confidentiality improvement for an availability regression.
- */
-function restrictPermissions(path: string, mode: number): void {
-  if (process.platform === "win32") {
-    return;
-  }
-  try {
-    chmodSync(path, mode);
-  } catch {
-    // Intentionally silent: see the doc comment above.
-  }
-}
 
 /**
  * Resolves mem's home directory. `TOKEN_GOAT_MEM_HOME` overrides the default
@@ -75,6 +45,24 @@ export function resolveMemHome(): string {
 /** Resolves the sqlite file path inside a mem home directory (default: `resolveMemHome()`). */
 export function resolveDbPath(home: string = resolveMemHome()): string {
   return join(home, DB_FILE_NAME);
+}
+
+/** Overrides where snapshots of the store are written (see `resolveBackupDir`). */
+export const BACKUP_DIR_ENV = "TOKEN_GOAT_MEM_BACKUP_DIR";
+
+/**
+ * Resolves where snapshots of the store live: `TOKEN_GOAT_MEM_BACKUP_DIR` if set, otherwise a sibling
+ * of the mem home named after it (`~/.mem-backups` for the default `~/.mem`).
+ *
+ * A sibling rather than a subdirectory so the backups outlive the thing they back up: deleting
+ * `~/.mem` -- or `~/.claude`, which never held the store -- leaves every snapshot where it was.
+ */
+export function resolveBackupDir(home: string = resolveMemHome()): string {
+  const override = process.env[BACKUP_DIR_ENV];
+  if (typeof override === "string" && override.trim().length > 0) {
+    return override;
+  }
+  return join(dirname(home), `${basename(home)}-backups`);
 }
 
 /**
@@ -146,6 +134,8 @@ CREATE TABLE IF NOT EXISTS meta (
  */
 export function openDb(dbPath: string = resolveDbPath()): Database.Database {
   const home = dirname(dbPath);
+  // Read before `new Database` creates the file: a store this call creates has nothing to snapshot.
+  const existed = existsSync(dbPath);
   // `mode` applies only when mkdir actually creates the directory, so an existing home -- including
   // one created 0755 by an earlier version of mem -- is tightened explicitly on the next line.
   mkdirSync(home, { recursive: true, mode: MEM_HOME_MODE });
@@ -171,6 +161,11 @@ export function openDb(dbPath: string = resolveDbPath()): Database.Database {
     db.exec(FACTS_SCHEMA);
     db.exec(AUDIT_LOG_SCHEMA);
     db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+    // Before migrations, so a store about to be migrated is copied as it was (src/backup.ts). Never
+    // throws: a snapshot that cannot be written must not cost the caller its database.
+    if (existed) {
+      snapshotOnOpen(db, { dir: resolveBackupDir(home), pendingMigrations: hasPendingMigrations(db) });
+    }
     // db.ts owns the whole-database `PRAGMA user_version` counter: every table any module adds --
     // `sources`/`recall_log`/`fact_terms`/`anchor_cache` included -- ends up versioned from the one
     // place every connection passes through, rather than only being migrated by whichever module's

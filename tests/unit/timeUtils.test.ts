@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ageInDays, daysAgoIso, MS_PER_DAY } from "../../src/timeUtils.js";
+import { ageInDays, daysAgoIso, formatAge, MS_PER_DAY } from "../../src/timeUtils.js";
 
 const NOW = new Date("2026-09-30T12:00:00.000Z");
 
@@ -23,5 +23,18 @@ describe("ageInDays", () => {
 
   it("round-trips with daysAgoIso", () => {
     expect(ageInDays(daysAgoIso(42, NOW), NOW)).toBe(42);
+  });
+});
+
+describe("formatAge", () => {
+  it("reads in the largest whole unit that is at least one", () => {
+    expect(formatAge(30_000)).toBe("<1m");
+    expect(formatAge(5 * 60_000)).toBe("5m");
+    expect(formatAge(3 * 3_600_000)).toBe("3h");
+    expect(formatAge(2 * MS_PER_DAY + 3_600_000)).toBe("2d");
+  });
+
+  it("clamps a negative age -- a clock that moved backwards -- to the smallest bucket", () => {
+    expect(formatAge(-5_000)).toBe("<1m");
   });
 });

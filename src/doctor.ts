@@ -7,12 +7,14 @@
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
 
+import { AUTO_SNAPSHOT_INTERVAL_MS, listSnapshots } from "./backup.js";
 import { extractErrorMessage, guard, withDb } from "./cliRuntime.js";
-import { resolveDbPath } from "./db.js";
+import { resolveBackupDir, resolveDbPath } from "./db.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
 import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
+import { formatAge } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
 import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands } from "./wiring.js";
 
@@ -220,6 +222,33 @@ function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: numbe
 }
 
 /** Registers `mem doctor` on the CLI program. */
+/**
+ * `mem doctor`'s backups line. Automatic snapshots are taken silently and fail silently (a backup
+ * that cannot be written must not stop recall), so this line is the only place a broken backup
+ * directory shows up -- before the day the store is lost, not after. A store never written to has
+ * nothing to back up, so an empty directory is only a warning once there is something to lose.
+ */
+export function describeBackups(dir: string, epoch: number, now: Date = new Date()): string {
+  let snapshots;
+  try {
+    snapshots = listSnapshots(dir);
+  } catch (error) {
+    return `backups: cannot read ${dir} (${extractErrorMessage(error)})`;
+  }
+  const [newest] = snapshots;
+  if (newest === undefined) {
+    return epoch === 0
+      ? `backups: none in ${dir} (nothing written yet)`
+      : `backups: none in ${dir} -- snapshots are not being written; check that ${dir} is a writable directory, then run \`mem backup\``;
+  }
+  const age = now.getTime() - newest.takenAt.getTime();
+  const line = `backups: ${dir} -- ${String(snapshots.length)} snapshot${snapshots.length === 1 ? "" : "s"}, newest ${formatAge(age)} ago (epoch ${String(newest.epoch)})`;
+  // A day past the interval with writes since means an automatic snapshot was due and did not land.
+  return age > 2 * AUTO_SNAPSHOT_INTERVAL_MS && newest.epoch !== epoch
+    ? `${line} -- automatic snapshots may be failing; check that ${dir} is writable, then run \`mem backup\``
+    : line;
+}
+
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
@@ -282,6 +311,7 @@ export function registerDoctorCommand(program: Command): void {
               relocated.length,
               relocated.reduce((sum, row) => sum + row.c, 0)
             ),
+            describeBackups(resolveBackupDir(), epoch),
             ...describeHookHealth(),
           ].join("\n");
         });

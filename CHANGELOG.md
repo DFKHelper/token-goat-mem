@@ -80,6 +80,8 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **The store is backed up outside the mem home.** Snapshots land in `~/.mem-backups` (override: `TOKEN_GOAT_MEM_BACKUP_DIR`), so deleting `~/.mem` -- or `~/.claude`, which never held the store -- no longer loses every fact. Opening an existing store takes an automatic `VACUUM INTO` snapshot at most once a day and only when it has changed (the newest 14 are kept), and always before a pending schema migration. `mem backup` takes one by hand and `mem backup --list` lists them; `mem restore <snapshot>` validates a snapshot, saves the store it replaces as a `pre-restore` snapshot, and advances the epoch. A snapshot that cannot be written never fails the command that opened the store; `mem doctor` gains a `backups:` line that reports it instead.
+
 - **`mem scan-session` can file a `correction`.** Its trigger table yielded `fact`, `preference` and
   `decision` and had no shape that produced a `correction`, while the block mem installs tells the
   agent to persist exactly those three kinds plus corrections. The scanner was structurally unable to

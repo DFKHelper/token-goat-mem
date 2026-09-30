@@ -18,8 +18,16 @@ const RETRIEVAL_BUDGET_ENV = "TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS";
 /** A soft budget no test machine can exceed. */
 const NO_TRUNCATION_BUDGET_MS = "3600000";
 
+/**
+ * Keeps every snapshot `openDb` takes inside the temp home. Left unset, the default backup directory
+ * is a *sibling* of the home (src/db.ts's `resolveBackupDir`), which would scatter
+ * `mem-test-*-backups` directories across the OS temp dir that the cleanup below never removes.
+ */
+const BACKUP_DIR_ENV = "TOKEN_GOAT_MEM_BACKUP_DIR";
+
 let tempDir: string;
 let priorRetrievalBudget: string | undefined;
+let priorBackupDir: string | undefined;
 
 beforeAll(() => {
   // Create isolated temp directory for tests
@@ -27,6 +35,8 @@ beforeAll(() => {
   process.env.TOKEN_GOAT_MEM_HOME = tempDir;
   priorRetrievalBudget = process.env[RETRIEVAL_BUDGET_ENV];
   process.env[RETRIEVAL_BUDGET_ENV] = NO_TRUNCATION_BUDGET_MS;
+  priorBackupDir = process.env[BACKUP_DIR_ENV];
+  process.env[BACKUP_DIR_ENV] = join(tempDir, "backups");
 });
 
 afterAll(() => {
@@ -34,6 +44,11 @@ afterAll(() => {
     delete process.env[RETRIEVAL_BUDGET_ENV];
   } else {
     process.env[RETRIEVAL_BUDGET_ENV] = priorRetrievalBudget;
+  }
+  if (priorBackupDir === undefined) {
+    delete process.env[BACKUP_DIR_ENV];
+  } else {
+    process.env[BACKUP_DIR_ENV] = priorBackupDir;
   }
   // Clean up temp directory
   if (tempDir) {

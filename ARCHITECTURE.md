@@ -139,9 +139,10 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 
 | Module | Layer | Role | Key exports |
 | --- | --- | --- | --- |
+| `src/backupCommands.ts` | Entry | `mem backup` and `mem restore`: the hand-driven side of the snapshots src/backup.ts takes on its own | registerBackupCommands |
 | `src/cli.ts` | Entry | Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list) | buildProgram, run |
 | `src/cliRuntime.ts` | Entry | The runtime every `mem` command action shares: the exit-code contract, the error-to-exit-code mapping, the `guard` wrapp | EXIT_SUCCESS, EXIT_USER_ERROR, EXIT_INTERNAL_ERROR, UsageError, exitCodeForError |
-| `src/doctor.ts` | Entry | `mem doctor`: the read-only environment and store health check | registerDoctorCommand |
+| `src/doctor.ts` | Entry | `mem doctor`: the read-only environment and store health check | describeBackups, registerDoctorCommand |
 | `src/index.ts` | Entry | Library entry point | — |
 | `src/main.ts` | Entry | Package executable | — |
 | `src/reflect.ts` | Entry | `mem reflect`: the end-of-session worklist that turns pending suggestions into decisions, update-before-create | registerReflectCommand |
@@ -161,7 +162,8 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/reviewActions.ts` | Capture | The status transitions a human drives through `mem review` (promote, reject, undo a rejection), and the two primitives e | setStatusWithAudit, REVIEW_RESOLVABLE_STATUSES, reconcileContradictions, PromotionOutcome, promotePending |
 | `src/sessionCapture.ts` | Capture | Files a session transcript's durable-statement candidates as pending suggestions -- the store side of `mem scan-session` | transcriptSourceRefPrefix, FileTranscriptOptions, fileTranscriptSuggestions |
 | `src/sessionScan.ts` | Capture | Deterministic extraction of durable-preference candidates from a session transcript | MAX_SCANNED_TURNS, MAX_CANDIDATE_LENGTH, Candidate, userTurnText, extractCandidates |
-| `src/db.ts` | Storage | SQLite connection and schema for the `facts` table (design plan Section 3), plus two small infra tables every write path | resolveMemHome, resolveDbPath, openDb, SUPERSEDED_BY_FACT_PREFIX, SUPERSEDED_AS_DUPLICATE_PREFIX |
+| `src/backup.ts` | Storage | Snapshots of the mem store, kept outside the mem home so they outlive it (`resolveBackupDir` in src/db.ts: `~/.mem-backu | SnapshotReason, Snapshot, AUTO_SNAPSHOT_INTERVAL_MS, AUTO_SNAPSHOTS_KEPT, snapshotFileName |
+| `src/db.ts` | Storage | SQLite connection and schema for the `facts` table (design plan Section 3), plus two small infra tables every write path | resolveMemHome, resolveDbPath, BACKUP_DIR_ENV, resolveBackupDir, openDb |
 | `src/epoch.ts` | Storage | The write epoch's read and write primitives (design plan Section 4: "every write bumps it") | getEpoch, writeEpoch |
 | `src/migrations.ts` | Storage | Ordered schema migrations for the mem database, keyed on SQLite's own `PRAGMA user_version` | MigrationStep, MigrationResult, hasColumn, addColumn, MIGRATIONS |
 | `src/storage.ts` | Storage | Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (d | ensureStorageSchema, openStorage, createAnchorCacheStore, clearAnchorCacheStore, BufferedAnchorVerdict |
@@ -169,10 +171,10 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/integration-seam.ts` | Integration | The token-goat integration seam (design plan Section 4) | TGMEM_PROTOCOL_VERSION, TGMEM_HEADER, FOLLOW_UP_SHOW_DETAIL, FOLLOW_UP_REVIEW, TGMEM_FOOTER_LINE |
 | `src/wiring.ts` | Integration | Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets | WiringOpts, WiringFileAction, WiringChange, WiringResult, WiringPlanEntry |
 | `src/factText.ts` | Support | The normalized-text key `storage.ts` and `migrations.ts` both need for fact deduplication | normalizeFactText, hashFactText |
-| `src/fileUtils.ts` | Support | Shared filesystem error handling for imports | readFileWithErrorMapping, statFileWithErrorMapping |
+| `src/fileUtils.ts` | Support | Shared filesystem error handling for imports | MEM_HOME_MODE, MEM_DB_MODE, restrictPermissions, formatBytes, readFileWithErrorMapping |
 | `src/pathUtils.ts` | Support | Case-folds a path for comparison on filesystems that ignore case | normalizePath |
 | `src/projectIdentity.ts` | Support | Repository-relative identity for a project root, so a project-scoped fact survives the path it was captured at | PROJECT_IDENTITY_ENV, clearProjectIdentityCache, normalizeRemoteUrl, resolveProjectIdentity, identityMatches |
-| `src/timeUtils.ts` | Support | Day arithmetic shared by every age-based rule in mem: recall's `--age-days` window, preference decay, pin reconfirmation | MS_PER_DAY, daysAgoIso, ageInDays |
+| `src/timeUtils.ts` | Support | Day arithmetic shared by every age-based rule in mem: recall's `--age-days` window, preference decay, pin reconfirmation | MS_PER_DAY, daysAgoIso, ageInDays, formatAge |
 | `src/types.ts` | Support | Shared domain types for token-goat-mem | FACT_KINDS, FactKind, factNounPhrase, FACT_SCOPES, FactScope |
 
 <!-- ARCH_COMPONENTS_END -->
