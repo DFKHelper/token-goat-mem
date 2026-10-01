@@ -50,10 +50,10 @@ function textGuess(obj: Record<string, unknown> | null, index: number): string {
   return `<invalid fact at index ${index}>`;
 }
 
-/** Validates one `facts[]` entry against the minimum `NewFact`-shaped requirements (text, kind, scope, source_type, id) plus the optional fields' types, and -- when valid -- converts it into an insert-ready `NewFact` (including the JSON `embedding: number[] | null` -> `Float32Array | null` conversion, the exact inverse of `mem export`'s `Array.from(embedding)` in cli.ts). Pure: does not touch the DB or screen for secrets (that is `importFromJson`'s job, since it needs `root` for `.mem/allowlist`). `root` is used here only to bound a non-global fact's `scopeRoot` (`undefined` when the caller has no root -- e.g. `planImportFromJson`'s dry run -- in which case only the absolute-path shape is checked, not containment). */
 /** Generous ceiling on an imported fact id: a uuid is 36 characters, so this leaves room for any reasonable external id scheme while refusing an unbounded string as a primary key. */
 const MAX_IMPORTED_ID_LENGTH = 128;
 
+/** Validates one `facts[]` entry against the minimum `NewFact`-shaped requirements (text, kind, scope, source_type, id) plus the optional fields' types, and -- when valid -- converts it into an insert-ready `NewFact` (including the JSON `embedding: number[] | null` -> `Float32Array | null` conversion, the exact inverse of `mem export`'s `Array.from(embedding)` in cli.ts). Pure: does not touch the DB or screen for secrets (that is `importFromJson`'s job, since it needs `root` for `.mem/allowlist`). `root` is used here only to bound a non-global fact's `scopeRoot` (`undefined` when the caller has no root -- e.g. `planImportFromJson`'s dry run -- in which case only the absolute-path shape is checked, not containment). */
 function validateJsonFact(raw: unknown, index: number, root: string | undefined): ParsedEntry {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     const candidate: ImportCandidate = { text: textGuess(null, index), line: index + 1, sourceRef: `#${index}` };
@@ -307,7 +307,6 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   return { candidate, newFact, reason: null, supersededByRaw };
 }
 
-/** Reads and validates `path` into per-entry results (`ParsedEntry`), without touching the DB. Shared by `planImportFromJson` and `importFromJson` so envelope/shape validation only lives in one place. Throws `JsonImportError` for a whole-file problem (bad JSON, wrong `schemaVersion`, missing `facts` array); an individual bad fact is instead reflected per-entry (`newFact: null`). */
 /** Validates the envelope-level `embeddingMeta` field written by `mem export` (the model/dimension `facts[].embedding` vectors were produced by, or `null` when the exporting store never recorded one). Distinguishes three states, matching `EmbeddingMeta | null`'s own null-is-meaningful shape plus "the field does not exist at all": - absent (`undefined`): an envelope written before this field existed. The vectors it carries, if any, have unknown provenance -- never treated as if they came from the model importing them. - `null`: the exporting store had no recorded model (nothing was ever embedded there, or that store was itself already in the unlabelled state) -- also unknown provenance. - `{ model, dimension }`: known provenance, importable as-is into a store recorded under the same model/dimension, or adoptable by a store that has never recorded one of its own. A malformed value is rejected outright, same discipline as every per-fact field in `validateJsonFact`: never coerced into a shape that would make an unknown-provenance vector look labelled. */
 function validateEmbeddingMetaField(envelope: Record<string, unknown>, filePath: string): EmbeddingMeta | null | undefined {
   const raw = envelope["embeddingMeta"];
@@ -333,6 +332,7 @@ function validateEmbeddingMetaField(envelope: Record<string, unknown>, filePath:
   return { model: obj["model"], dimension: obj["dimension"] };
 }
 
+/** Reads and validates `path` into per-entry results (`ParsedEntry`), without touching the DB. Shared by `planImportFromJson` and `importFromJson` so envelope/shape validation only lives in one place. Throws `JsonImportError` for a whole-file problem (bad JSON, wrong `schemaVersion`, missing `facts` array); an individual bad fact is instead reflected per-entry (`newFact: null`). */
 function parseJsonFacts(
   path: string,
   root: string | undefined

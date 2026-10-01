@@ -36,7 +36,6 @@ export function reconcileContradictions(db: Database.Database, event: string): r
   return updates;
 }
 
-/** `mem review --promote <id>`: accept a withheld fact. For a `pending` fact that means activating it. For a `contested` one it means declaring it the winner of its ambiguous contradiction, which requires superseding exactly its bucket rivals -- without that, the next detection pass would find the same tied precedence and re-contest the whole group, making the promotion silently self-undoing. The winner returns to `prior_status` where that was `pinned`, so resolving a contradiction never quietly discards a user's pin. */
 /** The outcome of a promotion: the resolved id, plus a caveat when the promoted fact cannot be contradicted. */
 export interface PromotionOutcome {
   readonly id: string;
@@ -62,6 +61,7 @@ function withReason(detail: string, reason: string | undefined): string {
   return reason === undefined ? detail : `${detail}; reason: ${reason}`;
 }
 
+/** `mem review --promote <id>`: accept a withheld fact. For a `pending` fact that means activating it, keyed first when `key` is given. For a `contested` one it means declaring it the winner of its ambiguous contradiction, which requires superseding exactly its bucket rivals -- without that, the next detection pass would find the same tied precedence and re-contest the whole group, making the promotion silently self-undoing. The winner returns to `prior_status` where that was `pinned`, so resolving a contradiction never quietly discards a user's pin. */
 export function promotePending(db: Database.Database, id: string, reason?: string, key?: PromotionKey): PromotionOutcome {
   const fact = resolveIdArgOrThrow(db, id);
   // `detectContradictions` is run over the same pool `formatReview` derives its `contested` bucket from -- active/pinned/contested -- and read before any status is written below, for the same reason the old contested-only read had to come first: `fact` must still be part of the population its rivals are drawn from. A precedence tie that ties on `captured_at` and provenance is *shown* as contested by `formatReview` without ever persisting `contested` on either side (nothing between detection and display writes it), so gating this solely on `fact.status` left the exact facts `mem review` told the user to resolve unreachable by the command it told them to resolve them with. Deriving live, the way `formatReview` does, is the one-source-of-truth fix rather than a second definition of "contested" that could drift from it.

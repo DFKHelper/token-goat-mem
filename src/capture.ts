@@ -693,7 +693,6 @@ function refuseSecretsOrThrow(
   throw new SecretDetectedError(matches);
 }
 
-/** Builds the shared, always-present part of a `NewFact` for either capture mode, then lets each caller layer on its mode-specific fields (subject, anchor, sourceRef, scopeRoot) -- kept as plain conditional assignment (rather than spreading possibly-`undefined` values into the literal) because `NewFact`'s optional fields are typed without an explicit `| undefined`, and `exactOptionalPropertyTypes` (tsconfig.json) rejects writing `undefined` into them. */
 /** Validates a caller-supplied `capturedAt` and returns it in the canonical ISO form the column stores, so a legal-but-differently-spelled timestamp (`2024-01-02`, an offset other than Z) does not break the lexical comparability `captured_at` is documented to have (types.ts). A future timestamp is refused rather than clamped: it would win every contradiction-precedence comparison and sit permanently at the top of any recency ordering, and silently rewriting the value a caller asked for would hide that they got something other than what they requested. */
 export function parseCapturedAtOrThrow(raw: string): string {
   const trimmed = raw.trim();
@@ -734,6 +733,7 @@ function restatementUpdates(newFact: NewFact, prior: Fact): { updates: Restateme
   return { updates, changed };
 }
 
+/** Layers a capture's optional fields (subject, anchor, sourceRef, why, scopeRoot) onto the shared `NewFact` base -- kept as plain conditional assignment (rather than spreading possibly-`undefined` values into the literal) because `NewFact`'s optional fields are typed without an explicit `| undefined`, and `exactOptionalPropertyTypes` (tsconfig.json) rejects writing `undefined` into them. */
 function applyOptionalFields(
   target: NewFact,
   input: CaptureExplicitInput,

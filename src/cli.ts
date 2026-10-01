@@ -180,7 +180,6 @@ function auditValuePreview(value: string | number | null | undefined): string {
   return text.length > AUDIT_VALUE_PREVIEW_LENGTH ? `${text.slice(0, AUDIT_VALUE_PREVIEW_LENGTH)}...` : text;
 }
 
-/** Audit detail for `mem edit`, recording what each edited field said *before*. The previous wording recorded only which field names changed, so the audit log could say a fact's text was edited but never what it used to say -- and since `mem edit` overwrites in place, that made the prior value unrecoverable from the store at all. A fact's whole value is that it can be trusted, and "it says X now, it said Y before, and Y is gone" is the one question an audit trail of an edit exists to answer. Deliberately a `detail` string rather than a version chain: a full history table is a schema migration and a retention policy bought for a question the audit log can already answer. The *prior* value is recorded whole; only the new one is previewed. Truncating both was a defect measured against the built bundle: editing a 223-character fact left 103 characters recorded nowhere in the store, while AGENTS.md promised "an edited fact's previous text is recorded there and nowhere else" -- so the log kept a prefix of the one value it exists to preserve. The asymmetry is the whole point of the trade the previous wording tried to make: the new value is never lost (it is the fact's current text, one column away in the same row), so previewing it costs nothing, and the growth this bounds is at most one prior value per changed field. */
 /** Every field `mem edit` can change, in the order `describeEdit` walks them. The single list driving three things that previously would have had to agree by convention rather than by construction: the before/after pairs `describeEdit` diffs into the audit `detail` line, the prior-value payload `buildEditPriorPayload` records for `mem edit --undo`, and the patch `undoEdit` replays through `updateFact`. One list here means a field added to `FactUpdate` only has to be added once for all three to pick it up, instead of three lists silently drifting apart. */
 const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "why", "scope", "scopeRoot", "scopeRepo", "captureRoot", "status", "confidence"] as const;
 type EditableFactField = (typeof EDITABLE_FACT_FIELDS)[number];
@@ -211,6 +210,7 @@ function redactPriorValueIfSecret(
   return `${REDACTED_PRIOR_VALUE_PREFIX}${matches.map((match) => match.patternName).join(", ")}]`;
 }
 
+/** Audit detail for `mem edit`, recording what each edited field said *before*. The previous wording recorded only which field names changed, so the audit log could say a fact's text was edited but never what it used to say -- and since `mem edit` overwrites in place, that made the prior value unrecoverable from the store at all. A fact's whole value is that it can be trusted, and "it says X now, it said Y before, and Y is gone" is the one question an audit trail of an edit exists to answer. Deliberately a `detail` string rather than a version chain: a full history table is a schema migration and a retention policy bought for a question the audit log can already answer. The *prior* value is recorded whole; only the new one is previewed. Truncating both was a defect measured against the built bundle: editing a 223-character fact left 103 characters recorded nowhere in the store, while AGENTS.md promised "an edited fact's previous text is recorded there and nowhere else" -- so the log kept a prefix of the one value it exists to preserve. The asymmetry is the whole point of the trade the previous wording tried to make: the new value is never lost (it is the fact's current text, one column away in the same row), so previewing it costs nothing, and the growth this bounds is at most one prior value per changed field. */
 function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: readonly string[]): string {
   const changes = Object.keys(patch)
     .map((field) => {
@@ -372,7 +372,6 @@ function parseContextFiles(raw: string | undefined): string[] | undefined {
 
 // ─────────────────────────────────────────────────────────────────────────── DB lifecycle + error handling ───────────────────────────────────────────────────────────────────────────
 
-/** Opens a fresh connection for one command invocation and always closes it, even on throw (mem is a short-lived, single-shot CLI process -- Section 3). */
 /** Wall clock for the post-capture embedding round trip. Small on purpose: `mem remember` is an interactive command whose real work is already finished by the time this runs, so the vector is worth waiting a moment for and not worth waiting on. An endpoint slower than this loses the vector, which `mem embed` picks up later. */
 const CAPTURE_EMBED_TIMEOUT_MS = 2_000;
 
@@ -1481,7 +1480,6 @@ function toWiringOpts(options: { readonly root?: string; readonly user?: boolean
   };
 }
 
-/** Builds the Commander program. Exported so tests can introspect/parse it without going through `process.argv`. */
 /** Replaced at build time by esbuild's `define` with package.json's version. Declared (not imported) so the bundle stays a single file with no runtime JSON read; `typeof` on an undeclared identifier is safe in JS, so an unbundled `tsx src/main.ts` dev run falls back instead of throwing. */
 declare const __MEM_VERSION__: string | undefined;
 
@@ -1493,6 +1491,7 @@ const SUBJECT_KEY_HELP =
   "Normalized key for contradiction detection; holds one value at a time, so a later --value " +
   "supersedes the earlier rather than joining it (requires --value)";
 
+/** Builds the Commander program. Exported so tests can introspect/parse it without going through `process.argv`. */
 export function buildProgram(): Command {
   const program = new Command();
   program.name("mem").description("Long-term conversational memory for AI coding agents").version(CLI_VERSION);

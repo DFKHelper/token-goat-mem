@@ -871,7 +871,6 @@ export function getSharedTermCounts(db: Db, factId: string): Map<string, SharedT
   return byFact;
 }
 
-/** Every fact's entity lookup keys, for `RetrievalOptions.factEntityKeys`. One grouped read rather than a query per candidate, for the reason `getUsefulnessCounts` gives: recall filters the whole store, so a per-fact round trip would land inside the `--hint-format` seam's ~150ms budget. Topics are excluded -- `--entity` is an entity filter, and the topic facet is already what BM25 ranks on. */
 /** How many of the query's own entities each fact carries: `fact_id` -> overlap count. Backs the entity rank list in `retrieval.ts`. Deliberately *not* built from {@link getEntityKeysByFact}: that is a full scan of `fact_terms`, and its caller only pays for it when `--entity` was passed. This runs on every recall, so the cost has to scale with the query rather than with the store -- one indexed lookup per entity the query actually contains, against `idx_fact_terms_lookup(term_key, kind)`. A query with no identifier in it therefore costs nothing and returns an empty map, which is also the behaviour the ranking wants: no signal, no vote. */
 export function getEntityOverlapForQuery(db: Db, query: string): Map<string, number> {
   const overlap = new Map<string, number>();
@@ -888,6 +887,7 @@ export function getEntityOverlapForQuery(db: Db, query: string): Map<string, num
   return overlap;
 }
 
+/** Every fact's entity lookup keys, for `RetrievalOptions.factEntityKeys`. One grouped read rather than a query per candidate, for the reason `getUsefulnessCounts` gives: recall filters the whole store, so a per-fact round trip would land inside the `--hint-format` seam's ~150ms budget. Topics are excluded -- `--entity` is an entity filter, and the topic facet is already what BM25 ranks on. */
 export function getEntityKeysByFact(db: Db): Map<string, Set<string>> {
   const rows = db
     .prepare<[], { fact_id: string; term_key: string }>("SELECT fact_id, term_key FROM fact_terms WHERE kind = 'entity'")
@@ -922,7 +922,6 @@ export function listFactsNeedingTerms(db: Db, options: { readonly all?: boolean 
     .all();
 }
 
-/** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
 /** The population `mem consolidate --stale` proposes: `active` facts captured before `beforeIso` that recall has gone unsurfaced on since `beforeIso` and nobody has ever marked useful, oldest first. `pinned` facts are excluded by construction, not by a caller-side filter -- a pin is a standing instruction that this fact matters regardless of whether it has been read yet. So are `pending`, `contested`, and `superseded` facts: none of them is live ground truth, and each already has its own resolution path (`mem review`, the retention pass). `COALESCE(last_surfaced_at, '') < beforeIso` is a *windowed* question -- "unsurfaced for at least this long", not "never surfaced, ever" -- so a fact surfaced once, long before the window, is eligible again once it goes quiet for the window's length. The empty-string floor treats a NULL (never surfaced, or captured before the column existed) as older than any real timestamp. The `recall_log` NOT EXISTS is windowed to the same cutoff for the matching reason: a fact whose `last_surfaced_at` predates the column but was actually surfaced inside the rotation window still has a live `recall_log` row saying so. The `used_at IS NOT NULL` half of that same NOT EXISTS is deliberately *not* windowed -- a fact the user explicitly confirmed useful must not lose that protection just because the confirming surfacing itself falls outside the stale window. This is bounded by `recall_log` retention, not by this query: `mem epoch --gc` rotates rows past `surfaced_at` regardless of `used_at` (see `deleteRecallLogOlderThan`), so a usefulness mark old enough to have been rotated away has no surviving evidence here. When that happens the fact does not silently fall out of protection into "propose immediately" -- it was surfaced too (every `used_at` row is also a surfacing), so `last_surfaced_at` is still set to that same date and the COALESCE branch above governs it exactly like any other surfaced-but-quiet fact. That is the intended end state rather than a gap worked around: usefulness is a decaying signal everywhere it is read -- `getUsefulnessCounts` ranks from these same rotating rows -- so granting it permanent retention in this one query would put it at odds with every other consumer of the same evidence. Permanence has its own mechanism, `mem pin`, which this query excludes by construction. A fact that must outlive its own recall history should be pinned, not kept alive indefinitely by a confirmation no surviving row can still attest to. Keying on `captured_at` (never edited) rather than `status_changed_at` is deliberate: this pass asks how long a fact has gone unread, and a fact that has never changed status has no `status_changed_at` at all. */
 export function listStaleUnsurfacedFacts(db: Db, beforeIso: string): Fact[] {
   const rows = db
@@ -942,6 +941,7 @@ export function listStaleUnsurfacedFacts(db: Db, beforeIso: string): Fact[] {
   return rows.map(rowToFact);
 }
 
+/** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
 export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM recall_log WHERE surfaced_at < ?").run(beforeIso).changes;
 }
@@ -983,7 +983,6 @@ export function countEmbeddedFacts(db: Db, options: { readonly excludeSuperseded
   return db.prepare<[], { count: number }>(`SELECT COUNT(*) AS count FROM facts ${where}`).get()?.count ?? 0;
 }
 
-/** Counts facts that have been through facet extraction, for `mem doctor`'s coverage line. `terms_checked_at IS NOT NULL`, not "carries a `fact_terms` row": a fact whose text is entirely stopwords is checked and legitimately has no row, and counting only rows would report it as an unclosable shortfall (see `listFactsNeedingTerms`). */
 /** How many of the decisions and corrections a session can receive (active or pinned) carry a `why`, out of how many there are. Those two kinds are the ones a later session relitigates when the reason is missing; `mem doctor` reports the ratio. */
 export function countRationaleCoverage(db: Db): { readonly withWhy: number; readonly total: number } {
   const row = db
@@ -994,6 +993,7 @@ export function countRationaleCoverage(db: Db): { readonly withWhy: number; read
   return { withWhy: row?.withWhy ?? 0, total: row?.total ?? 0 };
 }
 
+/** Counts facts that have been through facet extraction, for `mem doctor`'s coverage line. `terms_checked_at IS NOT NULL`, not "carries a `fact_terms` row": a fact whose text is entirely stopwords is checked and legitimately has no row, and counting only rows would report it as an unclosable shortfall (see `listFactsNeedingTerms`). */
 export function countFactsWithTerms(db: Db): number {
   return db.prepare<[], { count: number }>("SELECT COUNT(*) AS count FROM facts WHERE terms_checked_at IS NOT NULL").get()?.count ?? 0;
 }

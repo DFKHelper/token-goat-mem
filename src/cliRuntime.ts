@@ -69,6 +69,7 @@ export function guard(fn: (...args: never[]) => void | Promise<void>): (...args:
 
 // ─────────────────────────────────────────────────────────────────────────── Store access ───────────────────────────────────────────────────────────────────────────
 
+/** Opens a fresh connection for one command invocation and always closes it, even on throw (mem is a short-lived, single-shot CLI process -- Section 3). */
 export async function withDb<T>(fn: (db: Database.Database) => T | Promise<T>): Promise<T> {
   const db = openStorage();
   try {
