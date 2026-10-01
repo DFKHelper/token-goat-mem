@@ -6,6 +6,8 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **`mem doctor` inspects the store read-only and keeps reporting when it is broken.** It used to open the store through the same path every write command does, so a health check created a missing database, ran pending migrations, took snapshots, and died with an exception on a corrupt file -- the one case it exists for. It now opens the file read-only (`openDbReadOnly`), runs the hooks, backups, embedding and dream checks regardless, and reports `store: none` (no file; nothing is created), `store: unreadable (<code>)` (a `fail`, so `--strict` exits 1), `schema: N migrations pending`, and `integrity` from `PRAGMA quick_check` as findings. `--json`'s `epoch` is `null` when a store exists but could not be read.
+
 - **`mem doctor` no longer reports `does not support ?` for the earliest hook shape.** The first `mem init claude-code` stamped a bare, unguarded `mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"`; the flag parser only knew the two guarded wrappers, so doctor read that hook as unparseable and printed a placeholder subcommand. Recognising a hook as mem's and reading its flags now share one list of wrapper shapes, so they cannot disagree, and a stamped command in no known shape names its remedy (`re-run mem init claude-code`) instead of `?`.
 - **`mem scan-session` no longer blocks a Windows session's suggestions as a "secret".** It stamps
   each suggestion's `sourceRef` with the native transcript path, and Claude Code names a transcript

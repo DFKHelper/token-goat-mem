@@ -9,6 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -523,7 +524,9 @@ describe("exit-code and stderr/stdout contract (cli.ts module doc)", () => {
 // ─────────────────────────────────────────────────────────────────────────── mem doctor ───────────────────────────────────────────────────────────────────────────
 
 describe("mem doctor (read-only health check)", () => {
-  it("reports db path, WAL mode, schema tables, epoch, and zeroed fact counts on a fresh home", async () => {
+  it("reports db path, WAL mode, schema tables, epoch, and zeroed fact counts on an empty store", async () => {
+    // Doctor no longer creates the store, so an empty one has to exist already (epoch stays 0).
+    openDb(resolveDbPath()).close();
     const result = await runCli(["doctor"]);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
@@ -536,6 +539,66 @@ describe("mem doctor (read-only health check)", () => {
     expect(result.stdout).toContain("epoch: 0");
     expect(result.stdout).toContain("active=0");
     expect(result.stdout).toContain("(total 0)");
+  });
+
+  it("on an empty mem home exits 0, reports no store, and does not create the database", async () => {
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain(`store: none at ${join(home, "mem.db")} (mem remember creates it)`);
+    // The environment checks still report without a store behind them.
+    expect(result.stdout).toContain("hooks (");
+    expect(result.stdout).toContain("backups:");
+    expect(existsSync(join(home, "mem.db"))).toBe(false);
+    expect(existsSync(`${join(home, "mem.db")}-wal`)).toBe(false);
+    const strict = await runCli(["doctor", "--strict"]);
+    expect(strict.exitCode).toBe(0);
+  });
+
+  describe("on a corrupt store", () => {
+    beforeEach(() => {
+      writeFileSync(join(home, "mem.db"), "not a sqlite database, not even the 16-byte header\n".repeat(20), "utf8");
+    });
+
+    it("exits 0, reports the store unreadable, and still prints the environment lines", async () => {
+      const result = await runCli(["doctor"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stdout).toContain("store: unreadable (SQLITE_NOTADB) -- see mem backup --list / mem restore");
+      expect(result.stdout).toContain("hooks (");
+      expect(result.stdout).toContain("backups:");
+    });
+
+    it("--strict exits 1, and --json names the store as a failed finding", async () => {
+      expect((await runCli(["doctor", "--strict"])).exitCode).toBe(1);
+      const json = await runCli(["doctor", "--json"]);
+      expect(json.exitCode).toBe(0);
+      const report = JSON.parse(json.stdout) as { findings: { check: string; status: string }[] };
+      expect(report.findings.some((entry) => entry.check === "store" && entry.status === "fail")).toBe(true);
+    });
+  });
+
+  it("does not migrate a store from an older schema; it reports the pending migrations", async () => {
+    await runCli(["remember", "a pre-migration fact", "--kind", "fact", "--scope", "global"]);
+    const raw = openDb(resolveDbPath());
+    raw.pragma("user_version = 1");
+    raw.close();
+    const result = await runCli(["doctor"]);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/schema: \d+ migrations? pending \(the next write applies them\)/);
+    // A raw read-only handle, because `openDb` would migrate the store and hide what doctor did.
+    const after = new Database(resolveDbPath(), { readonly: true, fileMustExist: true });
+    try {
+      expect(after.pragma("user_version", { simple: true })).toBe(1);
+    } finally {
+      after.close();
+    }
+  });
+
+  it("reports a healthy store's schema and integrity as ok", async () => {
+    await runCli(["remember", "an intact fact", "--kind", "fact", "--scope", "global"]);
+    const result = await runCli(["doctor", "--json"]);
+    const report = JSON.parse(result.stdout) as { findings: { check: string; status: string; message: string }[] };
+    expect(report.findings.find((entry) => entry.check === "integrity")).toMatchObject({ status: "ok" });
+    expect(report.findings.some((entry) => entry.check === "schema")).toBe(false);
   });
 
   it("--json prints findings whose check names all come from the exported list", async () => {
@@ -6521,6 +6584,8 @@ describe("mem dream", () => {
     // report, not an exception that suppresses every check after it.
     process.env[URL_ENV] = "not a url";
     process.env[MODEL_ENV] = "test-model";
+    // Doctor no longer creates the store, and the term-coverage line below needs one to count.
+    openDb(resolveDbPath()).close();
     const result = await runCli(["doctor"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("dreaming: misconfigured");

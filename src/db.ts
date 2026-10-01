@@ -189,6 +189,47 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
 }
 
 /**
+ * Opens an existing store for inspection and nothing else: no directory creation, no permission
+ * changes, no schema DDL, no migrations, no snapshot. `mem doctor` is the caller -- a health check
+ * that creates, migrates, or snapshots the store it is asked to examine is not read-only, and one
+ * that goes through `openDb` cannot report a store `openDb` itself refuses (corrupt, or one a
+ * migration would fail on). Throws if the file is absent or unreadable; the caller owns `.close()`.
+ *
+ * Spike (better-sqlite3 as installed here, Windows 11, Node 24): a `readonly` open of a WAL store
+ * works with no `-shm` present, both after a clean close (no sidecars) and with a leftover `-wal`
+ * whose `-shm` is gone, and alongside a live writer. It does create the `-shm`/`-wal` sidecars (not
+ * the database file) the first time it reads, so a directory that is not writable can still fail
+ * with `SQLITE_CANTOPEN` on platforms where that creation is refused -- not verified on Linux. That
+ * case falls back to an ordinary connection with `query_only` on: the same read path, still no DDL,
+ * migration, or snapshot, and SQLite itself rejects any write the connection is asked to make.
+ */
+export function openDbReadOnly(dbPath: string = resolveDbPath()): Database.Database {
+  let db: Database.Database;
+  try {
+    db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  } catch (error) {
+    if (!existsSync(dbPath) || (error as { code?: string }).code !== "SQLITE_CANTOPEN") {
+      throw error;
+    }
+    db = new Database(dbPath, { fileMustExist: true });
+    db.pragma("query_only = ON");
+  }
+  // Same close-on-failure guarantee as `openDb`: the connection is lazy, so this first statement is
+  // what surfaces a non-sqlite file (`SQLITE_NOTADB`), and a handle leaked past it would hold the
+  // file locked on Windows -- the user could not replace the store doctor just called unreadable.
+  try {
+    db.prepare("SELECT 1 FROM sqlite_master LIMIT 1").get();
+    // A per-connection setting, not a write: it makes the foreign-key state doctor reports the one
+    // every other command runs under.
+    db.pragma("foreign_keys = ON");
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+  return db;
+}
+
+/**
  * The two audit-detail phrasings that name the fact a supersession went *to*.
  *
  * They are constants, and the parser below sits beside them, because the audit log is the only

@@ -4,12 +4,14 @@
  * sits beside the doc comment that justifies it, and the command itself only gathers counts.
  */
 
+import type Database from "better-sqlite3";
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
 
 import { AUTO_SNAPSHOT_INTERVAL_MS, listSnapshots } from "./backup.js";
-import { EXIT_USER_ERROR, extractErrorMessage, guard, withDb } from "./cliRuntime.js";
-import { resolveBackupDir, resolveDbPath } from "./db.js";
+import { EXIT_USER_ERROR, extractErrorMessage, guard } from "./cliRuntime.js";
+import { openDbReadOnly, resolveBackupDir, resolveDbPath } from "./db.js";
+import { MIGRATIONS } from "./migrations.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
 import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
@@ -294,7 +296,7 @@ function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: numbe
  * directory shows up -- before the day the store is lost, not after. A store never written to has
  * nothing to back up, so an empty directory is only a warning once there is something to lose.
  */
-function checkBackups(dir: string, epoch: number, now: Date): Finding {
+function checkBackups(dir: string, epoch: number | null, now: Date): Finding {
   let snapshots;
   try {
     snapshots = listSnapshots(dir);
@@ -304,6 +306,7 @@ function checkBackups(dir: string, epoch: number, now: Date): Finding {
   const [newest] = snapshots;
   if (newest === undefined) {
     // Facts with no snapshot is the one backup state worth a warning: there is something to lose.
+    // An unknown epoch (`null`, a store that could not be read) counts as something to lose.
     return epoch === 0
       ? finding("backups", "ok", `backups: none in ${dir} (nothing written yet)`)
       : finding(
@@ -326,6 +329,86 @@ export function describeBackups(dir: string, epoch: number, now: Date = new Date
   return checkBackups(dir, epoch, now).message;
 }
 
+/** What the store-dependent part of the report found; each list is empty when the store could not be read. */
+interface StoreDetail {
+  readonly store: readonly Finding[];
+  readonly embeddings: readonly Finding[];
+  readonly trailing: readonly Finding[];
+  readonly epoch: number;
+}
+
+interface StoreInspection {
+  /** The store lines plus the `schema` and `integrity` checks -- everything that prints before the embedding lines. */
+  readonly before: readonly Finding[];
+  readonly embeddings: readonly Finding[];
+  /** The facet, why, hint-budget, and scope-placement lines, which only a readable, current store can answer. */
+  readonly trailing: readonly Finding[];
+  /** The store's epoch; 0 with no store yet; null when a store exists but could not be read. */
+  readonly epoch: number | null;
+}
+
+function unreadableStore(error: unknown): Finding {
+  const code = (error as { code?: unknown }).code;
+  const detail = typeof code === "string" ? code : extractErrorMessage(error);
+  return finding("store", "fail", `store: unreadable (${detail}) -- see mem backup --list / mem restore`, "mem backup --list");
+}
+
+/**
+ * Opens the store read-only (`openDbReadOnly`: never creates, migrates, or snapshots it) and runs
+ * `inspect` against it, turning every way that can go wrong into a finding rather than an exception
+ * so the rest of the report still prints. Three states are told apart on purpose: no file (healthy
+ * -- `mem remember` creates it), a file that will not open or read (`fail`), and a readable store
+ * behind the newest schema, which is a `warn` (the next write migrates it) and has its detail lines
+ * attempted anyway but dropped if a table a later migration adds is missing.
+ */
+function inspectStoreFile(dbPath: string, inspect: (db: Database.Database) => StoreDetail): StoreInspection {
+  const absent: StoreInspection = { before: [], embeddings: describeEmbeddings(null, 0, 0), trailing: [], epoch: 0 };
+  if (!existsSync(dbPath)) {
+    return { ...absent, before: [finding("store", "warn", `store: none at ${dbPath} (mem remember creates it)`, "mem remember")] };
+  }
+  let db: Database.Database;
+  try {
+    db = openDbReadOnly(dbPath);
+  } catch (error) {
+    return { ...absent, before: [unreadableStore(error)], epoch: null };
+  }
+  try {
+    const userVersion = db.pragma("user_version", { simple: true }) as number;
+    const pending = MIGRATIONS.filter((step) => step.version > userVersion).length;
+    const checks: Finding[] = [];
+    if (pending > 0) {
+      checks.push(finding("schema", "warn", `schema: ${pending} migration${pending === 1 ? "" : "s"} pending (the next write applies them)`));
+    }
+    // quick_check, not integrity_check: it skips the index-content cross-check, so it stays fast on a big store.
+    const [first] = db.pragma("quick_check") as { quick_check: string }[];
+    checks.push(
+      first?.quick_check === "ok"
+        ? finding("integrity", "ok", "integrity: ok")
+        : finding("integrity", "fail", `integrity: failed -- ${first?.quick_check ?? "no result"}`, "mem restore")
+    );
+    try {
+      const detail = inspect(db);
+      return { before: [...detail.store, ...checks], embeddings: detail.embeddings, trailing: detail.trailing, epoch: detail.epoch };
+    } catch (error) {
+      if (pending > 0) {
+        // The pending migration names the cause; a second "unreadable" line would blame the file for being old.
+        let epoch: number | null = null;
+        try {
+          epoch = getEpoch(db);
+        } catch {
+          // `meta` is in the baseline schema, so this is a damaged store, which the quick_check above already reported.
+        }
+        return { ...absent, before: checks, epoch };
+      }
+      throw error;
+    }
+  } catch (error) {
+    return { ...absent, before: [unreadableStore(error)], epoch: null };
+  } finally {
+    db.close();
+  }
+}
+
 /** Registers `mem doctor` on the CLI program. */
 export function registerDoctorCommand(program: Command): void {
   program
@@ -334,9 +417,13 @@ export function registerDoctorCommand(program: Command): void {
     .option("--json", "Output the findings as machine-readable JSON: { findings: [{ check, status, message, remedy? }], epoch } (unstable, pre-1.0)")
     .option("--strict", "Exit 1 when any finding has status fail (an installed hook that cannot run, an unreadable store); without it doctor always exits 0 so a warning never breaks a script")
     .action(
-      guard(async (options: { json?: boolean; strict?: boolean }) => {
+      guard((options: { json?: boolean; strict?: boolean }) => {
         const dbPath = resolveDbPath();
-        const report = await withDb((db) => {
+        // The environment checks first: none of them needs the store, so a store that is missing,
+        // corrupt, or on an older schema cannot take them down with it.
+        const dream = describeDream();
+        const hooks = describeHookHealth();
+        const inspection = inspectStoreFile(dbPath, (db) => {
           const journalMode = db.pragma("journal_mode", { simple: true }) as string;
           const foreignKeys = db.pragma("foreign_keys", { simple: true }) as number;
           const tables = db
@@ -371,31 +458,42 @@ export function registerDoctorCommand(program: Command): void {
           // `scope_repo` is still reachable and must not be reported as unreachable.
           const relocated = orphaned.filter((row) => row.scope_repo !== null);
           const unreachable = orphaned.filter((row) => row.scope_repo === null);
-          const findings: Finding[] = [
-            finding("store", "ok", `db: ${dbPath}`),
-            finding("store", "ok", `journal_mode: ${journalMode}`),
-            finding("store", "ok", `foreign_keys: ${foreignKeys === 1 ? "on" : "off"}`),
-            finding("store", "ok", `tables: ${tables.join(", ")}`),
-            finding("store", "ok", `epoch: ${epoch}`),
-            finding("facts", "ok", `facts: ${statusCounts}  (total ${totalFacts})`),
-            finding("store", "ok", `sources: ${sourceRows}`),
-            finding("store", "ok", `audit_log rows: ${auditRows}`),
-            ...describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db, { excludeSuperseded: true }), embeddableFacts),
-            ...describeDream(),
-            ...describeFacets(countFactsWithTerms(db), totalFacts),
-            ...describeWhyCoverage(rationale.withWhy, rationale.total),
-            ...describeHintBudget(recallableFacts, pinnedFacts),
-            ...describeScopePlacement(
-              unreachable.length,
-              unreachable.reduce((sum, row) => sum + row.c, 0),
-              relocated.length,
-              relocated.reduce((sum, row) => sum + row.c, 0)
-            ),
-            checkBackups(resolveBackupDir(), epoch, new Date()),
-            ...describeHookHealth(),
-          ];
-          return { findings, epoch };
+          return {
+            store: [
+              finding("store", "ok", `db: ${dbPath}`),
+              finding("store", "ok", `journal_mode: ${journalMode}`),
+              finding("store", "ok", `foreign_keys: ${foreignKeys === 1 ? "on" : "off"}`),
+              finding("store", "ok", `tables: ${tables.join(", ")}`),
+              finding("store", "ok", `epoch: ${epoch}`),
+              finding("facts", "ok", `facts: ${statusCounts}  (total ${totalFacts})`),
+              finding("store", "ok", `sources: ${sourceRows}`),
+              finding("store", "ok", `audit_log rows: ${auditRows}`),
+            ],
+            embeddings: describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db, { excludeSuperseded: true }), embeddableFacts),
+            trailing: [
+              ...describeFacets(countFactsWithTerms(db), totalFacts),
+              ...describeWhyCoverage(rationale.withWhy, rationale.total),
+              ...describeHintBudget(recallableFacts, pinnedFacts),
+              ...describeScopePlacement(
+                unreachable.length,
+                unreachable.reduce((sum, row) => sum + row.c, 0),
+                relocated.length,
+                relocated.reduce((sum, row) => sum + row.c, 0)
+              ),
+            ],
+            epoch,
+          };
         });
+        const findings: Finding[] = [
+          ...inspection.before,
+          ...inspection.embeddings,
+          ...dream,
+          ...inspection.trailing,
+          checkBackups(resolveBackupDir(), inspection.epoch, new Date()),
+          ...hooks,
+        ];
+        // `epoch` is the store's, 0 when there is no store yet, and null when a store exists but could not be read.
+        const report = { findings, epoch: inspection.epoch };
         if (options.json === true) {
           process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
         } else {
