@@ -7,12 +7,12 @@
  * renaming it rather than by waiting a day.
  */
 import Database from "better-sqlite3";
-import { mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AUTO_SNAPSHOTS_KEPT, listSnapshots, snapshotFileName, takeSnapshot } from "../../src/backup.js";
+import { AUTO_SNAPSHOT_CLAIM, AUTO_SNAPSHOTS_KEPT, listSnapshots, snapshotFileName, takeSnapshot } from "../../src/backup.js";
 import { BACKUP_DIR_ENV, resolveBackupDir } from "../../src/db.js";
 import { describeBackups } from "../../src/doctor.js";
 import { MS_PER_DAY } from "../../src/timeUtils.js";
@@ -230,5 +230,86 @@ describe("doctor's backups line", () => {
     expect(describeBackups(backupDir, 7)).toContain("automatic snapshots may be failing");
     // An unchanged store needs no new snapshot however old the last one is.
     expect(describeBackups(backupDir, 1)).not.toContain("may be failing");
+  });
+});
+
+describe("snapshot hygiene", () => {
+  const HOUR_MS = 60 * 60 * 1000;
+
+  function backdate(path: string, ms: number): void {
+    const then = new Date(Date.now() - ms);
+    utimesSync(path, then, then);
+  }
+
+  it("leaves a due snapshot to the open that holds the claim, and takes over a claim abandoned for an hour", () => {
+    writeFacts(1);
+    mkdirSync(backupDir, { recursive: true });
+    const claim = join(backupDir, AUTO_SNAPSHOT_CLAIM);
+    writeFileSync(claim, "");
+
+    reopen();
+    expect(listSnapshots(backupDir)).toEqual([]);
+
+    backdate(claim, 2 * HOUR_MS);
+    reopen();
+    expect(listSnapshots(backupDir).map((snapshot) => snapshot.reason)).toEqual(["auto"]);
+    expect(existsSync(claim)).toBe(false);
+  });
+
+  it("clears copies an interrupted snapshot abandoned, but not one another process may still be writing", () => {
+    writeFacts(1);
+    mkdirSync(backupDir, { recursive: true });
+    const abandoned = join(backupDir, ".mem-snapshot-1-1.tmp");
+    const inFlight = join(backupDir, ".mem-snapshot-2-2.tmp");
+    writeFileSync(abandoned, "half a copy");
+    writeFileSync(inFlight, "half a copy");
+    backdate(abandoned, 2 * HOUR_MS);
+
+    reopen();
+
+    expect(existsSync(abandoned)).toBe(false);
+    expect(existsSync(inFlight)).toBe(true);
+    expect(listSnapshots(backupDir)).toHaveLength(1);
+  });
+
+  it("names a snapshot after the epoch of the copy itself, not a read taken before the copy", () => {
+    writeFacts(2);
+    const db = openStorage(dbPath, { autoSnapshot: false });
+    try {
+      // A temp table shadows main's `meta` for an unqualified read but is never copied by VACUUM INTO:
+      // the same disagreement a write landing between the read and the copy would cause.
+      db.exec("CREATE TEMP TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+      db.prepare("INSERT INTO temp.meta (key, value) VALUES ('epoch', '999')").run();
+      const snapshot = takeSnapshot(db, backupDir, "manual");
+      expect(snapshot.epoch).toBe(2);
+      expect(getEpochOf(snapshot.path)).toBe(2);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("lists past a snapshot-named entry that vanishes or dangles", (ctx) => {
+    mkdirSync(backupDir, { recursive: true });
+    try {
+      symlinkSync(join(root, "nowhere.db"), join(backupDir, snapshotFileName(new Date(), 5, "manual")));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EPERM") {
+        ctx.skip();
+      }
+      throw error;
+    }
+    expect(listSnapshots(backupDir)).toEqual([]);
+  });
+
+  it("takes one pre-migration snapshot per store state, however many opens find the migration pending", () => {
+    writeFacts(2);
+    reopen();
+    for (let i = 0; i < 2; i += 1) {
+      const raw = new Database(dbPath);
+      raw.pragma("user_version = 0");
+      raw.close();
+      reopen();
+    }
+    expect(listSnapshots(backupDir).filter((snapshot) => snapshot.reason === "pre-migration")).toHaveLength(1);
   });
 });
