@@ -83,6 +83,7 @@ import {
   truncationNotice,
   UsageError,
   withDb,
+  writeOutput,
 } from "./cliRuntime.js";
 
 // The exit-code contract is part of cli.ts's public surface (index.ts re-exports it); it is defined in
@@ -1751,6 +1752,7 @@ interface FacetsCliOptions {
   readonly all?: boolean;
   readonly fact?: string;
   readonly listEntities?: boolean;
+  readonly json?: boolean;
 }
 
 /** Commander's collector for a repeatable option: appends each occurrence instead of keeping only the last. */
@@ -1882,6 +1884,7 @@ interface EmbedCliOptions {
 
 interface EpochCliOptions {
   readonly gc?: boolean;
+  readonly json?: boolean;
 }
 
 interface UsedCliOptions {
@@ -2990,12 +2993,16 @@ export function buildProgram(): Command {
     .command("epoch")
     .description("Print the current write epoch (monotonic, bumped on every store write; covers store state only for efficient polling)")
     .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log/recall bookkeeping, report preference decay")
+    .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
       guard(async (options: EpochCliOptions) => {
         if (options.gc !== true) {
           const epoch = await withDb((db) => getEpoch(db));
-          process.stdout.write(`${epoch}\n`);
+          writeOutput(options.json, { epoch }, () => String(epoch));
           return;
+        }
+        if (options.json === true) {
+          throw new UsageError("--json does not apply to --gc, whose report is prose");
         }
         const summary = await withDb((db) => runRetentionPass(db));
         process.stdout.write(`${summary}\n`);
@@ -3141,6 +3148,7 @@ export function buildProgram(): Command {
     .option("--all", "Re-extract terms for every fact -- the path to take after an extraction-rule change")
     .option("--fact <id>", "Show the terms stored for one fact (full id or short prefix)")
     .option("--list-entities", "List the distinct entities in the store with fact counts, most frequent first")
+    .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
       guard(async (options: FacetsCliOptions) => {
         // Each mode answers a different question and they do not compose: `--fact` inspects one
@@ -3153,33 +3161,30 @@ export function buildProgram(): Command {
 
         if (options.fact !== undefined) {
           const id = options.fact;
-          const output = await withDb((db) => {
+          const { fact, terms } = await withDb((db) => {
             const existing = resolveIdArgOrThrow(db, id);
-            const terms = listTermsForFact(db, existing.id);
-            const entities = terms.filter((term) => term.kind === "entity").map((term) => term.term);
-            const topics = terms.filter((term) => term.kind === "topic").map((term) => term.term);
-            return [
-              `fact: ${existing.id}`,
+            return { fact: existing.id, terms: listTermsForFact(db, existing.id) };
+          });
+          const entities = terms.filter((term) => term.kind === "entity").map((term) => term.term);
+          const topics = terms.filter((term) => term.kind === "topic").map((term) => term.term);
+          writeOutput(options.json, { fact, entities, topics }, () =>
+            [
+              `fact: ${fact}`,
               // "none" rather than an empty line: a fact whose text names no identifier legitimately
               // has no entities, and a blank value reads as a failed lookup instead of an answer.
               `entities: ${entities.length > 0 ? entities.join(", ") : "none"}`,
               `topics: ${topics.length > 0 ? topics.join(", ") : "none"}`,
               ...(terms.length === 0 ? ["note: no terms stored yet -- run `mem facets` to backfill"] : []),
-            ].join("\n");
-          });
-          process.stdout.write(`${output}\n`);
+            ].join("\n")
+          );
           return;
         }
 
         if (options.listEntities === true) {
           const entities = await withDb((db) => listEntityCounts(db));
-          if (entities.length === 0) {
-            process.stdout.write("no entities extracted yet\n");
-            return;
-          }
-          for (const entity of entities) {
-            process.stdout.write(`${String(entity.facts).padStart(5, " ")}  ${entity.term}\n`);
-          }
+          writeOutput(options.json, entities.map(({ term, facts }) => ({ term, facts })), () =>
+            entities.length === 0 ? "no entities extracted yet" : entities.map((entity) => `${String(entity.facts).padStart(5, " ")}  ${entity.term}`).join("\n")
+          );
           return;
         }
 
@@ -3195,13 +3200,12 @@ export function buildProgram(): Command {
           }
           return { facts: pending.length, entities, topics };
         });
-        if (summary.facts === 0) {
-          // A backfill that found nothing is a success, so the exit code carries no signal and this
-          // line is the whole of it -- silence here is indistinguishable from a run that worked.
-          process.stdout.write("no facts need facet extraction\n");
-          return;
-        }
-        process.stdout.write(`extracted facets for ${summary.facts} fact${summary.facts === 1 ? "" : "s"}: ${summary.entities} entities, ${summary.topics} topics\n`);
+        // A backfill that found nothing is a success, so the exit code carries no signal and its line is the whole of it -- silence there is indistinguishable from a run that worked.
+        writeOutput(options.json, summary, () =>
+          summary.facts === 0
+            ? "no facts need facet extraction"
+            : `extracted facets for ${summary.facts} fact${summary.facts === 1 ? "" : "s"}: ${summary.entities} entities, ${summary.topics} topics`
+        );
       })
     );
 

@@ -368,3 +368,40 @@ describe("mem facets", () => {
     }
   });
 });
+
+describe("mem facets --json", () => {
+  it("emits each mode's data as JSON: --list-entities, --fact, and the backfill summary", async () => {
+    const id = await remember("src/cli.ts parses the flags");
+    await remember("src/cli.ts also owns exit codes");
+    await remember("we run PostgreSQL in production");
+
+    const listed = await runCli(["facets", "--list-entities", "--json"]);
+    expect(listed.exitCode).toBe(0);
+    const entities = JSON.parse(listed.stdout) as { term: string; facts: number }[];
+    expect(entities[0]).toEqual({ term: "src/cli.ts", facts: 2 });
+    expect(entities).toContainEqual({ term: "PostgreSQL", facts: 1 });
+
+    const shown = await runCli(["facets", "--fact", id.slice(0, 8), "--json"]);
+    expect(shown.exitCode).toBe(0);
+    const detail = JSON.parse(shown.stdout) as { fact: string; entities: string[]; topics: string[] };
+    expect(detail.fact).toBe(id);
+    expect(detail.entities).toContain("src/cli.ts");
+    expect(detail.topics.length).toBeGreaterThan(0);
+
+    const all = await runCli(["facets", "--all", "--json"]);
+    expect(all.exitCode).toBe(0);
+    const summary = JSON.parse(all.stdout) as { facts: number; entities: number; topics: number };
+    expect(summary.facts).toBe(3);
+    expect(summary.entities).toBeGreaterThanOrEqual(3);
+  });
+
+  it("emits empty JSON rather than the prose no-signal line when there is nothing to report", async () => {
+    const listed = await runCli(["facets", "--list-entities", "--json"]);
+    expect(listed.exitCode).toBe(0);
+    expect(JSON.parse(listed.stdout)).toEqual([]);
+
+    const backfilled = await runCli(["facets", "--json"]);
+    expect(backfilled.exitCode).toBe(0);
+    expect(JSON.parse(backfilled.stdout)).toEqual({ facts: 0, entities: 0, topics: 0 });
+  });
+});

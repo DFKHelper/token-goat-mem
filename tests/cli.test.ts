@@ -6808,3 +6808,66 @@ describe("mem edit keeps the value it is about to destroy", () => {
     expect(shown.stdout).toContain(prior);
   });
 });
+
+describe("mem epoch --json", () => {
+  it("emits JSON with epoch field and preserves plain output unchanged", async () => {
+    const plain = await runCli(["epoch"]);
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout.trim()).toBe("0");
+
+    await runCli(["remember", "test fact", "--kind", "fact"]);
+
+    const plainAfter = await runCli(["epoch"]);
+    expect(plainAfter.stdout.trim()).toBe("1");
+
+    const json = await runCli(["epoch", "--json"]);
+    expect(json.exitCode).toBe(0);
+    const parsed = JSON.parse(json.stdout) as { epoch: number };
+    expect(parsed.epoch).toBe(1);
+  });
+
+  it("rejects --json with --gc rather than printing prose under a JSON flag", async () => {
+    const result = await runCli(["epoch", "--gc", "--json"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("--json does not apply to --gc");
+    expect(result.stdout).toBe("");
+  });
+});
+
+describe("mem backup --list --json", () => {
+  it("emits JSON array with snapshot objects and preserves plain output unchanged", async () => {
+    // Create a fact first to ensure there's something to back up
+    await runCli(["remember", "test fact", "--kind", "fact"]);
+
+    // Take a backup
+    const backupResult = await runCli(["backup"]);
+    expect(backupResult.exitCode).toBe(0);
+
+    const plain = await runCli(["backup", "--list"]);
+    expect(plain.exitCode).toBe(0);
+    expect(plain.stdout).toContain("snapshots in");
+    expect(plain.stdout).toContain("epoch");
+
+    const json = await runCli(["backup", "--list", "--json"]);
+    expect(json.exitCode).toBe(0);
+    const parsed = JSON.parse(json.stdout) as Array<{
+      path: string;
+      name: string;
+      takenAt: string;
+      epoch: number;
+      reason: string;
+      size: number;
+    }>;
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.length).toBeGreaterThan(0);
+    expect(parsed[0]).toHaveProperty("path");
+    expect(parsed[0]).toHaveProperty("name");
+    expect(parsed[0]).toHaveProperty("takenAt");
+    expect(parsed[0]).toHaveProperty("epoch");
+    expect(parsed[0]).toHaveProperty("reason");
+    expect(parsed[0]).toHaveProperty("size");
+    // takenAt round-trips through Date unchanged, so it is canonical ISO 8601
+    expect(new Date(parsed[0].takenAt).toISOString()).toBe(parsed[0].takenAt);
+  });
+});
+

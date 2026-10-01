@@ -6,6 +6,9 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **`mem epoch --json` emits the current write epoch as JSON.** Outputs `{ epoch: <number> }`. The plain output remains unchanged byte-for-byte for cache invalidation.
+- **`mem facets --json` emits structured facets data for each mode.** `--list-entities --json` emits an array of `{ term, facts }` objects; `--fact <id> --json` emits `{ fact, entities, topics }`; backfill/`--all` mode emits `{ facts, entities, topics }` summary. Plain output is unchanged.
+- **`mem backup --list --json` emits snapshot records as JSON.** Outputs an array of snapshots, each with `path`, `name`, `takenAt` (ISO 8601), `epoch`, `reason`, and `size` fields. The plain output remains unchanged.
 - **`mem doctor` checks wiring drift for every supported tool, and project-vs-user hook divergence.** For each tool in `mem init`'s list whose config exists under `--root` (new on `doctor`, default the current directory) or the home directory, a `wiring` finding is `ok` when the block matches exactly what `mem init <tool>` would write now, and `warn` (remedy `mem init <tool>`, with `--user` at user level) when it is outdated, hand-edited inside its markers, or a Claude Code hook lacks an expected event. Tools mem was never wired into are one informational `ok` line, and doctor still writes nothing. A new `hook-divergence` finding warns when project and user Claude Code hooks run different mem invocations (both run, so recall is duplicated or inconsistent) and names which to remove or re-init.
 
 ### Fixed

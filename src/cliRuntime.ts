@@ -168,6 +168,16 @@ export function truncationNotice(shown: number, total: number): string {
   return `showing ${shown} of ${total} -- use --limit to see more\n`;
 }
 
+/** The one serialization every `--json` output uses (two-space indent), so machine output cannot drift per command. */
+export function formatJson(data: unknown): string {
+  return JSON.stringify(data, null, 2);
+}
+
+/** Writes `data` as JSON under `--json`, otherwise `plain()` (rendered only when needed), followed by one newline either way. */
+export function writeOutput(json: boolean | undefined, data: unknown, plain: () => string): void {
+  process.stdout.write(`${json === true ? formatJson(data) : plain()}\n`);
+}
+
 // ─────────────────────────────────────────────────────────────────────────── Flag validation ───────────────────────────────────────────────────────────────────────────
 
 /**

@@ -9,13 +9,18 @@ import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
 import { listSnapshots, takeSnapshot, type Snapshot } from "./backup.js";
-import { guard, UsageError, withDb } from "./cliRuntime.js";
+import { guard, UsageError, withDb, writeOutput } from "./cliRuntime.js";
 import { resolveBackupDir, resolveDbPath } from "./db.js";
 import { formatBytes } from "./fileUtils.js";
 import { restoreStore, UnusableSnapshotError } from "./restore.js";
 
 function describeSnapshot(snapshot: Snapshot): string {
   return `${snapshot.name}  ${snapshot.takenAt.toISOString()}  epoch ${String(snapshot.epoch)}  ${formatBytes(snapshot.bytes)}  ${snapshot.reason}`;
+}
+
+/** One `backup --list --json` record: `takenAt` as ISO 8601 and the byte count as `size`. */
+function snapshotToJson(snapshot: Snapshot): Record<string, unknown> {
+  return { path: snapshot.path, name: snapshot.name, takenAt: snapshot.takenAt.toISOString(), epoch: snapshot.epoch, reason: snapshot.reason, size: snapshot.bytes };
 }
 
 /** The canonical form of `path` for an identity comparison: resolved through symlinks when it exists. */
@@ -54,16 +59,15 @@ export function registerBackupCommands(program: Command): void {
         "--list shows every snapshot, newest first."
     )
     .option("--list", "list the snapshots instead of taking one")
+    .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
-      guard(async (options: { list?: boolean }) => {
+      guard(async (options: { list?: boolean; json?: boolean }) => {
         const dir = resolveBackupDir();
         if (options.list === true) {
           const snapshots = listSnapshots(dir);
-          if (snapshots.length === 0) {
-            process.stdout.write(`no snapshots in ${dir}\n`);
-            return;
-          }
-          process.stdout.write(`${[`snapshots in ${dir}:`, ...snapshots.map(describeSnapshot)].join("\n")}\n`);
+          writeOutput(options.json, snapshots.map(snapshotToJson), () =>
+            snapshots.length === 0 ? `no snapshots in ${dir}` : [`snapshots in ${dir}:`, ...snapshots.map(describeSnapshot)].join("\n")
+          );
           return;
         }
         const snapshot = await withDb((db) => takeSnapshot(db, dir, "manual"));
