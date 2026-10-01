@@ -50,7 +50,8 @@ function runPostinstall(env: Readonly<Record<string, string>> = {}): Postinstall
   delete childEnv["TOKEN_GOAT_MEM_WIRING_HOME"];
   delete childEnv["TOKEN_GOAT_MEM_SKIP_HOOKS"];
   Object.assign(childEnv, env);
-  const result = spawnSync(process.execPath, [POSTINSTALL_PATH], { encoding: "utf8", env: childEnv });
+  // A bound of its own, so a postinstall that hangs fails the test instead of hanging the run.
+  const result = spawnSync(process.execPath, [POSTINSTALL_PATH], { encoding: "utf8", env: childEnv, timeout: 30_000 });
   if (result.error !== undefined) {
     throw result.error;
   }
@@ -122,4 +123,28 @@ describe("postinstall", () => {
     expect(existsSync(settingsPath())).toBe(false);
     expect(result.output).toContain("mem init claude-code --user");
   });
+
+  it("gives up on a hook install that hangs rather than hanging the install", () => {
+    // Loaded into every node the postinstall starts; only the one running `init` blocks, forever.
+    const preload = join(root, "hang-on-init.cjs");
+    writeFileSync(preload, 'if (process.argv.includes("init")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n');
+    const started = Date.now();
+    const result = runPostinstall({ NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, TOKEN_GOAT_MEM_POSTINSTALL_TIMEOUT_MS: "1000" });
+    expect(result.exitCode).toBe(0);
+    expect(result.output).toContain("timed out");
+    expect(result.output).toContain("mem init claude-code --user");
+    expect(Date.now() - started).toBeLessThan(20_000);
+  }, 40_000);
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "leaves the hooks alone when run as someone other than the home directory's owner, as under sudo",
+    () => {
+      // `/` belongs to root, so this unprivileged run stands in for root writing into a user's home.
+      const result = runPostinstall({ HOME: "/" });
+      expect(result.exitCode).toBe(0);
+      expect(result.output).toContain("skipped Claude Code hooks");
+      expect(result.output).toContain("mem init claude-code --user");
+      expect(result.output).not.toContain("were not installed");
+    }
+  );
 });
