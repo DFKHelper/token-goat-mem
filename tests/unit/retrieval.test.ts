@@ -104,6 +104,24 @@ describe("computeBm25Scores", () => {
     expect(computeBm25Scores(docs, "es6").get("a")).toBeGreaterThan(0);
     expect(computeBm25Scores(docs, "es").get("a")).toBe(0);
   });
+
+  it("a query matching only a decision's rationale ranks that decision", () => {
+    const docs = [
+      makeFact({ id: "a", text: "use Node.js for backend", kind: "decision", why: "because the staging cluster kept running out of memory" }),
+      makeFact({ id: "b", text: "unrelated fact about bananas", kind: "fact", why: null }),
+    ];
+    const scores = computeBm25Scores(docs, "staging memory");
+    expect(scores.get("a")).toBeGreaterThan(0);
+    expect(scores.get("b")).toBe(0);
+  });
+
+  it("a fact without a rationale scores the same as before", () => {
+    const docWithNull = makeFact({ id: "a", text: "uses pnpm", kind: "preference", why: null });
+    const docWithUndefined = makeFact({ id: "a", text: "uses pnpm", kind: "preference", why: undefined });
+    const scoresWithNull = computeBm25Scores([docWithNull], "pnpm");
+    const scoresWithUndefined = computeBm25Scores([docWithUndefined], "pnpm");
+    expect(scoresWithNull.get("a")).toBe(scoresWithUndefined.get("a"));
+  });
 });
 
 describe("porterStem (item 2)", () => {

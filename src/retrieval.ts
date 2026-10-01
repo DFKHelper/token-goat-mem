@@ -648,7 +648,9 @@ export function computeBm25Scores(docs: readonly Fact[], query: string): Map<str
   let totalLength = 0;
 
   for (const doc of docs) {
-    const tokens = tokenize(`${doc.text} ${doc.subject ?? ""} ${doc.value ?? ""}`);
+    // Include the decision's rationale in lexical matching so queries matching only the "why"
+    // field can find it (e.g., "why did we choose Node.js?" searches the "why" field too).
+    const tokens = tokenize(`${doc.text} ${doc.subject ?? ""} ${doc.value ?? ""} ${doc.why ?? ""}`);
     docTokens.set(doc.id, tokens);
     totalLength += tokens.length;
     for (const term of new Set(tokens)) {
