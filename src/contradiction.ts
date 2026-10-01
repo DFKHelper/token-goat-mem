@@ -14,6 +14,8 @@
  * `pinned` facts are live enough to contradict one another (pins are not exempt from this — S8).
  */
 
+import { sep } from "node:path";
+
 import { SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import { normalizePath } from "./pathUtils.js";
 import { normalizeValue } from "./storage.js";
@@ -462,4 +464,72 @@ export function resolveContradictions(facts: readonly Fact[]): {
  */
 export function getGroundTruthFacts(facts: readonly Fact[]): Fact[] {
   return facts.filter((fact) => GROUND_TRUTH_STATUSES.includes(fact.status));
+}
+
+/** Scope breadth, narrowest highest: a `path` fact is narrower than a `project` fact, which is narrower than `global`. */
+const SCOPE_SPECIFICITY: Readonly<Record<FactScope, number>> = { global: 0, project: 1, path: 2 };
+
+/**
+ * Whether `narrow` is a strictly more specific scope than `broad`. A different level decides it;
+ * within `path` scope only nesting does (a directory binding is broader than a file or sub-directory
+ * under it), because two sibling paths are unrelated rather than ordered.
+ */
+function isMoreSpecificScope(narrow: Fact, broad: Fact): boolean {
+  const delta = SCOPE_SPECIFICITY[narrow.scope] - SCOPE_SPECIFICITY[broad.scope];
+  if (delta !== 0) {
+    return delta > 0;
+  }
+  const narrowRaw = narrow.scopeRoot ?? null;
+  const broadRaw = broad.scopeRoot ?? null;
+  if (narrow.scope !== "path" || narrowRaw === null || broadRaw === null) {
+    return false;
+  }
+  const narrowRoot = normalizePath(narrowRaw);
+  const broadRoot = normalizePath(broadRaw);
+  return narrowRoot !== broadRoot && narrowRoot.startsWith(broadRoot + sep);
+}
+
+/**
+ * Ids of facts a more specific in-scope fact overrides at recall: same `subject`, a *different*
+ * `value`, and a strictly narrower scope (the narrowest in-scope level wins, so a path fact beats a
+ * project fact beats a global one). The caller must pass only facts already in scope for the query;
+ * this cannot tell that a global fact is also wanted elsewhere, which is exactly why the result is a
+ * per-recall exclusion and never a status change -- the overridden fact stays `active` in the store
+ * and keeps surfacing in every project the override does not cover.
+ *
+ * Only `active`/`pinned` facts take part on either side: a `contested`/`pending` fact is already
+ * withheld and needs human attention, so it neither shadows nor is shadowed, and a pin does not
+ * exempt a fact (pinning expresses importance, not scope precedence). Facts without a subject or
+ * value, and a restatement with the same value, never conflict. `canOverride` vetoes a narrower fact
+ * the caller will withhold anyway (an anchor-contradicted override must not hide the broader fact
+ * along with itself); it is asked only for a fact that would otherwise shadow, so a caller can pass
+ * a costly check.
+ */
+export function scopeShadowedIds(facts: readonly Fact[], canOverride: (narrow: Fact) => boolean = () => true): ReadonlySet<string> {
+  const bySubject = new Map<string, Fact[]>();
+  for (const fact of facts) {
+    if (fact.subject === null || fact.value === null || !GROUND_TRUTH_STATUSES.includes(fact.status)) {
+      continue;
+    }
+    const bucket = bySubject.get(fact.subject);
+    if (bucket === undefined) {
+      bySubject.set(fact.subject, [fact]);
+    } else {
+      bucket.push(fact);
+    }
+  }
+  const shadowed = new Set<string>();
+  for (const bucket of bySubject.values()) {
+    for (const broad of bucket) {
+      const broadValue = normalizedFactValue(broad.value);
+      if (
+        bucket.some(
+          (narrow) => normalizedFactValue(narrow.value) !== broadValue && isMoreSpecificScope(narrow, broad) && canOverride(narrow)
+        )
+      ) {
+        shadowed.add(broad.id);
+      }
+    }
+  }
+  return shadowed;
 }

@@ -702,6 +702,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const { results, withheldCount, zeroSignal } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
+    poolIsInScope: true,
     hintFormat: true,
     limit: HINT_FORMAT_RECALL_LIMIT,
     anchorCacheStore,

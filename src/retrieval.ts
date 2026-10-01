@@ -30,7 +30,7 @@ import { resolve as resolvePath, sep } from "node:path";
 
 import { evaluateAnchor, type AnchorCacheStore, type AnchorVerdict } from "./anchors.js";
 import { screenForSecrets } from "./capture.js";
-import { resolveContradictions } from "./contradiction.js";
+import { resolveContradictions, scopeShadowedIds } from "./contradiction.js";
 import { normalizePath } from "./pathUtils.js";
 import { identityMatches, isBoundToRoot } from "./projectIdentity.js";
 import { ageInDays } from "./timeUtils.js";
@@ -95,6 +95,13 @@ export interface RetrievalOptions {
    * so applying it early would defeat the withholding gate on precisely the facts it exists to catch.
    */
   readonly restrictToRoot?: boolean;
+  /**
+   * Declares that the `facts` handed to `retrieve` were already narrowed to this caller's scope (the
+   * hint seam's `isInScope` pre-filter), so scope-specificity shadowing can run over them as-is.
+   * `restrictToRoot` implies the same thing by filtering the pool itself; with neither, `retrieve`
+   * cannot tell which facts apply here and does no shadowing.
+   */
+  readonly poolIsInScope?: boolean;
   /** Cap on the number of results returned, applied after ranking and gating. */
   readonly limit?: number;
   /** When true, drop every `trust === "withheld"` result (contested/pending/anchor-contradicted) — the `--hint-format` contract (Section 4). */
@@ -1321,7 +1328,19 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const { facts: resolved } = resolveContradictions(liveCandidates);
   const pool = resolved.filter((fact) => fact.status !== "superseded");
 
-  const filtered = pool.filter((fact) => matchesFilters(fact, options, now));
+  // A more specific in-scope fact overrides a same-subject, different-value broader one (a project's
+  // `package-manager = pnpm` over a global `npm`). Computed over the in-scope pool *before* the
+  // kind/subject/age/entity filters, so narrowing the query never removes the overriding fact and
+  // lets the broader one resurface. A per-recall exclusion only: nothing is written to the store. An
+  // override whose anchor is contradicted is withheld itself, so it must not take the broader fact down with it.
+  const shadowed =
+    options.restrictToRoot === true || options.poolIsInScope === true
+      ? scopeShadowedIds(
+          options.restrictToRoot === true ? pool.filter((fact) => isBoundToRoot(fact, options.root)) : pool,
+          (narrow) => evaluateFactFreshness(narrow, options.root, anchorDeadline, undefined, options.anchorCacheStore) !== "contradicted"
+        )
+      : new Set<string>();
+  const filtered = pool.filter((fact) => !shadowed.has(fact.id) && matchesFilters(fact, options, now));
   if (filtered.length === 0) {
     // `zeroSignal: false` here, not `true`: this is an empty candidate pool (nothing survived
     // scope/status filtering, possibly an empty store), not a real pool that no rank list could

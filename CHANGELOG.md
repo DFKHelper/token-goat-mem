@@ -162,6 +162,16 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Changed
 
+- **A more specific same-subject fact now overrides a broader one at recall.** Contradiction
+  resolution keys on subject + scope, so a global `package-manager = npm` and a project
+  `package-manager = pnpm` both stayed active and recall surfaced both, which is conflicting
+  guidance. `retrieve()` (shared by `mem recall` and the `TGMEM/2` hint seam) now withholds the
+  broader fact from that recall when an in-scope narrower fact (path over project over global)
+  has the same subject and a different value. The broader fact is not superseded or edited, so it
+  still surfaces in other projects; a pin does not exempt it, and subject-less facts, equal
+  values, and `contested`/`pending` facts are unaffected. A narrower fact whose anchor is
+  contradicted is withheld itself, so it does not hide the broader one.
+
 - **Releases publish only after the full CI matrix passes, with npm provenance.** The publish
   workflow now calls the CI workflow and waits for it, so a tag on a commit that fails lint,
   typecheck, or a test on either OS no longer reaches npm. The package is published with
