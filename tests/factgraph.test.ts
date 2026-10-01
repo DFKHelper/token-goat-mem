@@ -1,7 +1,4 @@
-/**
- * Tests for `src/factgraph.ts` -- the `fact_terms` co-occurrence graph, its IDF-damped edge
- * weights, and the seeded propagation `getGraphScoresForQuery` runs over it.
- */
+/** Tests for `src/factgraph.ts` -- the `fact_terms` co-occurrence graph, its IDF-damped edge weights, and the seeded propagation `getGraphScoresForQuery` runs over it. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,10 +28,7 @@ afterEach(() => {
 
 describe("neighbours -- hub-term damping", () => {
   it("weighs a rare-term neighbour above a hub-term neighbour, both surviving the df ceiling", () => {
-    // 10 facts total. "hub" sits on 6 (60%, right at the default 0.6 ceiling -- survives, but with
-    // a low weight). "rare" sits on only 2 (f1 and f7), well clear of the ceiling, so its weight is
-    // much larger. f1 carries both, so its edge to f7 (via "rare") must outrank every edge to
-    // f2..f6 (via "hub" alone).
+    // 10 facts total. "hub" sits on 6 (60%, right at the default 0.6 ceiling -- survives, but with a low weight). "rare" sits on only 2 (f1 and f7), well clear of the ceiling, so its weight is much larger. f1 carries both, so its edge to f7 (via "rare") must outrank every edge to f2..f6 (via "hub" alone).
     const f1 = seed(db, "f1", "f1 text");
     const f2 = seed(db, "f2", "f2 text");
     const f3 = seed(db, "f3", "f3 text");
@@ -63,9 +57,7 @@ describe("neighbours -- hub-term damping", () => {
   });
 
   it("excludes a term above the df ceiling outright, dropping its edges entirely", () => {
-    // 5 facts total; "megahub" covers 4 of them (80%, well past the default 0.6 ceiling). Two
-    // megahub-sharing facts must not be neighbours through it -- the excluded term contributes no
-    // edge at all, not just a small one.
+    // 5 facts total; "megahub" covers 4 of them (80%, well past the default 0.6 ceiling). Two megahub-sharing facts must not be neighbours through it -- the excluded term contributes no edge at all, not just a small one.
     const f1 = seed(db, "f1", "f1 text");
     const f2 = seed(db, "f2", "f2 text");
     const f3 = seed(db, "f3", "f3 text");
@@ -87,9 +79,7 @@ describe("neighbours -- hub-term damping", () => {
 
 describe("propagate", () => {
   it("terminates within its hop bound on a cyclic graph", () => {
-    // A ring: f1-f2-f3-f4-f1, each edge a distinct rare term shared by exactly one adjacent pair,
-    // so nothing here is excluded by the df ceiling and every node reaches every other node given
-    // enough hops -- the loop must still stop after exactly `hops` rounds.
+    // A ring: f1-f2-f3-f4-f1, each edge a distinct rare term shared by exactly one adjacent pair, so nothing here is excluded by the df ceiling and every node reaches every other node given enough hops -- the loop must still stop after exactly `hops` rounds.
     const facts = ["f1", "f2", "f3", "f4"].map((id) => seed(db, id, `${id} text`));
     const ring: ReadonlyArray<readonly [string, string, string]> = [
       ["f1", "f2", "edge-a"],
@@ -118,14 +108,10 @@ describe("propagate", () => {
 
 describe("getGraphScoresForQuery", () => {
   it("surfaces a fact entity overlap alone does not", () => {
-    // The query names "ProjectX" by entity. f-named carries that entity and is what entity overlap
-    // finds. f-linked shares a rare topic term with f-named but never mentions "ProjectX" itself --
-    // entity overlap has no way to find it, and propagation is the only signal that does.
+    // The query names "ProjectX" by entity. f-named carries that entity and is what entity overlap finds. f-linked shares a rare topic term with f-named but never mentions "ProjectX" itself -- entity overlap has no way to find it, and propagation is the only signal that does.
     const named = seed(db, "f-named", "ProjectX uses a custom deploy script");
     const linked = seed(db, "f-linked", "the deploy script reads config from a vault");
-    // Padding facts, not part of the shared term: with only `named` and `linked` in the store, the
-    // shared term's df (2 of 2) exceeds the default 0.6 df ceiling and gets excluded outright. Four
-    // total facts keeps df=2 under the ceiling (2.4) so the edge under test actually survives.
+    // Padding facts, not part of the shared term: with only `named` and `linked` in the store, the shared term's df (2 of 2) exceeds the default 0.6 df ceiling and gets excluded outright. Four total facts keeps df=2 under the ceiling (2.4) so the edge under test actually survives.
     seed(db, "f-other-1", "unrelated note about lunch");
     seed(db, "f-other-2", "unrelated note about the weather");
 

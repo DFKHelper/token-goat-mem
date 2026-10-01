@@ -1,8 +1,4 @@
-/**
- * `mem backup` and `mem restore`: the hand-driven side of the snapshots src/backup.ts takes on its
- * own. Snapshots live in `resolveBackupDir()` -- outside the mem home -- so deleting `~/.mem`, or
- * `~/.claude` (which never held the store), leaves every restore point in place.
- */
+/** `mem backup` and `mem restore`: the hand-driven side of the snapshots src/backup.ts takes on its own. Snapshots live in `resolveBackupDir()` -- outside the mem home -- so deleting `~/.mem`, or `~/.claude` (which never held the store), leaves every restore point in place. */
 
 import type { Command } from "commander";
 import { existsSync, realpathSync } from "node:fs";
@@ -32,10 +28,7 @@ function canonicalPath(path: string): string {
   }
 }
 
-/**
- * The snapshot file `restore <snapshot>` names: an existing path as given, else a bare file name looked
- * up in the backup directory -- so the names `mem backup --list` prints can be pasted back verbatim.
- */
+/** The snapshot file `restore <snapshot>` names: an existing path as given, else a bare file name looked up in the backup directory -- so the names `mem backup --list` prints can be pasted back verbatim. */
 function resolveSnapshotArg(arg: string, dir: string): string {
   if (existsSync(arg)) {
     return arg;

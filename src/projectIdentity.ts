@@ -1,48 +1,11 @@
-/**
- * Repository-relative identity for a project root, so a project-scoped fact survives the path it
- * was captured at.
- *
- * `scopeRoot` is an absolute path, and every reader compares it by string equality. That binding is
- * correct but brittle in exactly the cases a memory tool is supposed to cover: the same repository
- * checked out at a second path, a git worktree (a different root by construction), a clone on
- * another machine reached through `mem export`/`mem import`. In all three the facts are about the
- * same project and none of them surface.
- *
- * The identity here is deliberately *not* just the remote URL. A monorepo has one remote and many
- * project roots, so remote-only identity would make `packages/a` and `packages/b` the same project
- * and leak each one's decisions into the other. Keying on the remote *plus the root's path relative
- * to the working-tree root* keeps those distinct while still matching across clones:
- *
- * | case                                  | remote | relative path | same identity? |
- * |---------------------------------------|--------|---------------|----------------|
- * | same repo cloned to a different path  | same   | same          | yes            |
- * | git worktree of the same repo         | same   | same          | yes            |
- * | two packages in one monorepo          | same   | differs       | no             |
- * | unrelated repos                       | differs| --            | no             |
- *
- * Like src/anchors.ts, this module never shells out: `git` need not be installed, and evaluating an
- * identity can have no side effects on the repository. It reads `.git` (following a `gitdir:`
- * pointer for worktrees and submodules), `commondir` where present, and `config`.
- *
- * Everything degrades to `null`, never to a throw or a guess. `null` means "no identity available"
- * and every caller treats it as "fall back to the path binding", so a directory that is not a
- * repository, has no remote, or has several ambiguous ones behaves exactly as it did before this
- * module existed.
- */
+/** Repository-relative identity for a project root, so a project-scoped fact survives the path it was captured at. `scopeRoot` is an absolute path, and every reader compares it by string equality. That binding is correct but brittle in exactly the cases a memory tool is supposed to cover: the same repository checked out at a second path, a git worktree (a different root by construction), a clone on another machine reached through `mem export`/`mem import`. In all three the facts are about the same project and none of them surface. The identity here is deliberately *not* just the remote URL. A monorepo has one remote and many project roots, so remote-only identity would make `packages/a` and `packages/b` the same project and leak each one's decisions into the other. Keying on the remote *plus the root's path relative to the working-tree root* keeps those distinct while still matching across clones: | case                                  | remote | relative path | same identity? | |---------------------------------------|--------|---------------|----------------| | same repo cloned to a different path  | same   | same          | yes            | | git worktree of the same repo         | same   | same          | yes            | | two packages in one monorepo          | same   | differs       | no             | | unrelated repos                       | differs| --            | no             | Like src/anchors.ts, this module never shells out: `git` need not be installed, and evaluating an identity can have no side effects on the repository. It reads `.git` (following a `gitdir:` pointer for worktrees and submodules), `commondir` where present, and `config`. Everything degrades to `null`, never to a throw or a guess. `null` means "no identity available" and every caller treats it as "fall back to the path binding", so a directory that is not a repository, has no remote, or has several ambiguous ones behaves exactly as it did before this module existed. */
 
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { normalizePath } from "./pathUtils.js";
 import type { Fact } from "./types.js";
 
-/**
- * Set to `path` to switch project binding back to absolute paths only, at both capture and recall.
- *
- * The case for it: two clones of one repository that are deliberately *not* the same project -- a
- * fork kept for experiments, a customer-specific branch checkout -- where sharing decisions between
- * them is wrong rather than convenient. Nothing else re-creates a path-only binding once identities
- * are being written, so this is the opt-out rather than a tuning knob.
- */
+/** Set to `path` to switch project binding back to absolute paths only, at both capture and recall. The case for it: two clones of one repository that are deliberately *not* the same project -- a fork kept for experiments, a customer-specific branch checkout -- where sharing decisions between them is wrong rather than convenient. Nothing else re-creates a path-only binding once identities are being written, so this is the opt-out rather than a tuning knob. */
 export const PROJECT_IDENTITY_ENV = "TOKEN_GOAT_MEM_PROJECT_IDENTITY";
 
 /** Cap on bytes read from `.git/config`. A repository config is a small text file; anything larger is not one. */
@@ -54,11 +17,7 @@ const MAX_POINTER_BYTES = 4096;
 /** Upper bound on directories walked upward looking for the working-tree root, so a pathological path cannot loop. */
 const MAX_UPWARD_STEPS = 64;
 
-/**
- * Cache keyed by the *resolved* root. Identity is derived from repository layout, which does not
- * change within the life of a short-lived CLI process; recall asks for the same root once per fact
- * without it.
- */
+/** Cache keyed by the *resolved* root. Identity is derived from repository layout, which does not change within the life of a short-lived CLI process; recall asks for the same root once per fact without it. */
 const identityCache = new Map<string, string | null>();
 
 /** Drops the memoized identities. Tests that move a repository under a root need this; nothing in normal operation does. */
@@ -83,12 +42,7 @@ function readSmallFile(path: string, maxBytes: number): string | null {
   }
 }
 
-/**
- * The `.git` directory for a working tree at `dir`, following a `gitdir:` pointer file.
- *
- * A worktree and a submodule both replace `.git` with a one-line file pointing elsewhere, so the
- * pointer case is the normal case for exactly the layouts this module exists to serve.
- */
+/** The `.git` directory for a working tree at `dir`, following a `gitdir:` pointer file. A worktree and a submodule both replace `.git` with a one-line file pointing elsewhere, so the pointer case is the normal case for exactly the layouts this module exists to serve. */
 function gitDirOf(dir: string): string | null {
   const dotGit = join(dir, ".git");
   let stat;
@@ -136,13 +90,7 @@ function findWorkingTree(root: string): { readonly treeRoot: string; readonly gi
   return null;
 }
 
-/**
- * The directory holding the shared `config`.
- *
- * A worktree's own git directory carries only that worktree's state; `config` lives in the main
- * repository, named by a `commondir` file. Without this step every worktree reads as having no
- * remote -- and a worktree is one of the three cases this module exists for.
- */
+/** The directory holding the shared `config`. A worktree's own git directory carries only that worktree's state; `config` lives in the main repository, named by a `commondir` file. Without this step every worktree reads as having no remote -- and a worktree is one of the three cases this module exists for. */
 function commonDirOf(gitDir: string): string {
   const content = readSmallFile(join(gitDir, "commondir"), MAX_POINTER_BYTES);
   const pointer = content?.trim();
@@ -152,13 +100,7 @@ function commonDirOf(gitDir: string): string {
   return isAbsolute(pointer) ? resolve(pointer) : resolve(gitDir, pointer);
 }
 
-/**
- * The remote URL to identify a repository by: `origin` when it exists, otherwise the only remote if
- * there is exactly one.
- *
- * Several remotes with no `origin` is genuinely ambiguous -- picking one would make identity depend
- * on config file ordering -- so that yields `null` and the caller falls back to the path binding.
- */
+/** The remote URL to identify a repository by: `origin` when it exists, otherwise the only remote if there is exactly one. Several remotes with no `origin` is genuinely ambiguous -- picking one would make identity depend on config file ordering -- so that yields `null` and the caller falls back to the path binding. */
 function remoteUrlFrom(configText: string): string | null {
   const remotes = new Map<string, string>();
   let current: string | null = null;
@@ -173,8 +115,7 @@ function remoteUrlFrom(configText: string): string | null {
       continue;
     }
     const url = /^url\s*=\s*(.+)$/u.exec(line)?.[1]?.trim();
-    // First `url` in a section wins, matching git's own "last one set" only loosely -- but a second
-    // url line in one remote section is a pushurl-style edge case, not something to guess at.
+    // First `url` in a section wins, matching git's own "last one set" only loosely -- but a second url line in one remote section is a pushurl-style edge case, not something to guess at.
     if (url !== undefined && url.length > 0 && !remotes.has(current)) {
       remotes.set(current, url);
     }
@@ -186,14 +127,7 @@ function remoteUrlFrom(configText: string): string | null {
   return remotes.size === 1 ? ([...remotes.values()][0] ?? null) : null;
 }
 
-/**
- * Reduces a remote URL to a comparable host+path.
- *
- * `git@github.com:owner/repo.git`, `https://github.com/owner/repo`, and
- * `ssh://git@github.com/owner/repo.git` are the same repository and must produce the same string.
- * Case is folded because the hosts people actually use treat owner/repo case-insensitively, and an
- * identity that changed with how a URL was typed would be worse than no identity at all.
- */
+/** Reduces a remote URL to a comparable host+path. `git@github.com:owner/repo.git`, `https://github.com/owner/repo`, and `ssh://git@github.com/owner/repo.git` are the same repository and must produce the same string. Case is folded because the hosts people actually use treat owner/repo case-insensitively, and an identity that changed with how a URL was typed would be worse than no identity at all. */
 export function normalizeRemoteUrl(url: string): string | null {
   let rest = url.trim();
   if (rest.length === 0) {
@@ -214,16 +148,7 @@ export function normalizeRemoteUrl(url: string): string | null {
   return rest.length > 0 ? rest : null;
 }
 
-/**
- * A stable identity for the project rooted at `root`, or `null` when none is available.
- *
- * The shape is `<host>/<path>#<root relative to the working tree>`, with `.` for the working-tree
- * root itself. The `#` separator cannot appear in the relative-path component after normalization
- * of `\` to `/`, so the two halves never blur into each other.
- *
- * `null` is the honest and common answer -- no repository, no remote, several ambiguous remotes,
- * identity switched off -- and every caller must treat it as "compare paths as before".
- */
+/** A stable identity for the project rooted at `root`, or `null` when none is available. The shape is `<host>/<path>#<root relative to the working tree>`, with `.` for the working-tree root itself. The `#` separator cannot appear in the relative-path component after normalization of `\` to `/`, so the two halves never blur into each other. `null` is the honest and common answer -- no repository, no remote, several ambiguous remotes, identity switched off -- and every caller must treat it as "compare paths as before". */
 export function resolveProjectIdentity(root: string): string | null {
   if (pathIdentityOnly()) {
     return null;
@@ -256,8 +181,7 @@ function computeProjectIdentity(root: string): string | null {
     return null;
   }
   const within = relative(tree.treeRoot, root);
-  // `..` means the caller handed us a root the working tree does not contain, which findWorkingTree
-  // should make impossible; refusing beats emitting an identity that escapes its own repository.
+  // `..` means the caller handed us a root the working tree does not contain, which findWorkingTree should make impossible; refusing beats emitting an identity that escapes its own repository.
   if (within.startsWith("..")) {
     return null;
   }
@@ -265,12 +189,7 @@ function computeProjectIdentity(root: string): string | null {
   return `${host}#${suffix}`;
 }
 
-/**
- * Whether a stored identity and a querying root name the same project.
- *
- * Both halves must be present: a fact captured before identities existed (or with them switched
- * off) has `null` and is matched by path alone, never by "this root has no identity either".
- */
+/** Whether a stored identity and a querying root name the same project. Both halves must be present: a fact captured before identities existed (or with them switched off) has `null` and is matched by path alone, never by "this root has no identity either". */
 export function identityMatches(stored: string | null | undefined, root: string): boolean {
   if (stored === null || stored === undefined || stored.trim().length === 0) {
     return false;
@@ -278,39 +197,20 @@ export function identityMatches(stored: string | null | undefined, root: string)
   return stored === resolveProjectIdentity(root);
 }
 
-/**
- * Whether `fact`'s scope binding resolves to `root` -- the predicate behind retrieval.ts's
- * `RetrievalOptions.restrictToRoot`, reused by `mem review` (cli.ts) to decide whether a fact's
- * anchor is even meaningful to evaluate against a given root before calling it `contradicted`, and
- * by the capture paths (capture.ts, import.ts) to decide whether an existing fact is close enough
- * to a restatement to take a sighting instead of a second row.
- *
- * It lives here rather than in retrieval.ts because it is a statement about a fact's scope binding
- * and this module's own `identityMatches`, not about ranking: every layer that asks the question
- * can reach a Support module, and capture.ts asking retrieval.ts would close an import cycle
- * (retrieval.ts already imports `screenForSecrets` from capture.ts).
- *
- * A `path` fact counts as bound when its `scopeRoot` names a file or directory *inside* `root`,
- * which is the containment direction the CLI needs: the caller supplies a project directory and
- * the fact is bound to a file within it. integration-seam.ts's `isInScope` tests the opposite
- * direction against open editor files, so the two predicates are deliberately not shared.
- */
+/** Whether `fact`'s scope binding resolves to `root` -- the predicate behind retrieval.ts's `RetrievalOptions.restrictToRoot`, reused by `mem review` (cli.ts) to decide whether a fact's anchor is even meaningful to evaluate against a given root before calling it `contradicted`, and by the capture paths (capture.ts, import.ts) to decide whether an existing fact is close enough to a restatement to take a sighting instead of a second row. It lives here rather than in retrieval.ts because it is a statement about a fact's scope binding and this module's own `identityMatches`, not about ranking: every layer that asks the question can reach a Support module, and capture.ts asking retrieval.ts would close an import cycle (retrieval.ts already imports `screenForSecrets` from capture.ts). A `path` fact counts as bound when its `scopeRoot` names a file or directory *inside* `root`, which is the containment direction the CLI needs: the caller supplies a project directory and the fact is bound to a file within it. integration-seam.ts's `isInScope` tests the opposite direction against open editor files, so the two predicates are deliberately not shared. */
 export function isBoundToRoot(fact: Fact, root: string): boolean {
   if (fact.scope === "global") {
     return true;
   }
   const scopeRootRaw = fact.scopeRoot ?? null;
   if (scopeRootRaw === null || scopeRootRaw.trim().length === 0) {
-    // A project/path fact with no binding cannot be resolved against any root. Exclude rather than
-    // guess: that fails toward under-recall, which is the safe direction.
+    // A project/path fact with no binding cannot be resolved against any root. Exclude rather than guess: that fails toward under-recall, which is the safe direction.
     return false;
   }
   const scopeRoot = normalizePath(resolve(scopeRootRaw));
   const normalizedRoot = normalizePath(resolve(root));
   if (fact.scope === "project") {
-    // Path first: it is the original binding, needs no filesystem read, and answers the common case.
-    // The identity check only widens -- the same repository at another path, in a worktree, or on
-    // another machine -- and can never exclude a fact the path binding already accepted.
+    // Path first: it is the original binding, needs no filesystem read, and answers the common case. The identity check only widens -- the same repository at another path, in a worktree, or on another machine -- and can never exclude a fact the path binding already accepted.
     return normalizedRoot === scopeRoot || identityMatches(fact.scopeRepo, root);
   }
   // scope === "path": bound when the target sits at or beneath the querying root.

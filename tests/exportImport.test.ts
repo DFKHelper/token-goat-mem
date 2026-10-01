@@ -17,9 +17,7 @@ function envelope(facts: readonly Record<string, unknown>[], embeddingMeta?: { m
   return JSON.stringify({
     schemaVersion: 1,
     exportedAt: new Date().toISOString(),
-    // Omitted (not even `null`) unless a caller asks for it, matching every envelope written
-    // before `embeddingMeta` existed -- the "unknown provenance" case `exportImport.ts` must treat
-    // as incomparable rather than adopt.
+    // Omitted (not even `null`) unless a caller asks for it, matching every envelope written before `embeddingMeta` existed -- the "unknown provenance" case `exportImport.ts` must treat as incomparable rather than adopt.
     ...(embeddingMeta !== undefined ? { embeddingMeta } : {}),
     facts,
   });
@@ -196,9 +194,7 @@ describe("importFromJson", () => {
 
   it("round-trips a Float32Array embedding through the JSON number[] <-> Float32Array conversion", () => {
     const withEmbedding = { ...VALID_FACT, id: "22222222-2222-2222-2222-222222222222", embedding: [0.5, -0.25, 1] };
-    // Provenance must be known and adoptable by a fresh (no-meta) target, or this import's own
-    // fix (unknown-provenance vectors are stripped, not silently trusted) would null it out --
-    // see the dedicated "unknown provenance" tests below for that behavior.
+    // Provenance must be known and adoptable by a fresh (no-meta) target, or this import's own fix (unknown-provenance vectors are stripped, not silently trusted) would null it out -- see the dedicated "unknown provenance" tests below for that behavior.
     writeFileSync(jsonPath, envelope([withEmbedding], { model: "test-model", dimension: 3 }), "utf8");
 
     const result = importFromJson(db, { path: jsonPath, root });
@@ -440,11 +436,7 @@ describe("importFromJson", () => {
   });
 
   it("regression: an imported project-scoped fact whose scopeRoot escapes --root is accepted and rebound when scopeRepo identifies the same repository --root is a checkout of (cross-machine restore)", () => {
-    // AGENTS.md/CHANGELOG.md promise a fact survives an export/import onto another machine, but the
-    // scopeRoot-containment check above rejects any non-global fact whose recorded scopeRoot falls
-    // outside --root -- and on another machine the original scopeRoot path does not exist, so there
-    // is no --root the user could pass to satisfy it. The fix: accept and rebind to --root when
-    // scopeRepo identifies the same repository --root is a checkout of.
+    // AGENTS.md/CHANGELOG.md promise a fact survives an export/import onto another machine, but the scopeRoot-containment check above rejects any non-global fact whose recorded scopeRoot falls outside --root -- and on another machine the original scopeRoot path does not exist, so there is no --root the user could pass to satisfy it. The fix: accept and rebind to --root when scopeRepo identifies the same repository --root is a checkout of.
     const cloneA = mkdtempSync(join(tmpdir(), "mem-exportimport-clonea-"));
     const cloneB = mkdtempSync(join(tmpdir(), "mem-exportimport-cloneb-"));
     const unrelated = mkdtempSync(join(tmpdir(), "mem-exportimport-unrelated-"));
@@ -483,8 +475,7 @@ describe("importFromJson", () => {
       }
       expect(outcome.fact.scopeRoot).toBe(cloneB);
 
-      // Importing the same envelope into an unrelated directory (no shared identity, no path
-      // containment) must still fail with the existing "outside the import root" message.
+      // Importing the same envelope into an unrelated directory (no shared identity, no path containment) must still fail with the existing "outside the import root" message.
       const secondFact = { ...restoredFact, id: "13131313-1313-1313-1313-131313131313" };
       writeFileSync(jsonPath, envelope([secondFact]), "utf8");
       const rejectedIntoUnrelated = importFromJson(db, { path: jsonPath, root: unrelated });
@@ -545,13 +536,7 @@ describe("importFromJson", () => {
   });
 
   it("imports a fact with a multi-word file-contains substring anchor (json-import is exempt from the CLI arity check)", () => {
-    // Regression test for the round-trip bug: 008f60b accidentally routed json-import through the
-    // same `validateAnchorSyntax` arity check `mem edit`/`mem remember` use, which whitespace-splits
-    // the anchor and rejects a multi-word file-contains/file-not-contains substring as "expects 2
-    // argument(s), got N". That check only exists because those CLI commands parse the anchor out of
-    // a flat string; a JSON `anchor` field has no such parsing ambiguity, so json-import must accept
-    // it -- otherwise a previously-exported fact with a multi-word substring anchor could never be
-    // re-imported.
+    // Regression test for the round-trip bug: 008f60b accidentally routed json-import through the same `validateAnchorSyntax` arity check `mem edit`/`mem remember` use, which whitespace-splits the anchor and rejects a multi-word file-contains/file-not-contains substring as "expects 2 argument(s), got N". That check only exists because those CLI commands parse the anchor out of a flat string; a JSON `anchor` field has no such parsing ambiguity, so json-import must accept it -- otherwise a previously-exported fact with a multi-word substring anchor could never be re-imported.
     const multiWordAnchorFact = {
       ...VALID_FACT,
       id: "22222222-2222-2222-2222-222222222222",
@@ -574,18 +559,11 @@ describe("importFromJson", () => {
   it("an oversized import file throws JsonImportError before attempting to parse", () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-size-"));
     const path = join(dir, "huge.json");
-    // Just over the 50MB limit, by setting EOF rather than writing 50MB of bytes.
-    // The guard in src/exportImport.ts reads `stat.size` and rejects before it ever opens the
-    // file for reading, so the content is irrelevant -- only the size the filesystem reports is.
-    // Materialising it was ~100MB of JS string plus a 50MB write, which took over 5s on a cold
-    // Windows CI runner and timed the test out. `truncateSync` is O(1) on NTFS and ext4 alike.
+    // Just over the 50MB limit, by setting EOF rather than writing 50MB of bytes. The guard in src/exportImport.ts reads `stat.size` and rejects before it ever opens the file for reading, so the content is irrelevant -- only the size the filesystem reports is. Materialising it was ~100MB of JS string plus a 50MB write, which took over 5s on a cold Windows CI runner and timed the test out. `truncateSync` is O(1) on NTFS and ext4 alike.
     writeFileSync(path, "", "utf8");
     truncateSync(path, 50_000_001);
     try {
-      // Asserting on the message, not just the class: `JsonImportError` is also what a parse
-      // failure raises, and a 50MB file of any filler is invalid JSON -- so `toThrow(JsonImportError)`
-      // alone passed even with the size limit raised 10x, i.e. it never verified the guard this
-      // test is named for. The size check must reject the file *before* the parse it precedes.
+      // Asserting on the message, not just the class: `JsonImportError` is also what a parse failure raises, and a 50MB file of any filler is invalid JSON -- so `toThrow(JsonImportError)` alone passed even with the size limit raised 10x, i.e. it never verified the guard this test is named for. The size check must reject the file *before* the parse it precedes.
       expect(() => importFromJson(db, { path, root })).toThrow(JsonImportError);
       expect(() => importFromJson(db, { path, root })).toThrow(/is too large \(50000001 bytes, max 50000000 bytes\)/);
     } finally {
@@ -709,8 +687,7 @@ describe("importFromJson restores a superseded fact's superseded_by edge", () =>
       status: "superseded",
       superseded_by: winner.id,
     };
-    // Loser named first, winner appears later in the same array -- per-row resolution during the
-    // insert loop would not have found `winner` yet at this point.
+    // Loser named first, winner appears later in the same array -- per-row resolution during the insert loop would not have found `winner` yet at this point.
     writeFileSync(jsonPath, envelope([loser, winner]), "utf8");
 
     const result = importFromJson(db, { path: jsonPath, root });
@@ -828,8 +805,7 @@ describe("embedding provenance on import", () => {
   });
 
   it("does not adopt the envelope's model onto a target that already holds vectors with no recorded model", () => {
-    // Simulate the unlabelled state directly: a vector on disk with no meta row, as an interrupted
-    // `mem embed` or an earlier unfixed import would leave behind.
+    // Simulate the unlabelled state directly: a vector on disk with no meta row, as an interrupted `mem embed` or an earlier unfixed import would leave behind.
     insertFact(db, { ...VALID_FACT, id: "aaaaaaaa-6666-6666-6666-666666666666", embedding: new Float32Array([9, 9, 9]) } as unknown as NewFact);
     expect(countEmbeddedFacts(db)).toBe(1);
     expect(getEmbeddingMeta(db)).toBeUndefined();
@@ -931,17 +907,7 @@ describe("imported fact ids are validated for shape, not just presence", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── concurrent-import race ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Regression: the duplicate-id check that decides whether to insert a fact runs in the
- * classification pass, which is outside the transaction that takes the write lock. Two imports
- * sharing one id could therefore both classify it as new; the loser then hit the `facts.id` primary
- * key and rolled back its *whole* batch, losing every unrelated fact it was going to add.
- *
- * The interleave is reproduced exactly rather than approximated: `db` is proxied so the rival's
- * insert lands on the first `db.transaction(...)` call, which is the line immediately after the
- * classification pass and immediately before the write lock is taken -- precisely the window a
- * second process occupies. Racing two real processes would test the same thing nondeterministically.
- */
+/** Regression: the duplicate-id check that decides whether to insert a fact runs in the classification pass, which is outside the transaction that takes the write lock. Two imports sharing one id could therefore both classify it as new; the loser then hit the `facts.id` primary key and rolled back its *whole* batch, losing every unrelated fact it was going to add. The interleave is reproduced exactly rather than approximated: `db` is proxied so the rival's insert lands on the first `db.transaction(...)` call, which is the line immediately after the classification pass and immediately before the write lock is taken -- precisely the window a second process occupies. Racing two real processes would test the same thing nondeterministically. */
 describe("regression: an id inserted between classification and the write lock", () => {
   const FACT_A: Record<string, unknown> = { ...VALID_FACT, id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", text: "rival wins this id" };
   const FACT_B: Record<string, unknown> = { ...VALID_FACT, id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", text: "unrelated fact in the same batch" };

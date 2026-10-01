@@ -1,16 +1,4 @@
-/**
- * Tests for `mem consolidate` -- the near-duplicate pass and the stale pass -- plus the durable
- * `facts.last_surfaced_at` mark the stale pass depends on.
- *
- * Two layers, both against a real database: unit tests over `src/consolidate.ts`'s clustering rules
- * (which pairs may be compared at all, who survives, what is never touched), and end-to-end tests
- * driving the real `run()` for the parts that only exist at the CLI boundary -- dry-run-by-default,
- * `--apply`'s audit trail, and the flag validation.
- *
- * The one thing these must actually prove is that `--apply` cannot lose anything silently: every
- * loser is still in the store as `superseded`, with an audit row saying which pass moved it and
- * why.
- */
+/** Tests for `mem consolidate` -- the near-duplicate pass and the stale pass -- plus the durable `facts.last_surfaced_at` mark the stale pass depends on. Two layers, both against a real database: unit tests over `src/consolidate.ts`'s clustering rules (which pairs may be compared at all, who survives, what is never touched), and end-to-end tests driving the real `run()` for the parts that only exist at the CLI boundary -- dry-run-by-default, `--apply`'s audit trail, and the flag validation. The one thing these must actually prove is that `--apply` cannot lose anything silently: every loser is still in the store as `superseded`, with an audit row saying which pass moved it and why. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -77,9 +65,7 @@ function seed(db: Database.Database, text: string, options: SeedOptions = {}): F
   });
 }
 
-// Three restatements of one preference. Measured at Jaccard 1.00 against each other with this
-// repo's tokenizer (the stemmer collapses "the"/"our"/"is" away as stopwords), so they cluster at
-// any threshold the CLI accepts -- the tests below never have to encode a fragile score.
+// Three restatements of one preference. Measured at Jaccard 1.00 against each other with this repo's tokenizer (the stemmer collapses "the"/"our"/"is" away as stopwords), so they cluster at any threshold the CLI accepts -- the tests below never have to encode a fragile score.
 const PNPM_RESTATEMENTS = [
   "the package manager for this repo is pnpm",
   "package manager is pnpm for this repo",
@@ -182,9 +168,7 @@ describe("findDuplicateClusters", () => {
   });
 
   it("never clusters same-subject/same-scope facts with different values -- that is a live contradiction, not a duplicate", () => {
-    // Wording is similar enough to clear the Jaccard threshold, but the pinned "postgres" answer
-    // and the newer "mysql" answer disagree on the same subject: `detectContradictions` must own
-    // resolving that, not `preferenceOrder`, or a pinned fact can outrank a later correction.
+    // Wording is similar enough to clear the Jaccard threshold, but the pinned "postgres" answer and the newer "mysql" answer disagree on the same subject: `detectContradictions` must own resolving that, not `preferenceOrder`, or a pinned fact can outrank a later correction.
     seed(db, "the database server is postgres", { status: "pinned", subject: "db", value: "postgres" });
     seed(db, "the database server is mysql", { subject: "db", value: "mysql" });
     expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toEqual([]);
@@ -198,8 +182,7 @@ describe("findDuplicateClusters", () => {
   });
 
   it("never clusters facts whose text yields no topic terms", () => {
-    // Both texts are pure stopwords, so `extractFacets` stores no topics for either. An empty-set
-    // Jaccard of 1 would make every such fact a duplicate of every other.
+    // Both texts are pure stopwords, so `extractFacets` stores no topics for either. An empty-set Jaccard of 1 would make every such fact a duplicate of every other.
     seed(db, "the a of");
     seed(db, "is it to");
     expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toEqual([]);
@@ -250,16 +233,14 @@ describe("findCrossScopeDuplicates", () => {
   });
 
   it("does not report a same-subject, different-value pair as a duplicate -- that is a live contradiction, not a restatement", () => {
-    // A genuine override's two sides differ in *value*, and so in text -- "use tabs for indentation"
-    // and "use spaces for indentation" never share normalized text, the one bar this pass checks.
+    // A genuine override's two sides differ in *value*, and so in text -- "use tabs for indentation" and "use spaces for indentation" never share normalized text, the one bar this pass checks.
     seed(db, "use spaces for indentation", { scope: "global", subject: "indent-style", value: "spaces" });
     seed(db, "use tabs for indentation", { scope: "project", scopeRoot: "/repo-a", subject: "indent-style", value: "tabs" });
     expect(findCrossScopeDuplicates(db)).toEqual([]);
   });
 
   it("does not report a same-subject, different-value pair with byte-identical text -- a real override across scopes", () => {
-    // The reproduction this fix exists for: generic wording ("the default branch name") makes it
-    // easy for two legitimately different values to share exact text across scopes.
+    // The reproduction this fix exists for: generic wording ("the default branch name") makes it easy for two legitimately different values to share exact text across scopes.
     seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "main" });
     seed(db, "the default branch name", { scope: "project", scopeRoot: "/repo-a", subject: "default_branch", value: "master" });
     expect(findCrossScopeDuplicates(db)).toEqual([]);
@@ -423,10 +404,7 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
   });
 
   it("proposes a fact whose last surfacing predates the stale window, even with no recall_log row left", () => {
-    // `last_surfaced_at` answers "has this gone unread for the window", not "was it ever read at
-    // all" -- a fact surfaced once and then ignored for 300 days is exactly as stale as one that
-    // was never surfaced. (`--stale-days` here is the default, 90; recall_log is cleared to also
-    // prove this doesn't depend on a surviving row, e.g. after `mem epoch --gc` rotation.)
+    // `last_surfaced_at` answers "has this gone unread for the window", not "was it ever read at all" -- a fact surfaced once and then ignored for 300 days is exactly as stale as one that was never surfaced. (`--stale-days` here is the default, 90; recall_log is cleared to also prove this doesn't depend on a surviving row, e.g. after `mem epoch --gc` rotation.)
     const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) });
     insertRecallLog(db, "session-1", [fact.id], daysAgo(300));
     db.prepare("DELETE FROM recall_log").run();
@@ -436,8 +414,7 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
   });
 
   it("still excludes a fact surfaced inside the window even after its recall_log row rotates away", () => {
-    // Rotation itself must not manufacture false staleness: the durable `last_surfaced_at` mark
-    // still says "recent" even once the row that produced it is gone.
+    // Rotation itself must not manufacture false staleness: the durable `last_surfaced_at` mark still says "recent" even once the row that produced it is gone.
     const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) });
     insertRecallLog(db, "session-1", [fact.id], daysAgo(10));
     db.prepare("DELETE FROM recall_log").run();
@@ -462,8 +439,7 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
   });
 
   it("still excludes a pre-migration fact whose only evidence is a surviving recall_log row", () => {
-    // A fact captured before `last_surfaced_at` existed has NULL there and no honest backfill. The
-    // recall_log NOT EXISTS clause is what covers that window, so simulate it by clearing the mark.
+    // A fact captured before `last_surfaced_at` existed has NULL there and no honest backfill. The recall_log NOT EXISTS clause is what covers that window, so simulate it by clearing the mark.
     const fact = seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) });
     insertRecallLog(db, "session-1", [fact.id], daysAgo(5));
     db.prepare("UPDATE facts SET last_surfaced_at = NULL WHERE id = ?").run(fact.id);
@@ -540,8 +516,7 @@ describe("mem consolidate (end to end)", () => {
     const result = await runCli(["consolidate", "--apply"]);
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("superseded 2 facts as duplicates");
-    // The singular branch reads "as a duplicate"; a fixed-plural suffix on a pluralized count is
-    // the slip this pins.
+    // The singular branch reads "as a duplicate"; a fixed-plural suffix on a pluralized count is the slip this pins.
     expect(result.stdout).not.toContain("superseded 2 facts as a duplicate;");
     expect(result.stdout).toContain("`mem list --status superseded`");
     expect(result.stdout).not.toContain("dry run");
@@ -704,8 +679,7 @@ describe("mem consolidate (end to end)", () => {
   });
 
   it("does not supersede a project-scope override of a global fact under --apply, even with byte-identical text", async () => {
-    // The reproduction this fix exists for: same generic wording, but a genuine override (different
-    // subject/value) rather than a restatement -- `--apply` must leave both sides active.
+    // The reproduction this fix exists for: same generic wording, but a genuine override (different subject/value) rather than a restatement -- `--apply` must leave both sides active.
     const globalId = withStore(
       (db) => seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "main" }).id
     );
@@ -792,17 +766,13 @@ describe("findRelatedFactPairs", () => {
     for (const text of PNPM_RESTATEMENTS.slice(0, 2)) {
       seed(db, text);
     }
-    // PNPM_RESTATEMENTS score 1.00 against each other with this repo's tokenizer (see the fixture's
-    // own comment), well above DEFAULT_DUPLICATE_THRESHOLD.
+    // PNPM_RESTATEMENTS score 1.00 against each other with this repo's tokenizer (see the fixture's own comment), well above DEFAULT_DUPLICATE_THRESHOLD.
     expect(findRelatedFactPairs(db)).toEqual([]);
     expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toHaveLength(1);
   });
 
   it("THE TRAP: never links a live contradiction, even though it shares topic terms below the threshold", () => {
-    // Same fixture as findDuplicateClusters's own contradiction test: same subject+scope, different
-    // value. Terms chosen so their Jaccard (0.2) lands strictly inside (0, DEFAULT_DUPLICATE_THRESHOLD)
-    // -- clear of both the zero-similarity filter and the merge threshold -- so only the
-    // contradiction guard can be what excludes this pair.
+    // Same fixture as findDuplicateClusters's own contradiction test: same subject+scope, different value. Terms chosen so their Jaccard (0.2) lands strictly inside (0, DEFAULT_DUPLICATE_THRESHOLD) -- clear of both the zero-similarity filter and the merge threshold -- so only the contradiction guard can be what excludes this pair.
     const postgres = seed(db, "the database server is postgres", { status: "pinned", subject: "db", value: "postgres" });
     const mysql = seed(db, "the database server is mysql", { subject: "db", value: "mysql" });
     replaceFactTerms(db, postgres.id, { entities: [], topics: ["database", "server", "postgres"] });
@@ -837,13 +807,7 @@ describe("findGraphStaleFacts", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  /**
-   * `neighbours` (factgraph.ts) drops a term outright once its document frequency exceeds the
-   * default df ceiling (60% of the store) -- a real safety feature (hub-term damping), not
-   * something these fixtures should trip over by accident. Padding the store with `count`
-   * unrelated facts keeps "redis" comfortably under that ceiling so a test's assertions are about
-   * the staleness signal, not about incidentally recreating the hub-term exclusion.
-   */
+  /** `neighbours` (factgraph.ts) drops a term outright once its document frequency exceeds the default df ceiling (60% of the store) -- a real safety feature (hub-term damping), not something these fixtures should trip over by accident. Padding the store with `count` unrelated facts keeps "redis" comfortably under that ceiling so a test's assertions are about the staleness signal, not about incidentally recreating the hub-term exclusion. */
   function seedFiller(count: number): void {
     for (let i = 0; i < count; i += 1) {
       const filler = seed(db, `unrelated filler fact ${i}`);
@@ -993,8 +957,7 @@ describe("mem consolidate --related (end to end)", () => {
     expect(first.stdout).toContain("persisted 1 fact link");
     expect(withStore((db) => listFactLinks(db))).toHaveLength(1);
 
-    // A second --apply run over the same store must refresh, not duplicate, the row (see
-    // storage.upsertFactLink's own ordering guarantee).
+    // A second --apply run over the same store must refresh, not duplicate, the row (see storage.upsertFactLink's own ordering guarantee).
     const second = await runCli(["consolidate", "--related", "--apply"]);
     expect(second.exitCode).toBe(0);
     expect(withStore((db) => listFactLinks(db))).toHaveLength(1);
@@ -1036,11 +999,7 @@ describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
   it("--stale --apply supersedes the identical set whether or not the graph signal would also flag something -- absent by default", async () => {
     // A fact old enough and unsurfaced -- the age-based pass's own population.
     const ageStale = withStore((db) => seed(db, "we deploy to fly.io on merge", { capturedAt: daysAgo(400) }).id);
-    // A separate candidate the graph signal alone WOULD flag if asked (old enough, neighbours
-    // majority superseded) but the age-based pass never would: marked recently surfaced, so
-    // `findStaleFacts`'s own "unsurfaced since the cutoff" test excludes it. Its presence proves
-    // `--include-graph-stale`'s absence changes nothing -- not merely that the fixture was too weak
-    // for either pass to ever catch.
+    // A separate candidate the graph signal alone WOULD flag if asked (old enough, neighbours majority superseded) but the age-based pass never would: marked recently surfaced, so `findStaleFacts`'s own "unsurfaced since the cutoff" test excludes it. Its presence proves `--include-graph-stale`'s absence changes nothing -- not merely that the fixture was too weak for either pass to ever catch.
     const graphCandidate = withStore((db) => {
       replaceFactTerms(db, seed(db, "unrelated filler fact 0").id, { entities: [], topics: ["filler-0"] });
       replaceFactTerms(db, seed(db, "unrelated filler fact 1").id, { entities: [], topics: ["filler-1"] });
@@ -1064,14 +1023,11 @@ describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
 
   it("--include-graph-stale additionally supersedes a graph-flagged fact with a distinct, accurate audit reason", async () => {
     const graphCandidate = withStore((db) => {
-      // Two unrelated filler facts keep "redis" under `neighbours`' default 60% df ceiling (3 of 5
-      // facts, not 3 of 3) -- see findGraphStaleFacts's own unit tests for the same reasoning.
+      // Two unrelated filler facts keep "redis" under `neighbours`' default 60% df ceiling (3 of 5 facts, not 3 of 3) -- see findGraphStaleFacts's own unit tests for the same reasoning.
       replaceFactTerms(db, seed(db, "unrelated filler fact 0").id, { entities: [], topics: ["filler-0"] });
       replaceFactTerms(db, seed(db, "unrelated filler fact 1").id, { entities: [], topics: ["filler-1"] });
       const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
-      // Marked recently surfaced so the age-based pass's own "unsurfaced since the cutoff" test
-      // excludes it -- otherwise this fixture (old, never recalled) would also qualify for
-      // `findStaleFacts` and this test could not tell which pass actually superseded it.
+      // Marked recently surfaced so the age-based pass's own "unsurfaced since the cutoff" test excludes it -- otherwise this fixture (old, never recalled) would also qualify for `findStaleFacts` and this test could not tell which pass actually superseded it.
       markFactsSurfaced(db, [candidate.id], new Date().toISOString());
       const supersededA = seed(db, "we use redis for caching");
       const supersededB = seed(db, "redis is the cache layer");
@@ -1096,9 +1052,7 @@ describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
     );
     const graphRow = rows.find((row) => row.event === "consolidate_graph_stale");
     expect(graphRow).toBeDefined();
-    // The reason must be true of *this* fact, not the age-based pass's reason repurposed: this fact
-    // was captured 200 days ago and never surfaced, so an unfalsifiable "unsurfaced since" string
-    // would also happen to read true -- the distinct wording is what makes the claim checkable.
+    // The reason must be true of *this* fact, not the age-based pass's reason repurposed: this fact was captured 200 days ago and never surfaced, so an unfalsifiable "unsurfaced since" string would also happen to read true -- the distinct wording is what makes the claim checkable.
     expect(graphRow?.detail).toBe("superseded via graph staleness: 2 of 2 topic-connected neighbours already superseded");
     expect(rows.some((row) => row.event === "consolidate_stale")).toBe(false);
   });
@@ -1108,9 +1062,7 @@ describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
       replaceFactTerms(db, seed(db, "unrelated filler fact 0").id, { entities: [], topics: ["filler-0"] });
       replaceFactTerms(db, seed(db, "unrelated filler fact 1").id, { entities: [], topics: ["filler-1"] });
       const candidate = seed(db, "redis config lives in config/redis.yml", { capturedAt: daysAgo(200) });
-      // Marked recently surfaced so the age-based pass's own "unsurfaced since the cutoff" test
-      // excludes it -- otherwise this fixture would also be a `findStaleFacts` candidate, and the
-      // report line asserted below could come from either pass.
+      // Marked recently surfaced so the age-based pass's own "unsurfaced since the cutoff" test excludes it -- otherwise this fixture would also be a `findStaleFacts` candidate, and the report line asserted below could come from either pass.
       markFactsSurfaced(db, [candidate.id], new Date().toISOString());
       const supersededA = seed(db, "we use redis for caching");
       const supersededB = seed(db, "redis is the cache layer");

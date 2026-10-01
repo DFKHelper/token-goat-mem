@@ -1,10 +1,4 @@
-/**
- * Guard tests over the CLI's registered command surface. These were placeholder stubs
- * (`expect(true).toBe(true)`); they now assert the real invariants they described: every command
- * the design plan / P5 promises ("viewable / editable / deletable via CLI (`list`, `show`,
- * `forget`, `pin`, `edit`, `review`)", plus `remember`/`recall`/`epoch` from Sections 3/4 and the
- * `doctor` health check) is registered on `buildProgram()`, and nothing unexpected is.
- */
+/** Guard tests over the CLI's registered command surface. These were placeholder stubs (`expect(true).toBe(true)`); they now assert the real invariants they described: every command the design plan / P5 promises ("viewable / editable / deletable via CLI (`list`, `show`, `forget`, `pin`, `edit`, `review`)", plus `remember`/`recall`/`epoch` from Sections 3/4 and the `doctor` health check) is registered on `buildProgram()`, and nothing unexpected is. */
 import { describe, it, expect } from "vitest";
 
 import { buildProgram } from "../../src/cli.js";

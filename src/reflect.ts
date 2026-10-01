@@ -1,21 +1,4 @@
-/**
- * `mem reflect`: the end-of-session worklist that turns pending suggestions into decisions,
- * update-before-create.
- *
- * `mem scan-session` files every durable-sounding sentence as `pending` and stops there. Left alone,
- * that queue only grows, and the agent that said the sentences -- the one party that knows whether
- * "never commit generated files" restates a fact the store already holds, changes it, or is new --
- * has moved on. `mem reflect` asks it while it still knows: each pending suggestion is listed beside
- * the live facts it most resembles (`findRelatedFacts`, the same lookup behind `mem show --related`),
- * with the resolutions in the order they should be tried -- update an existing fact first, promote
- * as new only when nothing covers it, reject otherwise.
- *
- * As the Claude Code Stop hook (`--hook-stdin`) it files the session's transcript itself and blocks
- * the stop with the worklist as the reason, but only for suggestions *this run* filed. A sentence
- * already in the store files nothing (it is a sighting), so a second stop over the same transcript
- * is silent without any "already prompted" state. It never blocks while `stop_hook_active` is set:
- * the agent is then already continuing because of a Stop hook, and blocking again would loop.
- */
+/** `mem reflect`: the end-of-session worklist that turns pending suggestions into decisions, update-before-create. `mem scan-session` files every durable-sounding sentence as `pending` and stops there. Left alone, that queue only grows, and the agent that said the sentences -- the one party that knows whether "never commit generated files" restates a fact the store already holds, changes it, or is new -- has moved on. `mem reflect` asks it while it still knows: each pending suggestion is listed beside the live facts it most resembles (`findRelatedFacts`, the same lookup behind `mem show --related`), with the resolutions in the order they should be tried -- update an existing fact first, promote as new only when nothing covers it, reject otherwise. As the Claude Code Stop hook (`--hook-stdin`) it files the session's transcript itself and blocks the stop with the worklist as the reason, but only for suggestions *this run* filed. A sentence already in the store files nothing (it is a sighting), so a second stop over the same transcript is silent without any "already prompted" state. It never blocks while `stop_hook_active` is set: the agent is then already continuing because of a Stop hook, and blocking again would loop. */
 
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
@@ -48,10 +31,7 @@ function factLine(fact: Fact): string {
   return `${shortFactId(fact.id)} [${fact.kind}] ${fact.text}`;
 }
 
-/**
- * The worklist text: a heading, the resolutions once, then each suggestion with its related live
- * facts indented under it. Pending neighbours are left out -- they are on the worklist themselves.
- */
+/** The worklist text: a heading, the resolutions once, then each suggestion with its related live facts indented under it. Pending neighbours are left out -- they are on the worklist themselves. */
 function formatWorklist(db: Database.Database, heading: string, pending: readonly Fact[], root: string): string {
   const lines = [heading, ...RESOLUTIONS];
   for (const fact of pending) {

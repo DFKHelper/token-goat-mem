@@ -1,16 +1,4 @@
-/**
- * `mem log`: the store-wide audit timeline, newest first.
- *
- * `mem show <id>` reads one fact's audit trail back, but only once you already know which fact to
- * ask about. The question a user actually has after an agent session -- "what did it change in my
- * memory?" -- starts from the other end: from time, not from an id. `mem log` answers that from the
- * same `audit_log` rows, with the same filters `mem list` taught (`--limit`, `--json`, a truncation
- * notice that never lets a capped list read as complete).
- *
- * `--fact` resolves against the audit log as well as the live store. `gc` hard-deletes superseded
- * facts after 90 days but keeps their audit rows for 180, so for that window the log is the only
- * place a forgotten fact's id still means anything.
- */
+/** `mem log`: the store-wide audit timeline, newest first. `mem show <id>` reads one fact's audit trail back, but only once you already know which fact to ask about. The question a user actually has after an agent session -- "what did it change in my memory?" -- starts from the other end: from time, not from an id. `mem log` answers that from the same `audit_log` rows, with the same filters `mem list` taught (`--limit`, `--json`, a truncation notice that never lets a capped list read as complete). `--fact` resolves against the audit log as well as the live store. `gc` hard-deletes superseded facts after 90 days but keeps their audit rows for 180, so for that window the log is the only place a forgotten fact's id still means anything. */
 
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
@@ -34,22 +22,13 @@ import { daysAgoIso } from "./timeUtils.js";
 /** Stands in for the short fact id on a store-level event (an import summary) that names no fact, keeping the columns aligned. */
 const NO_FACT_PLACEHOLDER = "-".repeat(SHORT_ID_LENGTH);
 
-/**
- * One audit row as a line: `[createdAt] event: detail`, or with `withFactId`, the short fact id
- * between the timestamp and the event. `mem show`'s history block and `mem log` both render through
- * this, so the two views of the same row cannot drift.
- */
+/** One audit row as a line: `[createdAt] event: detail`, or with `withFactId`, the short fact id between the timestamp and the event. `mem show`'s history block and `mem log` both render through this, so the two views of the same row cannot drift. */
 export function formatAuditLine(entry: AuditLogRow, options: { readonly withFactId?: boolean } = {}): string {
   const fact = options.withFactId === true ? `${entry.factId === null ? NO_FACT_PLACEHOLDER : shortFactId(entry.factId)}  ` : "";
   return `[${entry.createdAt}] ${fact}${entry.event}: ${entry.detail}`;
 }
 
-/**
- * Resolves `--fact` to the one full fact id it names, looking in the live store and the audit log
- * together. An exact live id wins outright; otherwise every id either place knows under that prefix
- * is a candidate, so a prefix shared by a live fact and a gc-deleted one is reported as ambiguous
- * instead of silently showing only the live one's trail.
- */
+/** Resolves `--fact` to the one full fact id it names, looking in the live store and the audit log together. An exact live id wins outright; otherwise every id either place knows under that prefix is a candidate, so a prefix shared by a live fact and a gc-deleted one is reported as ambiguous instead of silently showing only the live one's trail. */
 export function resolveLoggedFactId(db: Database.Database, id: string): string {
   const live = resolveFactIdOrPrefix(db, id);
   if (live.kind === "found" && live.fact.id === id) {
@@ -108,8 +87,7 @@ export function registerLogCommand(program: Command): void {
           return;
         }
         if (entries.length === 0) {
-          // Same rule as `mem list`: "empty" is a claim about the whole log, never printed for a
-          // run that only filtered everything out.
+          // Same rule as `mem list`: "empty" is a claim about the whole log, never printed for a run that only filtered everything out.
           process.stdout.write(filtered ? "no audit events match these filters\n" : "audit log is empty\n");
           return;
         }

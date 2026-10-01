@@ -1,11 +1,4 @@
-/**
- * Correctness coverage for the eval harness itself (item 3) -- fast, deterministic, and run as
- * part of the normal `npm test` gate, unlike `npm run eval` (`eval/run.ts`), which generates a
- * 400-fact corpus and 40+ scenarios and is deliberately kept out of the gate for being unnecessary
- * weight on every commit. This file is not that benchmark; it pins that the metrics math, the
- * ranking configurations, and the fixture generator's own invariants are correct on small,
- * hand-inspectable inputs.
- */
+/** Correctness coverage for the eval harness itself (item 3) -- fast, deterministic, and run as part of the normal `npm test` gate, unlike `npm run eval` (`eval/run.ts`), which generates a 400-fact corpus and 40+ scenarios and is deliberately kept out of the gate for being unnecessary weight on every commit. This file is not that benchmark; it pins that the metrics math, the ranking configurations, and the fixture generator's own invariants are correct on small, hand-inspectable inputs. */
 
 import { describe, expect, it } from "vitest";
 
@@ -233,12 +226,7 @@ describe("eval/harness.ts (evaluateConfig)", () => {
 
 describe("eval fixture anchors", () => {
   it("uses anchor syntax the real predicates can parse", () => {
-    // Regression guard. `eval/fixtures.ts` builds `Fact` rows directly rather than going through
-    // `captureFact`, so `validateAnchorSyntax` -- the check every real capture passes -- never ran
-    // on its anchors. They were colon-glued (`"file-exists:package.json"`), which `anchors.ts`
-    // tokenizes as one unknown predicate and answers `"unverified"` for, unconditionally: every
-    // anchored fact in the corpus was inert, and no gate said so because an inert anchor is
-    // indistinguishable from a legitimately unverifiable one unless something checks the syntax.
+    // Regression guard. `eval/fixtures.ts` builds `Fact` rows directly rather than going through `captureFact`, so `validateAnchorSyntax` -- the check every real capture passes -- never ran on its anchors. They were colon-glued (`"file-exists:package.json"`), which `anchors.ts` tokenizes as one unknown predicate and answers `"unverified"` for, unconditionally: every anchored fact in the corpus was inert, and no gate said so because an inert anchor is indistinguishable from a legitimately unverifiable one unless something checks the syntax.
     expect(ANCHOR_TEMPLATES.length).toBeGreaterThan(0);
     for (const anchor of ANCHOR_TEMPLATES) {
       expect(() => validateAnchorSyntax(anchor)).not.toThrow();
@@ -246,8 +234,7 @@ describe("eval fixture anchors", () => {
   });
 
   it("records a captureRoot, without which a path-scoped anchor can never be evaluated", () => {
-    // Second half of the same defect: `anchorRootFor` returns `null` -- an unconditional
-    // `"unverified"` -- for a `path` fact with no `captureRoot`, and the generator set none.
+    // Second half of the same defect: `anchorRootFor` returns `null` -- an unconditional `"unverified"` -- for a `path` fact with no `captureRoot`, and the generator set none.
     const pathFacts = generateCorpus().filter((fact) => fact.scope === "path");
     expect(pathFacts.length).toBeGreaterThan(0);
     for (const fact of pathFacts) {

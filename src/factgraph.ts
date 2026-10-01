@@ -1,18 +1,4 @@
-/**
- * The co-occurrence fact graph and score propagation over it (design plan Section 3 extension,
- * "Retrieval" layer).
- *
- * `fact_terms` (fact_id, term_key, kind) is a bipartite fact<->term table -- two facts are graph
- * neighbours exactly when they share a `term_key`. The table carries no weight column, so an
- * unweighted walk over it floods through any term common enough to link hundreds of facts (a
- * language name, a common tool): every score here is damped by how many facts carry the term
- * (inverse document frequency), and a term covering more than `DF_CEILING_RATIO` of the store is
- * dropped outright -- that common, it carries no discriminating information at any weight.
- *
- * Caller-side, like consolidate.ts: this module may import storage.ts and opens no connection of
- * its own. retrieval.ts must not import this module or storage.ts -- the caller computes the
- * signal here and hands `retrieve()` plain data, never a db handle (see ARCHITECTURE.md).
- */
+/** The co-occurrence fact graph and score propagation over it (design plan Section 3 extension, "Retrieval" layer). `fact_terms` (fact_id, term_key, kind) is a bipartite fact<->term table -- two facts are graph neighbours exactly when they share a `term_key`. The table carries no weight column, so an unweighted walk over it floods through any term common enough to link hundreds of facts (a language name, a common tool): every score here is damped by how many facts carry the term (inverse document frequency), and a term covering more than `DF_CEILING_RATIO` of the store is dropped outright -- that common, it carries no discriminating information at any weight. Caller-side, like consolidate.ts: this module may import storage.ts and opens no connection of its own. retrieval.ts must not import this module or storage.ts -- the caller computes the signal here and hands `retrieve()` plain data, never a db handle (see ARCHITECTURE.md). */
 
 import { countFacts, getEntityOverlapForQuery, listTermsForFact } from "./storage.js";
 
@@ -52,13 +38,7 @@ function termWeight(df: number, totalFacts: number): number {
   return Math.log((totalFacts + 1) / (df + 1));
 }
 
-/**
- * Builds weighted co-occurrence edges from every fact in `factIds` outward, in three grouped
- * queries regardless of how many facts or terms are involved: the terms `factIds` carry, the
- * store-wide document frequency of just those terms, and the facts that carry the surviving ones.
- * Never one query per fact or per term -- that per-fact-in-a-loop shape is exactly what
- * integration-seam.ts's ~150ms budget cannot afford.
- */
+/** Builds weighted co-occurrence edges from every fact in `factIds` outward, in three grouped queries regardless of how many facts or terms are involved: the terms `factIds` carry, the store-wide document frequency of just those terms, and the facts that carry the surviving ones. Never one query per fact or per term -- that per-fact-in-a-loop shape is exactly what integration-seam.ts's ~150ms budget cannot afford. */
 function buildEdges(db: Db, factIds: readonly string[], totalFacts: number, dfCeilingRatio: number): FactGraphEdges {
   const edgesByFact = new Map<string, Map<string, number>>();
   const neighborIds = new Set<string>();
@@ -155,11 +135,7 @@ function buildEdges(db: Db, factIds: readonly string[], totalFacts: number, dfCe
   return { edgesByFact, neighborIds };
 }
 
-/**
- * Facts sharing a term with `factId`, weighted by how discriminating the shared term is -- an edge
- * weight is the sum of {@link termWeight} across every term the two facts have in common, so a
- * neighbour tied by one rare term can outrank one tied by several common ones.
- */
+/** Facts sharing a term with `factId`, weighted by how discriminating the shared term is -- an edge weight is the sum of {@link termWeight} across every term the two facts have in common, so a neighbour tied by one rare term can outrank one tied by several common ones. */
 export function neighbours(db: Db, factId: string, opts: FactGraphOptions = {}): Map<string, number> {
   const dfCeilingRatio = opts.dfCeilingRatio ?? DEFAULT_DF_CEILING_RATIO;
   const totalFacts = countFacts(db);
@@ -167,17 +143,7 @@ export function neighbours(db: Db, factId: string, opts: FactGraphOptions = {}):
   return new Map(edgesByFact.get(factId) ?? []);
 }
 
-/**
- * Stripped personalized PageRank: the truncated-to-`hops` series `(1 - damping) * sum_k damping^k *
- * M^k * seeds`, where `M` is the row-normalized (edge weight / a fact's total outgoing weight)
- * walk over {@link buildEdges}'s graph. Each hop's mass is recorded into the result at that hop's
- * `damping^k` weight before walking one more step outward -- not overwritten by the next hop -- so
- * a fact reached only at hop 1 keeps its score instead of being displaced by hop 2's redistribution.
- *
- * "Stripped" specifically means no convergence loop: `hops` bounds the `for` loop directly, so this
- * terminates on any input -- cyclic or not -- in at most `hops` rounds of {@link buildEdges}'s three
- * grouped queries, the shape integration-seam.ts's ~150ms budget requires.
- */
+/** Stripped personalized PageRank: the truncated-to-`hops` series `(1 - damping) * sum_k damping^k * M^k * seeds`, where `M` is the row-normalized (edge weight / a fact's total outgoing weight) walk over {@link buildEdges}'s graph. Each hop's mass is recorded into the result at that hop's `damping^k` weight before walking one more step outward -- not overwritten by the next hop -- so a fact reached only at hop 1 keeps its score instead of being displaced by hop 2's redistribution. "Stripped" specifically means no convergence loop: `hops` bounds the `for` loop directly, so this terminates on any input -- cyclic or not -- in at most `hops` rounds of {@link buildEdges}'s three grouped queries, the shape integration-seam.ts's ~150ms budget requires. */
 export function propagate(db: Db, seeds: ReadonlyMap<string, number>, opts: PropagateOptions = {}): Map<string, number> {
   if (seeds.size === 0) {
     return new Map();
@@ -231,26 +197,7 @@ export function propagate(db: Db, seeds: ReadonlyMap<string, number>, opts: Prop
   return result;
 }
 
-/**
- * Sibling to `storage.getEntityOverlapForQuery`, same shape and same vocabulary discipline: seeds
- * are the facts the query names by entity, and {@link propagate} walks outward from there.
- *
- * Where `getEntityOverlapForQuery` answers "does the query name this fact", this answers "is this
- * fact strongly connected to what the query names, even though the query never says so" -- a fact
- * reached only through a shared term, not through the identifier itself, surfaces here and nowhere
- * else. A vote, never an override, for the same reason `entityOverlap` is: fused as one more RRF
- * rank list, it cannot displace a fact that actually matches the rest of the query.
- *
- * Empty whenever the query names no entity: no seed, no graph work, matching
- * `getEntityOverlapForQuery`'s own empty-query short-circuit -- the common case costs nothing.
- *
- * `seeds` lets a caller that already paid for `getEntityOverlapForQuery(db, query)` -- both current
- * callers do, immediately before this call, to decide whether it is even worth calling -- hand the
- * result straight to `propagate` instead of this function recomputing an identical map on the same
- * hint-path budget. Omit it and this still works standalone, recomputing exactly as before; passing
- * a looser, hand-rolled map here would match rows the write path never creates, so the only intended
- * source is `getEntityOverlapForQuery` itself.
- */
+/** Sibling to `storage.getEntityOverlapForQuery`, same shape and same vocabulary discipline: seeds are the facts the query names by entity, and {@link propagate} walks outward from there. Where `getEntityOverlapForQuery` answers "does the query name this fact", this answers "is this fact strongly connected to what the query names, even though the query never says so" -- a fact reached only through a shared term, not through the identifier itself, surfaces here and nowhere else. A vote, never an override, for the same reason `entityOverlap` is: fused as one more RRF rank list, it cannot displace a fact that actually matches the rest of the query. Empty whenever the query names no entity: no seed, no graph work, matching `getEntityOverlapForQuery`'s own empty-query short-circuit -- the common case costs nothing. `seeds` lets a caller that already paid for `getEntityOverlapForQuery(db, query)` -- both current callers do, immediately before this call, to decide whether it is even worth calling -- hand the result straight to `propagate` instead of this function recomputing an identical map on the same hint-path budget. Omit it and this still works standalone, recomputing exactly as before; passing a looser, hand-rolled map here would match rows the write path never creates, so the only intended source is `getEntityOverlapForQuery` itself. */
 export function getGraphScoresForQuery(
   db: Db,
   query: string,

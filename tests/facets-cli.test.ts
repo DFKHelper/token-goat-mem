@@ -1,12 +1,4 @@
-/**
- * End-to-end tests for the facet layer's CLI and storage surface: `mem facets`, the write path that
- * populates `fact_terms`, and `mem recall --entity`.
- *
- * Driven through the real `run()` against a real database. The one thing these tests must actually
- * prove is that the layer earns its existence -- that `--entity src/retrieval.ts` distinguishes a
- * fact BM25 cannot -- so that case is pinned twice: once as a positive hit, and once as the
- * demonstration that the lexical query alone does not tell the two facts apart.
- */
+/** End-to-end tests for the facet layer's CLI and storage surface: `mem facets`, the write path that populates `fact_terms`, and `mem recall --entity`. Driven through the real `run()` against a real database. The one thing these tests must actually prove is that the layer earns its existence -- that `--entity src/retrieval.ts` distinguishes a fact BM25 cannot -- so that case is pinned twice: once as a positive hit, and once as the demonstration that the lexical query alone does not tell the two facts apart. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -54,8 +46,7 @@ function readTermRows(): Array<{ fact_id: string; term: string; term_key: string
 describe("mem recall --entity: the query BM25 cannot answer", () => {
   it("finds a fact by the exact file path in its text, where the lexical query alone does not distinguish it", async () => {
     const ranking = await remember("the ranking pipeline lives in src/retrieval.ts");
-    // The decoy shares every BM25 term the query produces -- `tokenize` reduces "src/retrieval.ts"
-    // to src / retriev / ts, all three of which this sentence contains -- and mentions no such file.
+    // The decoy shares every BM25 term the query produces -- `tokenize` reduces "src/retrieval.ts" to src / retriev / ts, all three of which this sentence contains -- and mentions no such file.
     const decoy = await remember("the ts compiler reads src files during retrieval of build output");
 
     // BM25 alone: both facts come back, and the lexical query has no way to prefer the real one.
@@ -108,10 +99,7 @@ describe("mem recall --entity: the query BM25 cannot answer", () => {
   });
 
   it("still withholds a contested fact reached via --entity, because the filter runs inside retrieve()", async () => {
-    // The rival deliberately does NOT mention the file. If `--entity` narrowed the candidate pool
-    // instead of filtering inside `retrieve`, the rival would be absent when contradictions are
-    // resolved, `resolveContradictions`'s reinstatement pass would read that absence as "nothing
-    // contests this fact", and a genuinely contested fact would surface as clean ground truth.
+    // The rival deliberately does NOT mention the file. If `--entity` narrowed the candidate pool instead of filtering inside `retrieve`, the rival would be absent when contradictions are resolved, `resolveContradictions`'s reinstatement pass would read that absence as "nothing contests this fact", and a genuinely contested fact would surface as clean ground truth.
     const withEntity = await runCli([
       "remember",
       "the store lives at src/storage.ts",
@@ -143,8 +131,7 @@ describe("mem recall --entity: the query BM25 cannot answer", () => {
     ]);
     const idB = extractRememberedId(rival);
 
-    // Tie captured_at so precedence is genuinely ambiguous and the pair is contested rather than
-    // superseded -- the same determinism fix tests/cli.test.ts applies to its contested pair.
+    // Tie captured_at so precedence is genuinely ambiguous and the pair is contested rather than superseded -- the same determinism fix tests/cli.test.ts applies to its contested pair.
     const db = openDb(resolveDbPath());
     db.prepare("UPDATE facts SET captured_at = ? WHERE id IN (?, ?)").run("2026-01-01T00:00:00.000Z", idA, idB);
     db.close();
@@ -153,8 +140,7 @@ describe("mem recall --entity: the query BM25 cannot answer", () => {
     expect(faceted.exitCode).toBe(0);
     expect(faceted.stdout).toContain(idA.slice(0, 8));
     expect(faceted.stdout).toContain("(contested, excluded)");
-    // The rival itself is filtered out of the results -- it carries no such entity -- which is
-    // exactly why its influence on the verdict is the thing under test.
+    // The rival itself is filtered out of the results -- it carries no such entity -- which is exactly why its influence on the verdict is the thing under test.
     expect(faceted.stdout).not.toContain(idB.slice(0, 8));
   });
 });
@@ -196,8 +182,7 @@ describe("fact_terms write path", () => {
 describe("mem facets", () => {
   it("backfills facts that have no terms and reports what it did", async () => {
     const id = await remember("the ranking lives in src/retrieval.ts");
-    // Simulate a store written before the facet layer existed: drop the rows the write path added,
-    // and the extraction record with them (terms_checked_at predates the facet layer too).
+    // Simulate a store written before the facet layer existed: drop the rows the write path added, and the extraction record with them (terms_checked_at predates the facet layer too).
     const db = openStorage(resolveDbPath());
     try {
       db.prepare("DELETE FROM fact_terms").run();
@@ -228,8 +213,7 @@ describe("mem facets", () => {
 
     const second = await runCli(["facets", "--all"]);
     expect(second.exitCode).toBe(0);
-    // Same rows, not merely the same count: a merge-style write would accumulate duplicates and a
-    // delete-then-insert that lost its delete would double every term.
+    // Same rows, not merely the same count: a merge-style write would accumulate duplicates and a delete-then-insert that lost its delete would double every term.
     expect(readTermRows()).toEqual(afterFirst);
     expect(second.stdout).toBe(first.stdout);
   });
@@ -266,16 +250,13 @@ describe("mem facets", () => {
   });
 
   it("collapses two spellings of one entity onto a single listed line", async () => {
-    // `--entity` matches on the normalized key, so advertising two lines here would promise a
-    // distinction lookup does not make.
+    // `--entity` matches on the normalized key, so advertising two lines here would promise a distinction lookup does not make.
     await remember("the flags are parsed in src/cli.ts");
     await remember("exit codes also live in SRC/CLI.ts");
 
     const listed = await runCli(["facets", "--list-entities"]);
     expect(listed.stdout.match(/cli\.ts/giu)).toHaveLength(1);
-    // One line, count 2, spelled `MIN(term)`'s pick -- lexicographically first under SQLite's
-    // BINARY collation, which is what makes the displayed spelling deterministic rather than
-    // whichever row the group happened to end on.
+    // One line, count 2, spelled `MIN(term)`'s pick -- lexicographically first under SQLite's BINARY collation, which is what makes the displayed spelling deterministic rather than whichever row the group happened to end on.
     expect(listed.stdout).toMatch(/^\s+2\s+SRC\/CLI\.ts$/mu);
   });
 
@@ -298,8 +279,7 @@ describe("mem facets", () => {
     await remember("the ranking lives in src/retrieval.ts");
     await remember("the delta filter lives in src/integration-seam.ts");
 
-    // Exactly the shape of an upgraded store: facts predating the feature, so no terms and no
-    // extraction ever recorded (terms_checked_at is added by an ALTER with no backfill).
+    // Exactly the shape of an upgraded store: facts predating the feature, so no terms and no extraction ever recorded (terms_checked_at is added by an ALTER with no backfill).
     const db = openStorage(resolveDbPath());
     try {
       db.exec("DELETE FROM fact_terms");
@@ -311,8 +291,7 @@ describe("mem facets", () => {
     const stale = await runCli(["doctor"]);
     expect(stale.exitCode).toBe(0);
     expect(stale.stdout).toContain("term coverage: 0/2 facts");
-    // The shortfall is only actionable if doctor names the remedy -- the symptom on its own
-    // (`--entity` matching nothing) is indistinguishable from a store with no such entity.
+    // The shortfall is only actionable if doctor names the remedy -- the symptom on its own (`--entity` matching nothing) is indistinguishable from a store with no such entity.
     expect(stale.stdout).toContain("mem facets --backfill");
 
     expect((await runCli(["facets", "--backfill"])).exitCode).toBe(0);
@@ -324,11 +303,7 @@ describe("mem facets", () => {
   });
 
   it("does not re-offer `mem facets --backfill` forever for a fact whose text is entirely stopwords", async () => {
-    // A fact this shape legitimately extracts zero entities and zero topics, so it writes zero
-    // `fact_terms` rows on capture -- indistinguishable, to `listFactsNeedingTerms`'s "no row exists"
-    // check, from a fact nobody has ever backfilled. Without a fix, doctor asks for `--backfill`
-    // forever: the command runs, writes nothing (there is nothing to write), and the shortfall
-    // doctor reports never closes.
+    // A fact this shape legitimately extracts zero entities and zero topics, so it writes zero `fact_terms` rows on capture -- indistinguishable, to `listFactsNeedingTerms`'s "no row exists" check, from a fact nobody has ever backfilled. Without a fix, doctor asks for `--backfill` forever: the command runs, writes nothing (there is nothing to write), and the shortfall doctor reports never closes.
     await remember("it is what it is");
 
     const before = await runCli(["doctor"]);

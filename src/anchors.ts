@@ -1,83 +1,14 @@
-/**
- * Anchor evaluation (design plan P3, Section 3, review S1/S4).
- *
- * An anchor is a read-only predicate string stored on a `Fact` that tests the fact's *proposition*
- * against real filesystem/git state — never a proxy for it (S1: "package-lock.json exists" does not
- * verify "uses npm", because a stale lockfile lingering after a switch is exactly the bug an anchor
- * must catch). Evaluation is three-valued, never a bare boolean:
- *   - `affirmed`     — the predicate positively confirms the proposition. Ground-truth eligible.
- *   - `unverified`    — the predicate cannot confirm or deny (missing files, no git repo, malformed
- *                        anchor, budget exceeded, or `anchor === null`). Hint-to-verify only.
- *   - `contradicted` — the predicate positively denies the proposition. Suppressed from ground truth.
- *
- * v1 supports filesystem/git predicates only (S4) — no "command output contains" / arbitrary-shell
- * anchors, and (deliberately stricter than the plan's minimum) no subprocess execution of any kind:
- * this module never shells out to `git` or anything else. `git-branch-is` and `git-tracked` are
- * answered by reading `.git/HEAD` and parsing `.git/index` directly, so anchor evaluation has zero
- * dependency on an external binary being installed, on PATH, or behaving a particular way across
- * versions — it is pure, synchronous, and bounded by nothing but disk I/O. Every predicate evaluates
- * against an explicit `root` (never ambient `process.cwd()`), and every path argument is resolved and
- * must stay within `root` (no traversal, no symlink escapes) — root-containment alone does not stop a
- * symlink *inside* `root` from pointing *outside* it, so every path-based predicate additionally
- * refuses to follow a symlink at the target path or at any directory component between `root` and the
- * target (`glob-exists` does this by skipping symlinked entries during its directory walk; every
- * other path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`,
- * `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check
- * before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived`
- * (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified. A detected
- * symlink escape is uniformly `unverified` across every path-based predicate — `file-exists`,
- * `file-absent`, `file-contains`/`file-not-contains`, `file-newer-than`, `newest-of`, and
- * `package-version` alike (Fix 3). A symlink means mem cannot safely resolve or read the path, so it
- * can assert neither presence/absence, the substring's presence/absence, nor the result of a
- * comparison it never actually performed. An earlier version of this policy returned `contradicted`
- * for `file-newer-than`/`newest-of`/`package-version` on the reasoning that none of the three has a
- * negated *predicate name* that `contradicted` could turn into "exactly the lie" the other predicates
- * avoid — but the absence of a negated predicate name doesn't make a negated *verdict* honest:
- * `file-newer-than` contradicted still asserts "a is not newer than b", `newest-of` contradicted still
- * asserts "the expected file is not the newest", and `package-version` contradicted still asserts "the
- * manifest does not declare that version" — each a positive claim about the filesystem derived from a
- * comparison mem refused to perform, which is P3's exact prohibition regardless of whether the
- * predicate has a negated name.
- *
- * Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`,
- * `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`,
- * `newest-of <expected> <candidate...>` (the direct implementation of the plan's P3 headline example,
- * "the newest lockfile is pnpm-lock.yaml"), `glob-exists <pattern>` (Section 3's "glob match"),
- * `git-branch-is <branch>`, `git-tracked <path>`, `package-version <path> <name>@<expected>`
- * (declared-manifest check only — see that predicate's own doc comment for the deliberate fence
- * against real semver-range-satisfaction or lockfile parsing).
- *
- * mem is a short-lived, single-shot CLI process (Section 3) — there is no cross-process cache to
- * invalidate. The in-memory memoization here exists only to avoid re-stat'ing / re-reading / re-parsing
- * shared inputs (a fact's full anchor result, a repo's parsed `.git/index`, a resolved `.git` dir) for
- * the common case of many facts sharing one root or one anchor within a single `mem` invocation; it is
- * safe precisely because the process does not live long enough for the underlying mtimes to change
- * under it.
- */
+/** Anchor evaluation (design plan P3, Section 3, review S1/S4). An anchor is a read-only predicate string stored on a `Fact` that tests the fact's *proposition* against real filesystem/git state — never a proxy for it (S1: "package-lock.json exists" does not verify "uses npm", because a stale lockfile lingering after a switch is exactly the bug an anchor must catch). Evaluation is three-valued, never a bare boolean: - `affirmed`     — the predicate positively confirms the proposition. Ground-truth eligible. - `unverified`    — the predicate cannot confirm or deny (missing files, no git repo, malformed anchor, budget exceeded, or `anchor === null`). Hint-to-verify only. - `contradicted` — the predicate positively denies the proposition. Suppressed from ground truth. v1 supports filesystem/git predicates only (S4) — no "command output contains" / arbitrary-shell anchors, and (deliberately stricter than the plan's minimum) no subprocess execution of any kind: this module never shells out to `git` or anything else. `git-branch-is` and `git-tracked` are answered by reading `.git/HEAD` and parsing `.git/index` directly, so anchor evaluation has zero dependency on an external binary being installed, on PATH, or behaving a particular way across versions — it is pure, synchronous, and bounded by nothing but disk I/O. Every predicate evaluates against an explicit `root` (never ambient `process.cwd()`), and every path argument is resolved and must stay within `root` (no traversal, no symlink escapes) — root-containment alone does not stop a symlink *inside* `root` from pointing *outside* it, so every path-based predicate additionally refuses to follow a symlink at the target path or at any directory component between `root` and the target (`glob-exists` does this by skipping symlinked entries during its directory walk; every other path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`, `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived` (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified. A detected symlink escape is uniformly `unverified` across every path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`, `file-newer-than`, `newest-of`, and `package-version` alike (Fix 3). A symlink means mem cannot safely resolve or read the path, so it can assert neither presence/absence, the substring's presence/absence, nor the result of a comparison it never actually performed. An earlier version of this policy returned `contradicted` for `file-newer-than`/`newest-of`/`package-version` on the reasoning that none of the three has a negated *predicate name* that `contradicted` could turn into "exactly the lie" the other predicates avoid — but the absence of a negated predicate name doesn't make a negated *verdict* honest: `file-newer-than` contradicted still asserts "a is not newer than b", `newest-of` contradicted still asserts "the expected file is not the newest", and `package-version` contradicted still asserts "the manifest does not declare that version" — each a positive claim about the filesystem derived from a comparison mem refused to perform, which is P3's exact prohibition regardless of whether the predicate has a negated name. Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`, `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`, `newest-of <expected> <candidate...>` (the direct implementation of the plan's P3 headline example, "the newest lockfile is pnpm-lock.yaml"), `glob-exists <pattern>` (Section 3's "glob match"), `git-branch-is <branch>`, `git-tracked <path>`, `package-version <path> <name>@<expected>` (declared-manifest check only — see that predicate's own doc comment for the deliberate fence against real semver-range-satisfaction or lockfile parsing). mem is a short-lived, single-shot CLI process (Section 3) — there is no cross-process cache to invalidate. The in-memory memoization here exists only to avoid re-stat'ing / re-reading / re-parsing shared inputs (a fact's full anchor result, a repo's parsed `.git/index`, a resolved `.git` dir) for the common case of many facts sharing one root or one anchor within a single `mem` invocation; it is safe precisely because the process does not live long enough for the underlying mtimes to change under it. */
 
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { FreshnessVerdict } from "./types.js";
 
-/**
- * Alias kept for readability within this module; identical to {@link FreshnessVerdict} in
- * src/types.ts (the shared vocabulary recall/review/hint-format also use), so callers may import
- * either name interchangeably.
- */
+/** Alias kept for readability within this module; identical to {@link FreshnessVerdict} in src/types.ts (the shared vocabulary recall/review/hint-format also use), so callers may import either name interchangeably. */
 export type AnchorVerdict = FreshnessVerdict;
 
-/**
- * Storage-agnostic seam for a verdict cache that outlives this process — this module has no
- * knowledge of SQLite or any other backing store and must stay that way (the concrete
- * implementation belongs in storage.ts, which already owns every non-`facts` table). A caller that
- * wants cross-process reuse constructs an implementation and passes it into {@link evaluateAnchor};
- * absent, evaluation behaves exactly as it did before this existed (in-process `memo` only).
- *
- * `witness` is whatever cheap, deterministic fingerprint the predicate that produced `verdict` read
- * at evaluation time (a stat tuple, typically) — see each cacheable predicate's own comment for what
- * it uses and why an unchanged witness proves the verdict still holds.
- */
+/** Storage-agnostic seam for a verdict cache that outlives this process — this module has no knowledge of SQLite or any other backing store and must stay that way (the concrete implementation belongs in storage.ts, which already owns every non-`facts` table). A caller that wants cross-process reuse constructs an implementation and passes it into {@link evaluateAnchor}; absent, evaluation behaves exactly as it did before this existed (in-process `memo` only). `witness` is whatever cheap, deterministic fingerprint the predicate that produced `verdict` read at evaluation time (a stat tuple, typically) — see each cacheable predicate's own comment for what it uses and why an unchanged witness proves the verdict still holds. */
 export interface AnchorCacheStore {
   get(root: string, anchor: string): { verdict: AnchorVerdict; witness: string | null } | undefined;
   set(root: string, anchor: string, verdict: AnchorVerdict, witness: string | null): void;
@@ -89,12 +20,7 @@ const MAX_CONTENT_READ_BYTES = 1_000_000;
 /** Cap on directory entries scanned for `glob-exists` — mirrors token-goat's bounded-walk precedent (S4). */
 const MAX_GLOB_ENTRIES_SCANNED = 20_000;
 
-/**
- * Cap on bytes read for `.git/index`. Generous on purpose — a 100k-file working tree indexes at
- * roughly 10 MB, so this bounds a pathological or adversarial file without rejecting a real repo.
- * Enforced by `statSync` before `readFileSync`, since `MAX_GIT_INDEX_ENTRIES` can only be checked
- * after the whole file is already resident.
- */
+/** Cap on bytes read for `.git/index`. Generous on purpose — a 100k-file working tree indexes at roughly 10 MB, so this bounds a pathological or adversarial file without rejecting a real repo. Enforced by `statSync` before `readFileSync`, since `MAX_GIT_INDEX_ENTRIES` can only be checked after the whole file is already resident. */
 const MAX_GIT_INDEX_READ_BYTES = 32_000_000;
 
 /** Cap on bytes read for a `.git` *file*: a `gitdir:` pointer is one short line, never kilobytes. */
@@ -103,28 +29,7 @@ const MAX_GIT_DIR_POINTER_BYTES = 4_096;
 /** Sanity bound on `.git/index` entry count — guards against a corrupt/hostile header, not real repos. */
 const MAX_GIT_INDEX_ENTRIES = 2_000_000;
 
-/**
- * Whether this platform's filesystem resolves paths case-insensitively.
- *
- * Matters because mem's predicates split into two families that would otherwise disagree about the
- * same file. The stat-based ones (`file-exists`, `file-newer-than`, `newest-of`) inherit the OS's
- * own resolution and so already tolerate a casing difference; the two *string-matching* ones --
- * `glob-exists` (regex against directory entries) and `git-tracked` (comparison against
- * `.git/index` bytes) -- did not. On Windows that made `git-tracked SRC/Db.TS` return
- * `contradicted` for a file `file-exists src/db.ts` affirms, and `contradicted` suppresses a fact
- * from ground truth entirely: a casing typo became silent fact suppression, on the platform this
- * project is developed on.
- *
- * The blanket case-insensitive regex/index-lookup fold below is win32 only, deliberately: macOS is
- * case-insensitive by default but supports case-sensitive APFS volumes, and this process cannot
- * tell which kind of volume it's looking at, so folding unconditionally there would trade a false
- * `contradicted` for a false `affirmed` -- the worse error, because P3 forbids fabricating a verdict
- * but permits declining to give one. That is not the only option, though: `evaluateGitTracked` and
- * the literal-segment path of `evaluateGlobExists` additionally fall back to `unverified` -- not
- * `affirmed` -- when an exact-bytes miss on a non-win32 platform would still hit under case folding,
- * since a miss that is explainable purely by casing is honestly "can't confirm or deny" on either
- * kind of APFS volume, not "confirmed absent".
- */
+/** Whether this platform's filesystem resolves paths case-insensitively. Matters because mem's predicates split into two families that would otherwise disagree about the same file. The stat-based ones (`file-exists`, `file-newer-than`, `newest-of`) inherit the OS's own resolution and so already tolerate a casing difference; the two *string-matching* ones -- `glob-exists` (regex against directory entries) and `git-tracked` (comparison against `.git/index` bytes) -- did not. On Windows that made `git-tracked SRC/Db.TS` return `contradicted` for a file `file-exists src/db.ts` affirms, and `contradicted` suppresses a fact from ground truth entirely: a casing typo became silent fact suppression, on the platform this project is developed on. The blanket case-insensitive regex/index-lookup fold below is win32 only, deliberately: macOS is case-insensitive by default but supports case-sensitive APFS volumes, and this process cannot tell which kind of volume it's looking at, so folding unconditionally there would trade a false `contradicted` for a false `affirmed` -- the worse error, because P3 forbids fabricating a verdict but permits declining to give one. That is not the only option, though: `evaluateGitTracked` and the literal-segment path of `evaluateGlobExists` additionally fall back to `unverified` -- not `affirmed` -- when an exact-bytes miss on a non-win32 platform would still hit under case folding, since a miss that is explainable purely by casing is honestly "can't confirm or deny" on either kind of APFS volume, not "confirmed absent". */
 const FS_CASE_INSENSITIVE = process.platform === "win32";
 
 const memo = new Map<string, AnchorVerdict>();
@@ -133,16 +38,7 @@ const gitIndexCache = new Map<string, GitIndexParseResult | null>();
 /** Lazily-built lowercase view of `gitIndexCache`, only ever populated on {@link FS_CASE_INSENSITIVE} platforms, so a case-folded lookup stays O(1) instead of rescanning the index set on every miss. */
 const gitIndexFoldedCache = new Map<string, Set<string>>();
 
-/**
- * Clears all in-process anchor memoization and caches.
- *
- * The memo has no invalidation and no size bound by design -- a `mem` CLI invocation is a
- * short-lived process, so "cache for the lifetime of the process" and "cache for the lifetime of
- * one command" are the same thing. That equivalence breaks for any embedder that keeps the module
- * loaded across calls (`buildHintFormat` is exported as a library seam for exactly that), where a
- * first-ever verdict would otherwise be served forever regardless of what changed on disk. Callers
- * that span more than one logical query must call this at the start of each.
- */
+/** Clears all in-process anchor memoization and caches. The memo has no invalidation and no size bound by design -- a `mem` CLI invocation is a short-lived process, so "cache for the lifetime of the process" and "cache for the lifetime of one command" are the same thing. That equivalence breaks for any embedder that keeps the module loaded across calls (`buildHintFormat` is exported as a library seam for exactly that), where a first-ever verdict would otherwise be served forever regardless of what changed on disk. Callers that span more than one logical query must call this at the start of each. */
 export function clearAnchorCaches(): void {
   memo.clear();
   gitDirCache.clear();
@@ -155,12 +51,7 @@ export function _clearAnchorMemoForTests(): void {
   clearAnchorCaches();
 }
 
-/**
- * Resolves `pathArg` against `root` and returns the resolved absolute path, or `null` if the
- * resolved path escapes `root` (path traversal) or `pathArg` is itself an absolute path pointing
- * outside `root`. Root-scoping is enforced here so a malformed or adversarial anchor string can
- * never be used to probe files outside the project.
- */
+/** Resolves `pathArg` against `root` and returns the resolved absolute path, or `null` if the resolved path escapes `root` (path traversal) or `pathArg` is itself an absolute path pointing outside `root`. Root-scoping is enforced here so a malformed or adversarial anchor string can never be used to probe files outside the project. */
 function resolveWithinRoot(root: string, pathArg: string): string | null {
   const resolvedRoot = resolve(root);
   const candidate = isAbsolute(pathArg) ? resolve(pathArg) : resolve(resolvedRoot, pathArg);
@@ -171,13 +62,7 @@ function resolveWithinRoot(root: string, pathArg: string): string | null {
   return null;
 }
 
-/**
- * Returns `true` if `path` is itself a symlink. Unlike {@link containsSymlink} this checks the single
- * final component and takes no root, so it is usable on the `.git` machinery — whose resolved
- * location is legitimately outside `root` for submodules and worktrees, and therefore cannot be
- * root-contained without breaking them. Refusing a symlink is the containment that *is* available
- * there: it stops a planted `.git` from redirecting a read, while leaving every real layout working.
- */
+/** Returns `true` if `path` is itself a symlink. Unlike {@link containsSymlink} this checks the single final component and takes no root, so it is usable on the `.git` machinery — whose resolved location is legitimately outside `root` for submodules and worktrees, and therefore cannot be root-contained without breaking them. Refusing a symlink is the containment that *is* available there: it stops a planted `.git` from redirecting a read, while leaving every real layout working. */
 function isSymlink(path: string): boolean {
   try {
     return lstatSync(path).isSymbolicLink();
@@ -186,21 +71,7 @@ function isSymlink(path: string): boolean {
   }
 }
 
-/**
- * Distinguishes a genuine absence from every other `statSync`/`readdirSync` failure (permission
- * denied, an I/O error, a path component that isn't a directory when one is expected, ...).
- * `ENOENT`/`ENOTDIR` are the only codes those calls raise that actually mean "nothing is there";
- * anything else means the check was never actually performed, and every caller of this module's
- * stat helpers must report that as `unverified`, not as absence -- reporting an unrun check as
- * absence is exactly the "returns `contradicted` from a check that never happened" defect P3
- * forbids (an unreadable subtree would otherwise `contradicted` `file-exists`, `affirmed`
- * `file-absent`, and `contradicted` `file-newer-than` for the side that couldn't be stat'd).
- *
- * Exported as its own function, rather than inlined at each catch site, specifically so the
- * classification is unit-testable against synthetic errors (`{ code: "EACCES" }`, etc.) independent
- * of a real unreadable-filesystem fixture -- `chmod`-based permission denial is awkward to reproduce
- * reliably on Windows.
- */
+/** Distinguishes a genuine absence from every other `statSync`/`readdirSync` failure (permission denied, an I/O error, a path component that isn't a directory when one is expected, ...). `ENOENT`/`ENOTDIR` are the only codes those calls raise that actually mean "nothing is there"; anything else means the check was never actually performed, and every caller of this module's stat helpers must report that as `unverified`, not as absence -- reporting an unrun check as absence is exactly the "returns `contradicted` from a check that never happened" defect P3 forbids (an unreadable subtree would otherwise `contradicted` `file-exists`, `affirmed` `file-absent`, and `contradicted` `file-newer-than` for the side that couldn't be stat'd). Exported as its own function, rather than inlined at each catch site, specifically so the classification is unit-testable against synthetic errors (`{ code: "EACCES" }`, etc.) independent of a real unreadable-filesystem fixture -- `chmod`-based permission denial is awkward to reproduce reliably on Windows. */
 export function isGenuineAbsence(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | undefined)?.code;
   return code === "ENOENT" || code === "ENOTDIR";
@@ -209,11 +80,7 @@ export function isGenuineAbsence(error: unknown): boolean {
 /** Tri-state result of a `statSync`-based existence/mtime check: see {@link isGenuineAbsence}. */
 type StatOutcome = "absent" | "unknown";
 
-/**
- * Returns the file's mtime in ms, `"absent"` if it genuinely does not exist, or `"unknown"` if it
- * could not be stat'd for any other reason (permission denied, I/O error, ...) -- see
- * {@link isGenuineAbsence}. Callers must treat `"unknown"` as `unverified`, never as absence.
- */
+/** Returns the file's mtime in ms, `"absent"` if it genuinely does not exist, or `"unknown"` if it could not be stat'd for any other reason (permission denied, I/O error, ...) -- see {@link isGenuineAbsence}. Callers must treat `"unknown"` as `unverified`, never as absence. */
 function mtimeOrNull(path: string): number | StatOutcome {
   try {
     return statSync(path).mtimeMs;
@@ -222,16 +89,7 @@ function mtimeOrNull(path: string): number | StatOutcome {
   }
 }
 
-/**
- * A cheap, deterministic fingerprint of `path` for the persistent anchor cache (mtime + size, not
- * mtime alone -- two edits landing in the same millisecond with the same byte count is the only gap
- * mtime alone would miss, and size is free once `statSync` has already run). `"absent"` when the
- * path genuinely does not exist (itself a valid, cacheable witness: an anchor that reads "no such
- * file" today reads the same tomorrow unless something is created there). `null` when the state
- * could not be determined for any other reason ({@link isGenuineAbsence}) -- not a sound basis for
- * either reusing or writing a cached verdict, same reasoning as the missing-root check in
- * {@link evaluateAnchor}.
- */
+/** A cheap, deterministic fingerprint of `path` for the persistent anchor cache (mtime + size, not mtime alone -- two edits landing in the same millisecond with the same byte count is the only gap mtime alone would miss, and size is free once `statSync` has already run). `"absent"` when the path genuinely does not exist (itself a valid, cacheable witness: an anchor that reads "no such file" today reads the same tomorrow unless something is created there). `null` when the state could not be determined for any other reason ({@link isGenuineAbsence}) -- not a sound basis for either reusing or writing a cached verdict, same reasoning as the missing-root check in {@link evaluateAnchor}. */
 function statWitness(path: string): string | null {
   try {
     const stat = statSync(path);
@@ -241,18 +99,7 @@ function statWitness(path: string): string | null {
   }
 }
 
-/**
- * Returns `true` if `target` itself, or any directory component between `root` and `target`, is a
- * symlink. Root-containment (`resolveWithinRoot`) only guarantees the *resolved* path stays inside
- * `root` — it says nothing about whether a symlink somewhere along that path hops outside `root`
- * before the filesystem gets there, so this is a separate, additional check. Mirrors `glob-exists`'s
- * own symlink refusal (it skips any `entry.isSymbolicLink()` encountered while walking, at every
- * directory level and for the final matched entry) for callers that stat/read a single resolved path
- * directly instead of walking a directory tree: every path component from `root` down to `target` is
- * `lstatSync`'d in turn, so a symlink anywhere in the chain — not just at the final component — is
- * caught. A missing component (nothing to detect, nothing to leak) is treated as "no symlink found"
- * and left for the caller's own `statSync`/`readFileSync` to report as missing.
- */
+/** Returns `true` if `target` itself, or any directory component between `root` and `target`, is a symlink. Root-containment (`resolveWithinRoot`) only guarantees the *resolved* path stays inside `root` — it says nothing about whether a symlink somewhere along that path hops outside `root` before the filesystem gets there, so this is a separate, additional check. Mirrors `glob-exists`'s own symlink refusal (it skips any `entry.isSymbolicLink()` encountered while walking, at every directory level and for the final matched entry) for callers that stat/read a single resolved path directly instead of walking a directory tree: every path component from `root` down to `target` is `lstatSync`'d in turn, so a symlink anywhere in the chain — not just at the final component — is caught. A missing component (nothing to detect, nothing to leak) is treated as "no symlink found" and left for the caller's own `statSync`/`readFileSync` to report as missing. */
 function containsSymlink(root: string, target: string): boolean {
   const rel = relative(root, target);
   if (rel === "" || rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel)) {
@@ -275,15 +122,7 @@ function containsSymlink(root: string, target: string): boolean {
   return false;
 }
 
-/**
- * `file-exists <path>` / `file-absent <path>` — affirmed/contradicted based on whether `path` exists
- * as a plain entity reachable through `root` alone. Symlink refusal is handled by the caller
- * ({@link evaluateTokens}), which checks {@link containsSymlink} *before* calling this function and
- * returns `unverified` rather than treating the path as absent — this function is never reached for a
- * symlinked path or intermediate directory, so it performs a plain `statSync`. Returns `"unknown"`,
- * never `"absent"`, for a permission or I/O error -- see {@link isGenuineAbsence}: a check that
- * couldn't run must not read as a positive presence/absence verdict either predicate can act on.
- */
+/** `file-exists <path>` / `file-absent <path>` — affirmed/contradicted based on whether `path` exists as a plain entity reachable through `root` alone. Symlink refusal is handled by the caller ({@link evaluateTokens}), which checks {@link containsSymlink} *before* calling this function and returns `unverified` rather than treating the path as absent — this function is never reached for a symlinked path or intermediate directory, so it performs a plain `statSync`. Returns `"unknown"`, never `"absent"`, for a permission or I/O error -- see {@link isGenuineAbsence}: a check that couldn't run must not read as a positive presence/absence verdict either predicate can act on. */
 function existsFile(path: string): "exists" | StatOutcome {
   try {
     statSync(path);
@@ -297,32 +136,12 @@ function budgetExceeded(deadlineMs: number | undefined): boolean {
   return deadlineMs !== undefined && Date.now() >= deadlineMs;
 }
 
-/**
- * Mutable out-of-band signal threaded through a single {@link evaluateAnchor} call: set to `true`
- * only when a `deadlineMs` time-budget check (never the unrelated `MAX_GLOB_ENTRIES_SCANNED` scan
- * cap) is the reason evaluation bailed out to `"unverified"`. `evaluateAnchor` uses this to decide
- * whether the resulting `"unverified"` is a genuine predicate outcome (safe to memoize) or merely
- * "ran out of time this call" (must not be memoized, since a later call with a different/absent
- * deadline could reach a different, real verdict for the same anchor+root).
- */
+/** Mutable out-of-band signal threaded through a single {@link evaluateAnchor} call: set to `true` only when a `deadlineMs` time-budget check (never the unrelated `MAX_GLOB_ENTRIES_SCANNED` scan cap) is the reason evaluation bailed out to `"unverified"`. `evaluateAnchor` uses this to decide whether the resulting `"unverified"` is a genuine predicate outcome (safe to memoize) or merely "ran out of time this call" (must not be memoized, since a later call with a different/absent deadline could reach a different, real verdict for the same anchor+root). */
 interface BudgetState {
   hit: boolean;
 }
 
-/**
- * Looks up a persisted verdict for `root`+`anchor` and returns it only if `witness` (freshly
- * computed by the caller, right before it would otherwise do the predicate's real, expensive work)
- * matches the witness stored alongside it exactly. A match proves nothing the predicate reads has
- * changed since that verdict was recorded, so reusing it is not a guess -- it is the same answer
- * evaluation would reach again, without paying for it again. `undefined` means "no reusable
- * verdict": either there's no store, no sound witness could be formed (`witness === null`), nothing
- * is cached yet, or what's cached no longer matches -- every one of those is a cache miss, not an
- * error, and the caller falls through to evaluating for real.
- *
- * A store failure (read-only file, lock contention, disk full -- recall is a read path, and
- * writing to SQLite during a read can fail) degrades to "no reusable verdict" rather than
- * propagating: a broken cache must never be the reason `mem recall` fails.
- */
+/** Looks up a persisted verdict for `root`+`anchor` and returns it only if `witness` (freshly computed by the caller, right before it would otherwise do the predicate's real, expensive work) matches the witness stored alongside it exactly. A match proves nothing the predicate reads has changed since that verdict was recorded, so reusing it is not a guess -- it is the same answer evaluation would reach again, without paying for it again. `undefined` means "no reusable verdict": either there's no store, no sound witness could be formed (`witness === null`), nothing is cached yet, or what's cached no longer matches -- every one of those is a cache miss, not an error, and the caller falls through to evaluating for real. A store failure (read-only file, lock contention, disk full -- recall is a read path, and writing to SQLite during a read can fail) degrades to "no reusable verdict" rather than propagating: a broken cache must never be the reason `mem recall` fails. */
 function tryPersistentCache(store: AnchorCacheStore | undefined, root: string, anchor: string, witness: string | null): AnchorVerdict | undefined {
   if (store === undefined || witness === null) {
     return undefined;
@@ -336,14 +155,7 @@ function tryPersistentCache(store: AnchorCacheStore | undefined, root: string, a
   return cached !== undefined && cached.witness === witness ? cached.verdict : undefined;
 }
 
-/**
- * Persists a freshly-computed verdict alongside the witness that justified reusing it later. Never
- * called with a budget-exhausted or missing-root `unverified` -- see those verdicts' own comments in
- * {@link evaluateAnchor} for why, doubly so once the cache outlives the process: a budget bailout
- * written here would poison every future call for this anchor+root, not just this one, and a
- * missing-root verdict would assert forever that a directory nobody has checked since is still gone.
- * Same fail-open contract as {@link tryPersistentCache}: a write failure is swallowed, never thrown.
- */
+/** Persists a freshly-computed verdict alongside the witness that justified reusing it later. Never called with a budget-exhausted or missing-root `unverified` -- see those verdicts' own comments in {@link evaluateAnchor} for why, doubly so once the cache outlives the process: a budget bailout written here would poison every future call for this anchor+root, not just this one, and a missing-root verdict would assert forever that a directory nobody has checked since is still gone. Same fail-open contract as {@link tryPersistentCache}: a write failure is swallowed, never thrown. */
 function persistVerdict(store: AnchorCacheStore | undefined, root: string, anchor: string, verdict: AnchorVerdict, witness: string | null): void {
   if (store === undefined || witness === null) {
     return;
@@ -355,24 +167,9 @@ function persistVerdict(store: AnchorCacheStore | undefined, root: string, ancho
   }
 }
 
-/**
- * `file-newer-than <a> <b>` — tests whether `a` is the currently-active file relative to `b`.
- * affirmed: `a` exists and is newer than `b`.
- * contradicted: `b` exists and is newer than `a`, or `a` does not exist while `b` does.
- * unverified: neither file exists, both exist with identical mtimes (ambiguous), `b` does not
- * exist (whether or not `a` does) — you cannot compare two files when one of them is missing, so
- * this can assert neither "newer" nor "older" (P3: never fabricate a verdict) — or `a`/`b` (or a
- * directory component between `root` and either) is a symlink ({@link containsSymlink}), refused
- * rather than followed: `contradicted` would assert "a is not newer than b", a comparison mem never
- * actually performed (Fix 3). Concretely: a fact anchored `file-newer-than generated.ts
- * schema.prisma` must not stay `affirmed` forever once `schema.prisma` is deleted or moved — that is
- * exactly the moment the fact stops being true, and silently reporting "b does not exist" as "a is
- * newer" would hide the staleness this anchor exists to catch.
- */
+/** `file-newer-than <a> <b>` — tests whether `a` is the currently-active file relative to `b`. affirmed: `a` exists and is newer than `b`. contradicted: `b` exists and is newer than `a`, or `a` does not exist while `b` does. unverified: neither file exists, both exist with identical mtimes (ambiguous), `b` does not exist (whether or not `a` does) — you cannot compare two files when one of them is missing, so this can assert neither "newer" nor "older" (P3: never fabricate a verdict) — or `a`/`b` (or a directory component between `root` and either) is a symlink ({@link containsSymlink}), refused rather than followed: `contradicted` would assert "a is not newer than b", a comparison mem never actually performed (Fix 3). Concretely: a fact anchored `file-newer-than generated.ts schema.prisma` must not stay `affirmed` forever once `schema.prisma` is deleted or moved — that is exactly the moment the fact stops being true, and silently reporting "b does not exist" as "a is newer" would hide the staleness this anchor exists to catch. */
 function evaluateFileNewerThan(mtimeA: number | StatOutcome, mtimeB: number | StatOutcome): AnchorVerdict {
-  // Either side's mtime couldn't be confidently determined (permission/I/O error, not genuine
-  // absence) -- see isGenuineAbsence. `contradicted` would assert a comparison that was never
-  // actually performed, on either side.
+  // Either side's mtime couldn't be confidently determined (permission/I/O error, not genuine absence) -- see isGenuineAbsence. `contradicted` would assert a comparison that was never actually performed, on either side.
   if (mtimeA === "unknown" || mtimeB === "unknown") {
     return "unverified";
   }
@@ -388,16 +185,7 @@ function evaluateFileNewerThan(mtimeA: number | StatOutcome, mtimeB: number | St
   return mtimeA > mtimeB ? "affirmed" : "contradicted";
 }
 
-/**
- * `file-contains <path> <substring>` / `file-not-contains <path> <substring>` — affirmed if `path`
- * exists, is a plain file within the read budget, and does (or does not, for the negated form)
- * contain `substring`. unverified if the file is missing (S1: a moved/renamed file is the exact
- * proxy-anchor trap, don't guess), is not a plain file, exceeds the read budget, or can't be read.
- * unverified if `path` (or a directory component between `root` and `path`) is a symlink
- * ({@link containsSymlink}) — refused rather than followed, since a symlink inside `root` could point
- * outside it, and following it here would turn this predicate into a content-read oracle for
- * arbitrary filesystem locations.
- */
+/** `file-contains <path> <substring>` / `file-not-contains <path> <substring>` — affirmed if `path` exists, is a plain file within the read budget, and does (or does not, for the negated form) contain `substring`. unverified if the file is missing (S1: a moved/renamed file is the exact proxy-anchor trap, don't guess), is not a plain file, exceeds the read budget, or can't be read. unverified if `path` (or a directory component between `root` and `path`) is a symlink ({@link containsSymlink}) — refused rather than followed, since a symlink inside `root` could point outside it, and following it here would turn this predicate into a content-read oracle for arbitrary filesystem locations. */
 function evaluateFileContains(
   root: string,
   path: string,
@@ -407,13 +195,7 @@ function evaluateFileContains(
   cacheStore: AnchorCacheStore | undefined
 ): AnchorVerdict {
   if (containsSymlink(root, path)) {
-    // `file-contains`/`file-not-contains` is the same asserts-presence/asserts-absence pair as
-    // `file-exists`/`file-absent` (header comment above): a symlink means mem refuses to read the
-    // target at all, so it can confirm neither the substring's presence nor its absence.
-    // `contradicted` for `file-not-contains` would assert the substring IS present -- a claim mem
-    // has no basis for, since it never read the file. Unverified for both forms, uniformly, matches
-    // the `file-exists`/`file-absent` precedent rather than the `file-newer-than`/`newest-of` one,
-    // which has no negated counterpart making the same claim.
+    // `file-contains`/`file-not-contains` is the same asserts-presence/asserts-absence pair as `file-exists`/`file-absent` (header comment above): a symlink means mem refuses to read the target at all, so it can confirm neither the substring's presence nor its absence. `contradicted` for `file-not-contains` would assert the substring IS present -- a claim mem has no basis for, since it never read the file. Unverified for both forms, uniformly, matches the `file-exists`/`file-absent` precedent rather than the `file-newer-than`/`newest-of` one, which has no negated counterpart making the same claim.
     return "unverified";
   }
   let stat;
@@ -425,11 +207,7 @@ function evaluateFileContains(
   if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
     return "unverified";
   }
-  // Persistent cache: reusing this file's `statWitness` costs one syscall this function already
-  // paid for above, and spares the read + full-content scan below -- the actual expense this
-  // predicate exists to bound (`MAX_CONTENT_READ_BYTES`). `file-exists`/`file-absent` get no
-  // equivalent treatment because for them the predicate *is* the stat above; there is nothing left
-  // to spare by caching.
+  // Persistent cache: reusing this file's `statWitness` costs one syscall this function already paid for above, and spares the read + full-content scan below -- the actual expense this predicate exists to bound (`MAX_CONTENT_READ_BYTES`). `file-exists`/`file-absent` get no equivalent treatment because for them the predicate *is* the stat above; there is nothing left to spare by caching.
   const witness = `f:${stat.mtimeMs}:${stat.size}`;
   const cached = tryPersistentCache(cacheStore, root, anchor, witness);
   if (cached !== undefined) {
@@ -447,33 +225,8 @@ function evaluateFileContains(
   return verdict;
 }
 
-/**
- * `package-version <path> <name>@<expected>` — declared-manifest check only, never an
- * installed/lockfile-resolved version check (S1: a predicate that can falsely affirm a version fact
- * is worse than no predicate at all — see the module header comment). Reads `path` (expected to be a
- * `package.json`), looks up `name` in `dependencies` then `devDependencies`, and compares the declared
- * range string against `expected` using only two confidently-resolvable comparisons: an exact string
- * match, or a leftmost-numeric-major-version-prefix match (e.g. declared `^18.2.0` affirms expected
- * `18`). This is deliberately **not** a semver-range-satisfaction check and does **not** consult any
- * lockfile — anything the comparison cannot confidently resolve (a range operator other than a bare
- * leading `^`/`~`/exact, a non-numeric expected value, ...) returns `unverified` rather than guess.
- * unverified: path unreadable/oversized, JSON malformed, the dependency key is missing entirely, or
- * `path` (or a directory component between `root` and `path`) is a symlink ({@link containsSymlink})
- * — refused rather than followed: `contradicted` here would assert "the manifest does not declare
- * that version", a comparison mem never actually performed (Fix 3).
- */
-/**
- * Matches a *single simple version* only: an optional leading `^`/`~`, a numeric version core (1 to
- * 3 dot-separated numeric groups), and an optional prerelease (`-...`) and/or build (`+...`) tag --
- * anchored at both ends. Anything else (whitespace, `||`, a ` - ` range separator, `<`/`>`/`=`
- * comparators, `x`/`*` wildcards, or any other range syntax) fails to match in full and is therefore
- * rejected by {@link comparePackageVersion} below, rather than accidentally prefix-matched.
- *
- * This is a positive allowlist of the shape a confidently-comparable version can take, not a
- * blocklist of range characters to reject -- a blocklist would silently admit whatever range syntax
- * npm invents next, while this allowlist unverifies it by default until this comparison is
- * deliberately extended to understand it.
- */
+/** `package-version <path> <name>@<expected>` — declared-manifest check only, never an installed/lockfile-resolved version check (S1: a predicate that can falsely affirm a version fact is worse than no predicate at all — see the module header comment). Reads `path` (expected to be a `package.json`), looks up `name` in `dependencies` then `devDependencies`, and compares the declared range string against `expected` using only two confidently-resolvable comparisons: an exact string match, or a leftmost-numeric-major-version-prefix match (e.g. declared `^18.2.0` affirms expected `18`). This is deliberately **not** a semver-range-satisfaction check and does **not** consult any lockfile — anything the comparison cannot confidently resolve (a range operator other than a bare leading `^`/`~`/exact, a non-numeric expected value, ...) returns `unverified` rather than guess. unverified: path unreadable/oversized, JSON malformed, the dependency key is missing entirely, or `path` (or a directory component between `root` and `path`) is a symlink ({@link containsSymlink}) — refused rather than followed: `contradicted` here would assert "the manifest does not declare that version", a comparison mem never actually performed (Fix 3). */
+/** Matches a *single simple version* only: an optional leading `^`/`~`, a numeric version core (1 to 3 dot-separated numeric groups), and an optional prerelease (`-...`) and/or build (`+...`) tag -- anchored at both ends. Anything else (whitespace, `||`, a ` - ` range separator, `<`/`>`/`=` comparators, `x`/`*` wildcards, or any other range syntax) fails to match in full and is therefore rejected by {@link comparePackageVersion} below, rather than accidentally prefix-matched. This is a positive allowlist of the shape a confidently-comparable version can take, not a blocklist of range characters to reject -- a blocklist would silently admit whatever range syntax npm invents next, while this allowlist unverifies it by default until this comparison is deliberately extended to understand it. */
 const SIMPLE_VERSION_RE =
   /^[\^~]?(\d+)(?:\.\d+){0,2}(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
@@ -485,11 +238,7 @@ function comparePackageVersion(declared: string, expected: string): AnchorVerdic
   if (expectedMajorMatch?.[1] === undefined) {
     return "unverified";
   }
-  // The previous regex here (`/^[\^~]?(\d+)(?:\.|$)/u`) only anchored the *start* of `declared`, so
-  // it matched the leading term of a compound range ("1.0.0 - 2.0.0", "1.0.0 || 2.0.0") and silently
-  // discarded the rest -- turning a range that plainly includes the expected major into a fabricated
-  // `contradicted`. Requiring a full-string match against a single-simple-version shape means any
-  // compound range falls through to `unverified` instead (Fix 1).
+  // The previous regex here (`/^[\^~]?(\d+)(?:\.|$)/u`) only anchored the *start* of `declared`, so it matched the leading term of a compound range ("1.0.0 - 2.0.0", "1.0.0 || 2.0.0") and silently discarded the rest -- turning a range that plainly includes the expected major into a fabricated `contradicted`. Requiring a full-string match against a single-simple-version shape means any compound range falls through to `unverified` instead (Fix 1).
   const declaredMajorMatch = SIMPLE_VERSION_RE.exec(declared.trim());
   if (declaredMajorMatch?.[1] === undefined) {
     return "unverified";
@@ -542,9 +291,7 @@ function evaluatePackageVersion(
     return "unverified";
   }
   if (containsSymlink(root, path)) {
-    // Fix 3: uniform symlink policy across every path-based predicate (see the module header
-    // comment) -- `contradicted` here would assert "the manifest does not declare that version", a
-    // comparison mem never actually performed once it refused to follow the symlink.
+    // Fix 3: uniform symlink policy across every path-based predicate (see the module header comment) -- `contradicted` here would assert "the manifest does not declare that version", a comparison mem never actually performed once it refused to follow the symlink.
     return "unverified";
   }
 
@@ -557,9 +304,7 @@ function evaluatePackageVersion(
   if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
     return "unverified";
   }
-  // Persistent cache: this predicate reads and JSON-parses the whole manifest -- materially dearer
-  // than the stat above, which is all `evaluatePackageVersionContent` would otherwise cost to redo
-  // on every call for an unchanged manifest.
+  // Persistent cache: this predicate reads and JSON-parses the whole manifest -- materially dearer than the stat above, which is all `evaluatePackageVersionContent` would otherwise cost to redo on every call for an unchanged manifest.
   const witness = `f:${stat.mtimeMs}:${stat.size}`;
   const cached = tryPersistentCache(cacheStore, root, anchor, witness);
   if (cached !== undefined) {
@@ -570,20 +315,7 @@ function evaluatePackageVersion(
   return verdict;
 }
 
-/**
- * `newest-of <expected> <candidate...>` — among the full candidate set (`expected` plus every other
- * candidate), affirmed if `expected` is the sole existing candidate with the greatest mtime;
- * contradicted if a different existing candidate is the sole newest; unverified if none of the
- * candidates exist, two or more candidates tie for newest (ambiguous — P3: never guess), or
- * `expected` or any candidate (or a directory component between `root` and any of them) is a symlink
- * ({@link containsSymlink}), refused rather than followed: trusting a symlinked candidate's mtime (or
- * silently dropping it) could make this predicate affirm based on a file outside `root`, and
- * `contradicted` would assert "the expected file is not the newest", a comparison mem never actually
- * performed (Fix 3). This is the direct implementation of the design plan's headline example (P3):
- * "the newest lockfile is pnpm-lock.yaml" — unlike a proxy check ("does pnpm-lock.yaml exist"), a
- * stale lockfile left behind after a package-manager switch cannot make this affirm, because it will
- * not be the newest.
- */
+/** `newest-of <expected> <candidate...>` — among the full candidate set (`expected` plus every other candidate), affirmed if `expected` is the sole existing candidate with the greatest mtime; contradicted if a different existing candidate is the sole newest; unverified if none of the candidates exist, two or more candidates tie for newest (ambiguous — P3: never guess), or `expected` or any candidate (or a directory component between `root` and any of them) is a symlink ({@link containsSymlink}), refused rather than followed: trusting a symlinked candidate's mtime (or silently dropping it) could make this predicate affirm based on a file outside `root`, and `contradicted` would assert "the expected file is not the newest", a comparison mem never actually performed (Fix 3). This is the direct implementation of the design plan's headline example (P3): "the newest lockfile is pnpm-lock.yaml" — unlike a proxy check ("does pnpm-lock.yaml exist"), a stale lockfile left behind after a package-manager switch cannot make this affirm, because it will not be the newest. */
 function evaluateNewestOf(mtimes: ReadonlyMap<string, number>, expected: string): AnchorVerdict {
   if (mtimes.size === 0) {
     return "unverified";
@@ -614,30 +346,11 @@ function segmentToRegExp(segment: string): RegExp {
     }
   }
   pattern += "$";
-  // See FS_CASE_INSENSITIVE: on Windows the walk below compares against real directory entries the
-  // OS itself would resolve case-insensitively, so a case-sensitive regex reports `contradicted`
-  // for a file that demonstrably exists.
+  // See FS_CASE_INSENSITIVE: on Windows the walk below compares against real directory entries the OS itself would resolve case-insensitively, so a case-sensitive regex reports `contradicted` for a file that demonstrably exists.
   return new RegExp(pattern, FS_CASE_INSENSITIVE ? "i" : "");
 }
 
-/**
- * `glob-exists <pattern>` — pattern segments are separated by `/` (and, on {@link FS_CASE_INSENSITIVE}
- * platforms, also by `\` — Windows paths are routinely typed with either) and support `*`, `?`, and a
- * recursive `**` segment. A `.` segment (e.g. a leading `./`) is dropped rather than rejected, so
- * `./src/*.ts` and `src/*.ts` are the same pattern. Affirmed if at least one filesystem entry under
- * `root` matches; contradicted if the walk completes with no match *and* never skipped anything that
- * could have matched; unverified if the walk exceeds its entry-count or time budget before resolving
- * (S4: never guess under a budget cutoff), or if it completes having skipped a symlink or a
- * `.git`/`node_modules` directory that could have contained the only match (Fix 2: a walk that never
- * looked cannot positively deny a match exists there — "no such file" would be a fabrication for a
- * file the walk simply declined to check). Symlinks are never followed (root-scoping — a symlink
- * could otherwise point outside `root`). `.git`/`node_modules` are skipped *only* when reached via a
- * wildcard segment (`*`, `?`, or `**`) — that is the S4 cost guard against walking those large,
- * usually-irrelevant trees when the pattern didn't ask for them. A pattern that *literally* names
- * `.git` or `node_modules` as a segment (e.g. `node_modules/pkg/index.js`, or `node_modules/**` to
- * search inside it) is an explicit request to descend there and is honored — contradicting a pattern
- * that plainly names a file that exists is exactly the fabrication P3 forbids.
- */
+/** `glob-exists <pattern>` — pattern segments are separated by `/` (and, on {@link FS_CASE_INSENSITIVE} platforms, also by `\` — Windows paths are routinely typed with either) and support `*`, `?`, and a recursive `**` segment. A `.` segment (e.g. a leading `./`) is dropped rather than rejected, so `./src/*.ts` and `src/*.ts` are the same pattern. Affirmed if at least one filesystem entry under `root` matches; contradicted if the walk completes with no match *and* never skipped anything that could have matched; unverified if the walk exceeds its entry-count or time budget before resolving (S4: never guess under a budget cutoff), or if it completes having skipped a symlink or a `.git`/`node_modules` directory that could have contained the only match (Fix 2: a walk that never looked cannot positively deny a match exists there — "no such file" would be a fabrication for a file the walk simply declined to check). Symlinks are never followed (root-scoping — a symlink could otherwise point outside `root`). `.git`/`node_modules` are skipped *only* when reached via a wildcard segment (`*`, `?`, or `**`) — that is the S4 cost guard against walking those large, usually-irrelevant trees when the pattern didn't ask for them. A pattern that *literally* names `.git` or `node_modules` as a segment (e.g. `node_modules/pkg/index.js`, or `node_modules/**` to search inside it) is an explicit request to descend there and is honored — contradicting a pattern that plainly names a file that exists is exactly the fabrication P3 forbids. */
 function evaluateGlobExists(
   root: string,
   pattern: string,
@@ -653,10 +366,7 @@ function evaluateGlobExists(
 
   let scanned = 0;
   let budgetHit = false;
-  // Fix 2: set whenever the walk skips an entry that *could* have matched (a symlink it refused to
-  // follow, or a `.git`/`node_modules` directory reached only via a wildcard). A completed walk that
-  // found nothing but skipped something like this cannot positively deny a match exists there -- it
-  // simply never looked -- so it must fall back to `unverified` rather than `contradicted`.
+  // Fix 2: set whenever the walk skips an entry that *could* have matched (a symlink it refused to follow, or a `.git`/`node_modules` directory reached only via a wildcard). A completed walk that found nothing but skipped something like this cannot positively deny a match exists there -- it simply never looked -- so it must fall back to `unverified` rather than `contradicted`.
   let skippedPotentialMatch = false;
   const stack: Array<{ dir: string; segIdx: number }> = [{ dir: root, segIdx: 0 }];
 
@@ -679,10 +389,7 @@ function evaluateGlobExists(
     try {
       entries = readdirSync(top.dir, { withFileTypes: true });
     } catch (error) {
-      // A directory that genuinely no longer exists (e.g. removed mid-walk) contributes nothing to
-      // look at, so skipping it is a real "nothing here". Anything else (permission denied, an I/O
-      // error) means this directory was never actually looked inside -- the walk cannot positively
-      // deny a match lives there, so it must not silently contribute to a final `contradicted`.
+      // A directory that genuinely no longer exists (e.g. removed mid-walk) contributes nothing to look at, so skipping it is a real "nothing here". Anything else (permission denied, an I/O error) means this directory was never actually looked inside -- the walk cannot positively deny a match lives there, so it must not silently contribute to a final `contradicted`.
       if (!isGenuineAbsence(error)) {
         skippedPotentialMatch = true;
       }
@@ -702,8 +409,7 @@ function evaluateGlobExists(
           break walk;
         }
         if (entry.isSymbolicLink()) {
-          // `**` matches everything under this directory, so this entry would have matched (or
-          // led to a match) had it not been a symlink.
+          // `**` matches everything under this directory, so this entry would have matched (or led to a match) had it not been a symlink.
           skippedPotentialMatch = true;
           continue;
         }
@@ -712,9 +418,7 @@ function evaluateGlobExists(
           continue;
         }
         if (trailing) {
-          // A trailing `**` matches everything under this directory, including this entry
-          // itself (file or directory) — standard glob semantics for a trailing `/**` — so
-          // any surviving entry here is an immediate affirm; no need to look deeper.
+          // A trailing `**` matches everything under this directory, including this entry itself (file or directory) — standard glob semantics for a trailing `/**` — so any surviving entry here is an immediate affirm; no need to look deeper.
           return "affirmed";
         }
         if (entry.isDirectory()) {
@@ -726,9 +430,7 @@ function evaluateGlobExists(
 
     const isLast = top.segIdx === segments.length - 1;
     const regex = segmentToRegExp(segment);
-    // A literal segment (no `*`/`?`) names its target explicitly, so it is exempt from the
-    // .git/node_modules skip below -- only a wildcard segment matched an entry it didn't ask for by
-    // name.
+    // A literal segment (no `*`/`?`) names its target explicitly, so it is exempt from the .git/node_modules skip below -- only a wildcard segment matched an entry it didn't ask for by name.
     const segmentIsWildcard = /[*?]/u.test(segment);
     for (const entry of entries) {
       scanned += 1;
@@ -737,20 +439,14 @@ function evaluateGlobExists(
         break walk;
       }
       if (!regex.test(entry.name)) {
-        // Item 4 (see FS_CASE_INSENSITIVE): a literal segment's case-sensitive miss here doesn't
-        // prove absence on a case-insensitive APFS volume this process cannot distinguish from a
-        // case-sensitive one -- unlike FS_CASE_INSENSITIVE's known-win32 case, folding here must not
-        // silently affirm, so it falls back to "can't confirm or deny" instead of treating the entry
-        // as irrelevant. A wildcard segment is exempt: `*`/`?` already match by shape, not by a
-        // literal name this ambiguity could apply to.
+        // Item 4 (see FS_CASE_INSENSITIVE): a literal segment's case-sensitive miss here doesn't prove absence on a case-insensitive APFS volume this process cannot distinguish from a case-sensitive one -- unlike FS_CASE_INSENSITIVE's known-win32 case, folding here must not silently affirm, so it falls back to "can't confirm or deny" instead of treating the entry as irrelevant. A wildcard segment is exempt: `*`/`?` already match by shape, not by a literal name this ambiguity could apply to.
         if (!FS_CASE_INSENSITIVE && !segmentIsWildcard && entry.name.toLowerCase() === segment.toLowerCase()) {
           skippedPotentialMatch = true;
         }
         continue;
       }
       if (entry.isSymbolicLink()) {
-        // This entry's name matches the segment -- it would have participated in the match (an
-        // immediate affirm if `isLast`, a descent otherwise) had it not been a symlink.
+        // This entry's name matches the segment -- it would have participated in the match (an immediate affirm if `isLast`, a descent otherwise) had it not been a symlink.
         skippedPotentialMatch = true;
         continue;
       }
@@ -776,16 +472,10 @@ function evaluateGlobExists(
   return "contradicted";
 }
 
-/**
- * Resolves the `.git` metadata directory for `root`, following a worktree/submodule `gitdir:` pointer
- * file when `.git` is a file rather than a directory. Returns `null` if `root` is not a git working
- * tree. Cached per `root` for the lifetime of the process (see module header).
- */
+/** Resolves the `.git` metadata directory for `root`, following a worktree/submodule `gitdir:` pointer file when `.git` is a file rather than a directory. Returns `null` if `root` is not a git working tree. Cached per `root` for the lifetime of the process (see module header). */
 function resolveGitDirUncached(root: string): string | null {
   const dotGitPath = join(root, ".git");
-  // A symlinked `.git` would let anything that can write inside `root` redirect every subsequent
-  // `HEAD`/`index` read at a path of its choosing. `statSync` follows the link, so the refusal has to
-  // come first. Yields "unverified", never a fabricated verdict — matching `existsFile`'s stance.
+  // A symlinked `.git` would let anything that can write inside `root` redirect every subsequent `HEAD`/`index` read at a path of its choosing. `statSync` follows the link, so the refusal has to come first. Yields "unverified", never a fabricated verdict — matching `existsFile`'s stance.
   if (isSymlink(dotGitPath)) {
     return null;
   }
@@ -833,12 +523,7 @@ function resolveGitDir(root: string): string | null {
   return result;
 }
 
-/**
- * `git-branch-is <branch>` — reads `.git/HEAD` directly (no `git` subprocess). Affirmed if the
- * checked-out branch equals `branch`; contradicted if a different branch is checked out; unverified
- * if `root` is not a git working tree, HEAD is detached (no branch to compare), or HEAD cannot be
- * parsed.
- */
+/** `git-branch-is <branch>` — reads `.git/HEAD` directly (no `git` subprocess). Affirmed if the checked-out branch equals `branch`; contradicted if a different branch is checked out; unverified if `root` is not a git working tree, HEAD is detached (no branch to compare), or HEAD cannot be parsed. */
 function evaluateGitBranchIs(root: string, branch: string): AnchorVerdict {
   const gitDir = resolveGitDir(root);
   if (gitDir === null) {
@@ -862,14 +547,7 @@ function evaluateGitBranchIs(root: string, branch: string): AnchorVerdict {
   return currentBranch === branch ? "affirmed" : "contradicted";
 }
 
-/**
- * Result of parsing `.git/index`'s entry table. `complete` is `false` when the index carries a
- * mandatory extension this parser does not understand — see {@link walkGitIndexExtensions} — meaning
- * `paths` reflects only what the entry table itself lists, not necessarily every path the index
- * actually tracks (a split index's main-index entry table omits paths unchanged since the last
- * split; a sparse index's collapsed directory entries omit paths outside the sparse cone). A miss
- * against `paths` when `complete` is `false` is not evidence of absence.
- */
+/** Result of parsing `.git/index`'s entry table. `complete` is `false` when the index carries a mandatory extension this parser does not understand — see {@link walkGitIndexExtensions} — meaning `paths` reflects only what the entry table itself lists, not necessarily every path the index actually tracks (a split index's main-index entry table omits paths unchanged since the last split; a sparse index's collapsed directory entries omit paths outside the sparse cone). A miss against `paths` when `complete` is `false` is not evidence of absence. */
 interface GitIndexParseResult {
   readonly paths: Set<string>;
   readonly complete: boolean;
@@ -878,28 +556,7 @@ interface GitIndexParseResult {
 /** SHA-1 and SHA-256 digest lengths, in bytes — the two possible index-file trailers (`git-index-format`). */
 const GIT_INDEX_TRAILER_LENGTHS = [20, 32] as const;
 
-/**
- * Walks `.git/index`'s optional trailing extensions, starting at `startOffset` (immediately after
- * the last parsed entry), for one candidate trailer length. Returns `null` if the walk cannot be
- * made to land exactly on the trailer boundary with this trailer length (signaling the caller to
- * retry with the other length, or give up); otherwise returns whether every extension encountered
- * was safely skippable.
- *
- * Git's index-extension format (`git-index-format` documentation) reserves the case of an
- * extension's 4-byte signature to mean something: an uppercase first letter is optional -- a reader
- * that does not recognize it is free to skip the extension's `size` bytes and move on, which is
- * exactly what this walker always does, for every signature, known or not. A *lowercase* first
- * letter marks the extension mandatory: a reader that does not understand it is supposed to refuse
- * the whole index rather than silently proceed as if the extension were not there. `link` (split
- * index -- the main index holds only entries that differ from a `sharedindex.*` file, so the entry
- * table alone understates what is tracked) and `sdir` (sparse index -- an entire directory outside
- * the sparse-checkout cone collapses into one entry, so files under it never appear individually)
- * are the two mandatory extensions real repositories produce; both are lowercase for exactly this
- * reason. Skipping their bytes without reading their content is safe -- this parser makes no attempt
- * to resolve a delta or expand a collapsed directory -- but the *caller* must treat a lowercase-only
- * skip as "the entry table is not the whole truth" (`complete: false`) rather than "there are no
- * more tracked paths" (P3: a miss must not read as a fabricated absence).
- */
+/** Walks `.git/index`'s optional trailing extensions, starting at `startOffset` (immediately after the last parsed entry), for one candidate trailer length. Returns `null` if the walk cannot be made to land exactly on the trailer boundary with this trailer length (signaling the caller to retry with the other length, or give up); otherwise returns whether every extension encountered was safely skippable. Git's index-extension format (`git-index-format` documentation) reserves the case of an extension's 4-byte signature to mean something: an uppercase first letter is optional -- a reader that does not recognize it is free to skip the extension's `size` bytes and move on, which is exactly what this walker always does, for every signature, known or not. A *lowercase* first letter marks the extension mandatory: a reader that does not understand it is supposed to refuse the whole index rather than silently proceed as if the extension were not there. `link` (split index -- the main index holds only entries that differ from a `sharedindex.*` file, so the entry table alone understates what is tracked) and `sdir` (sparse index -- an entire directory outside the sparse-checkout cone collapses into one entry, so files under it never appear individually) are the two mandatory extensions real repositories produce; both are lowercase for exactly this reason. Skipping their bytes without reading their content is safe -- this parser makes no attempt to resolve a delta or expand a collapsed directory -- but the *caller* must treat a lowercase-only skip as "the entry table is not the whole truth" (`complete: false`) rather than "there are no more tracked paths" (P3: a miss must not read as a fabricated absence). */
 function walkGitIndexExtensionsWithTrailer(buf: Buffer, startOffset: number, trailerLength: number): boolean | null {
   let offset = startOffset;
   let sawMandatoryExtension = false;
@@ -923,13 +580,7 @@ function walkGitIndexExtensionsWithTrailer(buf: Buffer, startOffset: number, tra
   return !sawMandatoryExtension;
 }
 
-/**
- * Tries both possible trailer lengths ({@link GIT_INDEX_TRAILER_LENGTHS}) and accepts the first one
- * whose extension walk lands exactly on the trailer boundary. Returns `null` if neither does --
- * an index this parser cannot confidently account for byte-for-byte is one it refuses to trust at
- * all (P3), consistent with every other anomaly in {@link readGitIndexPathsUncached} aborting the
- * whole parse rather than returning a partial answer.
- */
+/** Tries both possible trailer lengths ({@link GIT_INDEX_TRAILER_LENGTHS}) and accepts the first one whose extension walk lands exactly on the trailer boundary. Returns `null` if neither does -- an index this parser cannot confidently account for byte-for-byte is one it refuses to trust at all (P3), consistent with every other anomaly in {@link readGitIndexPathsUncached} aborting the whole parse rather than returning a partial answer. */
 function walkGitIndexExtensions(buf: Buffer, startOffset: number): boolean | null {
   for (const trailerLength of GIT_INDEX_TRAILER_LENGTHS) {
     const result = walkGitIndexExtensionsWithTrailer(buf, startOffset, trailerLength);
@@ -940,15 +591,7 @@ function walkGitIndexExtensions(buf: Buffer, startOffset: number): boolean | nul
   return null;
 }
 
-/**
- * Parses `.git/index` (version 2 or 3 only — version 4 uses path-prefix compression, a materially
- * different byte layout, and is deliberately not supported) and returns the set of tracked path
- * strings the entry table lists (POSIX-style, relative to the working tree root), plus whether that
- * set is the *complete* set of tracked paths ({@link GitIndexParseResult}) — or `null` if the index
- * cannot be confidently parsed. Every offset is bounds-checked before use; any anomaly aborts the
- * whole parse and returns `null` rather than risk silently misreading a later entry (P3: never
- * fabricate a verdict from an uncertain read).
- */
+/** Parses `.git/index` (version 2 or 3 only — version 4 uses path-prefix compression, a materially different byte layout, and is deliberately not supported) and returns the set of tracked path strings the entry table lists (POSIX-style, relative to the working tree root), plus whether that set is the *complete* set of tracked paths ({@link GitIndexParseResult}) — or `null` if the index cannot be confidently parsed. Every offset is bounds-checked before use; any anomaly aborts the whole parse and returns `null` rather than risk silently misreading a later entry (P3: never fabricate a verdict from an uncertain read). */
 function readGitIndexPathsUncached(gitDir: string): GitIndexParseResult | null {
   const indexPath = join(gitDir, "index");
   if (isSymlink(indexPath)) {
@@ -962,8 +605,7 @@ function readGitIndexPathsUncached(gitDir: string): GitIndexParseResult | null {
       // No index file yet (freshly initialized, empty repo) — correctly "nothing tracked", not an error.
       return { paths: new Set(), complete: true };
     }
-    // Any other stat failure (permission denied, transient lock) means we cannot tell, not that
-    // the index is definitively empty.
+    // Any other stat failure (permission denied, transient lock) means we cannot tell, not that the index is definitively empty.
     return null;
   }
   if (size > MAX_GIT_INDEX_READ_BYTES) {
@@ -1044,13 +686,7 @@ function readGitIndexPaths(gitDir: string): GitIndexParseResult | null {
   return result;
 }
 
-/**
- * Whether `relPath` names a tracked file or directory according to `paths` — the index stores files
- * only, never directories, so a directory target is never itself an index entry; it is "tracked" in
- * the sense the README promises whenever some entry lives under it (`relPath/anything`). Checked as
- * an exact-path hit first (the common case, and the only shape a file target can match) and only then
- * as a directory-prefix scan, so a file lookup pays no extra cost.
- */
+/** Whether `relPath` names a tracked file or directory according to `paths` — the index stores files only, never directories, so a directory target is never itself an index entry; it is "tracked" in the sense the README promises whenever some entry lives under it (`relPath/anything`). Checked as an exact-path hit first (the common case, and the only shape a file target can match) and only then as a directory-prefix scan, so a file lookup pays no extra cost. */
 function pathTrackedIn(paths: ReadonlySet<string>, relPath: string): boolean {
   if (paths.has(relPath)) {
     return true;
@@ -1064,22 +700,7 @@ function pathTrackedIn(paths: ReadonlySet<string>, relPath: string): boolean {
   return false;
 }
 
-/**
- * `git-tracked <path>` — parses `.git/index` directly (no `git` subprocess). `path` may name a
- * tracked file directly, or a directory that contains at least one tracked path — the index has no
- * entry for a directory itself, so treating a directory target as "never tracked" would contradict
- * the README's own promise that `git-tracked <dir>` works. Affirmed if `path` (relative to `root`)
- * appears in the index's entry table, or some entry lives under it as a directory; unverified if
- * `root` is not a git working tree, the index cannot be confidently parsed (e.g. index format
- * version 4, corrupt header), or `path` is absent from the entry table but the index carries a
- * mandatory extension this parser cannot account for ({@link GitIndexParseResult.complete}) — a
- * split index's `link` extension means the main index's entry table omits paths unchanged since the
- * last split, and a sparse index's `sdir` extension means an entire directory outside the
- * sparse-checkout cone collapses into one entry, so a path under it never appears individually;
- * either way, "not listed" is not "not tracked" and asserting `contradicted` here would be exactly
- * the fabrication P3 forbids. Only when the entry table is the *complete* set of tracked paths does
- * an absence become `contradicted`.
- */
+/** `git-tracked <path>` — parses `.git/index` directly (no `git` subprocess). `path` may name a tracked file directly, or a directory that contains at least one tracked path — the index has no entry for a directory itself, so treating a directory target as "never tracked" would contradict the README's own promise that `git-tracked <dir>` works. Affirmed if `path` (relative to `root`) appears in the index's entry table, or some entry lives under it as a directory; unverified if `root` is not a git working tree, the index cannot be confidently parsed (e.g. index format version 4, corrupt header), or `path` is absent from the entry table but the index carries a mandatory extension this parser cannot account for ({@link GitIndexParseResult.complete}) — a split index's `link` extension means the main index's entry table omits paths unchanged since the last split, and a sparse index's `sdir` extension means an entire directory outside the sparse-checkout cone collapses into one entry, so a path under it never appears individually; either way, "not listed" is not "not tracked" and asserting `contradicted` here would be exactly the fabrication P3 forbids. Only when the entry table is the *complete* set of tracked paths does an absence become `contradicted`. */
 /** The post-`gitDir` body of `evaluateGitTracked`, split out so the cache check below it has a single verdict to persist rather than one for each of this function's several early returns. */
 function evaluateGitTrackedUncached(root: string, resolvedPath: string, gitDir: string): AnchorVerdict {
   const index = readGitIndexPaths(gitDir);
@@ -1091,14 +712,7 @@ function evaluateGitTrackedUncached(root: string, resolvedPath: string, gitDir: 
   if (pathTrackedIn(paths, relPath)) {
     return "affirmed";
   }
-  // `.git/index` stores one exact casing per path. On Windows (FS_CASE_INSENSITIVE) the anchor's
-  // casing and the index's casing both resolve to the same file, so an exact-bytes miss is not
-  // evidence the path is untracked -- affirmed outright. Elsewhere (macOS, whose APFS volumes may be
-  // case-sensitive or case-insensitive per-volume; the two cannot be told apart from here) a
-  // case-folded hit means the index disagrees with the anchor only in casing -- "can't confirm or
-  // deny" is the honest verdict, not "confirmed untracked" (a false `contradicted`) and not
-  // "confirmed tracked" (a false `affirmed`, the trade the previous version of this comment argued
-  // against without naming this third option).
+  // `.git/index` stores one exact casing per path. On Windows (FS_CASE_INSENSITIVE) the anchor's casing and the index's casing both resolve to the same file, so an exact-bytes miss is not evidence the path is untracked -- affirmed outright. Elsewhere (macOS, whose APFS volumes may be case-sensitive or case-insensitive per-volume; the two cannot be told apart from here) a case-folded hit means the index disagrees with the anchor only in casing -- "can't confirm or deny" is the honest verdict, not "confirmed untracked" (a false `contradicted`) and not "confirmed tracked" (a false `affirmed`, the trade the previous version of this comment argued against without naming this third option).
   const folded = foldedGitIndexPaths(gitDir, paths);
   if (pathTrackedIn(folded, relPath.toLowerCase())) {
     return FS_CASE_INSENSITIVE ? "affirmed" : "unverified";
@@ -1111,14 +725,7 @@ function evaluateGitTracked(root: string, resolvedPath: string, anchor: string, 
   if (gitDir === null) {
     return "unverified";
   }
-  // Persistent cache: `.git/index`'s own stat is the witness, never `resolvedPath`'s -- whether a
-  // path is tracked is entirely a property of the index's contents, and the target file's own
-  // mtime is irrelevant to that (`git add`/`git rm` changes the index without touching the target
-  // file at all, and renaming a tracked path in the index changes nothing about the file on disk).
-  // An unchanged index stat means the parsed path set -- and therefore this verdict, for any path
-  // -- provably cannot have changed; this is also materially dearer to skip than a stat: parsing
-  // `.git/index` reads and walks its whole entry table (`readGitIndexPathsUncached`), which the
-  // in-process `gitIndexCache` already spares within one process but not across new ones.
+  // Persistent cache: `.git/index`'s own stat is the witness, never `resolvedPath`'s -- whether a path is tracked is entirely a property of the index's contents, and the target file's own mtime is irrelevant to that (`git add`/`git rm` changes the index without touching the target file at all, and renaming a tracked path in the index changes nothing about the file on disk). An unchanged index stat means the parsed path set -- and therefore this verdict, for any path -- provably cannot have changed; this is also materially dearer to skip than a stat: parsing `.git/index` reads and walks its whole entry table (`readGitIndexPathsUncached`), which the in-process `gitIndexCache` already spares within one process but not across new ones.
   const witness = statWitness(join(gitDir, "index"));
   const cached = tryPersistentCache(cacheStore, root, anchor, witness);
   if (cached !== undefined) {
@@ -1142,36 +749,16 @@ function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): Readon
   return folded;
 }
 
-/**
- * `valid-until <ISO date>` — affirmed while the date has not passed, contradicted once it has.
- *
- * The only predicate that reads no filesystem and no git state: some facts are true until a date
- * rather than until a file changes ("until the v2 migration lands, keep the shim"), and without
- * this they had no anchor at all and stayed permanently `unverified` — caveated forever, and never
- * surfaced in `mem review` as something to resolve.
- *
- * A bare `YYYY-MM-DD` is read as the *end* of that day in the machine's own local time zone, rather
- * than its midnight start or UTC end-of-day, so an anchor written `valid-until 2026-12-31` is still
- * affirmed during 2026-12-31 wherever `mem` runs, instead of expiring the instant the day begins or
- * flipping hours before local midnight for anyone west of UTC. Building the deadline from a `Z`
- * literal instead would contradict a fact still true by the user's own clock (P3: expiring early
- * destroys a fact the user was promised; expiring late merely caveats one a few hours longer, the
- * harmless direction). A timestamp with an explicit time is taken exactly as written.
- *
- * An unparseable date is `unverified`, matching every other malformed-argument path here: a typo
- * must not silently read as "this fact has expired" and suppress a true fact.
- */
+/** `valid-until <ISO date>` — affirmed while the date has not passed, contradicted once it has. The only predicate that reads no filesystem and no git state: some facts are true until a date rather than until a file changes ("until the v2 migration lands, keep the shim"), and without this they had no anchor at all and stayed permanently `unverified` — caveated forever, and never surfaced in `mem review` as something to resolve. A bare `YYYY-MM-DD` is read as the *end* of that day in the machine's own local time zone, rather than its midnight start or UTC end-of-day, so an anchor written `valid-until 2026-12-31` is still affirmed during 2026-12-31 wherever `mem` runs, instead of expiring the instant the day begins or flipping hours before local midnight for anyone west of UTC. Building the deadline from a `Z` literal instead would contradict a fact still true by the user's own clock (P3: expiring early destroys a fact the user was promised; expiring late merely caveats one a few hours longer, the harmless direction). A timestamp with an explicit time is taken exactly as written. An unparseable date is `unverified`, matching every other malformed-argument path here: a typo must not silently read as "this fact has expired" and suppress a true fact. */
 function evaluateValidUntil(raw: string): AnchorVerdict {
   const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(raw);
   let deadline: number;
   if (dateOnlyMatch) {
     const [, yearStr, monthStr, dayStr] = dateOnlyMatch;
-    // Local-time Date constructor overload (year, monthIndex, day, ...), not the UTC `Z`-literal
-    // parse: this is what makes "end of day" mean the user's own local day rather than UTC's.
+    // Local-time Date constructor overload (year, monthIndex, day, ...), not the UTC `Z`-literal parse: this is what makes "end of day" mean the user's own local day rather than UTC's.
     const local = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr), 23, 59, 59, 999);
     deadline = local.getTime();
-    // Guards against an out-of-range calendar date (e.g. 2026-13-45) that `Date` would otherwise
-    // silently roll into a neighboring month/day instead of rejecting.
+    // Guards against an out-of-range calendar date (e.g. 2026-13-45) that `Date` would otherwise silently roll into a neighboring month/day instead of rejecting.
     if (local.getMonth() !== Number(monthStr) - 1 || local.getDate() !== Number(dayStr)) {
       return "unverified";
     }
@@ -1215,9 +802,7 @@ function evaluateTokens(
         return "unverified";
       }
       if (containsSymlink(resolvedRoot, a) || containsSymlink(resolvedRoot, b)) {
-        // Fix 3: `contradicted` here would assert "a is not newer than b", a comparison mem never
-        // actually performed once it refused to follow the symlink -- uniform with every other
-        // path-based predicate (see the module header comment).
+        // Fix 3: `contradicted` here would assert "a is not newer than b", a comparison mem never actually performed once it refused to follow the symlink -- uniform with every other path-based predicate (see the module header comment).
         return "unverified";
       }
       return evaluateFileNewerThan(mtimeOrNull(a), mtimeOrNull(b));
@@ -1275,17 +860,13 @@ function evaluateTokens(
         return "unverified";
       }
       if (containsSymlink(resolvedRoot, expectedResolved)) {
-        // Fix 3: `contradicted` here would assert "the expected file is not the newest", a
-        // comparison mem never actually performed once it refused to follow the symlink -- uniform
-        // with every other path-based predicate (see the module header comment).
+        // Fix 3: `contradicted` here would assert "the expected file is not the newest", a comparison mem never actually performed once it refused to follow the symlink -- uniform with every other path-based predicate (see the module header comment).
         return "unverified";
       }
       const mtimes = new Map<string, number>();
       const expMtime = mtimeOrNull(expectedResolved);
       if (expMtime === "unknown") {
-        // Couldn't confirm or deny the expected file's own mtime (permission/I/O error) -- silently
-        // excluding it, as if it didn't exist, could report a different candidate as "the newest"
-        // over a file that in fact still exists and might genuinely be newer.
+        // Couldn't confirm or deny the expected file's own mtime (permission/I/O error) -- silently excluding it, as if it didn't exist, could report a different candidate as "the newest" over a file that in fact still exists and might genuinely be newer.
         return "unverified";
       }
       if (expMtime !== "absent") {
@@ -1297,15 +878,12 @@ function evaluateTokens(
           return "unverified";
         }
         if (containsSymlink(resolvedRoot, resolved)) {
-          // Fix 3: same rationale as the `expectedResolved` check above -- a candidate's mtime
-          // cannot be safely compared without following the symlink, so this cannot assert the
-          // expected file is not the newest.
+          // Fix 3: same rationale as the `expectedResolved` check above -- a candidate's mtime cannot be safely compared without following the symlink, so this cannot assert the expected file is not the newest.
           return "unverified";
         }
         const mtime = mtimeOrNull(resolved);
         if (mtime === "unknown") {
-          // Same rationale as the expected-file check above: an unreadable candidate could in fact
-          // be the newest, so it cannot simply be dropped from the comparison as if absent.
+          // Same rationale as the expected-file check above: an unreadable candidate could in fact be the newest, so it cannot simply be dropped from the comparison as if absent.
           return "unverified";
         }
         if (mtime !== "absent") {
@@ -1370,12 +948,7 @@ function evaluateTokens(
   }
 }
 
-/**
- * `file-contains`/`file-not-contains` take a free-text substring that may itself contain
- * whitespace, so — unlike every other predicate — they are matched against the raw anchor text
- * (predicate name, then one path token, then everything else verbatim) rather than through the
- * generic whitespace tokenizer.
- */
+/** `file-contains`/`file-not-contains` take a free-text substring that may itself contain whitespace, so — unlike every other predicate — they are matched against the raw anchor text (predicate name, then one path token, then everything else verbatim) rather than through the generic whitespace tokenizer. */
 function evaluateFileContainsRaw(
   trimmed: string,
   resolvedRoot: string,
@@ -1404,40 +977,11 @@ function evaluateFileContainsRaw(
   return evaluateFileContains(resolvedRoot, resolvedPath, substring, predicate === "file-not-contains", trimmed, cacheStore);
 }
 
-/**
- * Evaluates a fact's anchor predicate against `root`.
- *
- * `anchor === null` is always `unverified` (P3: no predicate means the proposition can neither be
- * confirmed nor denied — a hint-to-verify, never ground truth). `deadlineMs`, if given, is an
- * absolute `Date.now()`-based deadline; once passed, evaluation stops attempting further work and
- * returns `unverified` — the safe direction (never fabricate `affirmed`, never falsely claim
- * `contradicted`) rather than risk an unbounded directory walk or index parse in the recall hot path.
- *
- * `budgetHit`, if given, is an out-parameter: set to `true` when the returned `"unverified"` is a
- * "ran out of time this call" bailout rather than a genuine predicate outcome (mirrors the internal
- * `BudgetState` this function already threads through `evaluateFileContainsRaw`/`evaluateTokens`,
- * surfaced here so a caller iterating many facts under one shared deadline -- `retrieve`'s
- * `anchorTimeBudgetMs` -- can count how many verdicts are budget artifacts rather than real ones,
- * instead of every caller having to duplicate the "already expired on entry" / cache-hit reasoning
- * needed to infer it from the outside. Left untouched (`false` is never written back) when the
- * verdict is genuine, including a memo hit -- a budget-limited verdict is never memoized (see below),
- * so a cache hit can only ever be a real one.
- */
-/**
- * The predicates that ask nothing of the filesystem, and so mean exactly the same thing against a
- * root that is not there as against one that is. `valid-until` compares a stored date to the clock
- * and reads no path at all; every other predicate names a target inside the root and cannot answer
- * without it. Kept as a list rather than folded into the check below so that adding another
- * date-shaped or otherwise rootless predicate is a one-line change here instead of a silent
- * downgrade to `unverified` for it.
- */
+/** Evaluates a fact's anchor predicate against `root`. `anchor === null` is always `unverified` (P3: no predicate means the proposition can neither be confirmed nor denied — a hint-to-verify, never ground truth). `deadlineMs`, if given, is an absolute `Date.now()`-based deadline; once passed, evaluation stops attempting further work and returns `unverified` — the safe direction (never fabricate `affirmed`, never falsely claim `contradicted`) rather than risk an unbounded directory walk or index parse in the recall hot path. `budgetHit`, if given, is an out-parameter: set to `true` when the returned `"unverified"` is a "ran out of time this call" bailout rather than a genuine predicate outcome (mirrors the internal `BudgetState` this function already threads through `evaluateFileContainsRaw`/`evaluateTokens`, surfaced here so a caller iterating many facts under one shared deadline -- `retrieve`'s `anchorTimeBudgetMs` -- can count how many verdicts are budget artifacts rather than real ones, instead of every caller having to duplicate the "already expired on entry" / cache-hit reasoning needed to infer it from the outside. Left untouched (`false` is never written back) when the verdict is genuine, including a memo hit -- a budget-limited verdict is never memoized (see below), so a cache hit can only ever be a real one. */
+/** The predicates that ask nothing of the filesystem, and so mean exactly the same thing against a root that is not there as against one that is. `valid-until` compares a stored date to the clock and reads no path at all; every other predicate names a target inside the root and cannot answer without it. Kept as a list rather than folded into the check below so that adding another date-shaped or otherwise rootless predicate is a one-line change here instead of a silent downgrade to `unverified` for it. */
 const ROOTLESS_PREDICATES = ["valid-until"] as const;
 
-/**
- * Whether `path` is a directory that exists right now. `statSync` throws for a missing path rather
- * than reporting it, and a broken symlink or a plain file standing where a root should be is just as
- * unusable as nothing at all, so both collapse to false.
- */
+/** Whether `path` is a directory that exists right now. `statSync` throws for a missing path rather than reporting it, and a broken symlink or a plain file standing where a root should be is just as unusable as nothing at all, so both collapse to false. */
 function isExistingDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
@@ -1457,11 +1001,7 @@ export function evaluateAnchor(
     return "unverified";
   }
   if (budgetExceeded(deadlineMs)) {
-    // Already-expired deadline on entry: never a genuine predicate outcome, so never memoized —
-    // there is nothing to cache under `key` since we return before ever reading/writing `memo`. A
-    // persistent `cacheStore` is never touched for the same reason, with more force: writing this
-    // here would poison every future *process's* first call for this anchor+root too, not just this
-    // one's remaining budget.
+    // Already-expired deadline on entry: never a genuine predicate outcome, so never memoized — there is nothing to cache under `key` since we return before ever reading/writing `memo`. A persistent `cacheStore` is never touched for the same reason, with more force: writing this here would poison every future *process's* first call for this anchor+root too, not just this one's remaining budget.
     if (budgetHit) {
       budgetHit.hit = true;
     }
@@ -1471,20 +1011,7 @@ export function evaluateAnchor(
   const resolvedRoot = resolve(root);
   const trimmed = anchor.trim();
   if (!ROOTLESS_PREDICATES.some((name) => trimmed === name || trimmed.startsWith(`${name} `)) && !isExistingDirectory(resolvedRoot)) {
-    // Every predicate below asks a question *about a tree*, and a root that is not there answers
-    // none of them: `file-absent` would affirm because nothing is absent from a directory that does
-    // not exist, and `file-exists` would contradict for the same empty reason -- a confident verdict
-    // read off nothing at all. That happens whenever a project is moved or deleted, whenever a fact
-    // is imported from another machine and keeps its foreign root, and whenever a host hands the
-    // hook a `--root` that has since gone away. `git-tracked` already answered `unverified` here
-    // (its own command fails), so the predicates disagreed with each other about the same absence.
-    //
-    // Deliberately not memoized: unlike a predicate outcome, this is a statement about the root
-    // rather than the anchor, and a directory that is missing now may be present later. Never
-    // written to `cacheStore` either, with more force than the in-process memo: a persistent
-    // verdict outlives this process, so writing "unverified, root missing" here would keep
-    // asserting it in every later invocation too, long after the root reappears -- the memo at
-    // least clears itself the moment the process exits.
+    // Every predicate below asks a question *about a tree*, and a root that is not there answers none of them: `file-absent` would affirm because nothing is absent from a directory that does not exist, and `file-exists` would contradict for the same empty reason -- a confident verdict read off nothing at all. That happens whenever a project is moved or deleted, whenever a fact is imported from another machine and keeps its foreign root, and whenever a host hands the hook a `--root` that has since gone away. `git-tracked` already answered `unverified` here (its own command fails), so the predicates disagreed with each other about the same absence. Deliberately not memoized: unlike a predicate outcome, this is a statement about the root rather than the anchor, and a directory that is missing now may be present later. Never written to `cacheStore` either, with more force than the in-process memo: a persistent verdict outlives this process, so writing "unverified, root missing" here would keep asserting it in every later invocation too, long after the root reappears -- the memo at least clears itself the moment the process exits.
     return "unverified";
   }
   const key = `${resolvedRoot} ${trimmed}`;
@@ -1496,15 +1023,7 @@ export function evaluateAnchor(
   const budgetState: BudgetState = { hit: false };
   const containsResult = evaluateFileContainsRaw(trimmed, resolvedRoot, deadlineMs, budgetState, cacheStore);
   const verdict = containsResult ?? evaluateTokens(tokenize(trimmed), resolvedRoot, deadlineMs, budgetState, trimmed, cacheStore);
-  // A budget-limited "unverified" is a "ran out of time this call" bailout, not a genuine
-  // predicate outcome — memoizing it under a key that doesn't encode the deadline would let a
-  // later, differently-budgeted (or unbudgeted) call for the same anchor+root incorrectly reuse
-  // it instead of actually re-evaluating. Genuine verdicts (affirmed/contradicted, and unverified
-  // that stems from the predicate itself rather than the time budget) are cached as before. The
-  // cacheable predicates below (`file-contains`/`file-not-contains`, `package-version`,
-  // `git-tracked`) already refuse to touch `cacheStore` on a budget bailout themselves -- they
-  // return before ever computing a witness to persist -- so nothing further is needed here for
-  // `cacheStore` specifically; this branch only governs the in-process `memo`.
+  // A budget-limited "unverified" is a "ran out of time this call" bailout, not a genuine predicate outcome — memoizing it under a key that doesn't encode the deadline would let a later, differently-budgeted (or unbudgeted) call for the same anchor+root incorrectly reuse it instead of actually re-evaluating. Genuine verdicts (affirmed/contradicted, and unverified that stems from the predicate itself rather than the time budget) are cached as before. The cacheable predicates below (`file-contains`/`file-not-contains`, `package-version`, `git-tracked`) already refuse to touch `cacheStore` on a budget bailout themselves -- they return before ever computing a witness to persist -- so nothing further is needed here for `cacheStore` specifically; this branch only governs the in-process `memo`.
   if (!budgetState.hit) {
     memo.set(key, verdict);
   } else if (budgetHit) {
@@ -1518,16 +1037,7 @@ export function anchorPathWithinRoot(root: string, pathArg: string): string | nu
   return resolveWithinRoot(resolve(root), pathArg);
 }
 
-/**
- * Bare filenames conventionally referenced without a directory component. A fact saying "the pin
- * lives in package.json" names a checkable target just as concretely as one saying "src/db.ts",
- * but carries no path separator for {@link ANCHORABLE_PATTERNS} to key on.
- *
- * Deliberately an explicit list rather than a general "word + known extension" rule: the general
- * form also matches "Node.js", "asyncio.gather", and "v1.2.js"-shaped prose, and a review bucket
- * that cries wolf on ordinary sentences is one nobody reads. Under-matching here is recoverable
- * (the fact simply is not nominated); over-matching is not (the bucket degrades into noise).
- */
+/** Bare filenames conventionally referenced without a directory component. A fact saying "the pin lives in package.json" names a checkable target just as concretely as one saying "src/db.ts", but carries no path separator for {@link ANCHORABLE_PATTERNS} to key on. Deliberately an explicit list rather than a general "word + known extension" rule: the general form also matches "Node.js", "asyncio.gather", and "v1.2.js"-shaped prose, and a review bucket that cries wolf on ordinary sentences is one nobody reads. Under-matching here is recoverable (the fact simply is not nominated); over-matching is not (the bucket degrades into noise). */
 const ANCHORABLE_BARE_FILENAMES: readonly string[] = [
   "package.json",
   "package-lock.json",
@@ -1567,14 +1077,7 @@ const TRAILING_PUNCTUATION_RE = /[.,;:!?]+$/u;
 /** The one-character boundary a pattern in {@link ANCHORABLE_PATTERNS} consumes ahead of its target, when it isn't matching at the very start of the text. */
 const LEADING_BOUNDARY_CHAR_RE = /^[\s"'`([<]/u;
 
-/**
- * Shapes that denote a concrete, re-checkable target. Each alternative is kept simple and
- * independently testable rather than fused into one omnibus expression.
- *
- * The `relative-with-extension` case requires the final segment to carry a dot-extension precisely
- * so that separator-bearing English ("and/or", "24/7", "he/she") cannot match; the rooted and
- * absolute cases require a leading marker or two segments for the same reason.
- */
+/** Shapes that denote a concrete, re-checkable target. Each alternative is kept simple and independently testable rather than fused into one omnibus expression. The `relative-with-extension` case requires the final segment to carry a dot-extension precisely so that separator-bearing English ("and/or", "24/7", "he/she") cannot match; the rooted and absolute cases require a leading marker or two segments for the same reason. */
 const ANCHORABLE_PATTERNS: readonly { readonly name: string; readonly re: RegExp }[] = [
   { name: "url", re: /https?:\/\/[^\s)>\]"']+/iu },
   { name: "windows-path", re: /(?:^|[\s"'`([<])[A-Za-z]:[\\/][^\s)>\]"']+/u },
@@ -1586,17 +1089,7 @@ const ANCHORABLE_PATTERNS: readonly { readonly name: string; readonly re: RegExp
   },
 ];
 
-/**
- * Extracts every substring of `text` that an anchor predicate could plausibly be written against —
- * a path, a URL, or a conventionally-bare config filename — in the order each first appears:
- * {@link ANCHORABLE_PATTERNS} matches first (in pattern order), then bare-filename tokens.
- *
- * This is a *nomination* pass for `mem review --section unanchored`, not a verification one: a
- * returned string means "a human could write an anchor for this", never "this fact is stale", and
- * never "this target actually exists" — callers that need a live verdict still run it through
- * {@link evaluateAnchor}. It deliberately performs no filesystem I/O itself, so it stays pure,
- * synchronous, and cheap enough to run over every ground-truth fact on every `mem review`.
- */
+/** Extracts every substring of `text` that an anchor predicate could plausibly be written against — a path, a URL, or a conventionally-bare config filename — in the order each first appears: {@link ANCHORABLE_PATTERNS} matches first (in pattern order), then bare-filename tokens. This is a *nomination* pass for `mem review --section unanchored`, not a verification one: a returned string means "a human could write an anchor for this", never "this fact is stale", and never "this target actually exists" — callers that need a live verdict still run it through {@link evaluateAnchor}. It deliberately performs no filesystem I/O itself, so it stays pure, synchronous, and cheap enough to run over every ground-truth fact on every `mem review`. */
 export function extractAnchorableTargets(text: string): string[] {
   if (text.trim().length === 0) {
     return [];
@@ -1604,9 +1097,7 @@ export function extractAnchorableTargets(text: string): string[] {
   const targets: string[] = [];
   const seen = new Set<string>();
   const push = (target: string): void => {
-    // Two patterns can plausibly match the same substring (e.g. a `./`-rooted path that also carries
-    // an extension) -- de-duplicated here so a caller trying "the first that passes" never re-checks
-    // the identical candidate twice.
+    // Two patterns can plausibly match the same substring (e.g. a `./`-rooted path that also carries an extension) -- de-duplicated here so a caller trying "the first that passes" never re-checks the identical candidate twice.
     if (!seen.has(target)) {
       seen.add(target);
       targets.push(target);
@@ -1630,14 +1121,7 @@ export function extractAnchorableTargets(text: string): string[] {
   return targets;
 }
 
-/**
- * Reports whether `text` names something an anchor predicate could plausibly be written against.
- *
- * Motivation: an anchorless fact can never be `contradicted` — {@link evaluateAnchor} short-circuits
- * a `null` anchor to `unverified` — so before this predicate existed such a fact could not reach any
- * `mem review` bucket at all. It sat at `unverified` indefinitely, invisible to both `mem review`
- * and `mem doctor`, however thoroughly the world had moved on beneath it.
- */
+/** Reports whether `text` names something an anchor predicate could plausibly be written against. Motivation: an anchorless fact can never be `contradicted` — {@link evaluateAnchor} short-circuits a `null` anchor to `unverified` — so before this predicate existed such a fact could not reach any `mem review` bucket at all. It sat at `unverified` indefinitely, invisible to both `mem review` and `mem doctor`, however thoroughly the world had moved on beneath it. */
 export function mentionsAnchorableTarget(text: string): boolean {
   return extractAnchorableTargets(text).length > 0;
 }

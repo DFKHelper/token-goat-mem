@@ -1,29 +1,4 @@
-/**
- * The ranking stage under test, isolated from the rest of `retrieve()`'s correctness gate -- for
- * three of this eval harness's four configurations.
- *
- * Phase 1 (this eval harness's original reason for existing) touched exactly two things: whether
- * `--hint-format` threads a real query into BM25 at all (item 1), and whether BM25 stems its
- * tokens (item 2). Neither touched anchor re-evaluation, contradiction resolution, RRF fusion, the
- * entity/graph signals, or trust classification, so `"recency"`/`"query-no-stem"`/`"query-stem"`
- * below reimplement only the ranking step -- scope filtering, BM25 scoring, the kind boost, and
- * top-k selection -- to isolate items 1 and 2 from everything else `retrieve()` does.
- *
- * That justification does not extend to the fourth configuration. `"pipeline"` (see
- * `eval/pipelineFixture.ts`) drives the real `retrieve()` directly instead of reimplementing any
- * part of it -- RRF fusion, embeddings-off BM25, entity overlap, graph propagation, anchor
- * re-evaluation, contradiction resolution, and trust classification all run for real. `rankFacts`
- * below still only knows how to rank the first three; `harness.ts`'s `evaluateConfig` takes an
- * injectable ranker precisely so `"pipeline"` can bypass this file entirely rather than being
- * squeezed into its reduced model.
- *
- * The BM25 formula and constants (`K1`, `B`) and the kind boost mirror `src/retrieval.ts`'s
- * `computeBm25Scores`/`applyKindBoost` exactly (same math, same constants); "stemmed" scoring
- * reuses the *real*, exported `computeBm25Scores` from `src/retrieval.ts` directly (so item 2's
- * actual shipped stemmer is what gets measured, not a reimplementation of it). "Unstemmed" scoring
- * is a small local reimplementation of the pre-item-2 tokenizer, kept only because production code
- * no longer has an unstemmed code path to compare against.
- */
+/** The ranking stage under test, isolated from the rest of `retrieve()`'s correctness gate -- for three of this eval harness's four configurations. Phase 1 (this eval harness's original reason for existing) touched exactly two things: whether `--hint-format` threads a real query into BM25 at all (item 1), and whether BM25 stems its tokens (item 2). Neither touched anchor re-evaluation, contradiction resolution, RRF fusion, the entity/graph signals, or trust classification, so `"recency"`/`"query-no-stem"`/`"query-stem"` below reimplement only the ranking step -- scope filtering, BM25 scoring, the kind boost, and top-k selection -- to isolate items 1 and 2 from everything else `retrieve()` does. That justification does not extend to the fourth configuration. `"pipeline"` (see `eval/pipelineFixture.ts`) drives the real `retrieve()` directly instead of reimplementing any part of it -- RRF fusion, embeddings-off BM25, entity overlap, graph propagation, anchor re-evaluation, contradiction resolution, and trust classification all run for real. `rankFacts` below still only knows how to rank the first three; `harness.ts`'s `evaluateConfig` takes an injectable ranker precisely so `"pipeline"` can bypass this file entirely rather than being squeezed into its reduced model. The BM25 formula and constants (`K1`, `B`) and the kind boost mirror `src/retrieval.ts`'s `computeBm25Scores`/`applyKindBoost` exactly (same math, same constants); "stemmed" scoring reuses the *real*, exported `computeBm25Scores` from `src/retrieval.ts` directly (so item 2's actual shipped stemmer is what gets measured, not a reimplementation of it). "Unstemmed" scoring is a small local reimplementation of the pre-item-2 tokenizer, kept only because production code no longer has an unstemmed code path to compare against. */
 
 import { AGGRESSIVE_RECALL_BOOST, computeBm25Scores } from "../src/retrieval.js";
 import type { AnchorVerdict } from "../src/anchors.js";
@@ -105,22 +80,11 @@ export type BaselineRankConfig = Exclude<RankConfig, "pipeline">;
 export interface RankedResult {
   readonly fact: EvalFact;
   readonly score: number;
-  /**
-   * The anchor verdict `retrieve()` reached for this fact, when the configuration ran anchors at
-   * all. Absent for the three baseline configurations: `rankFacts` has no anchor stage, which is
-   * precisely the asymmetry the `"pipeline"` configuration exists to expose.
-   */
+  /** The anchor verdict `retrieve()` reached for this fact, when the configuration ran anchors at all. Absent for the three baseline configurations: `rankFacts` has no anchor stage, which is precisely the asymmetry the `"pipeline"` configuration exists to expose. */
   readonly freshness?: AnchorVerdict;
 }
 
-/**
- * Ranks `facts` for one scenario (`query` against project `root`) under the given configuration:
- *   - `"recency"`: today's original `--hint-format` behaviour -- the query is ignored entirely
- *     (mirrors the hardcoded `query: ""` this phase removed), so ranking falls through to
- *     `captured_at` descending.
- *   - `"query-no-stem"`: the query is honored (item 1) but BM25 has no stemmer (pre-item-2).
- *   - `"query-stem"`: the query is honored and BM25 stems (item 1 + item 2, today's shipped state).
- */
+/** Ranks `facts` for one scenario (`query` against project `root`) under the given configuration: - `"recency"`: today's original `--hint-format` behaviour -- the query is ignored entirely (mirrors the hardcoded `query: ""` this phase removed), so ranking falls through to `captured_at` descending. - `"query-no-stem"`: the query is honored (item 1) but BM25 has no stemmer (pre-item-2). - `"query-stem"`: the query is honored and BM25 stems (item 1 + item 2, today's shipped state). */
 export function rankFacts(facts: readonly EvalFact[], query: string, root: string, config: BaselineRankConfig): RankedResult[] {
   const scoped = facts.filter((fact) => isInScope(fact, root));
   const effectiveQuery = config === "recency" ? "" : query;

@@ -1,15 +1,4 @@
-/**
- * Permission tests for the mem home directory and database file (src/db.ts).
- *
- * Facts are exactly the class of data that must not be world-readable, and `openDb` used to leave
- * both the directory and the file to the process umask -- 0755 and 0644 under the default 022, which
- * on a shared host means every local account can read the store. These tests pin the modes so a
- * future refactor of `openDb` cannot quietly hand that back.
- *
- * POSIX only: on Windows `chmod` toggles only the read-only bit and carries no read-permission
- * meaning, so the modes asserted here are not the mechanism protecting the file there -- the profile
- * ACL `~/.mem` inherits is. Skipping is the honest outcome, not a coverage gap.
- */
+/** Permission tests for the mem home directory and database file (src/db.ts). Facts are exactly the class of data that must not be world-readable, and `openDb` used to leave both the directory and the file to the process umask -- 0755 and 0644 under the default 022, which on a shared host means every local account can read the store. These tests pin the modes so a future refactor of `openDb` cannot quietly hand that back. POSIX only: on Windows `chmod` toggles only the read-only bit and carries no read-permission meaning, so the modes asserted here are not the mechanism protecting the file there -- the profile ACL `~/.mem` inherits is. Skipping is the honest outcome, not a coverage gap. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -58,8 +47,7 @@ describe("openDb file permissions", () => {
     const dbPath = join(workDir, "home", "mem.db");
     const db = openDb(dbPath);
     try {
-      // WAL mode is on from `openDb`, so at least `-shm` exists here. Assert whichever sidecars the
-      // engine actually created rather than requiring both -- `-wal` creation timing is SQLite's.
+      // WAL mode is on from `openDb`, so at least `-shm` exists here. Assert whichever sidecars the engine actually created rather than requiring both -- `-wal` creation timing is SQLite's.
       const sidecars = [`${dbPath}-wal`, `${dbPath}-shm`].filter((path) => existsSync(path));
       expect(sidecars.length).toBeGreaterThan(0);
       for (const sidecar of sidecars) {

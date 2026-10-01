@@ -1,16 +1,4 @@
-/**
- * End-to-end tests for the embedding feature's CLI surface: `mem embed`, the post-capture vector
- * write, `mem doctor`'s report, and the dimension/model safety that keeps two vector spaces from
- * being compared.
- *
- * Driven through the real `run()` against a real database, and against a real (loopback) HTTP
- * endpoint (tests/support/embedding-server.ts), for the reason that file gives: mocking `fetch`
- * would test the mock's idea of the wire format.
- *
- * Every test that sets an embedding environment variable restores it afterwards. A leak here is not
- * a local failure: it would turn embeddings on for every later test file in the same worker, which
- * is exactly the byte-identical-when-unconfigured property the first block below exists to pin.
- */
+/** End-to-end tests for the embedding feature's CLI surface: `mem embed`, the post-capture vector write, `mem doctor`'s report, and the dimension/model safety that keeps two vector spaces from being compared. Driven through the real `run()` against a real database, and against a real (loopback) HTTP endpoint (tests/support/embedding-server.ts), for the reason that file gives: mocking `fetch` would test the mock's idea of the wire format. Every test that sets an embedding environment variable restores it afterwards. A leak here is not a local failure: it would turn embeddings on for every later test file in the same worker, which is exactly the byte-identical-when-unconfigured property the first block below exists to pin. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -40,8 +28,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Record/set/restore, matching tests/setup/isolate-home.ts: `delete` alone would clobber a value
-  // an outer harness had set, and leaving one set would silently configure every later test.
+  // Record/set/restore, matching tests/setup/isolate-home.ts: `delete` alone would clobber a value an outer harness had set, and leaving one set would silently configure every later test.
   for (const key of EMBED_ENV_KEYS) {
     const prior = priorEnv[key];
     if (prior === undefined) {
@@ -123,10 +110,7 @@ describe("with no embedding configuration, behaviour is what it was before the f
   });
 
   it("rejects a malformed --limit ahead of the configuration error, so the fixable mistake is the one reported", async () => {
-    // The flag used to be parsed with a bare parseInt and filtered downstream by Number.isFinite, so
-    // `--limit abc` silently embedded everything instead of erroring -- while `mem recall --limit`
-    // rejected the identical input. Unconfigured here on purpose: the usage error has to win, or the
-    // user fixes their environment first and only then discovers the flag never applied.
+    // The flag used to be parsed with a bare parseInt and filtered downstream by Number.isFinite, so `--limit abc` silently embedded everything instead of erroring -- while `mem recall --limit` rejected the identical input. Unconfigured here on purpose: the usage error has to win, or the user fixes their environment first and only then discovers the flag never applied.
     for (const bad of ["abc", "0", "-3"]) {
       const result = await runCli(["embed", "--limit", bad]);
 
@@ -153,8 +137,7 @@ describe("post-capture embedding", () => {
     const result = await runCli(["remember", "prefers pnpm", "--kind", "preference", "--scope", "project", "--root", root]);
 
     expect(result.exitCode).toBe(0);
-    // Same single line as an unconfigured capture: the vector is an optimization and must not show
-    // up in the command's contract with its caller.
+    // Same single line as an unconfigured capture: the vector is an optimization and must not show up in the command's contract with its caller.
     expect(result.stdout).toMatch(/^remembered preference fact \S+\n$/u);
     expect(storedFacts()[0]?.embedding).not.toBeNull();
     expect(storedMeta()).toEqual({ model: "stub-model", dimension: 4 });
@@ -188,8 +171,7 @@ describe("post-capture embedding", () => {
     const result = await runCli(["remember", "api_key = sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "--kind", "fact", "--root", root]);
 
     expect(result.exitCode).toBe(1);
-    // The security property: capture.ts rejected the text, so nothing was stored and nothing was
-    // sent. A pre-capture embedding call would have leaked the very string screening exists to stop.
+    // The security property: capture.ts rejected the text, so nothing was stored and nothing was sent. A pre-capture embedding call would have leaked the very string screening exists to stop.
     expect(server.requests).toEqual([]);
   });
 
@@ -201,8 +183,7 @@ describe("post-capture embedding", () => {
     process.env[EMBED_MODEL_ENV] = "model-b";
     await runCli(["remember", "second fact here", "--kind", "fact", "--root", root]);
 
-    // Mixing vector spaces inside one store is permanent and invisible: `cosineSimilarity` compares
-    // them without complaint. The second fact stays unembedded until `mem embed --all` migrates.
+    // Mixing vector spaces inside one store is permanent and invisible: `cosineSimilarity` compares them without complaint. The second fact stays unembedded until `mem embed --all` migrates.
     expect(storedMeta()).toEqual({ model: "model-a", dimension: 4 });
     const second = storedFacts().find((fact) => fact.text === "second fact here");
     expect(second?.embedding).toBeNull();
@@ -320,8 +301,7 @@ describe("mem embed", () => {
     await configureEmbeddings({
       dataOverride: (inputs) => {
         call += 1;
-        // Second request answers with a shape the parser must reject, standing in for any
-        // transport- or gateway-level failure that hits only part of a run.
+        // Second request answers with a shape the parser must reject, standing in for any transport- or gateway-level failure that hits only part of a run.
         return call === 2 ? [] : inputs.map((text, index) => ({ index, embedding: [text.length, 1, 2, 3] }));
       },
     });
@@ -352,8 +332,7 @@ describe("mem embed", () => {
     await runCli(["embed"]);
     expect(storedMeta()).toEqual({ model: "m", dimension: 4 });
 
-    // A repointed LiteLLM/Ollama alias, or a provider that changed its output size: same model
-    // name, different dimension.
+    // A repointed LiteLLM/Ollama alias, or a provider that changed its output size: same model name, different dimension.
     await configureEmbeddings({ model: "m", embedFor: () => [1, 2, 3, 4, 5, 6, 7, 8] });
 
     const plain = await runCli(["embed"]);
@@ -374,9 +353,7 @@ describe("mem embed", () => {
     await runCli(["embed"]);
     expect(storedMeta()).toEqual({ model: "m", dimension: 4 });
 
-    // Same model, same recorded dimension seed (no --all), but the endpoint now answers a different
-    // dimension. Reconfigured before this fact is captured so the post-capture best-effort embed
-    // (which also checks recorded.dimension) leaves it unembedded rather than quietly picking it up.
+    // Same model, same recorded dimension seed (no --all), but the endpoint now answers a different dimension. Reconfigured before this fact is captured so the post-capture best-effort embed (which also checks recorded.dimension) leaves it unembedded rather than quietly picking it up.
     await configureEmbeddings({ model: "m", embedFor: () => [1, 2, 3, 4, 5, 6, 7, 8] });
     await runCli(["remember", "a third fact", "--kind", "fact", "--root", root]);
 
@@ -474,8 +451,7 @@ describe("dimension and model safety at recall", () => {
   });
 
   it("doctor does not say 'nothing embedded yet' directly above a coverage line that says otherwise, when a vector exists with no recorded model", async () => {
-    // Simulates the state an interrupted `mem embed` (or an import of unknown provenance) leaves
-    // behind: a vector on disk, and no meta row naming the model that produced it.
+    // Simulates the state an interrupted `mem embed` (or an import of unknown provenance) leaves behind: a vector on disk, and no meta row naming the model that produced it.
     const db = openStorage(join(home, "mem.db"));
     insertFact(db, { text: "unlabelled fact", kind: "fact", scope: "global", source_type: "user", embedding: new Float32Array([1, 2, 3, 4]) } as unknown as NewFact);
     expect(getEmbeddingMeta(db)).toBeUndefined();
@@ -490,9 +466,7 @@ describe("dimension and model safety at recall", () => {
   });
 
   it("doctor's embedding coverage reaches 100% in a store holding a superseded fact, since backfill will never embed one", async () => {
-    // `listFactsNeedingEmbedding` excludes status='superseded' by design (superseding a fact is not
-    // a reason to spend an embedding call on it), so a superseded fact with no vector must not count
-    // against the coverage denominator -- otherwise doctor reports a shortfall no command can close.
+    // `listFactsNeedingEmbedding` excludes status='superseded' by design (superseding a fact is not a reason to spend an embedding call on it), so a superseded fact with no vector must not count against the coverage denominator -- otherwise doctor reports a shortfall no command can close.
     await seed(1);
     const db = openStorage(join(home, "mem.db"));
     insertFact(db, { text: "stale fact nobody will embed", kind: "fact", scope: "global", source_type: "user", status: "superseded" } as unknown as NewFact);
@@ -521,19 +495,7 @@ describe("dimension and model safety at recall", () => {
   });
 
   it("reaches the same decision about unlabelled vectors on the hook path as on the recall path", async () => {
-    // The seam keeps its own call into `planEmbeddingRanking`, and hand-maintained divergences
-    // between it and the rest of the CLI are this codebase's most repeated defect -- three columns
-    // have gone missing from its own SELECT on three separate occasions. Skipping the
-    // unrecorded-vector check here to save a `SELECT COUNT(*)` would make the hook rank against
-    // vectors of unknown provenance on every prompt while `mem recall` declines to: the same store
-    // answering the same question two ways.
-    //
-    // Driven through `buildHintFormat` rather than the CLI because the query has to come from
-    // somewhere: the hook path takes one from its stdin envelope's `prompt` and from nowhere else,
-    // and with no query nothing is embedded on any code path -- a `recall --hint-format` with no
-    // envelope passes whether the guard is there or not. The seam says nothing about the decision
-    // either way (its contract is to fail open, not to editorialize on ranking quality), so the
-    // observable is that it never reaches the endpoint.
+    // The seam keeps its own call into `planEmbeddingRanking`, and hand-maintained divergences between it and the rest of the CLI are this codebase's most repeated defect -- three columns have gone missing from its own SELECT on three separate occasions. Skipping the unrecorded-vector check here to save a `SELECT COUNT(*)` would make the hook rank against vectors of unknown provenance on every prompt while `mem recall` declines to: the same store answering the same question two ways. Driven through `buildHintFormat` rather than the CLI because the query has to come from somewhere: the hook path takes one from its stdin envelope's `prompt` and from nowhere else, and with no query nothing is embedded on any code path -- a `recall --hint-format` with no envelope passes whether the guard is there or not. The seam says nothing about the decision either way (its contract is to fail open, not to editorialize on ranking quality), so the observable is that it never reaches the endpoint.
     const db = openStorage(join(home, "mem.db"));
     insertFact(db, { text: "uses vitest for tests", kind: "fact", scope: "project", scopeRoot: root, source_type: "user", embedding: new Float32Array([1, 2, 3, 4]) } as unknown as NewFact);
     expect(getEmbeddingMeta(db)).toBeUndefined();
@@ -570,8 +532,7 @@ describe("dimension and model safety at recall", () => {
       expect(imported.exitCode).toBe(0);
       expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
 
-      // The fresh target has no vectors of its own; it adopts the envelope's recorded model, so a
-      // query under a third model must decline ranking exactly as a store embedded natively would.
+      // The fresh target has no vectors of its own; it adopts the envelope's recorded model, so a query under a third model must decline ranking exactly as a store embedded natively would.
       process.env[EMBED_MODEL_ENV] = "other";
       const requestsBeforeRecall = server.requests.length;
       const result = await runCli(["recall", "vitest", "--root", root]);

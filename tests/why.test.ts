@@ -1,10 +1,4 @@
-/**
- * End-to-end tests for a fact's optional `why`: the rationale behind a decision or correction.
- *
- * A stored decision without its reason is the one a later session is most tempted to relitigate --
- * "uses esbuild" invites "why not tsc?", where "uses esbuild (why: tsc cannot emit one ESM bundle)"
- * answers it. Driven through the real `run()` against a real database.
- */
+/** End-to-end tests for a fact's optional `why`: the rationale behind a decision or correction. A stored decision without its reason is the one a later session is most tempted to relitigate -- "uses esbuild" invites "why not tsc?", where "uses esbuild (why: tsc cannot emit one ESM bundle)" answers it. Driven through the real `run()` against a real database. */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -102,8 +96,7 @@ describe("fact why (rationale)", () => {
     expect(await shownWhy(id)).toBe(REASON);
   });
 
-  // `--force` because `mem remember` stores a source_type=user fact, and a reason is part of what
-  // the user stated: amending it goes through the same guard as any other field.
+  // `--force` because `mem remember` stores a source_type=user fact, and a reason is part of what the user stated: amending it goes through the same guard as any other field.
   it("is set by `mem edit --why`, cleared by an empty --why, and restored by `mem edit --undo`", async () => {
     const id = await rememberDecision(["--why", "first reason"]);
 

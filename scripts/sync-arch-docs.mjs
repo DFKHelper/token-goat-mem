@@ -1,30 +1,5 @@
 #!/usr/bin/env node
-/**
- * Architecture-documentation sync engine and gate.
- *
- * Discovers every source component via `git ls-files` against the patterns in
- * `.arch-doc-sync.json`, classifies each into a declared layer by exact path membership, extracts a
- * one-sentence Role and up to five exported symbol names, and splices the resulting table between the
- * `ARCH_COMPONENTS_START`/`END` markers in the configured doc (`ARCHITECTURE.md`).
- *
- * `--check` (default) is read-only and never mutates the doc; it recomputes the table from the
- * current tree and byte-compares it against what is currently spliced in, so any difference at all
- * -- a new module, a removed one, a changed export list, a module that matches no declared layer --
- * is drift. `--write` performs the splice. `--self-test` exercises the contract hermetically in a
- * temp directory.
- *
- * Curated Roles (a Role a human edited by hand, which by definition differs from what extraction
- * would produce for that path today) are never overwritten. When a curated module's path disappears
- * from the discovered set, `git diff --name-status -M -C HEAD` is consulted before treating the row
- * as deleted: a single rename target re-keys the curated Role; more than one target from the same old
- * path (a rename plus one or more copies) is treated as a split, and the Role is duplicated to every
- * child with a `(split from <old path>)` suffix; more than one old path landing on the same new path
- * is treated as a merge, keeping the longest curated Role and discarding the rest. Every drop,
- * re-key, duplication, and merge is reported on stderr -- never silent.
- *
- * Zero dependencies, Node 18 compatible: only `node:fs`, `node:path`, `node:child_process`,
- * `node:url`, `node:os`. No build step, matching `esbuild.config.mjs`'s own plain-ESM precedent.
- */
+/** Architecture-documentation sync engine and gate. Discovers every source component via `git ls-files` against the patterns in `.arch-doc-sync.json`, classifies each into a declared layer by exact path membership, extracts a one-sentence Role and up to five exported symbol names, and splices the resulting table between the `ARCH_COMPONENTS_START`/`END` markers in the configured doc (`ARCHITECTURE.md`). `--check` (default) is read-only and never mutates the doc; it recomputes the table from the current tree and byte-compares it against what is currently spliced in, so any difference at all -- a new module, a removed one, a changed export list, a module that matches no declared layer -- is drift. `--write` performs the splice. `--self-test` exercises the contract hermetically in a temp directory. Curated Roles (a Role a human edited by hand, which by definition differs from what extraction would produce for that path today) are never overwritten. When a curated module's path disappears from the discovered set, `git diff --name-status -M -C HEAD` is consulted before treating the row as deleted: a single rename target re-keys the curated Role; more than one target from the same old path (a rename plus one or more copies) is treated as a split, and the Role is duplicated to every child with a `(split from <old path>)` suffix; more than one old path landing on the same new path is treated as a merge, keeping the longest curated Role and discarding the rest. Every drop, re-key, duplication, and merge is reported on stderr -- never silent. Zero dependencies, Node 18 compatible: only `node:fs`, `node:path`, `node:child_process`, `node:url`, `node:os`. No build step, matching `esbuild.config.mjs`'s own plain-ESM precedent. */
 
 import { spawnSync } from "node:child_process";
 import {
@@ -46,9 +21,7 @@ const UNCATEGORIZED = "Uncategorized";
 
 class SyncError extends Error {}
 
-// ---------------------------------------------------------------------------
-// Config, discovery
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Config, discovery ---------------------------------------------------------------------------
 
 function loadConfig(repoRoot) {
   const configPath = join(repoRoot, CONFIG_FILE);
@@ -160,9 +133,7 @@ function layerFor(layers, modulePath) {
   return UNCATEGORIZED;
 }
 
-// ---------------------------------------------------------------------------
-// Role / exports extraction
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Role / exports extraction ---------------------------------------------------------------------------
 
 function escapePipe(text) {
   return text.replace(/\|/gu, "\\|");
@@ -227,9 +198,7 @@ function extractExports(fileText) {
   return names;
 }
 
-// ---------------------------------------------------------------------------
-// Table rendering / parsing
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Table rendering / parsing ---------------------------------------------------------------------------
 
 function bytewiseCompare(a, b) {
   return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
@@ -319,9 +288,7 @@ function spliceMarkers(docText, { startIdx, endIdx }, tableText, eol) {
   return `${before}${eol}${eol}${tableText}${eol}${eol}${after}`;
 }
 
-// ---------------------------------------------------------------------------
-// Curated-role preservation
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Curated-role preservation ---------------------------------------------------------------------------
 
 function pushOrigin(map, target, oldPath, role) {
   const arr = map.get(target) ?? [];
@@ -329,12 +296,7 @@ function pushOrigin(map, target, oldPath, role) {
   map.set(target, arr);
 }
 
-/**
- * Resolves curated rows whose path is no longer discovered: rekeys single renames, duplicates
- * (with a `(split from <old path>)` suffix) when one old path has multiple rename/copy targets, and
- * merges (keeping the longest Role) when multiple old paths land on the same target. Returns the
- * resolved `path -> role` map plus a flat, never-silent event log.
- */
+/** Resolves curated rows whose path is no longer discovered: rekeys single renames, duplicates (with a `(split from <old path>)` suffix) when one old path has multiple rename/copy targets, and merges (keeping the longest Role) when multiple old paths land on the same target. Returns the resolved `path -> role` map plus a flat, never-silent event log. */
 function resolveCuratedMigrations(curatedGone, renameMap, discoveredSet) {
   const events = [];
   const targetOrigins = new Map();
@@ -372,9 +334,7 @@ function resolveCuratedMigrations(curatedGone, renameMap, discoveredSet) {
   return { curatedRoles, events };
 }
 
-// ---------------------------------------------------------------------------
-// Core sync
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Core sync ---------------------------------------------------------------------------
 
 /** Runs the full compute-and-optionally-write pass. Never throws for expected failure modes -- returns `exitCode` 2 for config/usage/marker errors instead. */
 function runSync(repoRoot, { mode, format, strictCurated }) {
@@ -480,9 +440,7 @@ function runSync(repoRoot, { mode, format, strictCurated }) {
   return { exitCode, stderr, changed, jsonPayload };
 }
 
-// ---------------------------------------------------------------------------
-// Self-test
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Self-test ---------------------------------------------------------------------------
 
 function makeTempRepo() {
   const dir = mkdtempSync(join(tmpdir(), "arch-sync-selftest-"));
@@ -513,9 +471,7 @@ function readDoc(dir, docName = "ARCHITECTURE.md") {
 }
 
 function selfTest() {
-  // Under a git hook (the pre-commit guards tier) git exports GIT_DIR / GIT_INDEX_FILE, which every
-  // spawned `git` below would honour in preference to its temp-repo cwd -- committing "init" onto
-  // the real branch. Scrub them so the temp repos stay hermetic.
+  // Under a git hook (the pre-commit guards tier) git exports GIT_DIR / GIT_INDEX_FILE, which every spawned `git` below would honour in preference to its temp-repo cwd -- committing "init" onto the real branch. Scrub them so the temp repos stay hermetic.
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("GIT_")) {
       delete process.env[name];
@@ -686,8 +642,7 @@ function selfTest() {
       rmSync(join(dir, "src", "old.ts"));
       writeSrc(dir, "new.ts", oldContent);
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/new.ts"]]], exclude: [] });
-      // git ls-files reports the index, not the raw working tree, so the deletion/addition must be
-      // staged (not committed) before discovery sees it -- otherwise old.ts still looks tracked.
+      // git ls-files reports the index, not the raw working tree, so the deletion/addition must be staged (not committed) before discovery sees it -- otherwise old.ts still looks tracked.
       spawnSync("git", ["add", "-A"], { cwd: dir });
       const write = runSync(dir, { mode: "write", format: "text", strictCurated: false });
       const after = readDoc(dir);
@@ -832,9 +787,7 @@ function selfTest() {
   return { pass: failed.length === 0, summary: lines.join("\n") };
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- CLI ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
   const opts = { mode: "check", format: "text", strictCurated: false, selfTest: false };

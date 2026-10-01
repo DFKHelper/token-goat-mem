@@ -1,35 +1,4 @@
-/**
- * Cross-fact inference ("dreaming"): propose facts that follow from several stored facts but that
- * nobody stated outright.
- *
- * Everything else in this codebase is deterministic. This is not, and that is the point: merging
- * near-duplicates, resolving contradictions, and decaying old preferences are all mechanical, and
- * none of them can notice that three separate facts about deploy steps add up to "deploys are
- * manual". That inference is the one capability a rule cannot reach.
- *
- * **This module writes nothing.** It is an evaluation surface, deliberately: the open question is
- * whether a model's inferences over a real store are good enough to be worth a review queue, and
- * that is answerable by reading them. Building the storage, review, and hook machinery first would
- * be building the expensive half against an assumption. If the output proves worth keeping, the
- * shape it must take is already fixed by the rest of the system -- `captureSuggested`, so every
- * candidate lands `pending` with `source_type: "derived"` and reaches recall only through an
- * explicit `mem review --promote`. A fact nobody said must never be surfaced as if somebody had.
- *
- * **It is off unless configured, and once configured it sends stored fact text off the machine.**
- * `TOKEN_GOAT_MEM_DREAM_URL` + `TOKEN_GOAT_MEM_DREAM_MODEL` name an OpenAI-compatible chat-completions
- * endpoint, matching the opt-in shape src/embeddings.ts already established -- that other opt-in path
- * sends fact/query text of its own, to a separate endpoint, when configured. Unset, `mem dream` says
- * so and does nothing. Point it at a local endpoint if the store holds anything you would not paste
- * into a hosted API.
- *
- * **Store content is data, not instruction.** Facts reach the store from files and transcripts via
- * `mem import`/`mem scan-session`, so a fact's text can contain anything -- including text aimed at
- * whatever model reads it next. Two things bound that: nothing in the reply is used except a
- * `candidates` array, and every element of it is shape-checked and range-checked here before it
- * becomes a candidate -- any other key, and any prose around the JSON, is discarded, so the model
- * cannot make this module do anything other than emit candidates; and no candidate is written anywhere, so the
- * worst a hostile fact achieves is a bad suggestion in a list a human is already reading critically.
- */
+/** Cross-fact inference ("dreaming"): propose facts that follow from several stored facts but that nobody stated outright. Everything else in this codebase is deterministic. This is not, and that is the point: merging near-duplicates, resolving contradictions, and decaying old preferences are all mechanical, and none of them can notice that three separate facts about deploy steps add up to "deploys are manual". That inference is the one capability a rule cannot reach. **This module writes nothing.** It is an evaluation surface, deliberately: the open question is whether a model's inferences over a real store are good enough to be worth a review queue, and that is answerable by reading them. Building the storage, review, and hook machinery first would be building the expensive half against an assumption. If the output proves worth keeping, the shape it must take is already fixed by the rest of the system -- `captureSuggested`, so every candidate lands `pending` with `source_type: "derived"` and reaches recall only through an explicit `mem review --promote`. A fact nobody said must never be surfaced as if somebody had. **It is off unless configured, and once configured it sends stored fact text off the machine.** `TOKEN_GOAT_MEM_DREAM_URL` + `TOKEN_GOAT_MEM_DREAM_MODEL` name an OpenAI-compatible chat-completions endpoint, matching the opt-in shape src/embeddings.ts already established -- that other opt-in path sends fact/query text of its own, to a separate endpoint, when configured. Unset, `mem dream` says so and does nothing. Point it at a local endpoint if the store holds anything you would not paste into a hosted API. **Store content is data, not instruction.** Facts reach the store from files and transcripts via `mem import`/`mem scan-session`, so a fact's text can contain anything -- including text aimed at whatever model reads it next. Two things bound that: nothing in the reply is used except a `candidates` array, and every element of it is shape-checked and range-checked here before it becomes a candidate -- any other key, and any prose around the JSON, is discarded, so the model cannot make this module do anything other than emit candidates; and no candidate is written anywhere, so the worst a hostile fact achieves is a bad suggestion in a list a human is already reading critically. */
 
 import type { Fact } from "./types.js";
 import { normalizeFactText } from "./storage.js";
@@ -46,11 +15,7 @@ export const DREAM_API_KEY_ENV = "TOKEN_GOAT_MEM_DREAM_API_KEY";
 /** Default wall clock for the request. Generous next to embeddings' budget: this is one interactive command, not a call on the recall path. */
 const DEFAULT_DREAM_TIMEOUT_MS = 60_000;
 
-/**
- * Cap on facts sent in one request. A store larger than this is truncated to its most recent facts
- * and the caller is told, rather than silently reasoning over part of the store or blowing a context
- * window the endpoint never advertised.
- */
+/** Cap on facts sent in one request. A store larger than this is truncated to its most recent facts and the caller is told, rather than silently reasoning over part of the store or blowing a context window the endpoint never advertised. */
 export const MAX_DREAM_FACTS = 200;
 
 /** Cap on a candidate's text, matching the capture path's own limit so nothing is proposed that could not be stored. */
@@ -125,14 +90,7 @@ export function dreamEndpointLabel(url: string): string {
   }
 }
 
-/**
- * The instruction sent with every request.
- *
- * Written to make the model's job narrow and its output checkable rather than to make it clever: an
- * inference must cite the facts it came from, so a reader can judge the step instead of the claim.
- * The refusal clause matters more than the rest -- a model asked for insights will always produce
- * some, and a store with nothing to infer must be allowed to return an empty list.
- */
+/** The instruction sent with every request. Written to make the model's job narrow and its output checkable rather than to make it clever: an inference must cite the facts it came from, so a reader can judge the step instead of the claim. The refusal clause matters more than the rest -- a model asked for insights will always produce some, and a store with nothing to infer must be allowed to return an empty list. */
 const SYSTEM_PROMPT = [
   "You infer facts about a software project from facts already recorded about it.",
   "You are given numbered facts. Propose only statements that follow from TWO OR MORE of them together and that none of them states on its own.",
@@ -146,13 +104,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * Pulls the assistant's message text out of an OpenAI-compatible chat-completions body.
- *
- * Shape-checked at every level rather than indexed through: a body that is not this shape is an
- * endpoint problem to report, and reading `undefined` off it would surface much later as an
- * unexplained empty result.
- */
+/** Pulls the assistant's message text out of an OpenAI-compatible chat-completions body. Shape-checked at every level rather than indexed through: a body that is not this shape is an endpoint problem to report, and reading `undefined` off it would surface much later as an unexplained empty result. */
 function messageContentFrom(body: unknown, label: string): string {
   if (!isRecord(body) || !Array.isArray(body["choices"])) {
     throw new DreamRequestError(`dream endpoint ${label} returned a body with no choices array`);
@@ -168,13 +120,7 @@ function messageContentFrom(body: unknown, label: string): string {
   return content;
 }
 
-/**
- * Finds the JSON object in a reply that may be wrapped in a code fence or prose.
- *
- * The prompt asks for bare JSON and most models comply, but a stray fence is the single most common
- * deviation and failing the whole run over it would be brittle for no gain. Nothing beyond locating
- * the outermost braces is forgiven: the content between them still has to parse.
- */
+/** Finds the JSON object in a reply that may be wrapped in a code fence or prose. The prompt asks for bare JSON and most models comply, but a stray fence is the single most common deviation and failing the whole run over it would be brittle for no gain. Nothing beyond locating the outermost braces is forgiven: the content between them still has to parse. */
 function parseJsonReply(content: string, label: string): unknown {
   const start = content.indexOf("{");
   const end = content.lastIndexOf("}");
@@ -188,13 +134,7 @@ function parseJsonReply(content: string, label: string): unknown {
   }
 }
 
-/**
- * Turns one raw candidate into a checked one, or `null` to drop it.
- *
- * Dropping rather than throwing on a bad element: one malformed candidate in ten is a model being
- * imprecise, not an endpoint being broken, and discarding the run's other nine would make the
- * command's usefulness depend on the model's worst output rather than its best.
- */
+/** Turns one raw candidate into a checked one, or `null` to drop it. Dropping rather than throwing on a bad element: one malformed candidate in ten is a model being imprecise, not an endpoint being broken, and discarding the run's other nine would make the command's usefulness depend on the model's worst output rather than its best. */
 function checkCandidate(raw: unknown, sent: readonly Fact[], existing: ReadonlySet<string>): DreamCandidate | null {
   if (!isRecord(raw)) {
     return null;
@@ -203,8 +143,7 @@ function checkCandidate(raw: unknown, sent: readonly Fact[], existing: ReadonlyS
   if (text.length === 0 || text.length > MAX_CANDIDATE_TEXT) {
     return null;
   }
-  // A "new" fact that repeats one already in the store is the failure mode the prompt warns against
-  // twice; catching it here means the guarantee does not depend on the model having listened.
+  // A "new" fact that repeats one already in the store is the failure mode the prompt warns against twice; catching it here means the guarantee does not depend on the model having listened.
   if (existing.has(normalizeFactText(text))) {
     return null;
   }
@@ -225,8 +164,7 @@ function checkCandidate(raw: unknown, sent: readonly Fact[], existing: ReadonlyS
       supports.push(fact.id);
     }
   }
-  // A citation the caller cannot follow is worse than no citation: it looks like grounding and is
-  // not. Both the count floor and the range check exist so every id printed is one `mem show` finds.
+  // A citation the caller cannot follow is worse than no citation: it looks like grounding and is not. Both the count floor and the range check exist so every id printed is one `mem show` finds.
   return supports.length >= MIN_SUPPORTING_FACTS ? { text, kind, supports } : null;
 }
 
@@ -246,12 +184,7 @@ export interface DreamOptions {
   readonly fetchImpl?: typeof fetch;
 }
 
-/**
- * Asks the configured model what follows from `facts`, and returns the checked candidates.
- *
- * Sends the most recent {@link MAX_DREAM_FACTS} facts, newest first, so a truncated run keeps the
- * part of the store most likely to still be true.
- */
+/** Asks the configured model what follows from `facts`, and returns the checked candidates. Sends the most recent {@link MAX_DREAM_FACTS} facts, newest first, so a truncated run keeps the part of the store most likely to still be true. */
 export async function dream(
   facts: readonly Fact[],
   config: DreamConfig,
@@ -261,8 +194,7 @@ export async function dream(
   const ordered = [...facts].sort((a, b) => b.captured_at.localeCompare(a.captured_at));
   const sent = ordered.slice(0, MAX_DREAM_FACTS);
   if (sent.length < MIN_SUPPORTING_FACTS) {
-    // Nothing to cross-reference. Reported as an empty result rather than a request the endpoint
-    // would be paid for and could only answer with an empty list.
+    // Nothing to cross-reference. Reported as an empty result rather than a request the endpoint would be paid for and could only answer with an empty list.
     return { candidates: [], sent, available: facts.length, endpointLabel: label, model: config.model };
   }
 
@@ -280,17 +212,14 @@ export async function dream(
       },
       body: JSON.stringify({
         model: config.model,
-        // Zero temperature will not make this deterministic -- no sampling setting does across
-        // providers -- but it removes the one source of variation under our control, so two runs
-        // over an unchanged store differ because the model does, not because we asked it to.
+        // Zero temperature will not make this deterministic -- no sampling setting does across providers -- but it removes the one source of variation under our control, so two runs over an unchanged store differ because the model does, not because we asked it to.
         temperature: 0,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: `Facts:\n${numbered}` },
         ],
       }),
-      // Same reasoning as embeddings.ts: a promise the caller stopped awaiting still holds a socket
-      // open, and an open socket keeps Node alive past the point the command should have exited.
+      // Same reasoning as embeddings.ts: a promise the caller stopped awaiting still holds a socket open, and an open socket keeps Node alive past the point the command should have exited.
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (error) {
@@ -298,8 +227,7 @@ export async function dream(
     throw new DreamRequestError(`dream endpoint ${label} ${reason}`);
   }
   if (!response.ok) {
-    // Status only: a failing endpoint's body routinely echoes request headers, which is the one
-    // place an API key would leak into a user-visible error.
+    // Status only: a failing endpoint's body routinely echoes request headers, which is the one place an API key would leak into a user-visible error.
     throw new DreamRequestError(`dream endpoint ${label} returned HTTP ${response.status}`);
   }
   let body: unknown;

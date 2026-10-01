@@ -1,9 +1,4 @@
-/**
- * `mem recall --hint-format --hook-stdin [--delta]` driven exactly the way a Claude Code hook drives
- * it: the built `dist/token-goat-mem.mjs` as a real subprocess, with the hook's JSON envelope piped
- * to stdin. The in-process `run()` tests cannot cover this path -- `process.stdin` there is
- * vitest's, not a pipe -- so this file is the only place the stdin contract is exercised as shipped.
- */
+/** `mem recall --hint-format --hook-stdin [--delta]` driven exactly the way a Claude Code hook drives it: the built `dist/token-goat-mem.mjs` as a real subprocess, with the hook's JSON envelope piped to stdin. The in-process `run()` tests cannot cover this path -- `process.stdin` there is vitest's, not a pipe -- so this file is the only place the stdin contract is exercised as shipped. */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,8 +13,7 @@ let root: string;
 
 /** Runs the bundle against an isolated mem home with `stdin` piped in, capturing both streams (on exit 0 too -- a fail-open note on stderr is part of what this file asserts) and the exit code. */
 function runBundle(args: readonly string[], stdin = ""): BundleResult {
-  // No truncation budget: under a loaded runner the 150ms default blows and the seam returns an
-  // empty hint set by design, which would turn every selection assertion here into a timing one.
+  // No truncation budget: under a loaded runner the 150ms default blows and the seam returns an empty hint set by design, which would turn every selection assertion here into a timing one.
   return runBundleSync(args, { home: memHome, stdin, env: { TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS: "3600000" } });
 }
 
@@ -112,8 +106,7 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     expect(headerOf(nextDelta.stdout)).toBe("TGMEM/2  delta=1");
     expect(emittedIds(nextDelta.stdout)).toEqual([third]);
 
-    // A prompt that matches an already-sent fact re-sends it: "sent" is not "still in context" once
-    // the host has compacted, so a genuine hit must arrive every time it is asked for.
+    // A prompt that matches an already-sent fact re-sends it: "sent" is not "still in context" once the host has compacted, so a genuine hit must arrive every time it is asked for.
     const exact = runBundle(
       ["recall", "--hint-format", "--hook-stdin", "--delta", "--root", root],
       envelope({ session_id: "sess-delta", hook_event_name: "UserPromptSubmit", prompt: "bananas please" })
@@ -179,10 +172,7 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
   });
 
   it("an envelope carrying a session id prints a footer invocation naming exactly that session, and running it marks the row useful", () => {
-    // Regression: the recall footer used to say nothing about `mem used` at all, and the agent-facing
-    // guidance told the agent to run it "using the session id you recalled under" -- an id the wire
-    // format never carried. This is the fix: the session that logged this recall is now on the wire,
-    // in a copy-pasteable command, and running it end to end actually marks the row.
+    // Regression: the recall footer used to say nothing about `mem used` at all, and the agent-facing guidance told the agent to run it "using the session id you recalled under" -- an id the wire format never carried. This is the fix: the session that logged this recall is now on the wire, in a copy-pasteable command, and running it end to end actually marks the row.
     const id = remember("a fact worth marking useful");
     const result = runBundle(
       ["recall", "--hint-format", "--hook-stdin", "--root", root],
@@ -199,18 +189,14 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     expect(idList?.split(" ")).toEqual([id]);
     expect(sessionId).toBe("sess-mark");
 
-    // Drive the footer's own printed command back through `mem used`, exactly as an agent copying
-    // it would -- proving the handle works, not just that a string was formatted.
+    // Drive the footer's own printed command back through `mem used`, exactly as an agent copying it would -- proving the handle works, not just that a string was formatted.
     const used = runBundle(["used", ...(idList?.split(" ") ?? []), "--session-id", sessionId ?? ""]);
     expect(used.exitCode, used.stderr).toBe(0);
     expect(used.stdout).toBe(`marked 1 recall row useful in session ${sessionId}\n`);
   });
 
   it("with no session id known, the footer carries no usefulness invocation", () => {
-    // A plain, session-less recall never writes a `recall_log` row (see `markSurfaced` vs
-    // `recordSurfaced` in src/integration-seam.ts), so there is nothing a `mem used` call could mark
-    // -- printing one anyway would earn the exact "never surfaced in session ..." reply this fix
-    // exists to stop producing.
+    // A plain, session-less recall never writes a `recall_log` row (see `markSurfaced` vs `recordSurfaced` in src/integration-seam.ts), so there is nothing a `mem used` call could mark -- printing one anyway would earn the exact "never surfaced in session ..." reply this fix exists to stop producing.
     remember("a fact recalled with no session to log against");
     const result = runBundle(["recall", "--hint-format", "--root", root]);
     expect(result.exitCode, result.stderr).toBe(0);
@@ -260,8 +246,7 @@ describe("mem scan-session --hook-stdin (built bundle, Stop envelope on stdin)",
   });
 
   it("exits 1 with a usage error when the envelope carries no transcript_path", () => {
-    // The hook shape always supplies one; a bare invocation must say so rather than scan nothing
-    // and report success, which would look identical to a session with no durable statements.
+    // The hook shape always supplies one; a bare invocation must say so rather than scan nothing and report success, which would look identical to a session with no durable statements.
     const result = runBundle(["scan-session", "--hook-stdin", "--root", root], JSON.stringify({ session_id: "s1", hook_event_name: "Stop" }));
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("--transcript");

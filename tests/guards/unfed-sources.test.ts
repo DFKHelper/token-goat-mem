@@ -1,22 +1,4 @@
-/**
- * Source-level guard that the `sources` table is fed from exactly the two capture paths designed to
- * feed it -- `mem scan-session` and `mem import --from-md` -- and from nowhere else.
- *
- * The table used to be wired but genuinely empty: storage API, `mem show --json` surfacing, and gc
- * pruning all existed and were tested, but no capture path ever called `insertSource`. That state had
- * its own guard (this file, previously), which asserted the emptiness and the four disclosures of it.
- * Once fed, the risk inverts: a `sources` row now carries real excerpt text, so the boundary that
- * matters is *which* paths write one, not whether any do. `mem remember`/`mem suggest <text>` must
- * never write a source row (the caller's text already is the fact there -- a row would just echo it
- * back), and every excerpt that is written must have gone through truncation and secret screening
- * first, per storage.ts's Source doc ("storage.ts does not screen or truncate content itself").
- *
- * `insertSource` itself is called from exactly one place (`capture.ts`'s `writeFact`, gated on the
- * caller having set `sourceExcerpt`), so this guard checks the layer above it: which `captureSuggested`
- * call sites set `sourceExcerpt` at all, keyed on file rather than the shared `sourceExcerpt` field
- * name so a future third derived-capture path is caught by omission from ALLOWED_EXCERPT_FILES, not
- * waved through because it also happens to say `sourceExcerpt`.
- */
+/** Source-level guard that the `sources` table is fed from exactly the two capture paths designed to feed it -- `mem scan-session` and `mem import --from-md` -- and from nowhere else. The table used to be wired but genuinely empty: storage API, `mem show --json` surfacing, and gc pruning all existed and were tested, but no capture path ever called `insertSource`. That state had its own guard (this file, previously), which asserted the emptiness and the four disclosures of it. Once fed, the risk inverts: a `sources` row now carries real excerpt text, so the boundary that matters is *which* paths write one, not whether any do. `mem remember`/`mem suggest <text>` must never write a source row (the caller's text already is the fact there -- a row would just echo it back), and every excerpt that is written must have gone through truncation and secret screening first, per storage.ts's Source doc ("storage.ts does not screen or truncate content itself"). `insertSource` itself is called from exactly one place (`capture.ts`'s `writeFact`, gated on the caller having set `sourceExcerpt`), so this guard checks the layer above it: which `captureSuggested` call sites set `sourceExcerpt` at all, keyed on file rather than the shared `sourceExcerpt` field name so a future third derived-capture path is caught by omission from ALLOWED_EXCERPT_FILES, not waved through because it also happens to say `sourceExcerpt`. */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,14 +19,7 @@ const DISCLOSURES: ReadonlyArray<readonly [string, RegExp]> = [
 /** The only files allowed to set `sourceExcerpt` on a `CaptureSuggestedInput` -- scan-session's and --from-md's CLI/library wiring. `capture.ts` itself is exempt: it only reads the field back off `input`, never sets it. */
 const ALLOWED_EXCERPT_FILES = new Set(["src/cli.ts", "src/import.ts"]);
 
-/**
- * `sourceExcerpt` assignment sites in `src/`, as `file:line` -- places that *set* a
- * `CaptureSuggestedInput.sourceExcerpt` field, as `{ sourceExcerpt }` shorthand or `const
- * sourceExcerpt = ...`. Excludes the interface field declaration (`readonly sourceExcerpt?:`),
- * capture.ts's own read of `input.sourceExcerpt` when handing it to `writeFact`, and
- * `writeFact`/`insertSource`'s unrelated `excerpt: sourceExcerpt` parameter (a different field,
- * `sources.excerpt`, merely populated *from* the value read out of `input.sourceExcerpt`).
- */
+/** `sourceExcerpt` assignment sites in `src/`, as `file:line` -- places that *set* a `CaptureSuggestedInput.sourceExcerpt` field, as `{ sourceExcerpt }` shorthand or `const sourceExcerpt = ...`. Excludes the interface field declaration (`readonly sourceExcerpt?:`), capture.ts's own read of `input.sourceExcerpt` when handing it to `writeFact`, and `writeFact`/`insertSource`'s unrelated `excerpt: sourceExcerpt` parameter (a different field, `sources.excerpt`, merely populated *from* the value read out of `input.sourceExcerpt`). */
 function sourceExcerptAssignmentSites(): string[] {
   const hits: string[] = [];
   for (const rel of ["src/cli.ts", "src/capture.ts", "src/import.ts", "src/exportImport.ts", "src/sessionScan.ts"]) {
@@ -92,9 +67,7 @@ describe("the sources table is fed from exactly the two derived-capture paths de
     const captureText = readFileSync(join(REPO_ROOT, "src/capture.ts"), "utf8");
     expect(captureText).toMatch(/MAX_SOURCE_EXCERPT_LENGTH/u);
     expect(captureText).toMatch(/function buildScreenedExcerpt/u);
-    // buildScreenedExcerpt must route through screenForSecrets and truncate against the cap --
-    // asserted structurally here; the behavioral proof (screened-positive => null, over-cap => cut)
-    // lives in tests/unit/capture.test.ts.
+    // buildScreenedExcerpt must route through screenForSecrets and truncate against the cap -- asserted structurally here; the behavioral proof (screened-positive => null, over-cap => cut) lives in tests/unit/capture.test.ts.
     const fnStart = captureText.indexOf("export function buildScreenedExcerpt");
     const fnEnd = captureText.indexOf("\n}", fnStart);
     const fnBody = captureText.slice(fnStart, fnEnd);

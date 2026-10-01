@@ -1,8 +1,4 @@
-/**
- * Retrieval-quality metrics for the eval harness (item 3). Binary relevance throughout -- a fact
- * id is either in a scenario's labelled `relevantIds` set or it isn't; there is no partial-credit
- * grading in this fixture corpus.
- */
+/** Retrieval-quality metrics for the eval harness (item 3). Binary relevance throughout -- a fact id is either in a scenario's labelled `relevantIds` set or it isn't; there is no partial-credit grading in this fixture corpus. */
 
 import type { EvalFact } from "./fixtures.js";
 
@@ -53,12 +49,7 @@ export function duplicateSubjectPairs(rankedFacts: readonly EvalFact[], k: numbe
   return pairs;
 }
 
-/**
- * Approximate token count for the top `k` results' fact text, using the common ~4-characters-per-
- * token heuristic for English prose. This is an approximation, not a real tokenizer count -- good
- * enough to compare *relative* token cost across configurations (does stemming/query-honoring
- * change how much gets emitted), not to predict an exact provider token bill.
- */
+/** Approximate token count for the top `k` results' fact text, using the common ~4-characters-per- token heuristic for English prose. This is an approximation, not a real tokenizer count -- good enough to compare *relative* token cost across configurations (does stemming/query-honoring change how much gets emitted), not to predict an exact provider token bill. */
 export function approximateTokens(rankedFacts: readonly EvalFact[], k: number): number {
   const topK = rankedFacts.slice(0, k);
   return topK.reduce((sum, fact) => sum + Math.ceil(fact.text.length / 4), 0);

@@ -1,8 +1,4 @@
-/**
- * A small deterministic PRNG (mulberry32), used so the eval fixture corpus and scenario queries
- * are generated the same way on every run given the same seed -- no hand-written 400-fact JSON
- * blob to keep in sync, and no run-to-run noise in the precision/nDCG numbers this harness reports.
- */
+/** A small deterministic PRNG (mulberry32), used so the eval fixture corpus and scenario queries are generated the same way on every run given the same seed -- no hand-written 400-fact JSON blob to keep in sync, and no run-to-run noise in the precision/nDCG numbers this harness reports. */
 export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return function next(): number {

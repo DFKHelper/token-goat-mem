@@ -1,10 +1,4 @@
-/**
- * Unit-level tests for src/wiring.ts's install/uninstall/describe behavior across all four tools,
- * plus direct coverage of the low-level building blocks (marker insert/replace/strip, JSON/JSONC
- * stamping, atomic-write retry). Every test uses an isolated `mkdtempSync` fixture for both the
- * project root and the "home" directory -- never the real `~/.claude`, real VS Code config, or real
- * project files.
- */
+/** Unit-level tests for src/wiring.ts's install/uninstall/describe behavior across all four tools, plus direct coverage of the low-level building blocks (marker insert/replace/strip, JSON/JSONC stamping, atomic-write retry). Every test uses an isolated `mkdtempSync` fixture for both the project root and the "home" directory -- never the real `~/.claude`, real VS Code config, or real project files. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -70,22 +64,17 @@ describe("claudeCode wiring", () => {
     expect(hook.__token_goat_mem).toBe(true);
     expect(hook.command).toContain("mem recall --hint-format --hook-stdin --root");
 
-    // The per-prompt companion: same guard, reads the same envelope, but opts into a delta so a
-    // prompt never re-sends what SessionStart (or an earlier prompt) already surfaced this session.
+    // The per-prompt companion: same guard, reads the same envelope, but opts into a delta so a prompt never re-sends what SessionStart (or an earlier prompt) already surfaced this session.
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
     const promptHook = settings.hooks.UserPromptSubmit[0].hooks[0];
     expect(promptHook.__token_goat_mem).toBe(true);
     expect(promptHook.command).toContain("mem recall --hint-format --hook-stdin --delta --root");
-    // The capture half of the seam: the only event carrying `transcript_path`, and so the only
-    // place mem can see what was said without the agent volunteering it. `mem reflect` files the
-    // transcript and blocks the stop only on what it just filed, so the agent that said it resolves it.
+    // The capture half of the seam: the only event carrying `transcript_path`, and so the only place mem can see what was said without the agent volunteering it. `mem reflect` files the transcript and blocks the stop only on what it just filed, so the agent that said it resolves it.
     expect(settings.hooks.Stop).toHaveLength(1);
     const stopHook = settings.hooks.Stop[0].hooks[0];
     expect(stopHook.__token_goat_mem).toBe(true);
     expect(stopHook.command).toContain("mem reflect --hook-stdin --root");
-    // PreCompact is the only event guaranteed to fire while the pre-compaction transcript is still
-    // on disk -- a session compacted mid-task and then killed rather than ending a turn never fires
-    // Stop at all. It only files, `--quiet`: blocking belongs to Stop, where the agent can answer.
+    // PreCompact is the only event guaranteed to fire while the pre-compaction transcript is still on disk -- a session compacted mid-task and then killed rather than ending a turn never fires Stop at all. It only files, `--quiet`: blocking belongs to Stop, where the agent can answer.
     expect(settings.hooks.PreCompact).toHaveLength(1);
     const preCompactHook = settings.hooks.PreCompact[0].hooks[0];
     expect(preCompactHook.__token_goat_mem).toBe(true);
@@ -104,9 +93,7 @@ describe("claudeCode wiring", () => {
   });
 
   it("installed CLAUDE.md block tells the agent about --anchor, naming at least one real predicate", () => {
-    // An agent following this file literally is the whole point of installing it. Without a
-    // mention of --anchor, every captured fact stays unanchored forever and freshness can never
-    // move past "unverified" -- see anchors.ts for the predicate set this must draw from.
+    // An agent following this file literally is the whole point of installing it. Without a mention of --anchor, every captured fact stays unanchored forever and freshness can never move past "unverified" -- see anchors.ts for the predicate set this must draw from.
     claudeCode.install({ root, homeDir: home });
     const claudeMd = read(join(root, "CLAUDE.md"));
     expect(claudeMd).toContain("--anchor");
@@ -119,10 +106,7 @@ describe("claudeCode wiring", () => {
     const settings = JSON.parse(read(settingsPath));
     const command: string = settings.hooks.SessionStart[0].hooks[0].command;
 
-    // Pin the exact guarded string: `command -v mem` gates the call so a machine with no mem stays
-    // silent (the `if` body never runs), but "mem is on PATH and exits nonzero" now falls through to
-    // a `printf` that emits a bare TGMEM/2 response with a footer line -- collapsing that case into
-    // the same silence as "mem absent" is exactly what hid a stale-PATH-binary incident for 5 days.
+    // Pin the exact guarded string: `command -v mem` gates the call so a machine with no mem stays silent (the `if` body never runs), but "mem is on PATH and exits nonzero" now falls through to a `printf` that emits a bare TGMEM/2 response with a footer line -- collapsing that case into the same silence as "mem absent" is exactly what hid a stale-PATH-binary incident for 5 days.
     expect(command).toBe(
       'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
     );
@@ -143,14 +127,7 @@ describe("claudeCode wiring", () => {
   });
 
   {
-    // Verifies the guarded command's actual runtime behavior (not just its text) by running it
-    // through bash with a PATH that has no `mem` on it. Resolves bash's own absolute path first
-    // using the inherited PATH, then spawns it with a deliberately mem-less PATH -- restricting
-    // `env` also restricts what the OS uses to resolve the `bash` executable itself, so bash must be
-    // given as an absolute path rather than found again under the restricted PATH. On Windows,
-    // `command -v bash` reports bash's own MSYS-internal path (e.g. `/usr/bin/bash`), which Node's
-    // spawnSync cannot resolve directly, so `cygpath -w` converts it to a real Windows path first
-    // when available; elsewhere `command -v bash` already returns a directly usable absolute path.
+    // Verifies the guarded command's actual runtime behavior (not just its text) by running it through bash with a PATH that has no `mem` on it. Resolves bash's own absolute path first using the inherited PATH, then spawns it with a deliberately mem-less PATH -- restricting `env` also restricts what the OS uses to resolve the `bash` executable itself, so bash must be given as an absolute path rather than found again under the restricted PATH. On Windows, `command -v bash` reports bash's own MSYS-internal path (e.g. `/usr/bin/bash`), which Node's spawnSync cannot resolve directly, so `cygpath -w` converts it to a real Windows path first when available; elsewhere `command -v bash` already returns a directly usable absolute path.
     const bashProbe = spawnSync(
       "bash",
       ["-c", 'command -v cygpath >/dev/null 2>&1 && cygpath -w "$(command -v bash)" || command -v bash'],
@@ -164,9 +141,7 @@ describe("claudeCode wiring", () => {
         claudeCode.install({ root, homeDir: home });
         const settingsPath = join(root, ".claude", "settings.json");
         const settings = JSON.parse(read(settingsPath));
-        // Enumerated from the file rather than named here: hardcoding the event list quietly left
-        // `Stop`/`PreCompact` -- the scan-session commands, whose whole contract is to fail open and
-        // say nothing -- outside a test whose name claims every guarded hook command.
+        // Enumerated from the file rather than named here: hardcoding the event list quietly left `Stop`/`PreCompact` -- the scan-session commands, whose whole contract is to fail open and say nothing -- outside a test whose name claims every guarded hook command.
         const events: string[] = Object.keys(settings.hooks);
         const commands: string[] = events.map((event) => settings.hooks[event][0].hooks[0].command);
         expect(events).toEqual(expect.arrayContaining(["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]));
@@ -187,10 +162,7 @@ describe("claudeCode wiring", () => {
   }
 
   {
-    // Same bash-resolution dance as the block above, duplicated rather than shared because each
-    // `{ }` here is its own self-contained fixture (matching this file's existing style) -- this one
-    // verifies the *other* half of the fix: mem present on PATH but exiting nonzero must produce a
-    // visible fallback, not the same silence as mem being absent.
+    // Same bash-resolution dance as the block above, duplicated rather than shared because each `{ }` here is its own self-contained fixture (matching this file's existing style) -- this one verifies the *other* half of the fix: mem present on PATH but exiting nonzero must produce a visible fallback, not the same silence as mem being absent.
     const bashProbe = spawnSync(
       "bash",
       ["-c", 'command -v cygpath >/dev/null 2>&1 && cygpath -w "$(command -v bash)" || command -v bash'],
@@ -205,8 +177,7 @@ describe("claudeCode wiring", () => {
         const settingsPath = join(root, ".claude", "settings.json");
         const settings = JSON.parse(read(settingsPath));
 
-        // A `mem` on PATH that always exits 7 -- present, but broken, the case the old
-        // `... || true` shape collapsed into silence alongside "mem absent".
+        // A `mem` on PATH that always exits 7 -- present, but broken, the case the old `... || true` shape collapsed into silence alongside "mem absent".
         const fakeMemDir = mkdtempSync(join(tmpdir(), "mem-fails-path-"));
         writeFileSync(join(fakeMemDir, "mem"), "#!/bin/sh\nexit 7\n", "utf8");
         chmodSync(join(fakeMemDir, "mem"), 0o755);
@@ -328,8 +299,7 @@ describe("claudeCode wiring", () => {
 
   it("adopts an orphaned hook from a pre-STAMP_KEY mem install across every event, project- and user-level, with no duplicate", () => {
     const settingsPath = join(root, ".claude", "settings.json");
-    // The exact stale settings.json a pre-STAMP_KEY mem install left behind: a bare SessionStart
-    // recall with no --hook-stdin, and none of the other three events mem installs today.
+    // The exact stale settings.json a pre-STAMP_KEY mem install left behind: a bare SessionStart recall with no --hook-stdin, and none of the other three events mem installs today.
     const original = {
       hooks: {
         SessionStart: [
@@ -363,8 +333,7 @@ describe("claudeCode wiring", () => {
 
   it("does not adopt a mem-shaped command written under the wrong event (conservative shape match)", () => {
     const settingsPath = join(root, ".claude", "settings.json");
-    // Mem's own Stop/PreCompact shape (scan-session), planted under SessionStart -- not the shape
-    // SessionStart itself writes, so it must be left alone rather than adopted for SessionStart.
+    // Mem's own Stop/PreCompact shape (scan-session), planted under SessionStart -- not the shape SessionStart itself writes, so it must be left alone rather than adopted for SessionStart.
     const original = {
       hooks: {
         SessionStart: [
@@ -479,8 +448,7 @@ describe("claudeCode wiring", () => {
 
   it("takes a .bak snapshot on first write and never overwrites it on a later re-init", () => {
     const settingsPath = join(root, ".claude", "settings.json");
-    // Compact and unterminated on purpose: the .bak has to be a byte copy of what was on disk, not a
-    // reserialization of what mem parsed out of it.
+    // Compact and unterminated on purpose: the .bak has to be a byte copy of what was on disk, not a reserialization of what mem parsed out of it.
     const originalText = `{"hooks":{"SessionStart":[]}}`;
     seed(settingsPath, originalText);
 
@@ -497,10 +465,7 @@ describe("claudeCode wiring", () => {
   });
 
   it("CRITICAL: does not delete a pre-existing empty hooks.SessionStart array on uninstall", () => {
-    // Reproduces a real data-loss bug: an empty event array a user wrote themselves is
-    // indistinguishable, once mem's own stamped entries are removed, from one mem created and
-    // drained back to empty. The naive "empty means mem's" prune deleted the user's own key, then
-    // the now-empty `hooks` object too, silently discarding hand-authored config on uninstall.
+    // Reproduces a real data-loss bug: an empty event array a user wrote themselves is indistinguishable, once mem's own stamped entries are removed, from one mem created and drained back to empty. The naive "empty means mem's" prune deleted the user's own key, then the now-empty `hooks` object too, silently discarding hand-authored config on uninstall.
     const settingsPath = join(root, ".claude", "settings.json");
     const original = `{"model":"opus","hooks":{"SessionStart":[]}}`;
     seed(settingsPath, original);
@@ -524,8 +489,7 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
   it("--user installs copilot-vscode's keybindings alone, leaving the project untouched", () => {
     copilotVscode.install({ root, homeDir: home, user: true });
 
-    // The keybindings are the only artifact VS Code reads from the user directory, so they are the
-    // whole of a user-level install -- and a --user run must not write the project files it skips.
+    // The keybindings are the only artifact VS Code reads from the user directory, so they are the whole of a user-level install -- and a --user run must not write the project files it skips.
     expect(existsSync(join(vscodeUserDir(home), "keybindings.json"))).toBe(true);
     expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
     expect(existsSync(join(root, ".vscode", "tasks.json"))).toBe(false);
@@ -541,8 +505,7 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
   });
 
   it("installed shared AGENTS.md block tells the agent about --anchor, naming at least one real predicate", () => {
-    // Same gap as the CLAUDE.md installer: an agent following this block literally never anchors
-    // a fact unless the block itself says how, so freshness can never move past "unverified".
+    // Same gap as the CLAUDE.md installer: an agent following this block literally never anchors a fact unless the block itself says how, so freshness can never move past "unverified".
     codex.install({ root, homeDir: home });
     const agentsMd = read(join(root, "AGENTS.md"));
     expect(agentsMd).toContain("--anchor");
@@ -608,8 +571,7 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
     codex.uninstall({ root, homeDir: home });
     copilotCli.uninstall({ root, homeDir: home });
 
-    // AGENTS.md never existed before codex's install created it, so once the shared block it holds
-    // is the only content left, uninstall removes the file entirely rather than leaving it empty.
+    // AGENTS.md never existed before codex's install created it, so once the shared block it holds is the only content left, uninstall removes the file entirely rather than leaving it empty.
     expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
   });
 
@@ -658,8 +620,7 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
     expect(agentsMd).toContain("## Memory");
 
     codex.uninstall({ root, homeDir: home });
-    // AGENTS.md never existed before the first of these three installs created it, so once the
-    // last tool's uninstall empties the shared block, the file itself is removed.
+    // AGENTS.md never existed before the first of these three installs created it, so once the last tool's uninstall empties the shared block, the file itself is removed.
     expect(existsSync(join(root, "AGENTS.md"))).toBe(false);
   });
 
@@ -740,8 +701,7 @@ describe("opencode wiring (AGENTS.md shared block, project or user level)", () =
   });
 
   it("--user writes opencode's global AGENTS.md under homeDir/.config/opencode on every platform, leaving the project untouched", () => {
-    // opencode resolves its global config through xdg-basedir, which has no Windows branch: it is
-    // ~/.config/opencode there too, never %APPDATA%.
+    // opencode resolves its global config through xdg-basedir, which has no Windows branch: it is ~/.config/opencode there too, never %APPDATA%.
     opencode.install({ root, homeDir: home, user: true });
 
     expect(read(userAgentsMd())).toContain("<!-- token-goat-mem:start tools=opencode -->");
@@ -796,8 +756,7 @@ describe("copilotVisualStudio, copilotJetbrains wiring (shared, reference-counte
     expect(content).toContain("## Memory");
 
     copilotJetbrains.uninstall({ root, homeDir: home });
-    // .github/copilot-instructions.md never existed before the first of these two installs created
-    // it, so once the last tool's uninstall empties the shared block, the file itself is removed.
+    // .github/copilot-instructions.md never existed before the first of these two installs created it, so once the last tool's uninstall empties the shared block, the file itself is removed.
     expect(existsSync(instructionsPath())).toBe(false);
   });
 
@@ -862,11 +821,7 @@ describe("copilotVscode wiring", () => {
   });
 
   it("a conflict on a later managed file (keybindings.json) aborts the whole install before an earlier file (tasks.json) is written", () => {
-    // Managed files install in the order tasks.json, keybindings.json, AGENTS.md. Before this fix,
-    // install wrote each file's transform result to disk immediately as it walked the list, so a
-    // conflict thrown while processing keybindings.json (the second file) still left tasks.json (the
-    // first) created on disk -- a partial install the caller has no way to tell apart from "nothing
-    // happened".
+    // Managed files install in the order tasks.json, keybindings.json, AGENTS.md. Before this fix, install wrote each file's transform result to disk immediately as it walked the list, so a conflict thrown while processing keybindings.json (the second file) still left tasks.json (the first) created on disk -- a partial install the caller has no way to tell apart from "nothing happened".
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     seed(keybindingsPath, JSON.stringify([{ key: "ctrl+k m", command: "workbench.action.terminal.new" }]));
 
@@ -923,9 +878,7 @@ describe("copilotVscode wiring", () => {
   });
 
   it("aborts with WiringConflictError (not a raw jsonc-parser Error) when keybindings.json parses to literal null", () => {
-    // Regression: a `null` root slipped past the array check via a `null ?? []` coercion, then reached
-    // jsonc-parser's modify() on a null root -- which throws a raw "Can not add property to parent of
-    // type null" Error instead of the documented WiringConflictError contract.
+    // Regression: a `null` root slipped past the array check via a `null ?? []` coercion, then reached jsonc-parser's modify() on a null root -- which throws a raw "Can not add property to parent of type null" Error instead of the documented WiringConflictError contract.
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     seed(keybindingsPath, "null");
     expect(() => copilotVscode.install({ root, homeDir: home })).toThrow(WiringConflictError);
@@ -961,9 +914,7 @@ describe("copilotVscode wiring", () => {
     // The `inputs` key was mem's own -- uninstall prunes the array it emptied rather than leave `[]`.
     expect(tasks.inputs).toBeUndefined();
 
-    // keybindings.json never existed before this install created it (unlike tasks.json, which had a
-    // pre-existing "Build" task), so once uninstall empties it back to `[]`, the file is removed
-    // rather than left behind as an empty array.
+    // keybindings.json never existed before this install created it (unlike tasks.json, which had a pre-existing "Build" task), so once uninstall empties it back to `[]`, the file is removed rather than left behind as an empty array.
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     expect(existsSync(keybindingsPath)).toBe(false);
   });
@@ -988,14 +939,7 @@ describe("describe() (dry-run plan)", () => {
   });
 
   it("regression: a stamped hook whose command has drifted from what this build writes reports update, never noop's 'already installed; nothing would change'", () => {
-    // The mirror-image incident this guards against: an older mem installed a stamped hook (no
-    // `--hook-stdin`), and a newer `mem init claude-code --dry-run` must say an update is needed --
-    // reporting `installAction: "noop"` here is exactly what would surface as `mem init`'s
-    // "already installed; nothing would change", which is the sentence that hid the real incident
-    // (a PATH-binary mismatch, not a text mismatch) for five days. This fixture is the *text*-drift
-    // case, kept as a permanent regression guard even though this run of the fix found the
-    // production code already correct here (verified against `installClaudeHookEvent`'s stamped-hook
-    // branch before writing this test).
+    // The mirror-image incident this guards against: an older mem installed a stamped hook (no `--hook-stdin`), and a newer `mem init claude-code --dry-run` must say an update is needed -- reporting `installAction: "noop"` here is exactly what would surface as `mem init`'s "already installed; nothing would change", which is the sentence that hid the real incident (a PATH-binary mismatch, not a text mismatch) for five days. This fixture is the *text*-drift case, kept as a permanent regression guard even though this run of the fix found the production code already correct here (verified against `installClaudeHookEvent`'s stamped-hook branch before writing this test).
     const settingsPath = join(root, ".claude", "settings.json");
     const stale = {
       hooks: {
@@ -1024,13 +968,7 @@ describe("describe() (dry-run plan)", () => {
 // ─────────────────────────────────────────────────────────────────────────── writeManagedFile: atomic write + retry ───────────────────────────────────────────────────────────────────────────
 
 describe("writeManagedFile permissions", () => {
-  /**
-   * A temp-file-plus-rename write replaces the inode rather than updating it, so without explicit
-   * mode preservation the replacement carries whatever the umask gave it. For a managed file the
-   * user deliberately restricted -- a `~/.claude/settings.json` at 0600 holding API configuration --
-   * that turns "add a mem block" into "make this world-readable". POSIX-only: on Windows `chmod`
-   * carries no read-permission meaning and the ACL is what protects the file.
-   */
+  /** A temp-file-plus-rename write replaces the inode rather than updating it, so without explicit mode preservation the replacement carries whatever the umask gave it. For a managed file the user deliberately restricted -- a `~/.claude/settings.json` at 0600 holding API configuration -- that turns "add a mem block" into "make this world-readable". POSIX-only: on Windows `chmod` carries no read-permission meaning and the ACL is what protects the file. */
   it.skipIf(process.platform === "win32")("preserves a restrictive mode across the atomic replace", () => {
     const target = join(root, "settings.json");
     writeFileSync(target, "original\n", "utf8");
@@ -1085,13 +1023,7 @@ describe("writeManagedFile", () => {
 // ─────────────────────────────────────────────────────────────────────────── regression: install/uninstall round-trip leaves zero artifacts on a fresh root ───────────────────────────────────────────────────────────────────────────
 
 describe("regression: a single tool's install then uninstall on a fresh root leaves no file and no .bak behind", () => {
-  /**
-   * Before this fix, `mem uninstall` on a file mem itself created (never touched by the user before
-   * install) left an empty husk on disk (`""`, `"{\n}\n"`, or `"[]\n"` depending on the file) plus a
-   * `.bak` snapshot of that mem-authored content -- artifacts where there were zero before `init` was
-   * ever run. This asserts the full round trip is truly a no-op on disk for every managed file of
-   * every tool, not just that the *content* mem cares about is gone.
-   */
+  /** Before this fix, `mem uninstall` on a file mem itself created (never touched by the user before install) left an empty husk on disk (`""`, `"{\n}\n"`, or `"[]\n"` depending on the file) plus a `.bak` snapshot of that mem-authored content -- artifacts where there were zero before `init` was ever run. This asserts the full round trip is truly a no-op on disk for every managed file of every tool, not just that the *content* mem cares about is gone. */
   function assertNoArtifacts(path: string): void {
     expect(existsSync(path)).toBe(false);
     expect(existsSync(`${path}.token-goat-mem.bak`)).toBe(false);
@@ -1105,10 +1037,7 @@ describe("regression: a single tool's install then uninstall on a fresh root lea
   });
 
   it("claude-code: a pre-existing empty settings.json and empty CLAUDE.md survive install then uninstall unremoved", () => {
-    // Regression: `isEmptyManagedContent` cannot tell "mem created this file" from "the user's file
-    // was already empty (or `{}`) before mem ever touched it" -- both look identical once mem's own
-    // block is stripped back out. Deleting in the second case removes a file that pre-existed mem,
-    // which is a different failure from the no-op-round-trip case the describe block above covers.
+    // Regression: `isEmptyManagedContent` cannot tell "mem created this file" from "the user's file was already empty (or `{}`) before mem ever touched it" -- both look identical once mem's own block is stripped back out. Deleting in the second case removes a file that pre-existed mem, which is a different failure from the no-op-round-trip case the describe block above covers.
     const settingsPath = join(root, ".claude", "settings.json");
     const claudeMdPath = join(root, "CLAUDE.md");
     seed(settingsPath, "{}");
@@ -1139,16 +1068,7 @@ describe("regression: a single tool's install then uninstall on a fresh root lea
 });
 
 describe("regression: a stale .bak snapshot from a bygone install era no longer masks the current uninstall", () => {
-  /**
-   * Before this fix, `preInstallHooks` read a `.bak` snapshot's `hooks` object as proof of real
-   * pre-existing content without checking whether the snapshot itself `looksMemAuthored` -- unlike
-   * `writeManagedFile`'s own delete-if-empty check, which already applies that filter to the same
-   * kind of snapshot. A `.claude/settings.json` seeded by hand with mem's own (out-of-date) stamped
-   * hook and no `.bak` yet triggers exactly this: `mem init` takes a `.bak` of that mem-authored
-   * content on its first write, and `mem uninstall` then reads the snapshot's `SessionStart` array as
-   * a pre-existing event to preserve, leaving `{"hooks":{"SessionStart":[]}}` behind instead of
-   * deleting the file outright.
-   */
+  /** Before this fix, `preInstallHooks` read a `.bak` snapshot's `hooks` object as proof of real pre-existing content without checking whether the snapshot itself `looksMemAuthored` -- unlike `writeManagedFile`'s own delete-if-empty check, which already applies that filter to the same kind of snapshot. A `.claude/settings.json` seeded by hand with mem's own (out-of-date) stamped hook and no `.bak` yet triggers exactly this: `mem init` takes a `.bak` of that mem-authored content on its first write, and `mem uninstall` then reads the snapshot's `SessionStart` array as a pre-existing event to preserve, leaving `{"hooks":{"SessionStart":[]}}` behind instead of deleting the file outright. */
   it("claude-code: a settings.json seeded with mem's own stamped hook (no .bak yet) is fully removed by install then uninstall, not left as a husk", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     seed(
@@ -1171,16 +1091,7 @@ describe("regression: a stale .bak snapshot from a bygone install era no longer 
     expect(existsSync(`${settingsPath}.token-goat-mem.bak`)).toBe(false);
   });
 
-  /**
-   * Before this fix, a `.bak` snapshot was never removed once taken, so a genuine pre-existing
-   * snapshot from one install/uninstall cycle survived to mislead a later cycle after the user
-   * deleted the files by hand in between. Cycle 1's `.bak` (holding the user's real `{"model":"opus"}`
-   * and real `CLAUDE.md` prose) stuck around after cycle 1's uninstall fully restored both files;
-   * once the user deleted them and `mem init` created brand-new mem-only files from scratch, cycle
-   * 2's uninstall found the old `.bak`, read it as "real content exists", and left `{}` and a
-   * 0-byte `CLAUDE.md` behind -- an empty `CLAUDE.md` that Claude Code loads as a real (if inert)
-   * instruction file, not an absent one.
-   */
+  /** Before this fix, a `.bak` snapshot was never removed once taken, so a genuine pre-existing snapshot from one install/uninstall cycle survived to mislead a later cycle after the user deleted the files by hand in between. Cycle 1's `.bak` (holding the user's real `{"model":"opus"}` and real `CLAUDE.md` prose) stuck around after cycle 1's uninstall fully restored both files; once the user deleted them and `mem init` created brand-new mem-only files from scratch, cycle 2's uninstall found the old `.bak`, read it as "real content exists", and left `{}` and a 0-byte `CLAUDE.md` behind -- an empty `CLAUDE.md` that Claude Code loads as a real (if inert) instruction file, not an absent one. */
   it("claude-code: a stale .bak surviving a delete-and-reinstall cycle no longer blocks the second uninstall's cleanup", () => {
     const settingsPath = join(root, ".claude", "settings.json");
     const claudeMdPath = join(root, "CLAUDE.md");
@@ -1236,17 +1147,14 @@ describe("writeManagedFile leaves no temp file behind when the rename fails", ()
     return readdirSync(dirname(filePath)).filter((name) => name.includes(".tmp-"));
   }
 
-  // An open read-write handle on the destination makes Windows fail the rename with EPERM *after*
-  // the temp file has been written -- the one window where the scratch file can outlive the call.
-  // POSIX renames over an open file happily, so there is no equivalent failure to provoke there.
+  // An open read-write handle on the destination makes Windows fail the rename with EPERM *after* the temp file has been written -- the one window where the scratch file can outlive the call. POSIX renames over an open file happily, so there is no equivalent failure to provoke there.
   it.skipIf(process.platform !== "win32")("cleans up its scratch file when the rename fails", () => {
     const target = join(root, "CLAUDE.md");
     writeFileSync(target, "existing content\n");
     const handle = openSync(target, "r+");
 
     try {
-      // Without the cleanup, every failed write left a stray `<file>.token-goat-mem.tmp-<n>` next to
-      // the managed file -- in the user's project, or in their ~/.claude -- that no later run removes.
+      // Without the cleanup, every failed write left a stray `<file>.token-goat-mem.tmp-<n>` next to the managed file -- in the user's project, or in their ~/.claude -- that no later run removes.
       expect(() => writeManagedFile({ path: target, transform: () => "managed content\n" })).toThrow();
       expect(tempSiblings(target)).toEqual([]);
     } finally {
@@ -1270,15 +1178,11 @@ describe("regression: installed keybindings do not shadow VS Code defaults", () 
     const keybindings = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<{ key: string }>;
     const keys = keybindings.map((binding) => binding.key);
 
-    // Both originals were live VS Code defaults: ctrl+shift+m toggles the Problems panel and
-    // ctrl+shift+n opens a new window. A later entry in keybindings.json wins, so installing mem
-    // silently took both away from every user who ran `mem init copilot-vscode` -- a wiring command
-    // is expected to add capability, not remove two bindings the user never mentioned.
+    // Both originals were live VS Code defaults: ctrl+shift+m toggles the Problems panel and ctrl+shift+n opens a new window. A later entry in keybindings.json wins, so installing mem silently took both away from every user who ran `mem init copilot-vscode` -- a wiring command is expected to add capability, not remove two bindings the user never mentioned.
     expect(keys).not.toContain("ctrl+shift+m");
     expect(keys).not.toContain("ctrl+shift+n");
 
-    // `ctrl+k` is VS Code's conventional chord prefix: a second keystroke follows, so the binding
-    // reads as an extension's rather than a hijacked default, and collides with far less.
+    // `ctrl+k` is VS Code's conventional chord prefix: a second keystroke follows, so the binding reads as an extension's rather than a hijacked default, and collides with far less.
     expect(keys.every((key) => key.startsWith("ctrl+k "))).toBe(true);
   });
 });
@@ -1298,16 +1202,10 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
     copilotVscode.install({ root, homeDir: home });
     const installed = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<Record<string, unknown>>;
 
-    // The stamp is installer bookkeeping for reference-counted uninstall, not something a user
-    // hand-copying the doc would type, so it is not part of what the doc is expected to show.
+    // The stamp is installer bookkeeping for reference-counted uninstall, not something a user hand-copying the doc would type, so it is not part of what the doc is expected to show.
     const withoutStamp = installed.map(({ __token_goat_mem: _stamp, ...rest }) => rest);
 
-    // 0.2.4 changed these bindings from `ctrl+shift+m`/`ctrl+shift+n` (which shadowed View: Problems
-    // and New Window) to chords, and updated only src/wiring.ts. The suite stayed green because
-    // every existing test compared code against code, so the doc went on handing users by hand the
-    // exact two shadowing bindings the release had just removed. The doc's own promise -- "what
-    // `mem init copilot-vscode` writes, if you'd rather do it by hand" -- is the invariant, and this
-    // asserts it directly rather than restating either side's literal values.
+    // 0.2.4 changed these bindings from `ctrl+shift+m`/`ctrl+shift+n` (which shadowed View: Problems and New Window) to chords, and updated only src/wiring.ts. The suite stayed green because every existing test compared code against code, so the doc went on handing users by hand the exact two shadowing bindings the release had just removed. The doc's own promise -- "what `mem init copilot-vscode` writes, if you'd rather do it by hand" -- is the invariant, and this asserts it directly rather than restating either side's literal values.
     expect(withoutStamp).toEqual(docJsonBlock("## Keybindings for quick memory"));
   });
 
@@ -1321,9 +1219,7 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
 
     const documented = docJsonBlock("## VS Code tasks") as typeof installed;
 
-    // Same invariant as the keybindings above, on the other half of what the doc tells a user to
-    // write by hand. This block was in sync when the test was added -- it is here to keep it that
-    // way, since the keybindings only drifted because nothing was watching.
+    // Same invariant as the keybindings above, on the other half of what the doc tells a user to write by hand. This block was in sync when the test was added -- it is here to keep it that way, since the keybindings only drifted because nothing was watching.
     expect(installed.version).toEqual(documented.version);
     expect(installed.tasks.map(({ __token_goat_mem: _stamp, ...rest }) => rest)).toEqual(documented.tasks);
     expect(installed.inputs.map(({ __token_goat_mem: _stamp, ...rest }) => rest)).toEqual(documented.inputs);
@@ -1332,13 +1228,7 @@ describe("regression: the copilot-vscode doc matches what mem init actually writ
 
 // ─────────────────────────────────────────────────────────────────────────── malformed per-tool markers ───────────────────────────────────────────────────────────────────────────
 
-/**
- * The shared reference-counted locator already scans every start marker and skips the ones that do
- * not resolve to a complete block, because a hand-edit, a crashed write, or a merge conflict can
- * leave an orphaned start marker behind. The per-tool path took the first `start` and the first
- * `end` with a bare `indexOf` pair, so an orphan ahead of the real block made uninstall delete
- * everything between the two -- the user's content included.
- */
+/** The shared reference-counted locator already scans every start marker and skips the ones that do not resolve to a complete block, because a hand-edit, a crashed write, or a merge conflict can leave an orphaned start marker behind. The per-tool path took the first `start` and the first `end` with a bare `indexOf` pair, so an orphan ahead of the real block made uninstall delete everything between the two -- the user's content included. */
 describe("regression: per-tool marker pairing survives malformed markers", () => {
   const START = "<!-- token-goat-mem:claude-code:start -->";
   const END = "<!-- token-goat-mem:claude-code:end -->";
@@ -1370,9 +1260,7 @@ describe("regression: per-tool marker pairing survives malformed markers", () =>
   });
 
   it("removes every duplicated block, not just the first, when two complete blocks exist back-to-back", () => {
-    // Realistic outcome of a git merge: two branches each ran `mem init` and both committed blocks
-    // ended up in the merged CLAUDE.md. Stopping at the first pair used to leave a whole second
-    // block -- body included -- behind while uninstall still reported success.
+    // Realistic outcome of a git merge: two branches each ran `mem init` and both committed blocks ended up in the merged CLAUDE.md. Stopping at the first pair used to leave a whole second block -- body included -- behind while uninstall still reported success.
     const path = join(root, "CLAUDE.md");
     seed(path, `# My notes\n\n${START}\nmem body\n${END}\n\n${START}\nmem body\n${END}\n`);
 
@@ -1390,10 +1278,7 @@ describe("regression: per-tool marker pairing survives malformed markers", () =>
 
 describe("regression: the shared block body is upgraded, not left stale", () => {
   it("rewrites a stale shared body when a listed tool is reinstalled", () => {
-    // The shared body is identical prose for every tool that writes it, so a tool already named in
-    // tools= still has to refresh it. Returning early on `tools.includes(tool)` meant a body written
-    // by an older version was never upgraded -- the per-tool path replaces its body on reinstall, and
-    // the two diverged silently.
+    // The shared body is identical prose for every tool that writes it, so a tool already named in tools= still has to refresh it. Returning early on `tools.includes(tool)` meant a body written by an older version was never upgraded -- the per-tool path replaces its body on reinstall, and the two diverged silently.
     const path = join(root, "AGENTS.md");
     codex.install({ root, homeDir: home });
 
@@ -1424,12 +1309,7 @@ describe("regression: the shared block body is upgraded, not left stale", () => 
 
 // ─────────────────────────────────────────────────────────────────────────── hand-authored config formatting ───────────────────────────────────────────────────────────────────────────
 
-/**
- * mem edits four files it does not own. Two of them were being rewritten wholesale on every install:
- * settings.json went through `JSON.stringify(parsed, null, 2)`, and the JSONC array writes passed
- * jsonc-parser a `formattingOptions`, which makes `modify` reformat the entire containing array. A
- * user who indents with four spaces, or keeps a keybinding on one line, got it back mem's way.
- */
+/** mem edits four files it does not own. Two of them were being rewritten wholesale on every install: settings.json went through `JSON.stringify(parsed, null, 2)`, and the JSONC array writes passed jsonc-parser a `formattingOptions`, which makes `modify` reformat the entire containing array. A user who indents with four spaces, or keeps a keybinding on one line, got it back mem's way. */
 describe("regression: mem does not restyle config files it did not author", () => {
   const FOUR_SPACE_SETTINGS = [
     "{",
@@ -1475,8 +1355,7 @@ describe("regression: mem does not restyle config files it did not author", () =
   });
 
   it("removes the hooks container it created, so a settings.json with no hooks round-trips exactly", () => {
-    // The common shape: the user has never written a hook. Install has to create both `hooks` and
-    // `hooks.SessionStart`; stopping at the group removal used to leave that husk behind.
+    // The common shape: the user has never written a hook. Install has to create both `hooks` and `hooks.SessionStart`; stopping at the group removal used to leave that husk behind.
     const settingsPath = join(home, ".claude", "settings.json");
     const original = '{\n    "model": "opus",\n    "permissions": {\n        "allow": ["Bash(ls:*)"]\n    }\n}\n';
     seed(settingsPath, original);
@@ -1556,8 +1435,7 @@ describe("regression: mem does not restyle config files it did not author", () =
     expect(after).toContain('        { "label": "Build", "type": "shell", "command": "make" }');
     expect(after).toContain('    "version": "2.0.0",');
 
-    // Byte-identical, including the `"inputs"` key install had to create and the comment above the
-    // user's task -- uninstall prunes the array it emptied rather than leaving `"inputs": []`.
+    // Byte-identical, including the `"inputs"` key install had to create and the comment above the user's task -- uninstall prunes the array it emptied rather than leaving `"inputs": []`.
     copilotVscode.uninstall({ root, homeDir: home });
     expect(read(tasksPath)).toBe(original);
   });
@@ -1565,13 +1443,7 @@ describe("regression: mem does not restyle config files it did not author", () =
 
 // ─────────────────────────────────────────────────────────────────────────── Claude settings.json accepts JSONC ───────────────────────────────────────────────────────────────────────────
 
-/**
- * `installClaudeSettings`/`uninstallClaudeSettings` used to parse with strict `JSON.parse`, so a
- * `~/.claude/settings.json` with a `//`/`/* *\/` comment or a trailing comma was rejected outright
- * with "is not valid JSON; refusing to modify a hand-edited config" -- for exactly the users this
- * project's own `jsonc-parser` dependency exists to support. Routes through the same
- * `parseJsoncOrConflict` the VS Code path already used.
- */
+/** `installClaudeSettings`/`uninstallClaudeSettings` used to parse with strict `JSON.parse`, so a `~/.claude/settings.json` with a `//`/`/* *\/` comment or a trailing comma was rejected outright with "is not valid JSON; refusing to modify a hand-edited config" -- for exactly the users this project's own `jsonc-parser` dependency exists to support. Routes through the same `parseJsoncOrConflict` the VS Code path already used. */
 describe("regression: Claude settings.json accepts JSONC (comments, trailing commas)", () => {
   const JSONC_SETTINGS = [
     "{",
@@ -1605,24 +1477,14 @@ describe("regression: Claude settings.json accepts JSONC (comments, trailing com
     expect(after).toContain("/* block comment */");
 
     claudeCode.uninstall({ root, homeDir: home, user: true });
-    // Byte-for-byte, not a parsed-object comparison: a parsed comparison is exactly the weak
-    // assertion that let mem restyle/reject hand-edited configs unnoticed before.
+    // Byte-for-byte, not a parsed-object comparison: a parsed comparison is exactly the weak assertion that let mem restyle/reject hand-edited configs unnoticed before.
     expect(read(settingsPath)).toBe(JSONC_SETTINGS);
   });
 });
 
 // ──────────────────────────────────────────────────────────────────────────────── config files authored with a leading UTF-8 BOM ─────────────────────────────────────────────────────────────────────────────────
 
-/**
- * A leading U+FEFF is what Windows editors and PowerShell's default `Out-File`/`Set-Content`
- * write for UTF-8 -- Claude Code itself reads such a file fine. `parseJsoncOrConflict` used to
- * hand jsonc-parser the BOM byte along with the rest of the file, which jsonc-parser reports as an
- * invalid token at offset 0, so every managed JSON target aborted with "is not valid JSON/JSONC;
- * refusing to modify a hand-edited config" -- a false accusation against a file that was never
- * hand-broken. The BOM is stripped only for that validation parse; the text mem actually edits and
- * writes back still carries it untouched, so a file that had one keeps it and a file that didn't
- * does not gain one.
- */
+/** A leading U+FEFF is what Windows editors and PowerShell's default `Out-File`/`Set-Content` write for UTF-8 -- Claude Code itself reads such a file fine. `parseJsoncOrConflict` used to hand jsonc-parser the BOM byte along with the rest of the file, which jsonc-parser reports as an invalid token at offset 0, so every managed JSON target aborted with "is not valid JSON/JSONC; refusing to modify a hand-edited config" -- a false accusation against a file that was never hand-broken. The BOM is stripped only for that validation parse; the text mem actually edits and writes back still carries it untouched, so a file that had one keeps it and a file that didn't does not gain one. */
 describe("regression: config files authored with a leading UTF-8 BOM are accepted, not falsely rejected", () => {
   const BOM = "﻿";
 
@@ -1648,8 +1510,7 @@ describe("regression: config files authored with a leading UTF-8 BOM are accepte
     expect(afterInstall).toContain('"model": "opus"');
 
     claudeCode.uninstall({ root, homeDir: home });
-    // Byte-for-byte, including the BOM: a parsed-object comparison would not notice the encoding
-    // marker silently disappearing.
+    // Byte-for-byte, including the BOM: a parsed-object comparison would not notice the encoding marker silently disappearing.
     expect(read(settingsPath)).toBe(original);
   });
 
@@ -1707,16 +1568,7 @@ describe("regression: config files authored with a leading UTF-8 BOM are accepte
 
 // ─────────────────────────────────────────────────────────────────────────── CRLF-authored config files ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Every string this module generates is written with LF, but the files it edits belong to the user
- * and on Windows are routinely CRLF -- that is the editor default, not an exotic case. Appending LF
- * text to a CRLF file leaves it with mixed endings, and worse, the blank-line separator `install`
- * inserts then no longer matches on the way out, so `uninstall` leaves a growing gap behind instead
- * of restoring the file byte-for-byte as it advertises.
- *
- * These tests pin the file's own ending as the one mem writes in. They assert on exact bytes rather
- * than on parsed structure, because the whole failure mode is invisible to a parser.
- */
+/** Every string this module generates is written with LF, but the files it edits belong to the user and on Windows are routinely CRLF -- that is the editor default, not an exotic case. Appending LF text to a CRLF file leaves it with mixed endings, and worse, the blank-line separator `install` inserts then no longer matches on the way out, so `uninstall` leaves a growing gap behind instead of restoring the file byte-for-byte as it advertises. These tests pin the file's own ending as the one mem writes in. They assert on exact bytes rather than on parsed structure, because the whole failure mode is invisible to a parser. */
 describe("regression: config files authored with CRLF stay CRLF", () => {
   const CRLF_MD = "# Project notes\r\n\r\nExisting guidance the user wrote.\r\n";
 
@@ -1745,13 +1597,7 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
   });
 
   it("restores the file when an editor converts an LF-installed block to CRLF before uninstall", () => {
-    // The realistic Windows sequence: mem installs into an LF file, the user opens it in an editor
-    // whose default ending is CRLF, and the save converts the whole file -- mem's own block and its
-    // separator included. Uninstall has to recognise a separator it did not write.
-    //
-    // Seeded LF on purpose. Seeding CRLF makes the conversion below an identity transform, since
-    // install already writes CRLF into a CRLF file, and the test then silently restates the one
-    // above it.
+    // The realistic Windows sequence: mem installs into an LF file, the user opens it in an editor whose default ending is CRLF, and the save converts the whole file -- mem's own block and its separator included. Uninstall has to recognise a separator it did not write. Seeded LF on purpose. Seeding CRLF makes the conversion below an identity transform, since install already writes CRLF into a CRLF file, and the test then silently restates the one above it.
     const lfOriginal = CRLF_MD.replace(/\r\n/gu, "\n");
     const path = join(root, "CLAUDE.md");
     seed(path, lfOriginal);
@@ -1777,8 +1623,7 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
   });
 
   it("keeps the shared marker line CRLF when a second tool joins the tools= list", () => {
-    // Joining rewrites only the marker line, slicing the rest of the file back on. Slicing from the
-    // "\n" rather than the "\r" drops the CR and silently converts that one line to LF.
+    // Joining rewrites only the marker line, slicing the rest of the file back on. Slicing from the "\n" rather than the "\r" drops the CR and silently converts that one line to LF.
     const path = join(root, "AGENTS.md");
     seed(path, CRLF_MD);
     codex.install({ root, homeDir: home });
@@ -1800,11 +1645,7 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
   });
 
   it("restores a file that has no trailing newline", () => {
-    // Nothing forces a config file to end in a newline, and the separator install writes has to be
-    // removable without knowing whether the original ended in one. Padding the file up to a blank
-    // line makes "<text>\n\n" mean either an original "<text>" or an original "<text>\n", and
-    // uninstall then has to guess -- it guessed "<text>\n", so an unterminated file silently gained
-    // a newline on the first install/uninstall cycle.
+    // Nothing forces a config file to end in a newline, and the separator install writes has to be removable without knowing whether the original ended in one. Padding the file up to a blank line makes "<text>\n\n" mean either an original "<text>" or an original "<text>\n", and uninstall then has to guess -- it guessed "<text>\n", so an unterminated file silently gained a newline on the first install/uninstall cycle.
     const original = "# Notes\r\nno trailing newline here";
     const path = join(root, "CLAUDE.md");
     seed(path, original);
@@ -1816,8 +1657,7 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
   });
 
   it("restores a whitespace-only file rather than swallowing its contents", () => {
-    // Blank-looking is not the same as absent: these bytes are the user's, and install treated any
-    // whitespace-only file as an empty one and dropped them.
+    // Blank-looking is not the same as absent: these bytes are the user's, and install treated any whitespace-only file as an empty one and dropped them.
     const original = "\r\n";
     const path = join(root, "CLAUDE.md");
     seed(path, original);
@@ -1838,8 +1678,7 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
   });
 
   it("keeps a CRLF tasks.json CRLF when inserting tasks through the JSONC editor", () => {
-    // The JSONC path is a surgical edit rather than a reserialize, so a hardcoded LF here lands
-    // inside an otherwise-CRLF file and produces mixed endings in the region mem touched.
+    // The JSONC path is a surgical edit rather than a reserialize, so a hardcoded LF here lands inside an otherwise-CRLF file and produces mixed endings in the region mem touched.
     const path = join(root, ".vscode", "tasks.json");
     seed(path, '{\r\n  "version": "2.0.0",\r\n  "tasks": [],\r\n  "inputs": []\r\n}\r\n');
     copilotVscode.install({ root, homeDir: home });
@@ -1852,26 +1691,9 @@ describe("regression: config files authored with CRLF stay CRLF", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── markdown doc drift ───────────────────────────────────────────────────────────────────────────
 
-/**
- * The JSON half of this invariant has been covered since 0.2.5, but the helper doing it only ever
- * matched ` ```json ` fences -- so every markdown block mem writes was unwatched, and three drifts
- * accumulated behind it. Each doc's own promise is that it shows what `mem init <tool>` writes, for
- * a user who would rather do it by hand; a doc that shows something else is worse than no doc,
- * because it is confidently wrong.
- *
- * Compared against what `install()` actually writes to disk, not against the source constant: the
- * constant is one input to the written block, and a defect in the wrapping would slip past a
- * constant-to-doc comparison entirely.
- */
+/** The JSON half of this invariant has been covered since 0.2.5, but the helper doing it only ever matched ` ```json ` fences -- so every markdown block mem writes was unwatched, and three drifts accumulated behind it. Each doc's own promise is that it shows what `mem init <tool>` writes, for a user who would rather do it by hand; a doc that shows something else is worse than no doc, because it is confidently wrong. Compared against what `install()` actually writes to disk, not against the source constant: the constant is one input to the written block, and a defect in the wrapping would slip past a constant-to-doc comparison entirely. */
 describe("regression: integration docs match the markdown mem init actually writes", () => {
-  /**
-   * The single ```markdown fence in an integration doc -- the block that doc tells a user to paste.
-   *
-   * Anchored on the fence rather than on a preceding heading, because every one of these blocks
-   * *starts* with `## Memory`: a heading-anchored search finds the copy inside the fence and then
-   * looks for an opening fence that is already behind it. Asserting the fence is unique also turns
-   * a second markdown block into a visible failure rather than a silently unchecked one.
-   */
+  /** The single ```markdown fence in an integration doc -- the block that doc tells a user to paste. Anchored on the fence rather than on a preceding heading, because every one of these blocks *starts* with `## Memory`: a heading-anchored search finds the copy inside the fence and then looks for an opening fence that is already behind it. Asserting the fence is unique also turns a second markdown block into a visible failure rather than a silently unchecked one. */
   function soleMarkdownFence(docName: string): string {
     const doc = readFileSync(new URL(`../docs/integrations/${docName}.md`, import.meta.url), "utf8");
     const fences = [...doc.matchAll(/^```markdown\r?\n([\s\S]*?)\r?\n^```/gmu)];
@@ -1899,8 +1721,7 @@ describe("regression: integration docs match the markdown mem init actually writ
       "<!-- token-goat-mem:claude-code:end -->",
     );
 
-    // Drifted: the doc appended an `(e.g. --subject package-manager --value pnpm)` example the
-    // installer never writes, while claiming above the fence to show exactly what mem writes.
+    // Drifted: the doc appended an `(e.g. --subject package-manager --value pnpm)` example the installer never writes, while claiming above the fence to show exactly what mem writes.
     expect(soleMarkdownFence("claude-code")).toBe(written);
   });
 
@@ -1910,20 +1731,13 @@ describe("regression: integration docs match the markdown mem init actually writ
       codex.install({ root, homeDir: home });
       const written = writtenBlock(join(root, "AGENTS.md"), "<!-- token-goat-mem:start", "<!-- token-goat-mem:end -->");
 
-      // All three tools share one reference-counted AGENTS.md block, so all three docs must show
-      // the same text -- and all three had drifted from it identically, opening with "This machine
-      // has token-goat-mem installed" where the installer writes "token-goat-mem is installed".
+      // All three tools share one reference-counted AGENTS.md block, so all three docs must show the same text -- and all three had drifted from it identically, opening with "This machine has token-goat-mem installed" where the installer writes "token-goat-mem is installed".
       expect(soleMarkdownFence(docName)).toBe(written);
     },
   );
 
   it("the shared AGENTS.md block's recall command and its mem-used bullet (if any) agree about a session id", () => {
-    // Regression: this block once told the agent to run `mem recall --hint-format --root .` (no
-    // session id) and then, further down, to run `mem used <id>... --session-id <session>` "passing
-    // the same session id you recalled under" -- but codex/copilot-cli/copilot-vscode have no hook
-    // mechanism (unlike Claude Code's --hook-stdin) supplying one, so no such id ever existed and
-    // `mem used` always failed. The block must not promise `mem used` unless its own recall command
-    // actually supplies a session id for it to reuse.
+    // Regression: this block once told the agent to run `mem recall --hint-format --root .` (no session id) and then, further down, to run `mem used <id>... --session-id <session>` "passing the same session id you recalled under" -- but codex/copilot-cli/copilot-vscode have no hook mechanism (unlike Claude Code's --hook-stdin) supplying one, so no such id ever existed and `mem used` always failed. The block must not promise `mem used` unless its own recall command actually supplies a session id for it to reuse.
     codex.install({ root, homeDir: home });
     const written = writtenBlock(join(root, "AGENTS.md"), "<!-- token-goat-mem:start", "<!-- token-goat-mem:end -->");
     const recallLine = written.split("\n").find((line) => line.includes("mem recall --hint-format")) ?? "";
@@ -1938,10 +1752,7 @@ describe("regression: integration docs match the markdown mem init actually writ
     const installed = JSON.parse(read(join(vscodeUserDir(home), "keybindings.json"))) as ReadonlyArray<{ key: string }>;
     const doc = readFileSync(new URL("../docs/integrations/copilot-vscode.md", import.meta.url), "utf8");
 
-    // The prose walkthrough is outside every fenced block, so neither the JSON test above nor the
-    // markdown one sees it. It told the reader to press Ctrl+Shift+M and Ctrl+Shift+N for four
-    // releases after 0.2.4 replaced those bindings -- in the same file whose own keybindings section
-    // explains that they were removed for shadowing View: Problems and New Window.
+    // The prose walkthrough is outside every fenced block, so neither the JSON test above nor the markdown one sees it. It told the reader to press Ctrl+Shift+M and Ctrl+Shift+N for four releases after 0.2.4 replaced those bindings -- in the same file whose own keybindings section explains that they were removed for shadowing View: Problems and New Window.
     const walkthrough = doc.slice(doc.indexOf("## Workflow example"));
     expect(walkthrough).not.toBe("");
 
@@ -1954,8 +1765,7 @@ describe("regression: integration docs match the markdown mem init actually writ
       expect(walkthrough).toContain(display);
     }
 
-    // The superseded pair may still appear in the section that explains why they were dropped, but
-    // never in the walkthrough, which is instruction rather than history.
+    // The superseded pair may still appear in the section that explains why they were dropped, but never in the walkthrough, which is instruction rather than history.
     expect(walkthrough).not.toContain("Ctrl+Shift+M");
     expect(walkthrough).not.toContain("Ctrl+Shift+N");
   });
@@ -2025,8 +1835,7 @@ describe("parseHookCommandSpec", () => {
   });
 
   it("extracts subcommand and flags from the bare, unguarded shape the first `mem init` stamped", () => {
-    // Still live in installs that predate the `command -v` guard, including this repository's own
-    // .claude/settings.json; `mem doctor` read it as unparseable and reported "does not support ?".
+    // Still live in installs that predate the `command -v` guard, including this repository's own .claude/settings.json; `mem doctor` read it as unparseable and reported "does not support ?".
     expect(parseHookCommandSpec('mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"')).toEqual({
       subcommand: "recall",
       flags: ["--hint-format"],
@@ -2245,9 +2054,7 @@ describe("regression: an old-shape orphan hook is adopted (both shapes recognise
 
     claudeCode.uninstall({ root, homeDir: home });
     const afterUninstall = JSON.parse(read(settingsPath));
-    // Every event was mem's own (adopted) hook and nothing else -- uninstall leaves an empty array
-    // per event (the pre-adoption state had exactly one entry, which was mem's), not an orphaned
-    // stamped or unstamped hook of either shape.
+    // Every event was mem's own (adopted) hook and nothing else -- uninstall leaves an empty array per event (the pre-adoption state had exactly one entry, which was mem's), not an orphaned stamped or unstamped hook of either shape.
     for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]) {
       expect(afterUninstall.hooks[event]).toEqual([]);
     }

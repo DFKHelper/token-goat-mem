@@ -1,16 +1,4 @@
-/**
- * Guard that ARCHITECTURE.md's generated component table is in sync with `src/`, by actually
- * running `scripts/sync-arch-docs.mjs` -- the same engine `npm run arch:check` and `npm run
- * arch:write` invoke.
- *
- * Unlike this tier's other members, this guard shells out to a subprocess rather than doing pure
- * in-process introspection. That is a deliberate exception, not an accident: the sync engine's own
- * contract (marker validation, curated-Role preservation, byte-for-byte determinism) is exactly the
- * kind of thing that is only meaningfully exercised by actually running it, and the existing guards
- * already do real file I/O of comparable cost (`docs-claims.test.ts` reads nine docs,
- * `unfed-sources.test.ts` reads five source files) -- one `git ls-files` plus one node spawn is not a
- * meaningfully heavier gate than that.
- */
+/** Guard that ARCHITECTURE.md's generated component table is in sync with `src/`, by actually running `scripts/sync-arch-docs.mjs` -- the same engine `npm run arch:check` and `npm run arch:write` invoke. Unlike this tier's other members, this guard shells out to a subprocess rather than doing pure in-process introspection. That is a deliberate exception, not an accident: the sync engine's own contract (marker validation, curated-Role preservation, byte-for-byte determinism) is exactly the kind of thing that is only meaningfully exercised by actually running it, and the existing guards already do real file I/O of comparable cost (`docs-claims.test.ts` reads nine docs, `unfed-sources.test.ts` reads five source files) -- one `git ls-files` plus one node spawn is not a meaningfully heavier gate than that. */
 import { spawnSync } from "node:child_process";
 import type { SpawnSyncReturns } from "node:child_process";
 import { dirname, join } from "node:path";

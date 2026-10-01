@@ -1,11 +1,4 @@
-/**
- * End-to-end tests for `mem doctor`'s why-coverage line.
- *
- * A decision or correction without a `why` is the kind a later session relitigates, and nothing
- * else in the CLI says how many of them there are. The line counts only what can reach a session
- * (active or pinned): a withheld or superseded fact's missing reason costs nothing. Driven through
- * the real `run()` against a real database.
- */
+/** End-to-end tests for `mem doctor`'s why-coverage line. A decision or correction without a `why` is the kind a later session relitigates, and nothing else in the CLI says how many of them there are. The line counts only what can reach a session (active or pinned): a withheld or superseded fact's missing reason costs nothing. Driven through the real `run()` against a real database. */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

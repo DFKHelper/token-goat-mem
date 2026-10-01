@@ -60,9 +60,7 @@ describe("computeBm25Scores", () => {
     expect(scores.get("a")).toBe(0);
   });
 
-  // ── Porter stemming (item 2) ─────────────────────────────────────────────────────────────────
-  // Applied identically at index and query time inside `tokenize`, so a plural/inflected query
-  // term matches a differently-inflected document term it previously missed entirely.
+  // ── Porter stemming (item 2) ───────────────────────────────────────────────────────────────── Applied identically at index and query time inside `tokenize`, so a plural/inflected query term matches a differently-inflected document term it previously missed entirely.
 
   it("a plural query matches a singular document term ('commits' query -> 'commit' text)", () => {
     const docs = [
@@ -97,10 +95,7 @@ describe("computeBm25Scores", () => {
 
   it("does not stem a token containing a digit -- 'es6' stays 'es6', not truncated to 'es'", () => {
     const docs = [makeFact({ id: "a", text: "targets es6 output", kind: "fact" })];
-    // If "es6" were fed through the stemmer it is not purely alphabetic so nothing would change --
-    // this pins that a *query* of the bare prefix "es" does not match the mixed alnum token "es6",
-    // i.e. tokenize's digit guard actually took effect rather than the stemmer being a no-op here
-    // for an unrelated reason.
+    // If "es6" were fed through the stemmer it is not purely alphabetic so nothing would change -- this pins that a *query* of the bare prefix "es" does not match the mixed alnum token "es6", i.e. tokenize's digit guard actually took effect rather than the stemmer being a no-op here for an unrelated reason.
     expect(computeBm25Scores(docs, "es6").get("a")).toBeGreaterThan(0);
     expect(computeBm25Scores(docs, "es").get("a")).toBe(0);
   });
@@ -125,9 +120,7 @@ describe("computeBm25Scores", () => {
 });
 
 describe("porterStem (item 2)", () => {
-  // A representative slice of the word/stem pairs from Porter's own reference vocabulary
-  // (M.F. Porter, "An algorithm for suffix stripping", 1980) covering all five steps of the
-  // algorithm, not just the two words this project's own docs happen to mention.
+  // A representative slice of the word/stem pairs from Porter's own reference vocabulary (M.F. Porter, "An algorithm for suffix stripping", 1980) covering all five steps of the algorithm, not just the two words this project's own docs happen to mention.
   const vectors: ReadonlyArray<readonly [string, string]> = [
     ["caresses", "caress"],
     ["ponies", "poni"],
@@ -206,11 +199,7 @@ describe("porterStem (item 2)", () => {
     ["roll", "roll"],
   ];
 
-  // Cross-checked against the `porter-stemmer` npm package (jedp/porter-stemmer, MIT), a
-  // long-established independent implementation of the same algorithm -- every pair above and
-  // below matched it exactly when verified during development. Not a runtime dependency of this
-  // project; used only to validate these fixed expected values, which are what the suite actually
-  // pins.
+  // Cross-checked against the `porter-stemmer` npm package (jedp/porter-stemmer, MIT), a long-established independent implementation of the same algorithm -- every pair above and below matched it exactly when verified during development. Not a runtime dependency of this project; used only to validate these fixed expected values, which are what the suite actually pins.
   it.each([
     ["running", "run"],
     ["commits", "commit"],
@@ -283,9 +272,7 @@ describe("retrieve", () => {
   });
 
   it("anchorTimeBudgetMs: 0 forces every anchor to unverified and reports one anchorBudgetHits per fact", async () => {
-    // A zero (or already-passed) budget means `evaluateAnchor` bails out on entry for every
-    // candidate before it ever reads a file -- exercising `budgetExceeded`'s "already-expired
-    // deadline on entry" branch for the whole batch, not just a slow individual anchor.
+    // A zero (or already-passed) budget means `evaluateAnchor` bails out on entry for every candidate before it ever reads a file -- exercising `budgetExceeded`'s "already-expired deadline on entry" branch for the whole batch, not just a slow individual anchor.
     writeFileSync(join(root, "present.txt"), "x");
     const facts = [
       makeFact({ id: "1", text: "chose Postgres over Mongo", kind: "decision", anchor: "file-exists present.txt" }),
@@ -297,8 +284,7 @@ describe("retrieve", () => {
   });
 
   it("a fact with no anchor at all is unverified without counting as an anchorBudgetHits, even under a zero budget", async () => {
-    // `anchor === null` short-circuits `evaluateAnchor` before the budget check ever runs, so this
-    // fact's "unverified" is the ordinary "no predicate to evaluate" outcome, not a budget artifact.
+    // `anchor === null` short-circuits `evaluateAnchor` before the budget check ever runs, so this fact's "unverified" is the ordinary "no predicate to evaluate" outcome, not a budget artifact.
     const facts = [makeFact({ id: "1", text: "no anchor at all", kind: "fact" })];
     const outcome = await retrieve(facts, { query: "", root, anchorTimeBudgetMs: 0 });
     expect(outcome.results[0]?.freshness).toBe("unverified");
@@ -350,15 +336,13 @@ describe("retrieve", () => {
   });
 
   it("hintStyle 'terse' elides a body past its budget, states how much it dropped, and names the command that returns it", async () => {
-    // 200 characters with no spaces, so `trimEnd` cannot move the boundary and the arithmetic in
-    // the marker is assertable exactly: 140 kept, 60 dropped.
+    // 200 characters with no spaces, so `trimEnd` cannot move the boundary and the arithmetic in the marker is assertable exactly: 140 kept, 60 dropped.
     const long = "a".repeat(200);
     const facts = [makeFact({ id: "long-1", text: long, kind: "fact" })];
     const { results } = await retrieve(facts, { query: "", root, hintStyle: "terse" });
     const display = results[0]?.display ?? "";
     expect(display).toContain(`${"a".repeat(140)}... (+60 chars: mem show <id>)`);
-    // The id is already on the line in both surfaces that render a terse display, so the marker
-    // must not repeat it: interpolating the 36-character UUID cost more than the elision saved.
+    // The id is already on the line in both surfaces that render a terse display, so the marker must not repeat it: interpolating the 36-character UUID cost more than the elision saved.
     expect(display).not.toContain("long-1");
     // The whole body must not be on the line -- that is the defect, not the marker's absence.
     expect(display).not.toContain(long);
@@ -382,9 +366,7 @@ describe("retrieve", () => {
   });
 
   it("hintStyle 'terse' never splits a surrogate pair straddling the budget boundary", async () => {
-    // U+1F600 is two UTF-16 code units. Padding to 139 puts the pair across index 139/140, so a
-    // bare slice(0, 140) would keep the high half alone: valid JSON once escaped, a replacement
-    // character on screen. The fact body has to be longer than the budget for elision to fire.
+    // U+1F600 is two UTF-16 code units. Padding to 139 puts the pair across index 139/140, so a bare slice(0, 140) would keep the high half alone: valid JSON once escaped, a replacement character on screen. The fact body has to be longer than the budget for elision to fire.
     const text = `${"a".repeat(139)}\u{1F600}${"b".repeat(80)}`;
     const facts = [makeFact({ id: "emoji-1", text, kind: "fact" })];
     const { results } = await retrieve(facts, { query: "", root, hintStyle: "terse" });
@@ -573,10 +555,7 @@ describe("retrieve", () => {
     const { results: bySubject } = await retrieve(facts, { query: "", root, subject: "package-manager", now });
     expect(bySubject.map((r) => r.fact.id)).toEqual(["1"]);
 
-    // Regression: a subject filter typed with different casing/whitespace than how storage.ts
-    // normalized and stored it (trim + lowercase) must still match -- a raw, un-normalized `!==`
-    // comparison here would silently return zero results for a perfectly valid, naturally-typed
-    // `--subject Package-Manager`.
+    // Regression: a subject filter typed with different casing/whitespace than how storage.ts normalized and stored it (trim + lowercase) must still match -- a raw, un-normalized `!==` comparison here would silently return zero results for a perfectly valid, naturally-typed `--subject Package-Manager`.
     const { results: bySubjectDifferentCasing } = await retrieve(facts, { query: "", root, subject: "  Package-Manager  ", now });
     expect(bySubjectDifferentCasing.map((r) => r.fact.id)).toEqual(["1"]);
 
@@ -612,17 +591,7 @@ describe("retrieve", () => {
   });
 
   it("regression: an all-zero BM25 list does not vote, so a lexically-unmatched query ranks on embeddings rather than recency", async () => {
-    // The defect this pins, found by dogfooding against a real 768-dim endpoint rather than by the
-    // suite: when nothing matches lexically, every BM25 score is zero and `bm25Ranked`'s sort falls
-    // through to its `captured_at` tie-break -- so the list handed to RRF is pure recency order.
-    // Fusing it let recency vote on relevance at equal weight with the embedding signal, and it did
-    // the most damage on exactly the queries embeddings exist to answer. "deployments use blue-green"
-    // ranked third for "how do we roll out new versions", behind two newer, unrelated facts.
-    //
-    // Every prior ranking test used a query that did match lexically, so the zero case never reached
-    // fusion at all. Here "quantum" matches no fact text, and the semantically-correct fact is also
-    // the OLDEST -- so recency and the embedding signal disagree, and only one of them can be
-    // driving the result.
+    // The defect this pins, found by dogfooding against a real 768-dim endpoint rather than by the suite: when nothing matches lexically, every BM25 score is zero and `bm25Ranked`'s sort falls through to its `captured_at` tie-break -- so the list handed to RRF is pure recency order. Fusing it let recency vote on relevance at equal weight with the embedding signal, and it did the most damage on exactly the queries embeddings exist to answer. "deployments use blue-green" ranked third for "how do we roll out new versions", behind two newer, unrelated facts. Every prior ranking test used a query that did match lexically, so the zero case never reached fusion at all. Here "quantum" matches no fact text, and the semantically-correct fact is also the OLDEST -- so recency and the embedding signal disagree, and only one of them can be driving the result.
     const facts = [
       makeFact({ id: "semantic-match", text: "alpha", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z", embedding: new Float32Array([1, 0]) }),
       makeFact({ id: "newer-noise", text: "beta", kind: "fact", captured_at: "2026-06-01T00:00:00.000Z", embedding: new Float32Array([0, 1]) }),
@@ -635,8 +604,7 @@ describe("retrieve", () => {
   });
 
   it("non-firing: with no embedding backend, a lexically-unmatched query still falls back to recency order", async () => {
-    // The other half of the rule above -- dropping the uninformative BM25 list must not change the
-    // BM25-only path, where recency is the only ordering available and remains correct.
+    // The other half of the rule above -- dropping the uninformative BM25 list must not change the BM25-only path, where recency is the only ordering available and remains correct.
     const facts = [
       makeFact({ id: "older", text: "alpha", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
       makeFact({ id: "newer", text: "beta", kind: "fact", captured_at: "2026-06-01T00:00:00.000Z" }),
@@ -654,10 +622,7 @@ describe("retrieve", () => {
     });
 
     it("is true for an empty query too -- it describes the ranking, not the query", async () => {
-      // An empty query has no terms to rank against either, so this is honestly `true` here. The
-      // seam's footer clause does not fire on an empty query anyway: it gates on the query being
-      // non-empty as a separate condition, precisely because this field alone does not distinguish
-      // "no query" from "a real query nothing matched" -- see `footerLineFor`'s `noQuerySignal`.
+      // An empty query has no terms to rank against either, so this is honestly `true` here. The seam's footer clause does not fire on an empty query anyway: it gates on the query being non-empty as a separate condition, precisely because this field alone does not distinguish "no query" from "a real query nothing matched" -- see `footerLineFor`'s `noQuerySignal`.
       const facts = [makeFact({ id: "1", text: "alpha", kind: "fact" })];
       const outcome = await retrieve(facts, { query: "", root });
       expect(outcome.zeroSignal).toBe(true);
@@ -683,9 +648,7 @@ describe("retrieve", () => {
   });
 
   it("fuses BM25 and embedding signals when an embedding backend is available", async () => {
-    // "a" is a strong BM25 match but far in embedding space; "b" is a weak BM25 match but close in
-    // embedding space to the (contrived) query vector. RRF fusion should let "b" compete with "a"
-    // rather than BM25 alone dominating.
+    // "a" is a strong BM25 match but far in embedding space; "b" is a weak BM25 match but close in embedding space to the (contrived) query vector. RRF fusion should let "b" compete with "a" rather than BM25 alone dominating.
     const facts = [
       makeFact({ id: "a", text: "uses pnpm not npm for everything", kind: "fact", embedding: new Float32Array([0, 1]) }),
       makeFact({ id: "b", text: "irrelevant unrelated text", kind: "fact", embedding: new Float32Array([1, 0]) }),
@@ -697,15 +660,12 @@ describe("retrieve", () => {
     const ids = results.map((r) => r.fact.id);
     expect(ids).toContain("a");
     expect(ids).toContain("b");
-    // b wins the embedding signal outright (cosine similarity 1 vs 0), and RRF gives it credit
-    // even though it has zero BM25 score, so it should not rank last.
+    // b wins the embedding signal outright (cosine similarity 1 vs 0), and RRF gives it credit even though it has zero BM25 score, so it should not rank last.
     expect(ids.indexOf("b")).toBeLessThan(1 + 1);
   });
 
   it("skips the embedding call when the query itself trips secret screening, but still returns BM25 results", async () => {
-    // A query containing an AWS-key-shaped literal must never reach an embedding endpoint -- the
-    // capture-side invariant (text failing secret screening is never sent off-machine) has to hold
-    // for the query too, since the `UserPromptSubmit` hook hands every user prompt through here.
+    // A query containing an AWS-key-shaped literal must never reach an embedding endpoint -- the capture-side invariant (text failing secret screening is never sent off-machine) has to hold for the query too, since the `UserPromptSubmit` hook hands every user prompt through here.
     const embed = vi.fn(() => new Float32Array([1, 0]));
     const backend: EmbeddingBackend = { embed };
     const facts = [
@@ -763,9 +723,7 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
       }),
     ];
 
-    // Evaluated against the *querying* root the file is absent, which under P3 is a `contradicted`
-    // verdict -- actively asserting the fact is wrong, and withholding it from ground truth, purely
-    // because the query came from a different directory than the one the fact is bound to.
+    // Evaluated against the *querying* root the file is absent, which under P3 is a `contradicted` verdict -- actively asserting the fact is wrong, and withholding it from ground truth, purely because the query came from a different directory than the one the fact is bound to.
     const { results: [result] } = await retrieve(facts, { query: "postgres", root });
     expect(result?.freshness).toBe("affirmed");
     expect(result?.trust).toBe("ground-truth");
@@ -788,16 +746,7 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
   });
 
   it("cannot evaluate a path-scoped fact's anchor with no recorded capture root, even from the directory its target lives in", async () => {
-    // This used to assert `affirmed` -- the pre-fix `anchorRootFor` handed a `path`-scoped fact's
-    // anchor the bare `queryRoot` unconditionally, so the assertion passed here purely because this
-    // test's `root` happens to be both the query root and where `present.txt` lives. That is the
-    // same defect the ancestor-directory regression above exists to fix (retrieval.ts's
-    // `anchorRootFor`): without a real `captureRoot` on the fact -- this one predates the column, as
-    // every `Fact` built by `makeFact` above does -- there is no honest way to know `queryRoot` is
-    // the fact's own root rather than an unrelated one that happens to share a filename. `unverified`
-    // is now the correct verdict for a `path`-scoped fact whose `captureRoot` is unknown, whatever
-    // its query root. (`global` is deliberately unaffected: it carries no location binding, so its
-    // anchor is re-checked against wherever the caller currently is, by design.)
+    // This used to assert `affirmed` -- the pre-fix `anchorRootFor` handed a `path`-scoped fact's anchor the bare `queryRoot` unconditionally, so the assertion passed here purely because this test's `root` happens to be both the query root and where `present.txt` lives. That is the same defect the ancestor-directory regression above exists to fix (retrieval.ts's `anchorRootFor`): without a real `captureRoot` on the fact -- this one predates the column, as every `Fact` built by `makeFact` above does -- there is no honest way to know `queryRoot` is the fact's own root rather than an unrelated one that happens to share a filename. `unverified` is now the correct verdict for a `path`-scoped fact whose `captureRoot` is unknown, whatever its query root. (`global` is deliberately unaffected: it carries no location binding, so its anchor is re-checked against wherever the caller currently is, by design.)
     writeFileSync(join(root, "present.txt"), "x");
     const facts = [
       makeFact({
@@ -805,8 +754,7 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
         text: "chose Postgres over Mongo",
         kind: "decision",
         scope: "path",
-        // For `path` scope this is a file/dir path, not a project root -- resolving an anchor's
-        // relative target against it would be meaningless.
+        // For `path` scope this is a file/dir path, not a project root -- resolving an anchor's relative target against it would be meaningless.
         scopeRoot: join(otherRoot, "some", "file.ts"),
         anchor: "file-exists present.txt",
       }),
@@ -817,12 +765,7 @@ describe("regression: a project-scoped fact's anchor is evaluated against its ow
   });
 
   it("still answers decisively for a path-scoped fact queried from an ancestor of its capture root", async () => {
-    // The monorepo case the capture-root column exists for: a package's fact captured in
-    // `<root>/pkg`, recalled by a hook running at the repository root. The anchor's target was
-    // validated to sit inside the capture root, and an ancestor has that whole tree, so refusing to
-    // answer here would caveat the fact forever on every prompt -- the anchor would buy the user
-    // nothing. Both polarities are covered because the pre-column bug produced one wrong verdict of
-    // each kind from exactly this directory.
+    // The monorepo case the capture-root column exists for: a package's fact captured in `<root>/pkg`, recalled by a hook running at the repository root. The anchor's target was validated to sit inside the capture root, and an ancestor has that whole tree, so refusing to answer here would caveat the fact forever on every prompt -- the anchor would buy the user nothing. Both polarities are covered because the pre-column bug produced one wrong verdict of each kind from exactly this directory.
     const pkg = join(root, "pkg");
     mkdirSync(pkg, { recursive: true });
     writeFileSync(join(pkg, "present.txt"), "x");
@@ -994,8 +937,7 @@ describe("RetrievedFact.queryEvidence", () => {
   });
 
   it("is true for an embedding hit inside the top-N cut and false outside it", async () => {
-    // The embedding list ranks every comparable fact, so only its head may count as evidence.
-    // `f0` is the closest to the query vector, `f<n-1>` the furthest.
+    // The embedding list ranks every comparable fact, so only its head may count as evidence. `f0` is the closest to the query vector, `f<n-1>` the furthest.
     const total = QUERY_EVIDENCE_EMBED_TOP_N + 5;
     const embedded = Array.from({ length: total }, (_unused, index) =>
       makeFact({ id: `f${index}`, text: "plain filler about rice", kind: "fact", embedding: new Float32Array([1, index / 100]) })
@@ -1044,19 +986,13 @@ describe("usefulness as a third RRF rank list", () => {
         ["c", { surfaced: 2, used: 2 }],
       ]),
     });
-    // An empty query ties every BM25 score at 0, so the usefulness list alone decides the order of
-    // the two ranked facts -- which is what isolates the tie-break rule under test. `c` is also the
-    // *older* of the two, so the final `captured_at` tie-break would order them the other way round:
-    // without the surfaced-count rule this assertion reads ["b", "c"] and the test cannot pass by
-    // accident of the default recency ordering.
+    // An empty query ties every BM25 score at 0, so the usefulness list alone decides the order of the two ranked facts -- which is what isolates the tie-break rule under test. `c` is also the *older* of the two, so the final `captured_at` tie-break would order them the other way round: without the surfaced-count rule this assertion reads ["b", "c"] and the test cannot pass by accident of the default recency ordering.
     const ranked = withFeedback.results.map((r) => r.fact.id).filter((id) => id === "b" || id === "c");
     expect(ranked).toEqual(["c", "b"]);
   });
 
   it("ignores a surfaced-but-never-confirmed fact rather than demoting it", async () => {
-    // Zero used counts must leave the rank list empty. If they did not, every store that had ever
-    // logged a recall would switch retrieval into RRF -- and RRF never emits a 0 score, which is the
-    // single predicate integration-seam.ts's `--delta` filter uses to tell a match from filler.
+    // Zero used counts must leave the rank list empty. If they did not, every store that had ever logged a recall would switch retrieval into RRF -- and RRF never emits a 0 score, which is the single predicate integration-seam.ts's `--delta` filter uses to tell a match from filler.
     const baseline = await retrieve(facts, { query: "deploy", root });
     const withZeroes = await retrieve(facts, {
       query: "deploy",
@@ -1071,15 +1007,12 @@ describe("usefulness as a third RRF rank list", () => {
   });
 
   it("scores a non-matching fact exactly 0 when no auxiliary list is fused, preserving the --delta contract", async () => {
-    // Pinned, not assumed: integration-seam.ts's delta filter keeps a fact suppressed only while
-    // `score === 0` ("filler, swept in by the caps"). Switching the single-list path to RRF would
-    // give every filler fact a small positive score and silently disable delta suppression entirely.
+    // Pinned, not assumed: integration-seam.ts's delta filter keeps a fact suppressed only while `score === 0` ("filler, swept in by the caps"). Switching the single-list path to RRF would give every filler fact a small positive score and silently disable delta suppression entirely.
     const outcome = await retrieve(facts, { query: "deploy", root });
     const scores = new Map(outcome.results.map((r) => [r.fact.id, r.score]));
     expect(scores.get("c")).toBe(0);
     expect(scores.get("a")).toBeGreaterThan(0);
-    // And raw BM25, not a fused rank score: the two ranked facts differ by more than RRF's tiny
-    // 1/(k+rank) spacing ever could.
+    // And raw BM25, not a fused rank score: the two ranked facts differ by more than RRF's tiny 1/(k+rank) spacing ever could.
     expect((scores.get("a") ?? 0) - (scores.get("b") ?? 0)).not.toBe(0);
   });
 });
@@ -1101,10 +1034,7 @@ describe("graphScores as a fourth RRF rank list", () => {
     const withoutGraph = await retrieve(facts, { query: "deploy", root });
     expect(withoutGraph.results.map((r) => r.fact.id).slice(0, 2)).toEqual(["a", "b"]);
 
-    // RRF is rank-based, not magnitude-based: swapping only the top two of a two-entry graph list
-    // against a two-entry BM25 list in the opposite order is an exact tie (each fact is first in
-    // one list and second in the other) and the recency tie-break decides it right back to `a`.
-    // `c` ranked last in the graph list is what actually breaks the tie in `b`'s favor.
+    // RRF is rank-based, not magnitude-based: swapping only the top two of a two-entry graph list against a two-entry BM25 list in the opposite order is an exact tie (each fact is first in one list and second in the other) and the recency tie-break decides it right back to `a`. `c` ranked last in the graph list is what actually breaks the tie in `b`'s favor.
     const withGraph = await retrieve(facts, {
       query: "deploy",
       root,
@@ -1118,10 +1048,7 @@ describe("graphScores as a fourth RRF rank list", () => {
   });
 
   it("ignores an all-zero graph score map rather than letting a degenerate list vote", async () => {
-    // A BM25-informative query, mirroring the all-zero-BM25-list regression above: an all-zero
-    // graph map must produce an *empty* rank list (see `graphScoreRanking`'s `score > 0` filter),
-    // not a zero-filled one that would still enter fusion and let RRF's rank spacing move scores
-    // for a signal that never actually differed between any two facts.
+    // A BM25-informative query, mirroring the all-zero-BM25-list regression above: an all-zero graph map must produce an *empty* rank list (see `graphScoreRanking`'s `score > 0` filter), not a zero-filled one that would still enter fusion and let RRF's rank spacing move scores for a signal that never actually differed between any two facts.
     const baseline = await retrieve(facts, { query: "deploy", root });
     const withZeroes = await retrieve(facts, {
       query: "deploy",
@@ -1150,9 +1077,7 @@ describe("pinned facts and the recall cap", () => {
   }
 
   it("keeps a pinned fact in a no-query recall that newer facts would otherwise fill", async () => {
-    // The SessionStart hook `mem init` installs recalls with no query: every score ties at zero, the
-    // sort falls through to recency, and the cap keeps the newest `limit`. A pinned fact older than
-    // `limit` other facts silently vanished from the one call it was pinned for.
+    // The SessionStart hook `mem init` installs recalls with no query: every score ties at zero, the sort falls through to recency, and the cap keeps the newest `limit`. A pinned fact older than `limit` other facts silently vanished from the one call it was pinned for.
     const pinned = makeFact({
       id: "pinned-old",
       text: "deployments use blue-green",
@@ -1167,9 +1092,7 @@ describe("pinned facts and the recall cap", () => {
   });
 
   it("does not let a pin outrank a fact that actually matches the query", async () => {
-    // The privilege is scoped to the zero-signal case on purpose. If a pin also won under a real
-    // query, `mem pin` would be a ranking cheat code and an irrelevant pinned fact would displace
-    // the fact that answers the question.
+    // The privilege is scoped to the zero-signal case on purpose. If a pin also won under a real query, `mem pin` would be a ranking cheat code and an irrelevant pinned fact would displace the fact that answers the question.
     const pinned = makeFact({ id: "pinned-irrelevant", text: "we use tabs for indentation", kind: "preference", status: "pinned" });
     const match = makeFact({ id: "relevant", text: "deployments use blue-green rollout", kind: "decision" });
     const outcome = await retrieve([pinned, match], { query: "blue-green rollout", root });
@@ -1179,10 +1102,7 @@ describe("pinned facts and the recall cap", () => {
 
 describe("anchorRootsFor", () => {
   it("returns the roots anchors are really evaluated against, not the query root", () => {
-    // The set a persistent anchor cache has to be primed with. A `path` fact reached from an
-    // ancestor evaluates against its own `captureRoot`, and a `project` fact bound elsewhere
-    // against its own `scopeRoot` -- neither is the query root, so a prefetch keyed on the query
-    // root alone can never hold either one's verdict.
+    // The set a persistent anchor cache has to be primed with. A `path` fact reached from an ancestor evaluates against its own `captureRoot`, and a `project` fact bound elsewhere against its own `scopeRoot` -- neither is the query root, so a prefetch keyed on the query root alone can never hold either one's verdict.
     const facts: Fact[] = [
       makeFact({ id: "p", text: "path fact", kind: "fact", scope: "path", scopeRoot: "/repo/packages/api", captureRoot: "/repo/packages/api", anchor: "file-exists a.txt" }),
       makeFact({ id: "j", text: "project fact", kind: "fact", scope: "project", scopeRoot: "/elsewhere", anchor: "file-exists b.txt" }),

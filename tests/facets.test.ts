@@ -1,12 +1,4 @@
-/**
- * Unit tests for `src/facets.ts`.
- *
- * The negative half matters as much as the positive half. An entity list that also catches ordinary
- * prose words is not a second retrieval signal -- it is a noisier duplicate of the BM25 index, with
- * every prose word stored twice and every `--entity` query answered by facts that merely contain an
- * English sentence. So each recognized shape is pinned, and so is the plain-prose case that must
- * produce nothing at all.
- */
+/** Unit tests for `src/facets.ts`. The negative half matters as much as the positive half. An entity list that also catches ordinary prose words is not a second retrieval signal -- it is a noisier duplicate of the BM25 index, with every prose word stored twice and every `--entity` query answered by facts that merely contain an English sentence. So each recognized shape is pinned, and so is the plain-prose case that must produce nothing at all. */
 import { describe, expect, it } from "vitest";
 
 import { extractFacets, normalizeTermKey, MAX_ENTITIES_PER_FACT, MAX_TOPICS_PER_FACT } from "../src/facets.js";
@@ -61,8 +53,7 @@ describe("extractFacets: what must NOT become an entity", () => {
   });
 
   it("does not treat a capitalized sentence opener or an acronym as an identifier", () => {
-    // Both lack an internal lower-to-upper transition; a "contains a capital" rule would make every
-    // sentence's first word an entity and drown the index.
+    // Both lack an internal lower-to-upper transition; a "contains a capital" rule would make every sentence's first word an entity and drown the index.
     expect(extractFacets("Deployments go out over HTTP on Tuesday").entities).toEqual([]);
   });
 

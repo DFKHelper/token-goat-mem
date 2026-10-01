@@ -1,13 +1,4 @@
-/**
- * Tests for the token-goat integration seam (src/integration-seam.ts, design plan Section 4).
- *
- * Focus, per the design plan:
- *   - happy path: a well-formed TGMEM/<n> hint-format payload for an in-scope, affirmed fact.
- *   - fail-open on internal error: buildHintFormat() must never throw -- any internal failure
- *     (unreadable db, retrieval exception) resolves to an empty, well-formed result.
- *   - contested facts excluded from hint-format (Section 4: "Contested / low-trust / pending facts
- *     are excluded from --hint-format entirely").
- */
+/** Tests for the token-goat integration seam (src/integration-seam.ts, design plan Section 4). Focus, per the design plan: - happy path: a well-formed TGMEM/<n> hint-format payload for an in-scope, affirmed fact. - fail-open on internal error: buildHintFormat() must never throw -- any internal failure (unreadable db, retrieval exception) resolves to an empty, well-formed result. - contested facts excluded from hint-format (Section 4: "Contested / low-trust / pending facts are excluded from --hint-format entirely"). */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -23,23 +14,7 @@ import type { Fact } from "../src/types.js";
 /** A soft budget no test machine can exceed. */
 const NO_TRUNCATION_BUDGET_MS = 3_600_000;
 
-/**
- * `buildHintFormat` with budget exhaustion taken out of the picture, and the only entry point this
- * file should use.
- *
- * The seam returns an *empty* hint set when it overruns its 150ms soft budget, because TGMEM/2 has
- * no way to say "this is partial" and a reduced response is indistinguishable from a complete one.
- * That is deliberate -- but it means every assertion here about which facts come back is silently
- * also an assertion about how fast the runner is, and on a cold Windows CI runner the budget can go
- * on opening the database alone.
- *
- * `tests/unit/integration-seam.test.ts` already routes through a wrapper for exactly this reason.
- * This file was left out, which stayed survivable only while exhaustion merely *shrank* the result:
- * a content assertion could still pass against the smaller set. Now that it empties the result,
- * every such assertion fails outright, which is how two tests here went red on Windows CI while
- * passing everywhere else. Defaulting the budget here means a new test cannot acquire the flake by
- * omission; the spread puts `options` last so a test that is *about* exhaustion can still force it.
- */
+/** `buildHintFormat` with budget exhaustion taken out of the picture, and the only entry point this file should use. The seam returns an *empty* hint set when it overruns its 150ms soft budget, because TGMEM/2 has no way to say "this is partial" and a reduced response is indistinguishable from a complete one. That is deliberate -- but it means every assertion here about which facts come back is silently also an assertion about how fast the runner is, and on a cold Windows CI runner the budget can go on opening the database alone. `tests/unit/integration-seam.test.ts` already routes through a wrapper for exactly this reason. This file was left out, which stayed survivable only while exhaustion merely *shrank* the result: a content assertion could still pass against the smaller set. Now that it empties the result, every such assertion fails outright, which is how two tests here went red on Windows CI while passing everywhere else. Defaulting the budget here means a new test cannot acquire the flake by omission; the spread puts `options` last so a test that is *about* exhaustion can still force it. */
 async function buildHint(options: HintFormatOptions): Promise<HintFormatResult> {
   return buildHintFormat({ retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS, ...options });
 }
@@ -65,12 +40,7 @@ function seedFacts(dbPath: string, seeds: readonly FactSeed[]): void {
     `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)
      VALUES (@id, @text, @kind, @subject, @value, @scope, @scopeRoot, @source_type, @source_ref, @captured_at, @anchor, @status, @confidence)`
   );
-  // One transaction, not one implicit transaction per row. An unwrapped insert commits on its
-  // own, so seeding 500 facts costs 500 durability syncs -- 73ms on a local NVMe and over the
-  // 5s vitest default on a cold windows-latest runner, which is what turned
-  // `emits exactly the cap-limited set` red on the v0.4.0 release. Retrieval itself was never
-  // the cost: a query-less buildHintFormat over 500 facts returns inside the 150ms budget.
-  // `.immediate()` follows the convention tests/guards/transactions.test.ts pins for src.
+  // One transaction, not one implicit transaction per row. An unwrapped insert commits on its own, so seeding 500 facts costs 500 durability syncs -- 73ms on a local NVMe and over the 5s vitest default on a cold windows-latest runner, which is what turned `emits exactly the cap-limited set` red on the v0.4.0 release. Retrieval itself was never the cost: a query-less buildHintFormat over 500 facts returns inside the 150ms budget. `.immediate()` follows the convention tests/guards/transactions.test.ts pins for src.
   const insertAll = db.transaction((rows: readonly FactSeed[]) => {
     for (const seed of rows) {
       insert.run({
@@ -141,13 +111,7 @@ describe("buildHintFormat (integration seam)", () => {
     expect(display).toContain("uses pnpm not npm");
   });
 
-  /**
-   * `display` is JSON-encoded and so cannot break the consumer's line parse; `id` sits in a bare,
-   * whitespace-delimited field and cannot be quoted without breaking the published TGMEM contract.
-   * The emitter therefore has to refuse an unsafe id outright. No supported write path can produce
-   * one (mem writes `randomUUID`; `import --from-json` validates), so this seeds the row with raw
-   * SQL -- exactly the shape a pre-0.2.2 database or a hand-edited row could hold.
-   */
+  /** `display` is JSON-encoded and so cannot break the consumer's line parse; `id` sits in a bare, whitespace-delimited field and cannot be quoted without breaking the published TGMEM contract. The emitter therefore has to refuse an unsafe id outright. No supported write path can produce one (mem writes `randomUUID`; `import --from-json` validates), so this seeds the row with raw SQL -- exactly the shape a pre-0.2.2 database or a hand-edited row could hold. */
   it("drops a fact whose id could forge a line, instead of emitting it into the bare id= field", async () => {
     seedFacts(dbPath, [
       {
@@ -194,8 +158,7 @@ describe("buildHintFormat (integration seam)", () => {
   });
 
   it("fails open when the resolved db path's parent cannot be created (permission/invalid-path style failure), and says the store could not be read", async () => {
-    // A null byte is invalid in a path on every platform Node targets, so this reliably throws
-    // inside openDb()/mkdirSync() rather than depending on OS-specific permission setup.
+    // A null byte is invalid in a path on every platform Node targets, so this reliably throws inside openDb()/mkdirSync() rather than depending on OS-specific permission setup.
     const invalidDbPath = join(workDir, "bad\0path", "mem.db");
 
     const result = await buildHint({ root, dbPath: invalidDbPath });
@@ -235,9 +198,7 @@ describe("buildHintFormat (integration seam)", () => {
 
     const result = await buildHint({ root, dbPath });
 
-    // Neither side of the tied contradiction is surfaced -- the seam never hands the caller an
-    // unresolved either/or to gamble on (design plan P4 / Section 4) -- but the footer discloses
-    // that something was held back, so "withheld" stays distinguishable from "nothing stored".
+    // Neither side of the tied contradiction is surfaced -- the seam never hands the caller an unresolved either/or to gamble on (design plan P4 / Section 4) -- but the footer discloses that something was held back, so "withheld" stays distinguishable from "nothing stored".
     expect(result.lines.filter((line) => !line.startsWith("footer  "))).toEqual([]);
     expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
     expect(result.header).toBe(TGMEM_HEADER);
@@ -334,11 +295,7 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
 
     rmSync(lockfile);
 
-    // The anchor memo is scoped to the process, which is exactly one query for the `mem` CLI but
-    // unbounded for an embedder holding this module. Without a per-call reset the first verdict was
-    // served forever, no matter what happened on disk afterwards.
-    // Re-read, the anchor now contradicts the fact, which `--hint-format` drops entirely rather
-    // than emitting as a caveated line.
+    // The anchor memo is scoped to the process, which is exactly one query for the `mem` CLI but unbounded for an embedder holding this module. Without a per-call reset the first verdict was served forever, no matter what happened on disk afterwards. Re-read, the anchor now contradicts the fact, which `--hint-format` drops entirely rather than emitting as a caveated line.
     const second = await buildHint({ root, dbPath });
     expect(second.lines.some((line) => line.includes("anchored-1"))).toBe(false);
   });
@@ -350,9 +307,7 @@ describe("buildHintFormat as a long-lived embedder would call it", () => {
     const result = await buildHint({ root, dbPath });
     expect(result.lines[0]).toContain("id=anchored-1");
 
-    // `openDb` alone does not guarantee the storage-owned columns exist; reading a fact through a
-    // connection that skipped `ensureStorageSchema` worked only by accident of which columns this
-    // path happens to select today.
+    // `openDb` alone does not guarantee the storage-owned columns exist; reading a fact through a connection that skipped `ensureStorageSchema` worked only by accident of which columns this path happens to select today.
     const db = openDb(dbPath);
     const columns = db.prepare("PRAGMA table_info(facts)").all() as { name: string }[];
     const names = columns.map((column) => column.name);
@@ -403,8 +358,7 @@ describe("persistent anchor verdict cache (hint-format path)", () => {
     const result = await buildHint({ root, dbPath });
     expect(result.lines[0]).toContain("fresh=affirmed");
 
-    // A fresh `openDb`, not the connection `buildHintFormat` already closed -- this is exactly
-    // what a second, unrelated `mem` process opening the same store would see.
+    // A fresh `openDb`, not the connection `buildHintFormat` already closed -- this is exactly what a second, unrelated `mem` process opening the same store would see.
     const db = openDb(dbPath);
     const row = db
       .prepare<[string, string], { root: string; anchor: string; verdict: string }>(
@@ -419,8 +373,7 @@ describe("persistent anchor verdict cache (hint-format path)", () => {
     seedContentAnchoredFact();
     writeFileSync(join(root, "config.json"), "pnpm");
 
-    // One real call to learn the witness `evaluateAnchor` computes for this exact file -- the same
-    // value a genuine re-evaluation would still compute, since the file is untouched below.
+    // One real call to learn the witness `evaluateAnchor` computes for this exact file -- the same value a genuine re-evaluation would still compute, since the file is untouched below.
     await buildHint({ root, dbPath });
     const db = openDb(dbPath);
     const before = db
@@ -428,11 +381,7 @@ describe("persistent anchor verdict cache (hint-format path)", () => {
       .get(resolve(root), "file-contains config.json pnpm");
     expect(before).toBeDefined();
 
-    // Overwrite the persisted verdict to one a fresh evaluation of the untouched file could never
-    // produce, keeping the same witness. If the prefetch's key form (root/anchor) does not match
-    // what the flush wrote them under, `get()` misses, `evaluateAnchor` recomputes for real, and
-    // this assertion fails even though every other behavior looks correct -- the exact silent-miss
-    // this test exists to catch.
+    // Overwrite the persisted verdict to one a fresh evaluation of the untouched file could never produce, keeping the same witness. If the prefetch's key form (root/anchor) does not match what the flush wrote them under, `get()` misses, `evaluateAnchor` recomputes for real, and this assertion fails even though every other behavior looks correct -- the exact silent-miss this test exists to catch.
     db.prepare("UPDATE anchor_cache SET verdict = 'contradicted' WHERE root = ? AND anchor = ?").run(
       resolve(root),
       "file-contains config.json pnpm"
@@ -440,14 +389,12 @@ describe("persistent anchor verdict cache (hint-format path)", () => {
     db.close();
 
     const result = await buildHint({ root, dbPath });
-    // `--hint-format` drops a contradicted fact entirely rather than emitting it -- see the
-    // sibling "re-evaluates anchors on every call" test above for the same contract.
+    // `--hint-format` drops a contradicted fact entirely rather than emitting it -- see the sibling "re-evaluates anchors on every call" test above for the same contract.
     expect(result.lines.some((line) => line.includes("content-anchored-1"))).toBe(false);
   });
 
   it("does not open a second connection or write anything when nothing was evaluated (empty buffer)", async () => {
-    // No anchored fact at all: `retrieve()` never calls into the anchor cache store, so its
-    // buffer stays empty and `persistAnchorVerdicts` must be a no-op.
+    // No anchored fact at all: `retrieve()` never calls into the anchor cache store, so its buffer stays empty and `persistAnchorVerdicts` must be a no-op.
     seedFacts(dbPath, [
       {
         id: "unanchored-1",
@@ -472,14 +419,7 @@ describe("persistent anchor verdict cache (hint-format path)", () => {
     seedContentAnchoredFact();
     writeFileSync(join(root, "config.json"), "pnpm");
 
-    // A trigger that fails every INSERT into `anchor_cache`, not a whole-database lock: locking
-    // the file also blocks `openStorage`'s own schema/pragma setup on the read phase, which would
-    // fail the read this test needs to succeed and fail for the wrong reason (a store-unreadable
-    // result, not the flush failure this test targets). This isolates the failure to the write
-    // `persistAnchorVerdicts` makes in the post-retrieve bookkeeping block, mirroring the doc
-    // comment's own "a read-only store" failure mode. No warm-up call first: `anchor_cache` starts
-    // empty, so this evaluation is genuinely fresh and has a verdict to flush -- a cache-hit would
-    // leave the buffer empty and the trigger would never fire.
+    // A trigger that fails every INSERT into `anchor_cache`, not a whole-database lock: locking the file also blocks `openStorage`'s own schema/pragma setup on the read phase, which would fail the read this test needs to succeed and fail for the wrong reason (a store-unreadable result, not the flush failure this test targets). This isolates the failure to the write `persistAnchorVerdicts` makes in the post-retrieve bookkeeping block, mirroring the doc comment's own "a read-only store" failure mode. No warm-up call first: `anchor_cache` starts empty, so this evaluation is genuinely fresh and has a verdict to flush -- a cache-hit would leave the buffer empty and the trigger would never fire.
     const trigDb = openStorage(dbPath);
     trigDb.exec(
       "CREATE TRIGGER block_anchor_cache_insert BEFORE INSERT ON anchor_cache BEGIN SELECT RAISE(ABORT, 'simulated flush failure'); END;"
@@ -488,8 +428,7 @@ describe("persistent anchor verdict cache (hint-format path)", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       const result = await buildHint({ root, dbPath });
-      // The recall itself still succeeds -- the affirmed fact is still returned -- even though the
-      // flush that would have made the next call's evaluation free again silently failed.
+      // The recall itself still succeeds -- the affirmed fact is still returned -- even though the flush that would have made the next call's evaluation free again silently failed.
       expect(result.lines[0]).toContain("fresh=affirmed");
       // No session id in this call, so the flush runs through `markSurfaced`, not `recordSurfaced`.
       expect(warnSpy.mock.calls.some((call) => String(call[0]).includes("could not mark facts surfaced"))).toBe(true);
@@ -508,19 +447,7 @@ describe("regression: the seam's row mapper projects every column retrieval depe
     const select = /SELECT id, text[\s\S]*?FROM facts/u.exec(source)?.[0] ?? "";
     expect(select).not.toBe("");
 
-    // This is a structural assertion rather than a behavioural one, deliberately. `prior_status` is
-    // real input to `resolveContradictions`: reinstating a fact whose rival is gone restores `pinned`
-    // when the fact was pinned before it was contested, and `pinned` is what exempts a preference
-    // from time-decay. Omitting the column made every reinstatement in the hint path land on
-    // `active`.
-    //
-    // No assertion on `buildHintFormat`'s output can catch that today: the TGMEM line carries a kind
-    // tag, a freshness verdict, an id and a display string, and none of them encode trust level or
-    // pinned-ness -- `buildDisplay` renders an affirmed preference identically either way, and
-    // `hintFormat` drops only `withheld` results, never `hint` ones. The defect is therefore latent,
-    // and the only thing that can fail when someone adds a Fact field and forgets this SELECT is a
-    // check on the SELECT itself. If the wire format ever exposes trust, replace this with the
-    // behavioural test that then becomes possible.
+    // This is a structural assertion rather than a behavioural one, deliberately. `prior_status` is real input to `resolveContradictions`: reinstating a fact whose rival is gone restores `pinned` when the fact was pinned before it was contested, and `pinned` is what exempts a preference from time-decay. Omitting the column made every reinstatement in the hint path land on `active`. No assertion on `buildHintFormat`'s output can catch that today: the TGMEM line carries a kind tag, a freshness verdict, an id and a display string, and none of them encode trust level or pinned-ness -- `buildDisplay` renders an affirmed preference identically either way, and `hintFormat` drops only `withheld` results, never `hint` ones. The defect is therefore latent, and the only thing that can fail when someone adds a Fact field and forgets this SELECT is a check on the SELECT itself. If the wire format ever exposes trust, replace this with the behavioural test that then becomes possible.
     expect(select).toContain("prior_status");
   });
 
@@ -531,11 +458,7 @@ describe("regression: the seam's row mapper projects every column retrieval depe
   });
 
   it("surfaces a project fact captured in one checkout from a second checkout of the same repository", async () => {
-    // Mirrors the git fixture in tests/cli.test.ts's "project identity" describe block. Without
-    // `scope_repo` in the SELECT, `toFact` leaves `scopeRepo` undefined, `isInScope` calls
-    // `identityMatches(undefined, root)`, which is always false, and the fact never surfaces from
-    // checkout `b` even though it is the exact case `mem init`'s SessionStart/UserPromptSubmit
-    // hooks (the only unprompted consumer of this path) are meant to cover.
+    // Mirrors the git fixture in tests/cli.test.ts's "project identity" describe block. Without `scope_repo` in the SELECT, `toFact` leaves `scopeRepo` undefined, `isInScope` calls `identityMatches(undefined, root)`, which is always false, and the fact never surfaces from checkout `b` even though it is the exact case `mem init`'s SessionStart/UserPromptSubmit hooks (the only unprompted consumer of this path) are meant to cover.
     const work = mkdtempSync(join(tmpdir(), "mem-seam-worktree-"));
     try {
       function git(cwd: string, ...args: string[]): void {
@@ -596,12 +519,7 @@ describe("entity ranking on the hint-format path", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  /**
-   * Seeded through `insertFact` rather than this file's `seedFacts` helper: the helper writes rows
-   * straight into `facts` and so leaves `fact_terms` empty, which is the correct behaviour for a
-   * fact that never went through capture but means the entity layer these tests are about would not
-   * exist at all.
-   */
+  /** Seeded through `insertFact` rather than this file's `seedFacts` helper: the helper writes rows straight into `facts` and so leaves `fact_terms` empty, which is the correct behaviour for a fact that never went through capture but means the entity layer these tests are about would not exist at all. */
   function seedThroughCapture(texts: readonly string[]): void {
     const db = openStorage(dbPath);
     try {
@@ -614,9 +532,7 @@ describe("entity ranking on the hint-format path", () => {
   }
 
   it("ranks the fact naming a path above ones that only share its stems", async () => {
-    // This is the path that matters most: an agent gets one shot at the context it is handed and
-    // never sees what ranked below the cap, so a mis-ranked identifier is not a worse ordering --
-    // it is a fact the agent never learns.
+    // This is the path that matters most: an agent gets one shot at the context it is handed and never sees what ranked below the cap, so a mis-ranked identifier is not a worse ordering -- it is a fact the agent never learns.
     seedThroughCapture([
       "the BM25 scorer lives in src/retrieval.ts and owns fusion",
       "we retriev data from various src locations using ts helpers",

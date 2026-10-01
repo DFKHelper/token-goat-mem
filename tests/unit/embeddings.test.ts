@@ -1,10 +1,4 @@
-/**
- * Unit tests for the OpenAI-compatible embedding backend (src/embeddings.ts).
- *
- * The HTTP half runs against tests/support/embedding-server.ts -- a `node:http` server started
- * inside the test process on an ephemeral loopback port. No new dependency, and no outbound request
- * ever leaves the machine.
- */
+/** Unit tests for the OpenAI-compatible embedding backend (src/embeddings.ts). The HTTP half runs against tests/support/embedding-server.ts -- a `node:http` server started inside the test process on an ephemeral loopback port. No new dependency, and no outbound request ever leaves the machine. */
 import { describe, it, expect, afterEach } from "vitest";
 
 import { defaultVector, startStubEmbeddingServer, type StubEmbeddingServer, type StubEmbeddingServerOptions } from "../support/embedding-server.js";
@@ -39,8 +33,7 @@ afterEach(async () => {
 describe("readEmbeddingConfig", () => {
   it("returns null when no endpoint is configured, which is the default state of every install", () => {
     expect(readEmbeddingConfig({})).toBeNull();
-    // A variable set to whitespace is the shape a shell export with an empty value leaves behind;
-    // treating it as configured would turn a typo into a hard error on a healthy install.
+    // A variable set to whitespace is the shape a shell export with an empty value leaves behind; treating it as configured would turn a typo into a hard error on a healthy install.
     expect(readEmbeddingConfig({ [EMBED_URL_ENV]: "   " })).toBeNull();
   });
 
@@ -64,8 +57,7 @@ describe("readEmbeddingConfig", () => {
 
 describe("resolveConfiguredEmbeddingBackend", () => {
   it("returns null rather than throwing on a broken configuration, because its callers all fail open", () => {
-    // `readEmbeddingConfig` throws here; recall and the token-goat seam must still rank lexically
-    // instead of failing a command whose real work succeeded.
+    // `readEmbeddingConfig` throws here; recall and the token-goat seam must still rank lexically instead of failing a command whose real work succeeded.
     expect(resolveConfiguredEmbeddingBackend({ [EMBED_URL_ENV]: "http://localhost:4000/v1/embeddings" })).toBeNull();
     expect(resolveConfiguredEmbeddingBackend({})).toBeNull();
   });
@@ -94,8 +86,7 @@ describe("the HTTP backend against a real local endpoint", () => {
   });
 
   it("pairs vectors by the response's index field, not by array position", async () => {
-    // The failure this pins is silent: an endpoint answering out of order would attach every fact
-    // its neighbour's vector, producing wrong similarity forever with no error anywhere.
+    // The failure this pins is silent: an endpoint answering out of order would attach every fact its neighbour's vector, producing wrong similarity forever with no error anywhere.
     const server = await stubServer({ reverseOrder: true });
     const backend = createHttpEmbeddingBackend({ url: server.url, model: "test-model" });
 
@@ -121,8 +112,7 @@ describe("the HTTP backend against a real local endpoint", () => {
     const backend = createHttpEmbeddingBackend({ url: server.url, model: "m", apiKey: "sk-test-key" });
 
     await expect(backend.embed("x")).rejects.toThrow(EmbeddingRequestError);
-    // The stub echoes the Authorization header into its error body on purpose: real gateways do,
-    // and forwarding a failing endpoint's body is exactly how a key ends up in a pasted traceback.
+    // The stub echoes the Authorization header into its error body on purpose: real gateways do, and forwarding a failing endpoint's body is exactly how a key ends up in a pasted traceback.
     await expect(backend.embed("x")).rejects.toThrow(/HTTP 500/u);
     await expect(backend.embed("x")).rejects.not.toThrow(/sk-test-key/u);
   });
@@ -160,8 +150,7 @@ describe("the HTTP backend against a real local endpoint", () => {
     const outOfRange = await stubServer({ dataOverride: () => [{ index: 7, embedding: [1] }] });
     await expect(createHttpEmbeddingBackend({ url: outOfRange.url, model: "m" }).embed("a")).rejects.toThrow(/index 7 for a batch of 1/u);
 
-    // Ragged dimensions are the one malformed case that would otherwise pass silently: stored, then
-    // compared by `cosineSimilarity` over the shorter length, yielding a confident wrong number.
+    // Ragged dimensions are the one malformed case that would otherwise pass silently: stored, then compared by `cosineSimilarity` over the shorter length, yielding a confident wrong number.
     const ragged = await stubServer({ dataOverride: () => [{ index: 0, embedding: [1, 2] }, { index: 1, embedding: [1, 2, 3] }] });
     await expect(createHttpEmbeddingBackend({ url: ragged.url, model: "m" }).embedBatch(["a", "b"])).rejects.toThrow(/mixed vector dimensions/u);
   });
@@ -172,8 +161,7 @@ describe("the HTTP backend against a real local endpoint", () => {
 
     const started = Date.now();
     await expect(backend.embed("x")).rejects.toThrow(/timed out after 50ms/u);
-    // The abort is what matters, not the exact number: without `AbortSignal.timeout` the socket
-    // stays open and keeps Node's event loop alive long after the caller gave up.
+    // The abort is what matters, not the exact number: without `AbortSignal.timeout` the socket stays open and keeps Node's event loop alive long after the caller gave up.
     expect(Date.now() - started).toBeLessThan(4_000);
   });
 
@@ -209,8 +197,7 @@ describe("planEmbeddingRanking", () => {
   });
 
   it("withholds the backend when the store's vectors came from another model, and says how to fix it", () => {
-    // Withheld rather than used-with-care because `cosineSimilarity` cannot detect the mismatch: it
-    // compares over the shorter of the two lengths and answers confidently either way.
+    // Withheld rather than used-with-care because `cosineSimilarity` cannot detect the mismatch: it compares over the shorter of the two lengths and answers confidently either way.
     const plan = planEmbeddingRanking({ model: "model-a", dimension: 4 }, configured);
     expect(plan.backend).toBeNull();
     expect(plan.incomparable).toMatch(/model-a/u);

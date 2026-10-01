@@ -1,10 +1,4 @@
-/**
- * Unit tests for src/projectIdentity.ts.
- *
- * Real repositories on disk rather than mocks: the module's whole job is reading git's own layout
- * (pointer files, `commondir`, config sections), and a mocked filesystem would only assert that the
- * mock matches this file's idea of that layout. `git init` is cheap enough to use the real thing.
- */
+/** Unit tests for src/projectIdentity.ts. Real repositories on disk rather than mocks: the module's whole job is reading git's own layout (pointer files, `commondir`, config sections), and a mocked filesystem would only assert that the mock matches this file's idea of that layout. `git init` is cheap enough to use the real thing. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
@@ -56,8 +50,7 @@ afterEach(() => {
 
 describe("normalizeRemoteUrl", () => {
   it("reduces every spelling of one repository to the same string", () => {
-    // The three forms a person actually copies out of a host's UI. If these disagreed, whether two
-    // clones shared an identity would depend on which button was clicked when cloning.
+    // The three forms a person actually copies out of a host's UI. If these disagreed, whether two clones shared an identity would depend on which button was clicked when cloning.
     const expected = "github.com/acme/widget";
     for (const url of [
       "git@github.com:acme/widget.git",
@@ -92,9 +85,7 @@ describe("resolveProjectIdentity", () => {
   });
 
   it("gives a worktree the same identity as its main checkout", () => {
-    // The worktree's own git directory holds no config -- the remote lives in the main repository,
-    // reachable only through `commondir`. Without that step every worktree reads as remote-less,
-    // and a worktree is one of the three cases this module exists for.
+    // The worktree's own git directory holds no config -- the remote lives in the main repository, reachable only through `commondir`. Without that step every worktree reads as remote-less, and a worktree is one of the three cases this module exists for.
     const repo = makeRepo("repo");
     const worktree = join(dir, "wt");
     git(repo, "worktree", "add", "-q", worktree, "-b", "feature");
@@ -156,8 +147,7 @@ describe("identityMatches", () => {
     const repo = makeRepo("repo");
     const identity = resolveProjectIdentity(repo) ?? "";
     expect(identityMatches(identity, repo)).toBe(true);
-    // A fact captured before identities existed must fall back to its path binding rather than
-    // matching every root that also happens to have none.
+    // A fact captured before identities existed must fall back to its path binding rather than matching every root that also happens to have none.
     const plain = join(dir, "plain");
     mkdirSync(plain, { recursive: true });
     expect(identityMatches(null, plain)).toBe(false);

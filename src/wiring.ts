@@ -1,49 +1,4 @@
-/**
- * Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes
- * exactly the config snippets those guides document (Claude Code's `settings.json` hook +
- * `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also
- * at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's
- * `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's
- * `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and
- * only that.
- *
- * Two idempotency/authorship mechanisms, chosen per file format:
- *
- * - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block
- *   is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` /
- *   `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install
- *   replaces everything between an existing pair (upgrade in place) or appends a new marked block at
- *   end of file; uninstall strips the marked block plus the one separator newline install adds,
- *   leaving everything else untouched.
- * - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`;
- *   `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` --
- *   neither reads `AGENTS.md`, so they share a block in their own file instead of joining the
- *   `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of
- *   near-duplicate per-tool blocks they share one reference-counted block,
- *   `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see
- *   `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool
- *   to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole
- *   block as it goes -- the body comes from one constant shared by every tool that writes here, so
- *   a later tool's install is also what upgrades a body left behind by an older mem.
- *   Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other
- *   tool remains listed, and only removes the whole block once the last listed tool uninstalls. A
- *   project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block
- *   in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens.
- * - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object
- *   mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install
- *   upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped*
- *   entry already occupies the same identity (hook `command`, task `label`, keybinding `key`)
- *   rather than duplicating or silently overwriting hand-written config. Uninstall removes only
- *   stamped entries, so it survives content drift across mem versions (unlike deep-equality
- *   matching against a remembered snapshot).
- *
- * Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot
- * of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes
- * that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a
- * stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and
- * mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read
- * used to compute the new content.
- */
+/** Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets those guides document (Claude Code's `settings.json` hook + `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and only that. Two idempotency/authorship mechanisms, chosen per file format: - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked block plus the one separator newline install adds, leaving everything else untouched. - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`; `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` -- neither reads `AGENTS.md`, so they share a block in their own file instead of joining the `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of near-duplicate per-tool blocks they share one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole block as it goes -- the body comes from one constant shared by every tool that writes here, so a later tool's install is also what upgrades a body left behind by an older mem. Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other tool remains listed, and only removes the whole block once the last listed tool uninstalls. A project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens. - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped* entry already occupies the same identity (hook `command`, task `label`, keybinding `key`) rather than duplicating or silently overwriting hand-written config. Uninstall removes only stamped entries, so it survives content drift across mem versions (unlike deep-equality matching against a remembered snapshot). Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read used to compute the new content. */
 
 import { spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -118,15 +73,7 @@ interface FileOp {
   readonly transform: FileTransform;
 }
 
-/**
- * The permission bits of an existing file, or `null` on Windows or if it cannot be stat'd.
- *
- * A temp-file-plus-rename write does not update a file in place -- it replaces the inode -- so
- * without this the new file carries whatever the umask gave it. For a managed file the user
- * deliberately restricted (a `~/.claude/settings.json` at 0600, say), that silently *widens* the
- * permissions of a file mem was only asked to add a block to. Windows is excluded for the same
- * reason as in `db.ts`: `chmod` there carries no read permission meaning.
- */
+/** The permission bits of an existing file, or `null` on Windows or if it cannot be stat'd. A temp-file-plus-rename write does not update a file in place -- it replaces the inode -- so without this the new file carries whatever the umask gave it. For a managed file the user deliberately restricted (a `~/.claude/settings.json` at 0600, say), that silently *widens* the permissions of a file mem was only asked to add a block to. Windows is excluded for the same reason as in `db.ts`: `chmod` there carries no read permission meaning. */
 function existingMode(filePath: string): number | null {
   if (process.platform === "win32") {
     return null;
@@ -145,21 +92,7 @@ function backupIfNeeded(filePath: string): void {
   }
 }
 
-/**
- * True when `content` holds nothing a user could have written: the empty string, or a JSON document
- * whose root is an empty object or empty array. Uninstall transforms prune mem's own entries out of
- * a shared container (`hooks`, `tasks`, `inputs`, a keybindings array) but stop short of deleting the
- * file, so a file whose *entire* content was mem's collapses to one of these shapes.
- *
- * Deliberately stricter than `isBlank`: a markdown/text file that strips down to whitespace (say a
- * lone "\r\n") is not treated as empty here, because those bytes were the user's before mem ever
- * touched the file and `stripBlockSeparators` hands them straight back unmodified -- collapsing that
- * to "delete" would erase pre-existing (if blank-looking) content. The JSON managed files never hit
- * this function in that state at all: `isBlank(current)` short-circuits their uninstall transform to
- * `undefined` (a no-op, file untouched) before any pruning happens, so an empty *object or array* seen
- * here can only mean every key/entry mem's pruning left behind is gone -- i.e. nothing outside mem's
- * own stamped content survived.
- */
+/** True when `content` holds nothing a user could have written: the empty string, or a JSON document whose root is an empty object or empty array. Uninstall transforms prune mem's own entries out of a shared container (`hooks`, `tasks`, `inputs`, a keybindings array) but stop short of deleting the file, so a file whose *entire* content was mem's collapses to one of these shapes. Deliberately stricter than `isBlank`: a markdown/text file that strips down to whitespace (say a lone "\r\n") is not treated as empty here, because those bytes were the user's before mem ever touched the file and `stripBlockSeparators` hands them straight back unmodified -- collapsing that to "delete" would erase pre-existing (if blank-looking) content. The JSON managed files never hit this function in that state at all: `isBlank(current)` short-circuits their uninstall transform to `undefined` (a no-op, file untouched) before any pruning happens, so an empty *object or array* seen here can only mean every key/entry mem's pruning left behind is gone -- i.e. nothing outside mem's own stamped content survived. */
 function isEmptyManagedContent(content: string): boolean {
   if (content === "") {
     return true;
@@ -178,41 +111,12 @@ function isEmptyManagedContent(content: string): boolean {
   return false;
 }
 
-/**
- * Whether `content` carries nothing but mem's own marker: the `<!-- token-goat-mem:` comment on
- * markdown files (per-tool or shared), or the `__token_goat_mem` JSON stamp key on structured ones.
- *
- * Used only to read a `.bak` snapshot, not live content -- see its call site in `writeManagedFile`.
- * A shared file (`AGENTS.md`) can pick up a `.bak` from a *second* tool's install finding the file
- * already there with the *first* tool's own block already in it; that `.bak` is not evidence of real
- * pre-existing content, it is mem's own writing caught mid-sequence. This check tells the two apart
- * without needing to know which of the several marker formats produced it.
- */
+/** Whether `content` carries nothing but mem's own marker: the `<!-- token-goat-mem:` comment on markdown files (per-tool or shared), or the `__token_goat_mem` JSON stamp key on structured ones. Used only to read a `.bak` snapshot, not live content -- see its call site in `writeManagedFile`. A shared file (`AGENTS.md`) can pick up a `.bak` from a *second* tool's install finding the file already there with the *first* tool's own block already in it; that `.bak` is not evidence of real pre-existing content, it is mem's own writing caught mid-sequence. This check tells the two apart without needing to know which of the several marker formats produced it. */
 function looksMemAuthored(content: string): boolean {
   return content.includes("<!-- token-goat-mem:") || content.includes(`"${STAMP_KEY}"`);
 }
 
-/**
- * Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the
- * transform once if the file changed between the initial read and the pre-write check. Exported for
- * direct unit testing of the retry path.
- *
- * `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before
- * its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever
- * capture content mem is about to touch for the first time (install), never a snapshot of mem's own
- * managed content on the way out.
- *
- * `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed
- * `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the
- * uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by
- * uninstall rather than left behind empty.
- *
- * Whenever `!backup` (the uninstall path) and the write leaves `path` deleted or holding no mem
- * markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the
- * authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is
- * both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks`
- * / delete-if-empty checks.
- */
+/** Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the transform once if the file changed between the initial read and the pre-write check. Exported for direct unit testing of the retry path. `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever capture content mem is about to touch for the first time (install), never a snapshot of mem's own managed content on the way out. `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by uninstall rather than left behind empty. Whenever `!backup` (the uninstall path) and the write leaves `path` deleted or holding no mem markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks` / delete-if-empty checks. */
 export function writeManagedFile(
   op: FileOp,
   opts: { backup?: boolean; deleteIfEmpty?: boolean; detailFor?: (before: string, after: string) => string | undefined } = {}
@@ -226,8 +130,7 @@ export function writeManagedFile(
     return { path: op.path, action: "noop", detail: "already up to date" };
   }
 
-  // Re-check immediately before writing: if the file changed underneath us since the read above,
-  // re-read and recompute once against the fresh content before writing.
+  // Re-check immediately before writing: if the file changed underneath us since the read above, re-read and recompute once against the fresh content before writing.
   const recheck = existsSync(op.path) ? readFileSync(op.path, "utf8") : undefined;
   if (recheck !== before) {
     before = recheck;
@@ -238,24 +141,12 @@ export function writeManagedFile(
   }
 
   if (deleteIfEmpty && before !== undefined && isEmptyManagedContent(after)) {
-    // Emptiness alone cannot tell "mem created this file" from "the user's file was already empty
-    // (or `{}`) before mem ever touched it" -- both look identical once mem's own block is stripped
-    // back out. The `.bak` snapshot `backupIfNeeded` takes on the first write it sees existing
-    // content (see `preInstallHooks` for the same distinction, scoped to hooks) is the record of
-    // which case this is -- with one wrinkle on a shared file (`AGENTS.md`): a *second* tool's
-    // install can be the write that finds "existing content" and takes the `.bak`, but that content
-    // is the *first* tool's own marker block, not real pre-existing data. `looksMemAuthored` reads
-    // that case as equivalent to no `.bak` at all. Only a `.bak` holding genuine outside content
-    // blocks the delete and falls through to the ordinary write path below, keeping its (now
-    // emptied) content.
+    // Emptiness alone cannot tell "mem created this file" from "the user's file was already empty (or `{}`) before mem ever touched it" -- both look identical once mem's own block is stripped back out. The `.bak` snapshot `backupIfNeeded` takes on the first write it sees existing content (see `preInstallHooks` for the same distinction, scoped to hooks) is the record of which case this is -- with one wrinkle on a shared file (`AGENTS.md`): a *second* tool's install can be the write that finds "existing content" and takes the `.bak`, but that content is the *first* tool's own marker block, not real pre-existing data. `looksMemAuthored` reads that case as equivalent to no `.bak` at all. Only a `.bak` holding genuine outside content blocks the delete and falls through to the ordinary write path below, keeping its (now emptied) content.
     const bakPath = `${op.path}.token-goat-mem.bak`;
     const bakContent = existsSync(bakPath) ? readFileSync(bakPath, "utf8") : undefined;
     if (bakContent === undefined || looksMemAuthored(bakContent)) {
       rmSync(op.path, { force: true });
-      // The file is gone and held nothing but mem's own content, so the snapshot that distinguished
-      // "mem created this" from "the user's own empty file" has nothing left to disambiguate.
-      // Leaving it behind is what let a `.bak` from one install/uninstall cycle survive to mislead
-      // the next one after the user deleted the file by hand and reinstalled from scratch.
+      // The file is gone and held nothing but mem's own content, so the snapshot that distinguished "mem created this" from "the user's own empty file" has nothing left to disambiguate. Leaving it behind is what let a `.bak` from one install/uninstall cycle survive to mislead the next one after the user deleted the file by hand and reinstalled from scratch.
       if (!backup) {
         rmSync(bakPath, { force: true });
       }
@@ -271,9 +162,7 @@ export function writeManagedFile(
   const preservedMode = existingMode(op.path);
   mkdirSync(dirname(op.path), { recursive: true });
   const tmpPath = `${op.path}.token-goat-mem.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  // The temp file is an implementation detail of the atomic write, so it must not survive a failure
-  // and litter the user's project (or their `~/.claude`) with a file no later run cleans up. On the
-  // success path the rename has already consumed it and the unlink is an expected no-op.
+  // The temp file is an implementation detail of the atomic write, so it must not survive a failure and litter the user's project (or their `~/.claude`) with a file no later run cleans up. On the success path the rename has already consumed it and the unlink is an expected no-op.
   try {
     writeFileSync(tmpPath, after, "utf8");
     if (preservedMode !== null) {
@@ -287,11 +176,7 @@ export function writeManagedFile(
       // Best-effort cleanup only: never mask the original failure with a cleanup failure.
     }
   }
-  // Uninstall that leaves the file holding no mem markers has fully restored it to its pre-mem
-  // state -- the file itself is now the authoritative record of that state, so a `.bak` snapshot
-  // taken during some earlier install/uninstall era is no longer needed to disambiguate anything,
-  // and keeping it around is what let it outlive the content it snapshotted (see the `deleteIfEmpty`
-  // branch above for the file-removed half of the same fix).
+  // Uninstall that leaves the file holding no mem markers has fully restored it to its pre-mem state -- the file itself is now the authoritative record of that state, so a `.bak` snapshot taken during some earlier install/uninstall era is no longer needed to disambiguate anything, and keeping it around is what let it outlive the content it snapshotted (see the `deleteIfEmpty` branch above for the file-removed half of the same fix).
   if (!backup && !looksMemAuthored(after)) {
     rmSync(`${op.path}.token-goat-mem.bak`, { force: true });
   }
@@ -309,31 +194,13 @@ interface ManagedFile {
   readonly path: string;
   readonly install: FileTransform;
   readonly uninstall: FileTransform;
-  /**
-   * Optional override for describe()'s per-entry `detail` string, consulted with the same `current`
-   * content (plus the already-computed install/uninstall actions) used to build the generic
-   * "install would create/update this file" / "already installed; uninstall would strip mem's
-   * content" wording. Returns `undefined` to fall back to that generic wording. Used by the shared
-   * AGENTS.md block (see `sharedMarkdownFile`) to distinguish "join existing shared block" from
-   * "create new block", and "leave shared block in place, drop <tool> from tools=" from "remove
-   * shared block entirely".
-   */
+  /** Optional override for describe()'s per-entry `detail` string, consulted with the same `current` content (plus the already-computed install/uninstall actions) used to build the generic "install would create/update this file" / "already installed; uninstall would strip mem's content" wording. Returns `undefined` to fall back to that generic wording. Used by the shared AGENTS.md block (see `sharedMarkdownFile`) to distinguish "join existing shared block" from "create new block", and "leave shared block in place, drop <tool> from tools=" from "remove shared block entirely". */
   readonly describeDetail?: (current: string | undefined, installAction: WiringFileAction, uninstallAction: WiringFileAction) => string | undefined;
-  /**
-   * Optional override for install()'s reported `detail` when the file already existed, consulted
-   * with the pre- and post-install content. Returns `undefined` to fall back to the generic
-   * "updated existing file" wording. Used by Claude Code's settings.json to call out an unstamped
-   * hook adopted from an older mem install, rather than reporting it as an ordinary update.
-   */
+  /** Optional override for install()'s reported `detail` when the file already existed, consulted with the pre- and post-install content. Returns `undefined` to fall back to the generic "updated existing file" wording. Used by Claude Code's settings.json to call out an unstamped hook adopted from an older mem install, rather than reporting it as an ordinary update. */
   readonly installDetail?: (before: string, after: string) => string | undefined;
 }
 
-/**
- * Computes every file's next content up front -- discarding the result -- before any file is
- * written, so a `WiringConflictError` thrown by a later file's transform is raised before an
- * earlier file has been written to disk. Mirrors the read-then-transform shape `runDescribe` already
- * uses to compute a dry-run plan without writing anything.
- */
+/** Computes every file's next content up front -- discarding the result -- before any file is written, so a `WiringConflictError` thrown by a later file's transform is raised before an earlier file has been written to disk. Mirrors the read-then-transform shape `runDescribe` already uses to compute a dry-run plan without writing anything. */
 function validateAll(files: readonly ManagedFile[], transformOf: (file: ManagedFile) => FileTransform): void {
   for (const file of files) {
     const current = existsSync(file.path) ? readFileSync(file.path, "utf8") : undefined;
@@ -417,48 +284,17 @@ function markerEnd(tool: string): string {
   return `<!-- token-goat-mem:${tool}:end -->`;
 }
 
-/**
- * The line ending `content` already uses, which is the one mem writes back into it.
- *
- * Every string this module generates is LF, but the files it edits belong to the user and on Windows
- * are routinely CRLF -- that is the editor default, not an exotic case. Appending LF text to a CRLF
- * file leaves it with mixed endings, and the blank-line separator `appendBlock` inserts then fails to
- * match on the way out, so `uninstall` leaves a growing gap behind instead of restoring the file
- * byte-for-byte the way it advertises. Detecting once and emitting in the file's own ending removes
- * both failures at the source.
- *
- * A file with no CRLF anywhere -- including a blank or absent one -- gets LF.
- */
+/** The line ending `content` already uses, which is the one mem writes back into it. Every string this module generates is LF, but the files it edits belong to the user and on Windows are routinely CRLF -- that is the editor default, not an exotic case. Appending LF text to a CRLF file leaves it with mixed endings, and the blank-line separator `appendBlock` inserts then fails to match on the way out, so `uninstall` leaves a growing gap behind instead of restoring the file byte-for-byte the way it advertises. Detecting once and emitting in the file's own ending removes both failures at the source. A file with no CRLF anywhere -- including a blank or absent one -- gets LF. */
 function detectEol(content: string | undefined): "\r\n" | "\n" {
   return content !== undefined && content.includes("\r\n") ? "\r\n" : "\n";
 }
 
-/**
- * Rewrites every line ending in generated text to `eol`.
- *
- * Safe on `JSON.stringify` output: a literal newline there is always formatting, because a newline
- * inside a string value is emitted escaped and so is never matched here. The lone carriage return in
- * the VS Code `sendSequence` task argument is escaped for the same reason and survives untouched.
- */
+/** Rewrites every line ending in generated text to `eol`. Safe on `JSON.stringify` output: a literal newline there is always formatting, because a newline inside a string value is emitted escaped and so is never matched here. The lone carriage return in the VS Code `sendSequence` task argument is escaped for the same reason and survives untouched. */
 function withEol(text: string, eol: "\r\n" | "\n"): string {
   return eol === "\n" ? text.replace(/\r\n/gu, "\n") : text.replace(/\r?\n/gu, "\r\n");
 }
 
-/**
- * Appends `block` to `content` in whichever line ending `content` already uses, adding exactly one
- * newline between the two. Writes just the block when `content` is empty.
- *
- * The single newline is what makes the append invertible. A file that already ends in a newline gets
- * the blank line you would expect; one that does not gets the block on the very next line instead,
- * and `stripBlockSeparators` restores either by removing exactly one newline. Padding an
- * unterminated file up to a blank line reads better but destroys information: the result `<text>\n\n`
- * is then produced by both an original `<text>` and an original `<text>\n`, and uninstall has to
- * guess. It used to guess `<text>\n`, so a file with no trailing newline silently gained one on the
- * first install/uninstall cycle.
- *
- * Emptiness is tested by length, not by `trim()`: a whitespace-only file is the user's bytes, not an
- * absent file, and treating the two alike dropped its contents on install.
- */
+/** Appends `block` to `content` in whichever line ending `content` already uses, adding exactly one newline between the two. Writes just the block when `content` is empty. The single newline is what makes the append invertible. A file that already ends in a newline gets the blank line you would expect; one that does not gets the block on the very next line instead, and `stripBlockSeparators` restores either by removing exactly one newline. Padding an unterminated file up to a blank line reads better but destroys information: the result `<text>\n\n` is then produced by both an original `<text>` and an original `<text>\n`, and uninstall has to guess. It used to guess `<text>\n`, so a file with no trailing newline silently gained one on the first install/uninstall cycle. Emptiness is tested by length, not by `trim()`: a whitespace-only file is the user's bytes, not an absent file, and treating the two alike dropped its contents on install. */
 function appendBlock(content: string, block: string): string {
   const eol = detectEol(content);
   const eolBlock = withEol(block, eol);
@@ -472,10 +308,7 @@ function appendBlock(content: string, block: string): string {
 function stripBlockSeparators(content: string, startIdx: number, blockEnd: number): string {
   const before = content.slice(0, startIdx);
   const after = content.slice(blockEnd);
-  // Removes exactly the one newline `appendBlock` inserted, in whichever ending the file uses --
-  // the inverse of that function, and the reason it inserts one newline rather than padding to a
-  // blank line. Matched as a pattern rather than as a literal, since a CRLF file's separator is
-  // "\r\n" and a literal "\n" test would leave the carriage return behind.
+  // Removes exactly the one newline `appendBlock` inserted, in whichever ending the file uses -- the inverse of that function, and the reason it inserts one newline rather than padding to a blank line. Matched as a pattern rather than as a literal, since a CRLF file's separator is "\r\n" and a literal "\n" test would leave the carriage return behind.
   const beforeStripped = before.replace(/\r?\n$/u, "");
   const afterStripped = after.replace(/^\r?\n/u, "");
   return `${beforeStripped}${afterStripped}`;
@@ -490,18 +323,7 @@ function allOccurrences(content: string, marker: string): number[] {
   return out;
 }
 
-/**
- * The first `start` occurrence that resolves to a complete block -- an `end` marker after it with no
- * other `start` in between -- or `undefined` if none does.
- *
- * A bare `indexOf(start)` / `indexOf(end)` pair is not equivalent, and the difference destroys data.
- * A hand-edit, a crashed write, or a merge conflict can leave an orphaned start marker with no end
- * of its own; pairing that orphan with a *later* block's end marker makes uninstall delete every
- * byte between them -- the user's own content along with mem's block. Scanning past a start that
- * does not resolve also stops installs from appending a duplicate block whenever a stray end marker
- * happens to sit earlier in the file. `findSharedBlock` has always reasoned this way; this is the
- * same rule for the per-tool markers.
- */
+/** The first `start` occurrence that resolves to a complete block -- an `end` marker after it with no other `start` in between -- or `undefined` if none does. A bare `indexOf(start)` / `indexOf(end)` pair is not equivalent, and the difference destroys data. A hand-edit, a crashed write, or a merge conflict can leave an orphaned start marker with no end of its own; pairing that orphan with a *later* block's end marker makes uninstall delete every byte between them -- the user's own content along with mem's block. Scanning past a start that does not resolve also stops installs from appending a duplicate block whenever a stray end marker happens to sit earlier in the file. `findSharedBlock` has always reasoned this way; this is the same rule for the per-tool markers. */
 function resolveMarkedBlock(content: string, start: string, end: string): { startIdx: number; endIdx: number } | undefined {
   const starts = allOccurrences(content, start);
   for (let i = 0; i < starts.length; i++) {
@@ -536,16 +358,7 @@ function upsertMarkedBlock(content: string, tool: string, body: string): string 
   return appendBlock(content, block);
 }
 
-/**
- * Strips every resolvable tool-namespaced marked block plus the one separator newline
- * `upsertMarkedBlock` adds per block, leaving the rest of the file untouched. No-op (returns
- * `content` unchanged) if no marker pair is present.
- *
- * Loops rather than stopping after the first pair: a committed CLAUDE.md/AGENTS.md can end up with
- * two complete back-to-back blocks for the same tool -- a realistic git-merge outcome when two
- * branches each ran `mem init` -- and stopping after one left a full second block, body and all,
- * behind while uninstall still reported success.
- */
+/** Strips every resolvable tool-namespaced marked block plus the one separator newline `upsertMarkedBlock` adds per block, leaving the rest of the file untouched. No-op (returns `content` unchanged) if no marker pair is present. Loops rather than stopping after the first pair: a committed CLAUDE.md/AGENTS.md can end up with two complete back-to-back blocks for the same tool -- a realistic git-merge outcome when two branches each ran `mem init` -- and stopping after one left a full second block, body and all, behind while uninstall still reported success. */
 function stripMarkedBlock(content: string, tool: string): string {
   const start = markerStart(tool);
   const end = markerEnd(tool);
@@ -585,19 +398,7 @@ interface SharedBlockLocation {
   readonly tools: readonly string[];
 }
 
-/**
- * Locates the shared marker block (if any) and parses its `tools=` list. `startLineEndIdx` is the
- * index of the newline terminating the start-marker line, used to rewrite just that line without
- * touching the body.
- *
- * Scans *every* `start` marker occurrence (not just the first) and returns the first one that
- * resolves to a complete block (a matching `end` marker somewhere after it). This matters because a
- * hand-edit, crashed write, or merge conflict can leave an orphaned/malformed start marker with no
- * end marker earlier in the file; stopping at the first occurrence (as a non-global regex would)
- * would make every later install/uninstall permanently blind to a perfectly valid block further
- * down -- installs would keep appending duplicate blocks, and uninstall could never find the real
- * one to strip.
- */
+/** Locates the shared marker block (if any) and parses its `tools=` list. `startLineEndIdx` is the index of the newline terminating the start-marker line, used to rewrite just that line without touching the body. Scans *every* `start` marker occurrence (not just the first) and returns the first one that resolves to a complete block (a matching `end` marker somewhere after it). This matters because a hand-edit, crashed write, or merge conflict can leave an orphaned/malformed start marker with no end marker earlier in the file; stopping at the first occurrence (as a non-global regex would) would make every later install/uninstall permanently blind to a perfectly valid block further down -- installs would keep appending duplicate blocks, and uninstall could never find the real one to strip. */
 function findSharedBlock(content: string): SharedBlockLocation | undefined {
   SHARED_BLOCK_START_RE.lastIndex = 0;
   const starts: Array<{ index: number; tools: readonly string[] }> = [];
@@ -612,19 +413,14 @@ function findSharedBlock(content: string): SharedBlockLocation | undefined {
       continue;
     }
     const startIdx = start.index;
-    // Index of where the start-marker line's terminator begins, not of its newline: on CRLF the
-    // carriage return sits one character earlier, and the tools= rewrite slices the rest of the file
-    // back on from here -- slicing from the newline would drop that CR and convert the marker line
-    // alone to LF.
+    // Index of where the start-marker line's terminator begins, not of its newline: on CRLF the carriage return sits one character earlier, and the tools= rewrite slices the rest of the file back on from here -- slicing from the newline would drop that CR and convert the marker line alone to LF.
     const newlineIdx = content.indexOf("\n", startIdx);
     const startLineEndIdx = newlineIdx > 0 && content[newlineIdx - 1] === "\r" ? newlineIdx - 1 : newlineIdx;
     const endIdx = startLineEndIdx === -1 ? -1 : content.indexOf(SHARED_BLOCK_END, startLineEndIdx);
     if (startLineEndIdx === -1 || endIdx === -1) {
       continue;
     }
-    // A block can't legitimately contain another block's start marker: if one does, the `end` found
-    // above doesn't actually belong to this `start` (it belongs to the later block), so this `start`
-    // is orphaned/malformed. Skip it and let the next candidate resolve against its own end marker.
+    // A block can't legitimately contain another block's start marker: if one does, the `end` found above doesn't actually belong to this `start` (it belongs to the later block), so this `start` is orphaned/malformed. Skip it and let the next candidate resolve against its own end marker.
     const nextStart = starts[i + 1];
     if (nextStart !== undefined && nextStart.index < endIdx) {
       continue;
@@ -634,21 +430,11 @@ function findSharedBlock(content: string): SharedBlockLocation | undefined {
   return undefined;
 }
 
-/**
- * Inserts/joins/upgrades the single reference-counted shared block used by tools that write the
- * same "## Memory" prose into the same file (currently `codex`, `copilot-cli`, and `copilot-vscode`,
- * all targeting `AGENTS.md`). If no block exists yet, creates one with `tools=<thisTool>` and `body`. If a block
- * exists and `thisTool` is already listed, no-op. If a block exists and `thisTool` isn't listed,
- * adds it to the (sorted) `tools=` list by rewriting only the marker line -- the body, already
- * shared and correct, is left untouched.
- */
+/** Inserts/joins/upgrades the single reference-counted shared block used by tools that write the same "## Memory" prose into the same file (currently `codex`, `copilot-cli`, and `copilot-vscode`, all targeting `AGENTS.md`). If no block exists yet, creates one with `tools=<thisTool>` and `body`. If a block exists and `thisTool` is already listed, no-op. If a block exists and `thisTool` isn't listed, adds it to the (sorted) `tools=` list by rewriting only the marker line -- the body, already shared and correct, is left untouched. */
 function upsertSharedMarkedBlock(content: string, tool: string, body: string): string {
   const found = findSharedBlock(content);
   if (found !== undefined) {
-    // Rebuilt whole rather than rewriting just the `tools=` line. Returning early once the tool was
-    // already listed meant a body written by an older version of mem was never refreshed, so a
-    // reinstall upgraded the per-tool blocks and silently left this one stale. The body is generated
-    // from one constant shared by every tool that writes here, so regenerating it is the upgrade.
+    // Rebuilt whole rather than rewriting just the `tools=` line. Returning early once the tool was already listed meant a body written by an older version of mem was never refreshed, so a reinstall upgraded the per-tool blocks and silently left this one stale. The body is generated from one constant shared by every tool that writes here, so regenerating it is the upgrade.
     const tools = found.tools.includes(tool) ? found.tools : [...found.tools, tool];
     const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
     const block = withEol(`${sharedMarkerStart(tools)}\n${body.trim()}\n${SHARED_BLOCK_END}`, detectEol(content));
@@ -662,12 +448,7 @@ function upsertSharedMarkedBlock(content: string, tool: string, body: string): s
   return appendBlock(content, block);
 }
 
-/**
- * Removes `thisTool` from the shared block's `tools=` list. If other tools remain listed, rewrites
- * only the marker line and leaves the block body in place. If `thisTool` was the only tool listed,
- * removes the whole block plus the one separator newline install adds (same rule as
- * `stripMarkedBlock`). No-op if the block doesn't exist or doesn't list `thisTool`.
- */
+/** Removes `thisTool` from the shared block's `tools=` list. If other tools remain listed, rewrites only the marker line and leaves the block body in place. If `thisTool` was the only tool listed, removes the whole block plus the one separator newline install adds (same rule as `stripMarkedBlock`). No-op if the block doesn't exist or doesn't list `thisTool`. */
 function stripSharedMarkedBlock(content: string, tool: string): string {
   const found = findSharedBlock(content);
   if (found === undefined || !found.tools.includes(tool)) {
@@ -691,8 +472,7 @@ function describeSharedBlockDetail(tool: string, current: string | undefined, in
     return undefined;
   }
   if (installAction !== "noop") {
-    // A listed tool can still have work to do now that install refreshes a stale body, so the two
-    // reasons a shared-block install is non-noop have to read differently.
+    // A listed tool can still have work to do now that install refreshes a stale body, so the two reasons a shared-block install is non-noop have to read differently.
     return found.tools.includes(tool)
       ? `install would refresh the shared block body (${tool} already in tools=)`
       : `install would join existing shared block (adds ${tool} to tools=)`;
@@ -746,11 +526,7 @@ function jsoncNodeAt(content: string, path: JSONPath): Node | undefined {
 /** Last-resort formatting for `surgicalJsoncEdit`'s fallback path; never used on the surgical path. */
 const JSONC_FORMAT: ModificationOptions = { formattingOptions: { insertSpaces: true, tabSize: 2, eol: "\n" } };
 
-/**
- * The indentation unit the document already uses, so mem's inserts match the file instead of
- * restyling it. Heuristic: a tab-indented line wins outright, otherwise the narrowest positive space
- * indent in the file. Guessing wrong only affects the block mem itself writes.
- */
+/** The indentation unit the document already uses, so mem's inserts match the file instead of restyling it. Heuristic: a tab-indented line wins outright, otherwise the narrowest positive space indent in the file. Guessing wrong only affects the block mem itself writes. */
 function detectIndentUnit(content: string): string {
   if (/^\t+\S/mu.test(content)) {
     return "\t";
@@ -779,20 +555,7 @@ function renderJsonAt(value: unknown, unit: string, base: string, eol: string): 
     .join(eol);
 }
 
-/**
- * `modify` + `applyEdits` that does not reformat text mem did not write.
- *
- * Handing `modify` a `formattingOptions` makes it rewrite the whole containing array or object, so a
- * hand-written `{ "key": "ctrl+q", "command": "noop" }` came back exploded over five lines and a
- * 4-space-indented settings.json came back 2-space -- mem restyling a file it does not own. Passing
- * `{}` instead produces a genuinely surgical (usually zero-length) edit that touches nothing else,
- * at the cost of a minified payload; this re-renders only that payload at the document's own
- * indentation and end-of-line.
- *
- * Falls back to the old whole-container reformat when the edit is not a plain insert of `value` --
- * chiefly when `modify` had to create intermediate objects, where the payload is a nested wrapper
- * rather than `value` itself. Correct output, just less careful about the neighbours.
- */
+/** `modify` + `applyEdits` that does not reformat text mem did not write. Handing `modify` a `formattingOptions` makes it rewrite the whole containing array or object, so a hand-written `{ "key": "ctrl+q", "command": "noop" }` came back exploded over five lines and a 4-space-indented settings.json came back 2-space -- mem restyling a file it does not own. Passing `{}` instead produces a genuinely surgical (usually zero-length) edit that touches nothing else, at the cost of a minified payload; this re-renders only that payload at the document's own indentation and end-of-line. Falls back to the old whole-container reformat when the edit is not a plain insert of `value` -- chiefly when `modify` had to create intermediate objects, where the payload is a nested wrapper rather than `value` itself. Correct output, just less careful about the neighbours. */
 function surgicalJsoncEdit(content: string, path: JSONPath, value: unknown): string {
   const edits = modify(content, path, value, {});
   const edit = edits[0];
@@ -832,13 +595,7 @@ function surgicalJsoncEdit(content: string, path: JSONPath, value: unknown): str
   return `${before}${eol}${base}${key}${spacer}${renderJsonAt(value, unit, base, eol)}${tail}${after}`;
 }
 
-/**
- * Deletes element `index` of the array at `arrayPath`, leaving every other byte alone.
- *
- * jsonc-parser's own deletion swallows the line break before the closing bracket when the last
- * element goes (`[a,\n  b\n]` becomes `[a ]`), which breaks the install/uninstall round trip this
- * module promises. Returns `content` unchanged when the path or index does not resolve.
- */
+/** Deletes element `index` of the array at `arrayPath`, leaving every other byte alone. jsonc-parser's own deletion swallows the line break before the closing bracket when the last element goes (`[a,\n  b\n]` becomes `[a ]`), which breaks the install/uninstall round trip this module promises. Returns `content` unchanged when the path or index does not resolve. */
 function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, index: number): string {
   const array = jsoncNodeAt(content, arrayPath);
   const children = array?.children;
@@ -851,8 +608,7 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
   if (children.length === 1) {
     const inner = array.offset + 1;
     const close = array.offset + array.length - 1;
-    // Collapse to `[]` only when whitespace is all that surrounds the element. A comment in there is
-    // the user's, and dropping it is exactly the collateral this whole path exists to avoid.
+    // Collapse to `[]` only when whitespace is all that surrounds the element. A comment in there is the user's, and dropping it is exactly the collateral this whole path exists to avoid.
     if (`${content.slice(inner, start)}${content.slice(end, close)}`.trim() === "") {
       start = inner;
       end = close;
@@ -873,65 +629,21 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
 
 // ─────────────────────────────────────────────────────────────────────────── Claude Code: settings.json hooks ───────────────────────────────────────────────────────────────────────────
 
-// These hooks land in `<root>/.claude/settings.json`, which is typically committed and shared with
-// collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call so a
-// machine with no mem installed stays silent (the historically fail-open case the README documents
-// for this seam: a missing mem must never block a session). But "mem is on PATH and exits nonzero"
-// is a different case from "mem is absent", and collapsing both into the same silent branch (the
-// old `guard && call || true` shape) hid a real incident: a stale PATH binary rejecting flags a
-// newer `mem init` had written produced 219 silently-swallowed hook failures over five days with no
-// visible signal anywhere. `if guard; then call || fallback; fi` keeps "absent" silent (the `if`
-// condition is false, nothing runs) while giving "present but failed" a fallback that actually
-// prints something the host will show -- `$?` inside the fallback is the failed call's own exit
-// code, captured before the fallback runs.
-//
-// Both read the hook's JSON envelope from stdin (`--hook-stdin`) rather than depending on `jq` or
-// any other tool being on PATH: `mem` parses it itself. `session_id` is a common field on every
-// Claude Code hook event, so the SessionStart recall is logged under the same session the later
-// UserPromptSubmit deltas subtract from -- otherwise the first prompt would re-send everything the
-// session opener already surfaced. A SessionStart envelope carries no prompt, so that recall stays
-// query-less (recency order) exactly as before; UserPromptSubmit's `prompt` field becomes the query.
-//
-// The fallback's output is itself a (bare, fact-less) `TGMEM/2` response with a `footer` line, so a
-// host already rendering that wire format shows the failure instead of nothing.
+// These hooks land in `<root>/.claude/settings.json`, which is typically committed and shared with collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call so a machine with no mem installed stays silent (the historically fail-open case the README documents for this seam: a missing mem must never block a session). But "mem is on PATH and exits nonzero" is a different case from "mem is absent", and collapsing both into the same silent branch (the old `guard && call || true` shape) hid a real incident: a stale PATH binary rejecting flags a newer `mem init` had written produced 219 silently-swallowed hook failures over five days with no visible signal anywhere. `if guard; then call || fallback; fi` keeps "absent" silent (the `if` condition is false, nothing runs) while giving "present but failed" a fallback that actually prints something the host will show -- `$?` inside the fallback is the failed call's own exit code, captured before the fallback runs. Both read the hook's JSON envelope from stdin (`--hook-stdin`) rather than depending on `jq` or any other tool being on PATH: `mem` parses it itself. `session_id` is a common field on every Claude Code hook event, so the SessionStart recall is logged under the same session the later UserPromptSubmit deltas subtract from -- otherwise the first prompt would re-send everything the session opener already surfaced. A SessionStart envelope carries no prompt, so that recall stays query-less (recency order) exactly as before; UserPromptSubmit's `prompt` field becomes the query. The fallback's output is itself a (bare, fact-less) `TGMEM/2` response with a `footer` line, so a host already rendering that wire format shows the failure instead of nothing.
 const CLAUDE_SESSION_START_COMMAND =
   'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi';
 const CLAUDE_USER_PROMPT_SUBMIT_COMMAND =
   'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi';
 
-// `Stop` fires after the user has actually said something -- the two recall events above run
-// before or instead of that -- and carries `transcript_path`, so there is a transcript to read.
-// Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block.
-// `mem reflect` files the transcript's durable statements as pending (the same scan `scan-session`
-// runs) and, only when that run filed something new, blocks the stop with a worklist so the agent
-// that said them resolves each one -- updating an existing fact before creating another. Otherwise
-// it prints nothing. A failure prints a plain one-line notice, not `TGMEM/2`: Stop/PreCompact are
-// not on the recall wire and nothing here parses their stdout as that format.
+// `Stop` fires after the user has actually said something -- the two recall events above run before or instead of that -- and carries `transcript_path`, so there is a transcript to read. Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block. `mem reflect` files the transcript's durable statements as pending (the same scan `scan-session` runs) and, only when that run filed something new, blocks the stop with a worklist so the agent that said them resolves each one -- updating an existing fact before creating another. Otherwise it prints nothing. A failure prints a plain one-line notice, not `TGMEM/2`: Stop/PreCompact are not on the recall wire and nothing here parses their stdout as that format.
 const CLAUDE_STOP_COMMAND =
   'if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root "$CLAUDE_PROJECT_DIR" || echo "mem reflect failed (exit $?); run mem doctor"; fi';
 
-// `PreCompact` is the same filing under a different trigger, and it is not redundant with `Stop`:
-// `Stop` fires when a turn ends, so a session that runs long enough to be compacted mid-task has
-// had everything before the compaction boundary summarized away -- and if that session is later
-// killed, closed, or interrupted rather than ending a turn cleanly, `Stop` never fires at all and
-// the whole transcript is captured by nothing. `PreCompact` is the one event guaranteed to fire
-// while the pre-compaction transcript still exists on disk, and it carries `transcript_path` for
-// the same reason `Stop` does. It files only (`--quiet`): a compaction has no agent turn to answer
-// a worklist. What it files is a sighting by the time `Stop` scans the same turns, so nothing is
-// filed twice -- and `Stop` does not prompt for it either, since the agent past the compaction
-// boundary no longer holds the context to judge it; it waits in `mem reflect` / `mem review`.
+// `PreCompact` is the same filing under a different trigger, and it is not redundant with `Stop`: `Stop` fires when a turn ends, so a session that runs long enough to be compacted mid-task has had everything before the compaction boundary summarized away -- and if that session is later killed, closed, or interrupted rather than ending a turn cleanly, `Stop` never fires at all and the whole transcript is captured by nothing. `PreCompact` is the one event guaranteed to fire while the pre-compaction transcript still exists on disk, and it carries `transcript_path` for the same reason `Stop` does. It files only (`--quiet`): a compaction has no agent turn to answer a worklist. What it files is a sighting by the time `Stop` scans the same turns, so nothing is filed twice -- and `Stop` does not prompt for it either, since the agent past the compaction boundary no longer holds the context to judge it; it waits in `mem reflect` / `mem review`.
 const CLAUDE_PRE_COMPACT_COMMAND =
   'if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || echo "mem scan-session failed (exit $?); run mem doctor"; fi';
 
-// Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand
-// and `--root` vary across events, and the wrapper shape itself has varied across mem versions --
-// a bare, unguarded `mem ... --root "$CLAUDE_PROJECT_DIR"` first, then `command -v mem ... && mem
-// ... || true`, then `if command -v mem ...; then mem ... || fallback; fi`. Exact alternatives, not
-// one loosened pattern, so a hybrid string that happens to satisfy pieces of several without being
-// any of them is not accidentally recognised. Each captures the subcommand, then the text between it
-// and `--root` (the flags). Matching the wrapper -- not the full literal string -- is what lets
-// `looksLikeMemHookCommand` recognise an older *or* newer mem install's hook as its own, and
-// `parseHookCommandSpec` read the flags of any of them.
+// Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand and `--root` vary across events, and the wrapper shape itself has varied across mem versions -- a bare, unguarded `mem ... --root "$CLAUDE_PROJECT_DIR"` first, then `command -v mem ... && mem ... || true`, then `if command -v mem ...; then mem ... || fallback; fi`. Exact alternatives, not one loosened pattern, so a hybrid string that happens to satisfy pieces of several without being any of them is not accidentally recognised. Each captures the subcommand, then the text between it and `--root` (the flags). Matching the wrapper -- not the full literal string -- is what lets `looksLikeMemHookCommand` recognise an older *or* newer mem install's hook as its own, and `parseHookCommandSpec` read the flags of any of them.
 const MEM_HOOK_INVOCATION_SHAPES: readonly RegExp[] = [
   /^mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR"$/u,
   /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u,
@@ -948,14 +660,7 @@ function matchMemHookInvocation(command: string): RegExpExecArray | null {
   return null;
 }
 
-/**
- * Whether `command` is mem's own invocation shape for `event` -- same wrapper, and either the
- * subcommand `CLAUDE_HOOK_EVENTS` currently writes for that event or one an older mem wrote there
- * (`legacySubcommands`), allowing for flags that have been added or dropped since. Used to recognise
- * an unstamped hook left behind by a pre-STAMP_KEY (or otherwise older) mem install as mem's own,
- * rather than a stranger's hand-written entry that merely mentions `mem`; without the legacy list an
- * old `scan-session` Stop hook would be left beside the new `reflect` one and both would run.
- */
+/** Whether `command` is mem's own invocation shape for `event` -- same wrapper, and either the subcommand `CLAUDE_HOOK_EVENTS` currently writes for that event or one an older mem wrote there (`legacySubcommands`), allowing for flags that have been added or dropped since. Used to recognise an unstamped hook left behind by a pre-STAMP_KEY (or otherwise older) mem install as mem's own, rather than a stranger's hand-written entry that merely mentions `mem`; without the legacy list an old `scan-session` Stop hook would be left beside the new `reflect` one and both would run. */
 function looksLikeMemHookCommand(command: string, event: string): boolean {
   const entry = CLAUDE_HOOK_EVENTS.find((candidate) => candidate.event === event);
   const canonicalMatch = entry === undefined ? null : matchMemHookInvocation(entry.command);
@@ -967,16 +672,7 @@ function looksLikeMemHookCommand(command: string, event: string): boolean {
   return subcommand === canonicalMatch[1] || (entry.legacySubcommands?.includes(subcommand) ?? false);
 }
 
-/**
- * The subcommand and flags a mem-authored hook command actually invokes -- `null` if `command` is
- * none of the wrapper shapes `matchMemHookInvocation` knows, so recognising a hook as mem's and
- * reading its flags can never disagree. Each shape anchors `mem` after its own guard, so the earlier
- * `command -v mem` in the same string is never mistaken for the invocation. Used to check a command (whether the one
- * `CLAUDE_HOOK_EVENTS` is about to write, or one already sitting in a settings.json this build did
- * not write) against what a candidate `mem` binary's own `--help` output actually supports --
- * derived from the command text itself rather than a separately maintained flag list, so it never
- * drifts from what mem init/doctor really checks.
- */
+/** The subcommand and flags a mem-authored hook command actually invokes -- `null` if `command` is none of the wrapper shapes `matchMemHookInvocation` knows, so recognising a hook as mem's and reading its flags can never disagree. Each shape anchors `mem` after its own guard, so the earlier `command -v mem` in the same string is never mistaken for the invocation. Used to check a command (whether the one `CLAUDE_HOOK_EVENTS` is about to write, or one already sitting in a settings.json this build did not write) against what a candidate `mem` binary's own `--help` output actually supports -- derived from the command text itself rather than a separately maintained flag list, so it never drifts from what mem init/doctor really checks. */
 export function parseHookCommandSpec(command: string): { readonly subcommand: string; readonly flags: readonly string[] } | null {
   const match = matchMemHookInvocation(command);
   if (match === null) {
@@ -988,11 +684,7 @@ export function parseHookCommandSpec(command: string): { readonly subcommand: st
   return { subcommand, flags };
 }
 
-/**
- * The hook events mem installs, in the order they are written, each with the one command mem stamps
- * under it and any subcommand an older mem ran there, so an unstamped hook of that older shape is
- * adopted and rewritten rather than left running beside the new one.
- */
+/** The hook events mem installs, in the order they are written, each with the one command mem stamps under it and any subcommand an older mem ran there, so an unstamped hook of that older shape is adopted and rewritten rather than left running beside the new one. */
 export const CLAUDE_HOOK_EVENTS: ReadonlyArray<{
   readonly event: string;
   readonly command: string;
@@ -1004,20 +696,7 @@ export const CLAUDE_HOOK_EVENTS: ReadonlyArray<{
   { event: "PreCompact", command: CLAUDE_PRE_COMPACT_COMMAND },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────── Claude Code: hook-binary capability detection ───────────────────────────────────────────────────────────────────────────
-//
-// A hook command being written (or already sitting) in settings.json says nothing about whether the
-// `mem` binary Claude Code will actually invoke at hook time understands it -- that binary is
-// resolved from PATH at run time, by a shell, completely independently of which mem build produced
-// this process. A newer `mem init` writing `--hook-stdin`/`scan-session` while an older `mem` sits
-// on PATH is exactly the five-day incident this fix responds to: the write succeeded, the file was
-// byte-for-byte correct, and every hook still failed, silently, because nothing checked the *other*
-// binary.
-//
-// Capability is checked by running the candidate binary's own `--help`, not by comparing version
-// numbers: a version-string comparison needs a maintained "hooks need >= x.y.z" constant that goes
-// stale the moment a future release adds another flag, where asking the binary what it actually
-// supports never does.
+// ─────────────────────────────────────────────────────────────────────────── Claude Code: hook-binary capability detection ─────────────────────────────────────────────────────────────────────────── A hook command being written (or already sitting) in settings.json says nothing about whether the `mem` binary Claude Code will actually invoke at hook time understands it -- that binary is resolved from PATH at run time, by a shell, completely independently of which mem build produced this process. A newer `mem init` writing `--hook-stdin`/`scan-session` while an older `mem` sits on PATH is exactly the five-day incident this fix responds to: the write succeeded, the file was byte-for-byte correct, and every hook still failed, silently, because nothing checked the *other* binary. Capability is checked by running the candidate binary's own `--help`, not by comparing version numbers: a version-string comparison needs a maintained "hooks need >= x.y.z" constant that goes stale the moment a future release adds another flag, where asking the binary what it actually supports never does.
 
 /** A `mem` binary resolved from PATH, plus the `--version` string it reports (`null` if `--version` itself failed to run). */
 export interface ResolvedMemBinary {
@@ -1038,12 +717,7 @@ function candidateBinaryNames(name: string, platform: NodeJS.Platform, pathExt: 
   return [...ordered.map((ext) => `${name}${ext}`), name];
 }
 
-/**
- * The absolute path `name` resolves to on PATH, or `null` if no directory in `pathEnv` has a
- * matching file. Pure PATH-directory scan, not a subprocess (`command -v`/`where`), so it works the
- * same on every platform this runs on and stays fully testable via `pathEnv`/`pathExt`/`platform`
- * overrides rather than mutating `process.env` or depending on a shell being present at all.
- */
+/** The absolute path `name` resolves to on PATH, or `null` if no directory in `pathEnv` has a matching file. Pure PATH-directory scan, not a subprocess (`command -v`/`where`), so it works the same on every platform this runs on and stays fully testable via `pathEnv`/`pathExt`/`platform` overrides rather than mutating `process.env` or depending on a shell being present at all. */
 export function resolveBinaryOnPath(
   name: string,
   opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform } = {}
@@ -1088,8 +762,7 @@ export function resolveBinaryOnPath(
             return full;
           }
         } catch {
-          // Permission error or a race with something deleting `full` mid-scan -- keep scanning
-          // the rest of PATH rather than letting one bad entry abort resolution.
+          // Permission error or a race with something deleting `full` mid-scan -- keep scanning the rest of PATH rather than letting one bad entry abort resolution.
         }
       }
     }
@@ -1097,14 +770,7 @@ export function resolveBinaryOnPath(
   return null;
 }
 
-/**
- * Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed
- * out, or exited nonzero. The command is assembled as one shell string (quoting each token) and run
- * with `shell: true` rather than passed as an argv array: Windows cannot exec an npm-installed
- * `.cmd`/`.bat` shim directly (`spawnSync` raises `EINVAL`), and `shell: true` with a separate argv
- * array is a documented footgun (Node's own DEP0190) because the array elements are concatenated
- * into the command line unescaped -- quoting them here, once, in the string form avoids both.
- */
+/** Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed out, or exited nonzero. The command is assembled as one shell string (quoting each token) and run with `shell: true` rather than passed as an argv array: Windows cannot exec an npm-installed `.cmd`/`.bat` shim directly (`spawnSync` raises `EINVAL`), and `shell: true` with a separate argv array is a documented footgun (Node's own DEP0190) because the array elements are concatenated into the command line unescaped -- quoting them here, once, in the string form avoids both. */
 function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: number): string | null {
   const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
   const result = spawnSync(quoted, { encoding: "utf8", timeout: timeoutMs, shell: true });
@@ -1170,11 +836,7 @@ export function checkClaudeHookHealth(
   return { bin, hooks };
 }
 
-/**
- * Human-readable "<subcommand> <missing flags>" (or just "<subcommand>" when the subcommand itself is
- * unsupported), for reporting one incapable hook; a stamped command in no shape mem recognises names
- * its remedy instead of a placeholder subcommand.
- */
+/** Human-readable "<subcommand> <missing flags>" (or just "<subcommand>" when the subcommand itself is unsupported), for reporting one incapable hook; a stamped command in no shape mem recognises names its remedy instead of a placeholder subcommand. */
 export function describeHookGap(command: string, missing: readonly string[]): string {
   const spec = parseHookCommandSpec(command);
   if (spec === null) {
@@ -1204,9 +866,7 @@ interface ClaudeSettings {
 }
 
 function installClaudeSettings(current: string | undefined, path: string): string | undefined {
-  // JSONC, not strict JSON: Claude Code's own settings.json commonly carries `//`/`/* */` comments
-  // and trailing commas, and this file already depends on jsonc-parser to preserve exactly that
-  // formatting -- rejecting the file here defeated the point for the users it matters most to.
+  // JSONC, not strict JSON: Claude Code's own settings.json commonly carries `//`/`/* */` comments and trailing commas, and this file already depends on jsonc-parser to preserve exactly that formatting -- rejecting the file here defeated the point for the users it matters most to.
   const rawParsed: unknown = isBlank(current) ? {} : parseJsoncOrConflict(current as string, path);
   if (!isPlainObject(rawParsed)) {
     throw new WiringConflictError(`${path} does not contain a JSON object at its root; refusing to modify a hand-edited config`);
@@ -1216,14 +876,11 @@ function installClaudeSettings(current: string | undefined, path: string): strin
     throw new WiringConflictError(`hooks in ${path} is not an object; refusing to modify a hand-edited config`);
   }
 
-  // Edit the text, never a reserialize of the parsed object. `JSON.stringify(parsed, null, 2)` threw
-  // away everything the user's file expressed and mem has no opinion about -- indentation width, key
-  // layout, the blank lines between sections -- on every install of a one-line hook.
+  // Edit the text, never a reserialize of the parsed object. `JSON.stringify(parsed, null, 2)` threw away everything the user's file expressed and mem has no opinion about -- indentation width, key layout, the blank lines between sections -- on every install of a one-line hook.
   let text = isBlank(current) ? "{}\n" : (current as string);
   let changed = false;
   for (const { event, command } of CLAUDE_HOOK_EVENTS) {
-    // Re-read after each event's edit so the JSON paths the next one computes address the text as it
-    // now stands (the first event may have created the `hooks` container the second one inserts into).
+    // Re-read after each event's edit so the JSON paths the next one computes address the text as it now stands (the first event may have created the `hooks` container the second one inserts into).
     const settingsNow: unknown = changed ? parseJsonc(text, [], JSONC_PARSE) : parsed;
     const next = installClaudeHookEvent(text, settingsNow as ClaudeSettings, event, command, path);
     if (next !== text) {
@@ -1234,28 +891,14 @@ function installClaudeSettings(current: string | undefined, path: string): strin
   return changed ? text : current;
 }
 
-/**
- * Events for which `installClaudeSettings` adopted a pre-existing unstamped hook rather than
- * inserting a fresh one -- `before` is un-parseable or has no such hook: an empty list. Read against
- * `before` alone (an event already has a stamped hook, so nothing needed adopting) rather than
- * diffing `before`/`after`, since the adopted hook's stamp is otherwise indistinguishable from one
- * `installClaudeHookEvent` inserted from scratch. Surfaced by `claudeCode`'s `installDetail` so an
- * install that quietly absorbs an older install's hook is reported, not silent.
- */
+/** Events for which `installClaudeSettings` adopted a pre-existing unstamped hook rather than inserting a fresh one -- `before` is un-parseable or has no such hook: an empty list. Read against `before` alone (an event already has a stamped hook, so nothing needed adopting) rather than diffing `before`/`after`, since the adopted hook's stamp is otherwise indistinguishable from one `installClaudeHookEvent` inserted from scratch. Surfaced by `claudeCode`'s `installDetail` so an install that quietly absorbs an older install's hook is reported, not silent. */
 export interface InstalledClaudeHook {
   readonly event: string;
   readonly command: string;
   readonly stamped: boolean;
 }
 
-/**
- * Every mem-authored (stamped, or unstamped-but-adoptable) hook command currently sitting in
- * `before`'s `hooks` object, one entry per event that has one. The one place that walks
- * `hooks.<event>[].hooks[]` looking for mem's own shape -- shared by `claudeHookAdoptions` (which
- * events would be *upgraded* by an install) and `mem doctor`'s hook-health report (which commands
- * to check a candidate `mem` binary against), so a second traversal of the same structure never
- * drifts from this one.
- */
+/** Every mem-authored (stamped, or unstamped-but-adoptable) hook command currently sitting in `before`'s `hooks` object, one entry per event that has one. The one place that walks `hooks.<event>[].hooks[]` looking for mem's own shape -- shared by `claudeHookAdoptions` (which events would be *upgraded* by an install) and `mem doctor`'s hook-health report (which commands to check a candidate `mem` binary against), so a second traversal of the same structure never drifts from this one. */
 function installedClaudeHooks(before: string): InstalledClaudeHook[] {
   let parsed: unknown;
   try {
@@ -1304,14 +947,7 @@ function claudeHookAdoptions(before: string): string[] {
     .map((hook) => hook.event);
 }
 
-/**
- * The mem-authored `SessionStart`/`UserPromptSubmit`/`Stop`/`PreCompact` hook commands actually
- * sitting in a project's (or, with `user: true`, the user-level) `.claude/settings.json` right now
- * -- `[]` when the file doesn't exist or has none. What `mem doctor`'s hook-health report checks a
- * resolved `mem` binary against, since the file on disk (not `CLAUDE_HOOK_EVENTS`, which is what
- * this build would *write*) is the ground truth for what a real Claude Code session will actually
- * invoke.
- */
+/** The mem-authored `SessionStart`/`UserPromptSubmit`/`Stop`/`PreCompact` hook commands actually sitting in a project's (or, with `user: true`, the user-level) `.claude/settings.json` right now -- `[]` when the file doesn't exist or has none. What `mem doctor`'s hook-health report checks a resolved `mem` binary against, since the file on disk (not `CLAUDE_HOOK_EVENTS`, which is what this build would *write*) is the ground truth for what a real Claude Code session will actually invoke. */
 export function installedClaudeHookCommands(opts?: WiringOpts): readonly InstalledClaudeHook[] {
   const { root, homeDir, user } = resolveWiringOpts(opts);
   const settingsPath = user ? join(homeDir, ".claude", "settings.json") : join(root, ".claude", "settings.json");
@@ -1333,10 +969,7 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
   }
   const entries = eventValue as unknown[];
 
-  // Guard every element before touching `.hooks`: a hand-edited event array can legally hold a
-  // `null`, a primitive, or a group whose `hooks` isn't an array. Unguarded access below would throw
-  // a raw TypeError instead of the documented WiringConflictError contract (same failure class the
-  // root/hooks/array checks above already cover, one level deeper).
+  // Guard every element before touching `.hooks`: a hand-edited event array can legally hold a `null`, a primitive, or a group whose `hooks` isn't an array. Unguarded access below would throw a raw TypeError instead of the documented WiringConflictError contract (same failure class the root/hooks/array checks above already cover, one level deeper).
   for (const group of entries) {
     if (!isPlainObject(group)) {
       throw new WiringConflictError(`hooks.${event} in ${path} contains a non-object entry; refusing to modify a hand-edited config`);
@@ -1344,8 +977,7 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
     if (group["hooks"] !== undefined && !Array.isArray(group["hooks"])) {
       throw new WiringConflictError(`a hooks.${event} entry in ${path} has a non-array "hooks"; refusing to modify a hand-edited config`);
     }
-    // Also guard individual hook elements: a hand-edited hooks array may contain null, primitives, or
-    // other non-objects. Validate them upfront so later code doesn't crash when accessing .command.
+    // Also guard individual hook elements: a hand-edited hooks array may contain null, primitives, or other non-objects. Validate them upfront so later code doesn't crash when accessing .command.
     if (Array.isArray(group["hooks"])) {
       for (const hook of group["hooks"]) {
         if (!isPlainObject(hook)) {
@@ -1377,10 +1009,7 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
     return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
   }
 
-  // An unstamped hook whose command matches mem's own invocation shape for this event is an orphan
-  // left by an install that predates STAMP_KEY (or whose flags have since changed) -- adopt it in
-  // place rather than leaving it to run forever alongside the stamped hook this function would
-  // otherwise insert, or refusing outright and stranding every older install behind a manual edit.
+  // An unstamped hook whose command matches mem's own invocation shape for this event is an orphan left by an install that predates STAMP_KEY (or whose flags have since changed) -- adopt it in place rather than leaving it to run forever alongside the stamped hook this function would otherwise insert, or refusing outright and stranding every older install behind a manual edit.
   let adoptGroupIdx = -1;
   let adoptHookIdx = -1;
   for (let index = 0; index < groups.length && adoptGroupIdx === -1; index += 1) {
@@ -1399,8 +1028,7 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
     return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
   }
 
-  // Insert at the deepest container the file already has, so `modify` never has to synthesise
-  // intermediates -- that is the one case surgicalJsoncEdit has to fall back to a reformat.
+  // Insert at the deepest container the file already has, so `modify` never has to synthesise intermediates -- that is the one case surgicalJsoncEdit has to fall back to a reformat.
   const group = { hooks: [{ type: "command", command, [STAMP_KEY]: true }] };
   if (!hadHooks) {
     return surgicalJsoncEdit(text, ["hooks"], { [event]: [group] });
@@ -1411,36 +1039,17 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
   return surgicalJsoncEdit(text, ["hooks", event, -1], group);
 }
 
-/**
- * Which `hooks.<event>` keys (and whether `hooks` itself) existed before mem ever wrote to `path`,
- * read from the one-time `.bak` snapshot `writeManagedFile` takes on install's first write.
- *
- * The naive test at uninstall time -- "the event array is empty, so mem must have created it" -- is
- * wrong: a user's own pre-existing `"hooks": {"SessionStart": []}` looks identical, after mem's own
- * stamped entries are removed, to a container mem created and drained back to empty itself. The two
- * are indistinguishable from the current file content alone, so this reads the pre-install snapshot
- * instead of guessing from emptiness. Four outcomes: missing `.bak` returns `{hooksExisted: false, hooks: {}}`,
- * because no backup is taken unless the file pre-existed, so mem created it and pruning is safe;
- * a `.bak` that `looksMemAuthored` (see that function's own doc for why the snapshot can be mem's own
- * writing rather than real pre-existing content) is treated the same as no `.bak` at all, for the same
- * reason `writeManagedFile`'s delete-if-empty check does; present, parseable, and not mem-authored
- * returns the snapshot's own `hooks`; present but unparseable returns `undefined`, which callers must
- * read as "assume everything pre-existed" so pruning fails closed. Note: if a user deletes the `.bak`
- * by hand, that is indistinguishable from mem having created the file.
- */
+/** Which `hooks.<event>` keys (and whether `hooks` itself) existed before mem ever wrote to `path`, read from the one-time `.bak` snapshot `writeManagedFile` takes on install's first write. The naive test at uninstall time -- "the event array is empty, so mem must have created it" -- is wrong: a user's own pre-existing `"hooks": {"SessionStart": []}` looks identical, after mem's own stamped entries are removed, to a container mem created and drained back to empty itself. The two are indistinguishable from the current file content alone, so this reads the pre-install snapshot instead of guessing from emptiness. Four outcomes: missing `.bak` returns `{hooksExisted: false, hooks: {}}`, because no backup is taken unless the file pre-existed, so mem created it and pruning is safe; a `.bak` that `looksMemAuthored` (see that function's own doc for why the snapshot can be mem's own writing rather than real pre-existing content) is treated the same as no `.bak` at all, for the same reason `writeManagedFile`'s delete-if-empty check does; present, parseable, and not mem-authored returns the snapshot's own `hooks`; present but unparseable returns `undefined`, which callers must read as "assume everything pre-existed" so pruning fails closed. Note: if a user deletes the `.bak` by hand, that is indistinguishable from mem having created the file. */
 function preInstallHooks(path: string): { readonly hooksExisted: boolean; readonly hooks: Record<string, unknown> } | undefined {
   const bakPath = `${path}.token-goat-mem.bak`;
   if (!existsSync(bakPath)) {
-    // No backup was taken because the file did not exist before mem's first write -- there was no
-    // pre-existing `hooks` for it to have written into.
+    // No backup was taken because the file did not exist before mem's first write -- there was no pre-existing `hooks` for it to have written into.
     return { hooksExisted: false, hooks: {} };
   }
   try {
     const bakContent = readFileSync(bakPath, "utf8");
     if (looksMemAuthored(bakContent)) {
-      // The snapshot is mem's own earlier write (e.g. a stamped hook seeded before a `.bak` existed,
-      // then backed up on the next install), not real pre-existing content -- there was no genuine
-      // pre-existing `hooks` for it to have written into either.
+      // The snapshot is mem's own earlier write (e.g. a stamped hook seeded before a `.bak` existed, then backed up on the next install), not real pre-existing content -- there was no genuine pre-existing `hooks` for it to have written into either.
       return { hooksExisted: false, hooks: {} };
     }
     const parsed: unknown = parseJsonc(bakContent, [], JSONC_PARSE);
@@ -1466,10 +1075,7 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
   }
   const hooks = parsed.hooks;
 
-  // Plan the removals as JSON paths, then apply them to the text. Rebuilding the object and
-  // reserializing it would hand the user back a file reindented to mem's taste.
-  // Built in descending index order -- groups first, then hooks within a group -- so applying them in
-  // sequence never shifts the index of one still to come.
+  // Plan the removals as JSON paths, then apply them to the text. Rebuilding the object and reserializing it would hand the user back a file reindented to mem's taste. Built in descending index order -- groups first, then hooks within a group -- so applying them in sequence never shifts the index of one still to come.
   const removals: JSONPath[] = [];
   for (const { event } of CLAUDE_HOOK_EVENTS) {
     const entries: unknown = hooks[event];
@@ -1478,9 +1084,7 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
     }
     const groupsOfEvent = entries as unknown[];
     for (let index = groupsOfEvent.length - 1; index >= 0; index -= 1) {
-      // Access `.hooks` only through an isPlainObject guard: a hand-edited event array may hold a
-      // `null`/primitive element, and `null.hooks` would throw a raw TypeError. Uninstall stays lenient
-      // (leave anything mem didn't stamp untouched) rather than crashing on such an entry.
+      // Access `.hooks` only through an isPlainObject guard: a hand-edited event array may hold a `null`/primitive element, and `null.hooks` would throw a raw TypeError. Uninstall stays lenient (leave anything mem didn't stamp untouched) rather than crashing on such an entry.
       const group: unknown = groupsOfEvent[index];
       const groupHooks = isPlainObject(group) ? group["hooks"] : undefined;
       if (!Array.isArray(groupHooks) || !groupHooks.some((hook) => isStamped(hook))) {
@@ -1512,14 +1116,7 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
     }
   }
 
-  // Prune the containers mem's own removals just emptied -- but only the ones mem itself created.
-  // Install creates `hooks` and `hooks.<event>` when a settings.json has neither, and leaving those
-  // behind as an empty husk broke the "uninstall reverses exactly what init wrote" promise. But an
-  // event array that is empty now is not proof mem created it: a user's own pre-existing
-  // `"hooks": {"SessionStart": []}` looks exactly the same once mem's stamped entries are gone,
-  // and deleting that key doesn't restore the file, it destroys hand-written content that predates
-  // mem entirely (the CRITICAL bug this snapshot check exists to close). `preInstallHooks` answers
-  // the question emptiness alone cannot: did this key exist before mem's first write.
+  // Prune the containers mem's own removals just emptied -- but only the ones mem itself created. Install creates `hooks` and `hooks.<event>` when a settings.json has neither, and leaving those behind as an empty husk broke the "uninstall reverses exactly what init wrote" promise. But an event array that is empty now is not proof mem created it: a user's own pre-existing `"hooks": {"SessionStart": []}` looks exactly the same once mem's stamped entries are gone, and deleting that key doesn't restore the file, it destroys hand-written content that predates mem entirely (the CRITICAL bug this snapshot check exists to close). `preInstallHooks` answers the question emptiness alone cannot: did this key exist before mem's first write.
   const pre = preInstallHooks(path);
   for (const { event } of CLAUDE_HOOK_EVENTS) {
     const settingsAfter: unknown = parseJsonc(text, [], JSONC_PARSE);
@@ -1627,11 +1224,7 @@ function removeStampedJsoncArrayEntries(text: string, arrayPath: JSONPath, exist
 
 function parseJsoncOrConflict(current: string, path: string): unknown {
   const errors: import("jsonc-parser").ParseError[] = [];
-  // A leading UTF-8 BOM (U+FEFF) is a valid, common encoding marker -- Windows editors and
-  // PowerShell's default `Out-File`/`Set-Content` write it routinely -- but jsonc-parser treats it
-  // as an invalid token at offset 0. Stripping it only for this validation pass (never from the
-  // text mem actually edits/writes) avoids a false "not valid JSON/JSONC" refusal on a file that is
-  // perfectly valid to every other consumer.
+  // A leading UTF-8 BOM (U+FEFF) is a valid, common encoding marker -- Windows editors and PowerShell's default `Out-File`/`Set-Content` write it routinely -- but jsonc-parser treats it as an invalid token at offset 0. Stripping it only for this validation pass (never from the text mem actually edits/writes) avoids a false "not valid JSON/JSONC" refusal on a file that is perfectly valid to every other consumer.
   const withoutBom = current.startsWith("\uFEFF") ? current.slice(1) : current;
   const parsed: unknown = parseJsonc(withoutBom, errors, { allowTrailingComma: true });
   if (errors.length > 0) {
@@ -1652,10 +1245,7 @@ function installTasksJson(current: string | undefined, path: string): string | u
     text = surgicalJsoncEdit(text, ["version"], "2.0.0");
   }
 
-  // A present-but-non-array `tasks`/`inputs` is a hand-edited config mem can't reason about: appending
-  // to it via jsonc-parser's `modify(..., [key, -1], ...)` would throw a raw "Can not add property to
-  // parent of type ..." Error, not the documented WiringConflictError contract. Reject it explicitly,
-  // matching how installClaudeSettings treats a non-array `hooks.SessionStart`. Absent keys stay fine.
+  // A present-but-non-array `tasks`/`inputs` is a hand-edited config mem can't reason about: appending to it via jsonc-parser's `modify(..., [key, -1], ...)` would throw a raw "Can not add property to parent of type ..." Error, not the documented WiringConflictError contract. Reject it explicitly, matching how installClaudeSettings treats a non-array `hooks.SessionStart`. Absent keys stay fine.
   if (parsed["tasks"] !== undefined && !Array.isArray(parsed["tasks"])) {
     throw new WiringConflictError(`"tasks" in ${path} is not an array; refusing to modify a hand-edited config`);
   }
@@ -1690,9 +1280,7 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
   text = tasksResult.text;
   anyChanged = anyChanged || tasksResult.changed;
 
-  // Re-parsed rather than reused: the `tasks` removal above edited `text`, so `parsed` is stale.
-  // Guarded like every other call site -- `parseJsoncOrConflict` returns undefined for an empty
-  // document, which the previous cast-then-`?? {}` hid from the type system while it still fired.
+  // Re-parsed rather than reused: the `tasks` removal above edited `text`, so `parsed` is stale. Guarded like every other call site -- `parseJsoncOrConflict` returns undefined for an empty document, which the previous cast-then-`?? {}` hid from the type system while it still fired.
   const rawReparsed = parseJsoncOrConflict(text, path);
   const reparsed = isPlainObject(rawReparsed) ? rawReparsed : {};
   const inputs = Array.isArray(reparsed["inputs"]) ? (reparsed["inputs"] as unknown[]) : [];
@@ -1704,10 +1292,7 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
     return current;
   }
 
-  // Drop the arrays mem's own removals just emptied, same rule as the settings.json hook containers:
-  // install has to create `tasks`/`inputs` when the file has no such key, and leaving `"inputs": []`
-  // behind is not the pre-install state uninstall promises. An empty array here is inert, so pruning
-  // one a user happened to have written costs them nothing.
+  // Drop the arrays mem's own removals just emptied, same rule as the settings.json hook containers: install has to create `tasks`/`inputs` when the file has no such key, and leaving `"inputs": []` behind is not the pre-install state uninstall promises. An empty array here is inert, so pruning one a user happened to have written costs them nothing.
   for (const key of ["tasks", "inputs"] as const) {
     const after: unknown = parseJsoncOrConflict(text, path);
     const value = isPlainObject(after) ? after[key] : undefined;
@@ -1716,12 +1301,7 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
     }
   }
 
-  // A `"version": "2.0.0"` left as the only remaining key is the exact skeleton install writes when
-  // `tasks.json` didn't exist yet (`installTasksJson`'s `isBlank(current)` branch) -- functionally
-  // identical to no file at all, since VS Code treats a missing tasks.json and one with just its
-  // default schema version and no tasks the same way. Pruning it here, only after both `tasks` and
-  // `inputs` are already gone, lets a from-scratch install/uninstall round trip collapse the whole
-  // file to nothing instead of leaving this one inert key behind.
+  // A `"version": "2.0.0"` left as the only remaining key is the exact skeleton install writes when `tasks.json` didn't exist yet (`installTasksJson`'s `isBlank(current)` branch) -- functionally identical to no file at all, since VS Code treats a missing tasks.json and one with just its default schema version and no tasks the same way. Pruning it here, only after both `tasks` and `inputs` are already gone, lets a from-scratch install/uninstall round trip collapse the whole file to nothing instead of leaving this one inert key behind.
   const finalParsed: unknown = parseJsoncOrConflict(text, path);
   if (isPlainObject(finalParsed) && Object.keys(finalParsed).length === 1 && finalParsed["version"] === "2.0.0") {
     text = surgicalJsoncEdit(text, ["version"], undefined);
@@ -1729,18 +1309,7 @@ function uninstallTasksJson(current: string | undefined, path: string): string |
   return text;
 }
 
-/**
- * Both bindings are `ctrl+k` chords rather than plain `ctrl+shift` combinations.
- *
- * The previous `ctrl+shift+m` and `ctrl+shift+n` shadowed two VS Code defaults -- View: Problems and
- * New Window -- so installing mem silently took over shortcuts the user already had muscle memory
- * for, and the only signal was the built-in quietly not working any more. `ctrl+k` is VS Code's
- * conventional chord prefix for exactly this reason: a second keystroke follows, so a chord collides
- * with far less and reads as an extension binding rather than a hijacked default.
- *
- * `mem uninstall` removes these by their stamp, so a user who already installed the old bindings
- * gets them replaced on the next `mem init` rather than accumulating both.
- */
+/** Both bindings are `ctrl+k` chords rather than plain `ctrl+shift` combinations. The previous `ctrl+shift+m` and `ctrl+shift+n` shadowed two VS Code defaults -- View: Problems and New Window -- so installing mem silently took over shortcuts the user already had muscle memory for, and the only signal was the built-in quietly not working any more. `ctrl+k` is VS Code's conventional chord prefix for exactly this reason: a second keystroke follows, so a chord collides with far less and reads as an extension binding rather than a hijacked default. `mem uninstall` removes these by their stamp, so a user who already installed the old bindings gets them replaced on the next `mem init` rather than accumulating both. */
 const VSCODE_KEYBINDINGS: ReadonlyArray<Record<string, unknown>> = [
   {
     key: "ctrl+k m",
@@ -1758,12 +1327,7 @@ const VSCODE_KEYBINDINGS: ReadonlyArray<Record<string, unknown>> = [
 
 function installKeybindings(current: string | undefined, path: string): string | undefined {
   const text = isBlank(current) ? "[]\n" : (current as string);
-  // Guard the raw parsed value against a `?? []` coercion: a keybindings.json holding literally
-  // `null` parses to JS `null`, and `null ?? []` would silently masquerade as an empty array, slip
-  // past the array check, then reach jsonc-parser's `modify(text, [-1], ...)` on a `null` root --
-  // which throws a raw "Can not add property to parent of type null" Error instead of the documented
-  // WiringConflictError contract. Every non-array root (null, number, string, boolean, object) must
-  // abort with WiringConflictError, matching how installTasksJson rejects a non-object root.
+  // Guard the raw parsed value against a `?? []` coercion: a keybindings.json holding literally `null` parses to JS `null`, and `null ?? []` would silently masquerade as an empty array, slip past the array check, then reach jsonc-parser's `modify(text, [-1], ...)` on a `null` root -- which throws a raw "Can not add property to parent of type null" Error instead of the documented WiringConflictError contract. Every non-array root (null, number, string, boolean, object) must abort with WiringConflictError, matching how installTasksJson rejects a non-object root.
   const parsed: unknown = isBlank(current) ? [] : parseJsoncOrConflict(current as string, path);
   if (!Array.isArray(parsed)) {
     throw new WiringConflictError(`${path} does not contain a JSON array; refusing to modify a hand-edited config`);
@@ -1806,10 +1370,7 @@ invocation naming exactly the facts and session that recall logged under --
 run that line verbatim rather than composing your own. Recall ranks partly
 on this signal, and nothing else produces it.`;
 
-/**
- * Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the
- * reference-counted shared block (`codex`, `copilot-cli`, and `copilot-vscode`).
- */
+/** Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the reference-counted shared block (`codex`, `copilot-cli`, and `copilot-vscode`). */
 const AGENTS_MD_SHARED_BODY = `## Memory
 
 token-goat-mem is installed (\`mem\` on PATH).
@@ -1884,15 +1445,7 @@ export const copilotCli: ToolWiring = makeToolWiring(({ root, user }) => {
   return [sharedMarkdownFile(agentsMdPath, "copilot-cli", AGENTS_MD_SHARED_BODY)];
 });
 
-/**
- * opencode reads the first project `AGENTS.md` it finds walking up from the working directory, plus
- * one global rules file, so it joins the shared `AGENTS.md` block at project level and has a real
- * user-level target too. The global file is `<xdgConfig>/opencode/AGENTS.md`, and opencode resolves
- * xdgConfig through xdg-basedir, which has no Windows branch: it is `~/.config` on every platform,
- * never `%APPDATA%`. `XDG_CONFIG_HOME` is deliberately not consulted, for the same reason
- * `vscodeUserDir` ignores `%APPDATA%`: user paths derive only from the injected `homeDir`, so tests
- * stay isolated.
- */
+/** opencode reads the first project `AGENTS.md` it finds walking up from the working directory, plus one global rules file, so it joins the shared `AGENTS.md` block at project level and has a real user-level target too. The global file is `<xdgConfig>/opencode/AGENTS.md`, and opencode resolves xdgConfig through xdg-basedir, which has no Windows branch: it is `~/.config` on every platform, never `%APPDATA%`. `XDG_CONFIG_HOME` is deliberately not consulted, for the same reason `vscodeUserDir` ignores `%APPDATA%`: user paths derive only from the injected `homeDir`, so tests stay isolated. */
 export function opencodeUserAgentsMd(homeDir: string): string {
   return join(homeDir, ".config", "opencode", "AGENTS.md");
 }
@@ -1908,10 +1461,7 @@ export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir, user }
     install: (current) => installKeybindings(current, keybindingsPath),
     uninstall: (current) => uninstallKeybindings(current, keybindingsPath),
   };
-  // Unlike the project-only tools, this one has somewhere real to put a user-level install: the
-  // keybindings live in VS Code's own user directory, so they are the whole of it. The tasks file
-  // and the AGENTS.md block are project artifacts, and writing them under --user would put mem into
-  // a repository the user asked only to configure their editor for.
+  // Unlike the project-only tools, this one has somewhere real to put a user-level install: the keybindings live in VS Code's own user directory, so they are the whole of it. The tasks file and the AGENTS.md block are project artifacts, and writing them under --user would put mem into a repository the user asked only to configure their editor for.
   if (user) {
     return [keybindingsEntry];
   }
@@ -1924,12 +1474,7 @@ export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir, user }
   ];
 });
 
-// Visual Studio never reads AGENTS.md, and JetBrains' local in-IDE chat (as opposed to its cloud
-// agent, which does) reads only .github/copilot-instructions.md -- so both converge on that one
-// file rather than joining the AGENTS.md shared block above. A project that also installs
-// copilot-vscode or copilot-cli gets mem's block in both files, which VS Code and Copilot CLI both
-// read; harmless in meaning, redundant in tokens. Reference counting keeps the two files
-// independent by design (see the module comment), so this overlap is accepted, not fixed here.
+// Visual Studio never reads AGENTS.md, and JetBrains' local in-IDE chat (as opposed to its cloud agent, which does) reads only .github/copilot-instructions.md -- so both converge on that one file rather than joining the AGENTS.md shared block above. A project that also installs copilot-vscode or copilot-cli gets mem's block in both files, which VS Code and Copilot CLI both read; harmless in meaning, redundant in tokens. Reference counting keeps the two files independent by design (see the module comment), so this overlap is accepted, not fixed here.
 export const copilotVisualStudio: ToolWiring = makeToolWiring(({ root, user }) => {
   rejectUserLevel(user, "copilot-visual-studio");
   const instructionsPath = join(root, ".github", "copilot-instructions.md");

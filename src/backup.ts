@@ -1,27 +1,4 @@
-/**
- * Snapshots of the mem store, kept outside the mem home so they outlive it (`resolveBackupDir` in
- * src/db.ts: `~/.mem-backups` by default).
- *
- * Every connection open of an existing store calls `snapshotOnOpen` (src/db.ts's `openDb`), which
- * copies the store at most once per `AUTO_SNAPSHOT_INTERVAL_MS`, only when it has changed since the
- * newest snapshot, and always before a pending migration rewrites it. mem has no daemon, so "the next
- * time anything opens the store" is the only schedule a backup can have; the hooks `mem init`
- * installs open it on every session, which makes that roughly daily for anyone using mem at all.
- *
- * A snapshot is a `VACUUM INTO` copy: a consistent, compacted, standalone SQLite file taken through
- * the open connection, so it never races a writer the way copying the `.db` file and its WAL sidecar
- * would. Its file name carries everything the retention and freshness rules read -- when it was
- * taken, the store's write epoch at the time, and why -- so neither depends on file mtimes, which a
- * copy or a sync tool rewrites. The epoch in the name is read from the finished copy, so it always
- * describes what the file holds, even when a write lands while the copy is being taken.
- *
- * Hooks open the store from several processes at once, so an automatic snapshot is taken only by the
- * open that creates `AUTO_SNAPSHOT_CLAIM` in the backup directory; the rest skip it. A claim, or a
- * temporary copy, left by a process that died mid-snapshot is cleared once it is an hour old.
- *
- * Deliberately independent of src/db.ts (which imports this module) and src/storage.ts (which imports
- * db.ts): the epoch comes from src/epoch.ts.
- */
+/** Snapshots of the mem store, kept outside the mem home so they outlive it (`resolveBackupDir` in src/db.ts: `~/.mem-backups` by default). Every connection open of an existing store calls `snapshotOnOpen` (src/db.ts's `openDb`), which copies the store at most once per `AUTO_SNAPSHOT_INTERVAL_MS`, only when it has changed since the newest snapshot, and always before a pending migration rewrites it. mem has no daemon, so "the next time anything opens the store" is the only schedule a backup can have; the hooks `mem init` installs open it on every session, which makes that roughly daily for anyone using mem at all. A snapshot is a `VACUUM INTO` copy: a consistent, compacted, standalone SQLite file taken through the open connection, so it never races a writer the way copying the `.db` file and its WAL sidecar would. Its file name carries everything the retention and freshness rules read -- when it was taken, the store's write epoch at the time, and why -- so neither depends on file mtimes, which a copy or a sync tool rewrites. The epoch in the name is read from the finished copy, so it always describes what the file holds, even when a write lands while the copy is being taken. Hooks open the store from several processes at once, so an automatic snapshot is taken only by the open that creates `AUTO_SNAPSHOT_CLAIM` in the backup directory; the rest skip it. A claim, or a temporary copy, left by a process that died mid-snapshot is cleared once it is an hour old. Deliberately independent of src/db.ts (which imports this module) and src/storage.ts (which imports db.ts): the epoch comes from src/epoch.ts. */
 
 import Database from "better-sqlite3";
 import { closeSync, mkdirSync, openSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
@@ -79,12 +56,7 @@ function parseSnapshotName(name: string): Pick<Snapshot, "takenAt" | "epoch" | "
   return { takenAt, epoch: Number(epoch), reason: reason as SnapshotReason };
 }
 
-/**
- * Every snapshot in `dir`, newest first. A directory that does not exist yet -- or a path that is not a
- * directory -- holds none; any other failure to read it throws. Files that are not snapshot-named
- * (including an interrupted copy's temporary file) are ignored, and so is an entry that is gone by the
- * time it is looked at: one pruned by another process, or a dangling link.
- */
+/** Every snapshot in `dir`, newest first. A directory that does not exist yet -- or a path that is not a directory -- holds none; any other failure to read it throws. Files that are not snapshot-named (including an interrupted copy's temporary file) are ignored, and so is an entry that is gone by the time it is looked at: one pruned by another process, or a dangling link. */
 export function listSnapshots(dir: string): Snapshot[] {
   let names: string[];
   try {
@@ -112,14 +84,7 @@ export function listSnapshots(dir: string): Snapshot[] {
   return snapshots.sort((a, b) => b.takenAt.getTime() - a.takenAt.getTime() || b.name.localeCompare(a.name));
 }
 
-/**
- * Copies the store behind `db` into `dir` as a new snapshot and returns it.
- *
- * Written to a temporary name and renamed into place, so a crash or a full disk mid-copy never leaves
- * a truncated file that `listSnapshots` would offer as a restore point. Owner-only permissions, like
- * the store itself: a snapshot holds the same fact rows. The epoch it is named for is read from the
- * finished copy, never from `db` beforehand, which a write could move before the copy starts.
- */
+/** Copies the store behind `db` into `dir` as a new snapshot and returns it. Written to a temporary name and renamed into place, so a crash or a full disk mid-copy never leaves a truncated file that `listSnapshots` would offer as a restore point. Owner-only permissions, like the store itself: a snapshot holds the same fact rows. The epoch it is named for is read from the finished copy, never from `db` beforehand, which a write could move before the copy starts. */
 export function takeSnapshot(db: Database.Database, dir: string, reason: SnapshotReason, now: Date = new Date()): Snapshot {
   ensureBackupDir(dir);
   const temporary = join(dir, `.mem-snapshot-${String(process.pid)}-${String(now.getTime())}.tmp`);
@@ -155,24 +120,7 @@ export interface SnapshotOnOpenOptions {
   now?: Date;
 }
 
-/**
- * The automatic snapshot `openDb` takes of an existing store, or `undefined` when none was due.
- *
- * Due when the store has ever been written (epoch above 0), the newest snapshot of any kind is at
- * least `AUTO_SNAPSHOT_INTERVAL_MS` old, and the store has changed since it (a different epoch): a
- * store nobody writes to is not copied again however long it sits. Only the open holding
- * `AUTO_SNAPSHOT_CLAIM` takes it, after checking it is still due -- another open may have taken it
- * between the first check and the claim.
- *
- * A pending migration overrides all of that -- the copy taken right before a schema change is the
- * one a failed upgrade needs -- unless a `pre-migration` snapshot of this very store state (same epoch,
- * same schema version) already exists, as it does when an earlier open's migration failed. It takes no
- * claim: several processes opening a store that needs migrating at the same moment may each copy it,
- * which costs disk once per upgrade and never loses the copy.
- *
- * Never throws. A backup directory that cannot be written is a reason for `mem doctor` to warn, not
- * for every mem command -- the recall hooks included -- to stop working.
- */
+/** The automatic snapshot `openDb` takes of an existing store, or `undefined` when none was due. Due when the store has ever been written (epoch above 0), the newest snapshot of any kind is at least `AUTO_SNAPSHOT_INTERVAL_MS` old, and the store has changed since it (a different epoch): a store nobody writes to is not copied again however long it sits. Only the open holding `AUTO_SNAPSHOT_CLAIM` takes it, after checking it is still due -- another open may have taken it between the first check and the claim. A pending migration overrides all of that -- the copy taken right before a schema change is the one a failed upgrade needs -- unless a `pre-migration` snapshot of this very store state (same epoch, same schema version) already exists, as it does when an earlier open's migration failed. It takes no claim: several processes opening a store that needs migrating at the same moment may each copy it, which costs disk once per upgrade and never loses the copy. Never throws. A backup directory that cannot be written is a reason for `mem doctor` to warn, not for every mem command -- the recall hooks included -- to stop working. */
 export function snapshotOnOpen(db: Database.Database, options: SnapshotOnOpenOptions): Snapshot | undefined {
   const { dir } = options;
   const now = options.now ?? new Date();
@@ -225,12 +173,7 @@ function hasPreMigrationSnapshot(db: Database.Database, dir: string): boolean {
   );
 }
 
-/**
- * Creates the claim file and returns its path, or `undefined` when another open holds it. A claim
- * an hour old was left by a process that died mid-snapshot and is taken over. Two opens taking over
- * the same abandoned claim at once can both proceed; the recheck after claiming makes the second
- * skip unless the first has not finished, and the cost of both finishing is one extra auto snapshot.
- */
+/** Creates the claim file and returns its path, or `undefined` when another open holds it. A claim an hour old was left by a process that died mid-snapshot and is taken over. Two opens taking over the same abandoned claim at once can both proceed; the recheck after claiming makes the second skip unless the first has not finished, and the cost of both finishing is one extra auto snapshot. */
 function claimAutoSnapshot(dir: string): string | undefined {
   ensureBackupDir(dir);
   const claim = join(dir, AUTO_SNAPSHOT_CLAIM);

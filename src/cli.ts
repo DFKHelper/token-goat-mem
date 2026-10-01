@@ -1,38 +1,4 @@
-/**
- * Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list).
- *
- * This module owns argument parsing, input validation at the CLI boundary (raw `string` -> `FactKind`
- * /`FactScope`/`FactStatus`), output formatting, and orchestration across the already-built domain
- * modules (storage.ts, capture.ts, retrieval.ts, contradiction.ts, anchors.ts, integration-seam.ts). It
- * does not reimplement any of their logic -- every command is a thin composition of the exported
- * functions those modules already provide.
- *
- * `buildProgram()` is exported separately from `run()` so tests can construct and introspect a fresh
- * Commander program without going through `process.argv`/`process.exit` (mirrors token-goat's own
- * `src/cli.ts` convention). `run()` is the actual entry point `src/main.ts` calls.
- *
- * Exit-code / stream contract (normative for every command):
- *   - exit 0 -- success. All requested data goes to **stdout**; stderr is empty. "Nothing found"
- *     outcomes (`no matching facts`, `no facts stored`, `nothing needs review`) are successes, not
- *     errors. `--hint-format` additionally *always* exits 0, even on internal failure -- the seam
- *     fails open to an empty, well-formed TGMEM payload by design (Section 4).
- *   - exit 1 -- user/usage error: invalid arguments or option values, unknown fact id, an invalid
- *     state transition (e.g. promoting a non-pending fact), input rejected by secret screening, or
- *     a Commander parse error (unknown command, missing argument). The input was wrong; retrying
- *     the same invocation will fail the same way.
- *   - exit 2 -- internal/unexpected error: DB open/IO failure, or any bug-class exception. The
- *     input may have been fine; the environment or mem itself is what failed.
- *   Diagnostics always go to **stderr** as a single `mem: <message>` line (Commander writes its own
- *   usage diagnostics to stderr in its own format); stdout carries data only, so piping stdout is
- *   always safe. `--help`/`--version` are successes (exit 0).
- *
- * Every action is wrapped in `guard()`, which enforces that contract: it maps a thrown error to a
- * single `mem: <message>` stderr line and `process.exitCode` 1 or 2 (`UsageError` and the capture
- * module's validation/secret errors are user errors; everything else is internal) -- never a
- * partial stack trace, never a hard `process.exit()` (that would truncate buffered stdout on
- * Windows pipes; letting the event loop drain naturally, same as token-goat's `main.ts` shim,
- * guarantees output flushes first).
- */
+/** Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list). This module owns argument parsing, input validation at the CLI boundary (raw `string` -> `FactKind` /`FactScope`/`FactStatus`), output formatting, and orchestration across the already-built domain modules (storage.ts, capture.ts, retrieval.ts, contradiction.ts, anchors.ts, integration-seam.ts). It does not reimplement any of their logic -- every command is a thin composition of the exported functions those modules already provide. `buildProgram()` is exported separately from `run()` so tests can construct and introspect a fresh Commander program without going through `process.argv`/`process.exit` (mirrors token-goat's own `src/cli.ts` convention). `run()` is the actual entry point `src/main.ts` calls. Exit-code / stream contract (normative for every command): - exit 0 -- success. All requested data goes to **stdout**; stderr is empty. "Nothing found" outcomes (`no matching facts`, `no facts stored`, `nothing needs review`) are successes, not errors. `--hint-format` additionally *always* exits 0, even on internal failure -- the seam fails open to an empty, well-formed TGMEM payload by design (Section 4). - exit 1 -- user/usage error: invalid arguments or option values, unknown fact id, an invalid state transition (e.g. promoting a non-pending fact), input rejected by secret screening, or a Commander parse error (unknown command, missing argument). The input was wrong; retrying the same invocation will fail the same way. - exit 2 -- internal/unexpected error: DB open/IO failure, or any bug-class exception. The input may have been fine; the environment or mem itself is what failed. Diagnostics always go to **stderr** as a single `mem: <message>` line (Commander writes its own usage diagnostics to stderr in its own format); stdout carries data only, so piping stdout is always safe. `--help`/`--version` are successes (exit 0). Every action is wrapped in `guard()`, which enforces that contract: it maps a thrown error to a single `mem: <message>` stderr line and `process.exitCode` 1 or 2 (`UsageError` and the capture module's validation/secret errors are user errors; everything else is internal) -- never a partial stack trace, never a hard `process.exit()` (that would truncate buffered stdout on Windows pipes; letting the event loop drain naturally, same as token-goat's `main.ts` shim, guarantees output flushes first). */
 
 import { Command } from "commander";
 import type Database from "better-sqlite3";
@@ -88,8 +54,7 @@ import {
   writeOutput,
 } from "./cliRuntime.js";
 
-// The exit-code contract is part of cli.ts's public surface (index.ts re-exports it); it is defined in
-// cliRuntime.ts so command modules can share it without importing cli.ts.
+// The exit-code contract is part of cli.ts's public surface (index.ts re-exports it); it is defined in cliRuntime.ts so command modules can share it without importing cli.ts.
 export { EXIT_INTERNAL_ERROR, EXIT_SUCCESS, EXIT_USER_ERROR, UsageError } from "./cliRuntime.js";
 import {
   dream,
@@ -215,34 +180,8 @@ function auditValuePreview(value: string | number | null | undefined): string {
   return text.length > AUDIT_VALUE_PREVIEW_LENGTH ? `${text.slice(0, AUDIT_VALUE_PREVIEW_LENGTH)}...` : text;
 }
 
-/**
- * Audit detail for `mem edit`, recording what each edited field said *before*.
- *
- * The previous wording recorded only which field names changed, so the audit log could say a fact's
- * text was edited but never what it used to say -- and since `mem edit` overwrites in place, that
- * made the prior value unrecoverable from the store at all. A fact's whole value is that it can be
- * trusted, and "it says X now, it said Y before, and Y is gone" is the one question an audit trail
- * of an edit exists to answer.
- *
- * Deliberately a `detail` string rather than a version chain: a full history table is a schema
- * migration and a retention policy bought for a question the audit log can already answer.
- *
- * The *prior* value is recorded whole; only the new one is previewed. Truncating both was a defect
- * measured against the built bundle: editing a 223-character fact left 103 characters recorded
- * nowhere in the store, while AGENTS.md promised "an edited fact's previous text is recorded there
- * and nowhere else" -- so the log kept a prefix of the one value it exists to preserve. The
- * asymmetry is the whole point of the trade the previous wording tried to make: the new value is
- * never lost (it is the fact's current text, one column away in the same row), so previewing it
- * costs nothing, and the growth this bounds is at most one prior value per changed field.
- */
-/**
- * Every field `mem edit` can change, in the order `describeEdit` walks them. The single list
- * driving three things that previously would have had to agree by convention rather than by
- * construction: the before/after pairs `describeEdit` diffs into the audit `detail` line, the
- * prior-value payload `buildEditPriorPayload` records for `mem edit --undo`, and the patch
- * `undoEdit` replays through `updateFact`. One list here means a field added to `FactUpdate` only
- * has to be added once for all three to pick it up, instead of three lists silently drifting apart.
- */
+/** Audit detail for `mem edit`, recording what each edited field said *before*. The previous wording recorded only which field names changed, so the audit log could say a fact's text was edited but never what it used to say -- and since `mem edit` overwrites in place, that made the prior value unrecoverable from the store at all. A fact's whole value is that it can be trusted, and "it says X now, it said Y before, and Y is gone" is the one question an audit trail of an edit exists to answer. Deliberately a `detail` string rather than a version chain: a full history table is a schema migration and a retention policy bought for a question the audit log can already answer. The *prior* value is recorded whole; only the new one is previewed. Truncating both was a defect measured against the built bundle: editing a 223-character fact left 103 characters recorded nowhere in the store, while AGENTS.md promised "an edited fact's previous text is recorded there and nowhere else" -- so the log kept a prefix of the one value it exists to preserve. The asymmetry is the whole point of the trade the previous wording tried to make: the new value is never lost (it is the fact's current text, one column away in the same row), so previewing it costs nothing, and the growth this bounds is at most one prior value per changed field. */
+/** Every field `mem edit` can change, in the order `describeEdit` walks them. The single list driving three things that previously would have had to agree by convention rather than by construction: the before/after pairs `describeEdit` diffs into the audit `detail` line, the prior-value payload `buildEditPriorPayload` records for `mem edit --undo`, and the patch `undoEdit` replays through `updateFact`. One list here means a field added to `FactUpdate` only has to be added once for all three to pick it up, instead of three lists silently drifting apart. */
 const EDITABLE_FACT_FIELDS = ["text", "subject", "value", "anchor", "why", "scope", "scopeRoot", "scopeRepo", "captureRoot", "status", "confidence"] as const;
 type EditableFactField = (typeof EDITABLE_FACT_FIELDS)[number];
 
@@ -250,30 +189,13 @@ function isEditableFactField(field: string): field is EditableFactField {
   return (EDITABLE_FACT_FIELDS as readonly string[]).includes(field);
 }
 
-/**
- * Free-text editable fields a secret pattern could plausibly hide in -- the same set
- * `screenInputOrThrow` screens on capture/edit of the *new* value. `scope`/`status` are fixed
- * enums, `scopeRoot`/`scopeRepo` are filesystem paths, and `confidence` is a number: none of those
- * are worth running through pattern/entropy screening.
- */
+/** Free-text editable fields a secret pattern could plausibly hide in -- the same set `screenInputOrThrow` screens on capture/edit of the *new* value. `scope`/`status` are fixed enums, `scopeRoot`/`scopeRepo` are filesystem paths, and `confidence` is a number: none of those are worth running through pattern/entropy screening. */
 const AUDIT_SCREENED_FIELDS: ReadonlySet<EditableFactField> = new Set(["text", "subject", "value", "anchor", "why"]);
 
-/**
- * Prefix stamped onto a prior value that tripped secret screening on its way into the audit log.
- * `undoEdit` matches on it: a redacted prior value is not a value, and restoring it would write the
- * marker itself in as the fact's text while reporting success.
- */
+/** Prefix stamped onto a prior value that tripped secret screening on its way into the audit log. `undoEdit` matches on it: a redacted prior value is not a value, and restoring it would write the marker itself in as the fact's text while reporting success. */
 const REDACTED_PRIOR_VALUE_PREFIX = "[redacted: possible secret -- ";
 
-/**
- * Screens a field's *prior* value -- the one an edit is about to duplicate into the audit
- * `detail`/`prior_json` -- with the same heuristic `screenInputOrThrow` runs on the *new* value.
- * Capture screening is deny-by-default but not a guarantee (S7): a secret that slipped past it once
- * must not gain a second, unforgettable at-rest copy just because it happened to be the value an
- * edit is replacing, one `mem forget` of the fact does not touch. Never throws -- the fact's own
- * text already passed or failed screening at capture time; this only decides what may travel into
- * the audit log.
- */
+/** Screens a field's *prior* value -- the one an edit is about to duplicate into the audit `detail`/`prior_json` -- with the same heuristic `screenInputOrThrow` runs on the *new* value. Capture screening is deny-by-default but not a guarantee (S7): a secret that slipped past it once must not gain a second, unforgettable at-rest copy just because it happened to be the value an edit is replacing, one `mem forget` of the fact does not touch. Never throws -- the fact's own text already passed or failed screening at capture time; this only decides what may travel into the audit log. */
 function redactPriorValueIfSecret(
   field: EditableFactField,
   value: string | number | null | undefined,
@@ -297,9 +219,7 @@ function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: r
       }
       const old = before[field];
       const now = after[field];
-      // A field named in the patch whose value did not actually move is still worth recording as
-      // touched, but without a misleading "X -> X" arrow. Compared before redaction: redacting
-      // `old` but not `now` would otherwise make an unchanged secret-bearing field look "changed".
+      // A field named in the patch whose value did not actually move is still worth recording as touched, but without a misleading "X -> X" arrow. Compared before redaction: redacting `old` but not `now` would otherwise make an unchanged secret-bearing field look "changed".
       return old === now
         ? `${field} (unchanged)`
         : `${field}: ${auditValueWhole(redactPriorValueIfSecret(field, old, allowlist))} -> ${auditValuePreview(now)}`;
@@ -308,12 +228,7 @@ function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: r
   return `edited ${changes}`;
 }
 
-/**
- * The reversal payload `mem edit --undo` needs: a JSON object of only the fields `patch` actually
- * touched, each mapped to the value `before` held for it. Scoped to the touched fields rather than
- * every editable field on the fact so an edit that only ever set `--text` cannot be undone into
- * clobbering a `--scope` no one asked to change back.
- */
+/** The reversal payload `mem edit --undo` needs: a JSON object of only the fields `patch` actually touched, each mapped to the value `before` held for it. Scoped to the touched fields rather than every editable field on the fact so an edit that only ever set `--text` cannot be undone into clobbering a `--scope` no one asked to change back. */
 function buildEditPriorPayload(before: Fact, patch: FactUpdate, allowlist: readonly string[]): string {
   const prior: Partial<Record<EditableFactField, unknown>> = {};
   for (const field of EDITABLE_FACT_FIELDS) {
@@ -324,20 +239,7 @@ function buildEditPriorPayload(before: Fact, patch: FactUpdate, allowlist: reado
   return JSON.stringify(prior);
 }
 
-/**
- * Refuses to edit a `source_type=user` fact unless the caller passes `--force`. Promotion into
- * ground truth is already gated hard -- `captureSuggested` caps a derived fact's confidence at 0.6,
- * and only `mem review --promote` activates a pending one -- but mutation of an already-active fact
- * was not: `mem edit` treated a fact the user typed themselves exactly like one `mem` inferred on
- * its own.
- *
- * `--force` is a per-invocation override, not a stored flag on the fact -- there is deliberately no
- * `facts.read_only` column. That would be a second axis of a distinction `source_type` already
- * makes (a fact is either user-stated or derived; a read-only bit would just restate "user-stated"
- * with its own storage and its own drift risk to keep in sync). The tradeoff this leaves is honest,
- * not hidden: a *derived* fact has no equivalent protection through this guard, and there is
- * currently no way to ask for one.
- */
+/** Refuses to edit a `source_type=user` fact unless the caller passes `--force`. Promotion into ground truth is already gated hard -- `captureSuggested` caps a derived fact's confidence at 0.6, and only `mem review --promote` activates a pending one -- but mutation of an already-active fact was not: `mem edit` treated a fact the user typed themselves exactly like one `mem` inferred on its own. `--force` is a per-invocation override, not a stored flag on the fact -- there is deliberately no `facts.read_only` column. That would be a second axis of a distinction `source_type` already makes (a fact is either user-stated or derived; a read-only bit would just restate "user-stated" with its own storage and its own drift risk to keep in sync). The tradeoff this leaves is honest, not hidden: a *derived* fact has no equivalent protection through this guard, and there is currently no way to ask for one. */
 function guardUserFactEditOrThrow(fact: Fact, force: boolean | undefined): void {
   if (fact.source_type === "user" && force !== true) {
     throw new UsageError(
@@ -347,17 +249,7 @@ function guardUserFactEditOrThrow(fact: Fact, force: boolean | undefined): void 
   }
 }
 
-/**
- * Reverses the most recent `mem edit` on a fact, restoring every field that edit touched to the
- * value `buildEditPriorPayload` recorded for it -- `mem review --undo`'s `undoReject` pattern
- * applied to `mem edit`, which had no equivalent: an edit overwrote a fact in place with no way to
- * walk it back through the CLI, only by hand-editing the database.
- *
- * Refuses on anything other than the fact's own last audit row being a recoverable `edit`: a fact
- * whose last action was a `pin`/`forget`/earlier `edit_undo` names that action instead of guessing,
- * and a fact whose last edit predates the `prior_json` column (or was itself an `edit_undo`, which
- * never records one) refuses cleanly rather than restoring nothing and reporting success.
- */
+/** Reverses the most recent `mem edit` on a fact, restoring every field that edit touched to the value `buildEditPriorPayload` recorded for it -- `mem review --undo`'s `undoReject` pattern applied to `mem edit`, which had no equivalent: an edit overwrote a fact in place with no way to walk it back through the CLI, only by hand-editing the database. Refuses on anything other than the fact's own last audit row being a recoverable `edit`: a fact whose last action was a `pin`/`forget`/earlier `edit_undo` names that action instead of guessing, and a fact whose last edit predates the `prior_json` column (or was itself an `edit_undo`, which never records one) refuses cleanly rather than restoring nothing and reporting success. */
 function undoEdit(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   const history = listAuditLogForFact(db, fact.id);
@@ -372,10 +264,7 @@ function undoEdit(db: Database.Database, id: string): string {
     throw new UsageError(`fact ${fact.id}'s last edit has no recoverable prior value recorded -- nothing to undo`);
   }
   const patch = JSON.parse(last.priorJson) as FactUpdate;
-  // A prior value that tripped secret screening was never stored -- the marker was stored in its
-  // place. Restoring it would write "[redacted: possible secret -- ...]" in as the fact's text and
-  // report success, which is worse than refusing: the original is gone either way, but a refusal
-  // says so. The fact's current value is untouched and still settable by hand with `mem edit`.
+  // A prior value that tripped secret screening was never stored -- the marker was stored in its place. Restoring it would write "[redacted: possible secret -- ...]" in as the fact's text and report success, which is worse than refusing: the original is gone either way, but a refusal says so. The fact's current value is untouched and still settable by hand with `mem edit`.
   const redactedFields = Object.entries(patch)
     .filter(([, value]) => typeof value === "string" && value.startsWith(REDACTED_PRIOR_VALUE_PREFIX))
     .map(([field]) => field);
@@ -460,13 +349,7 @@ function parseToolName(raw: string): ToolName {
   return raw as ToolName;
 }
 
-/**
- * `TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS`: test/advanced override for the hint-format soft time budget
- * (`RETRIEVAL_BUDGET_MS` in integration-seam.ts). Subprocess-level tests drive the built bundle
- * under a fully loaded runner, where the 150ms default blows and turns a selection assertion into a
- * timing one; the in-process seam tests already override it the same way through `HintFormatOptions`.
- * Ignored unless it parses as a positive integer.
- */
+/** `TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS`: test/advanced override for the hint-format soft time budget (`RETRIEVAL_BUDGET_MS` in integration-seam.ts). Subprocess-level tests drive the built bundle under a fully loaded runner, where the 150ms default blows and turns a selection assertion into a timing one; the in-process seam tests already override it the same way through `HintFormatOptions`. Ignored unless it parses as a positive integer. */
 function retrievalBudgetOverride(): number | undefined {
   const raw = process.env["TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS"];
   if (raw === undefined) {
@@ -490,26 +373,13 @@ function parseContextFiles(raw: string | undefined): string[] | undefined {
 // ─────────────────────────────────────────────────────────────────────────── DB lifecycle + error handling ───────────────────────────────────────────────────────────────────────────
 
 /** Opens a fresh connection for one command invocation and always closes it, even on throw (mem is a short-lived, single-shot CLI process -- Section 3). */
-/**
- * Wall clock for the post-capture embedding round trip.
- *
- * Small on purpose: `mem remember` is an interactive command whose real work is already finished by
- * the time this runs, so the vector is worth waiting a moment for and not worth waiting on. An
- * endpoint slower than this loses the vector, which `mem embed` picks up later.
- */
+/** Wall clock for the post-capture embedding round trip. Small on purpose: `mem remember` is an interactive command whose real work is already finished by the time this runs, so the vector is worth waiting a moment for and not worth waiting on. An endpoint slower than this loses the vector, which `mem embed` picks up later. */
 const CAPTURE_EMBED_TIMEOUT_MS = 2_000;
 
 /** Texts per `mem embed` request. One round trip per batch rather than per fact is the whole reason `embedBatch` exists; 32 keeps a batch small enough that a failure loses little work. */
 const EMBED_BATCH_SIZE = 32;
 
-/**
- * Reads the embeddings config for a command that owes the user a diagnosis rather than a shrug.
- *
- * The fail-open callers (recall, the seam, post-capture) go through
- * `resolveConfiguredEmbeddingBackend`, which returns `null` for both "off" and "misconfigured". For
- * `mem embed` those are different answers and both are user errors worth naming: running it with no
- * endpoint set is not a silent no-op.
- */
+/** Reads the embeddings config for a command that owes the user a diagnosis rather than a shrug. The fail-open callers (recall, the seam, post-capture) go through `resolveConfiguredEmbeddingBackend`, which returns `null` for both "off" and "misconfigured". For `mem embed` those are different answers and both are user errors worth naming: running it with no endpoint set is not a silent no-op. */
 function readEmbeddingConfigForCommand(): { readonly url: string; readonly model: string } {
   let config;
   try {
@@ -525,22 +395,7 @@ function readEmbeddingConfigForCommand(): { readonly url: string; readonly model
   return config;
 }
 
-/**
- * Best-effort: computes and stores an embedding for a fact that was just captured.
- *
- * Lives here rather than in capture.ts deliberately. `writeFact` inserts the fact and its audit row
- * inside a single synchronous transaction; awaiting a network call there would put an HTTP round
- * trip inside a write transaction and turn every capture path async to buy nothing -- the vector is
- * a ranking optimization, not part of the fact.
- *
- * Running after capture also means running strictly after capture.ts's secret screening, and that
- * ordering is a security property rather than an accident: text that fails screening is never
- * stored, never returned, and so can never be handed to a configured embeddings endpoint.
- *
- * Nothing here may fail the capture. The fact is already durable and its id already printed, so
- * every failure -- unconfigured, unreachable, slow, malformed, or a model that disagrees with the
- * store's -- is swallowed without touching the exit code or stdout.
- */
+/** Best-effort: computes and stores an embedding for a fact that was just captured. Lives here rather than in capture.ts deliberately. `writeFact` inserts the fact and its audit row inside a single synchronous transaction; awaiting a network call there would put an HTTP round trip inside a write transaction and turn every capture path async to buy nothing -- the vector is a ranking optimization, not part of the fact. Running after capture also means running strictly after capture.ts's secret screening, and that ordering is a security property rather than an accident: text that fails screening is never stored, never returned, and so can never be handed to a configured embeddings endpoint. Nothing here may fail the capture. The fact is already durable and its id already printed, so every failure -- unconfigured, unreachable, slow, malformed, or a model that disagrees with the store's -- is swallowed without touching the exit code or stdout. */
 async function attachEmbeddingBestEffort(fact: Fact): Promise<void> {
   const backend = resolveConfiguredEmbeddingBackend(process.env, { timeoutMs: CAPTURE_EMBED_TIMEOUT_MS });
   if (backend === null) {
@@ -555,9 +410,7 @@ async function attachEmbeddingBestEffort(fact: Fact): Promise<void> {
         setEmbeddingMeta(db, { model: backend.model, dimension: vector.length });
         return;
       }
-      // A store whose vectors came from another model stays untouched: adding one vector from a
-      // second model is exactly the mixed-vector-space corruption `mem embed --all` exists to
-      // resolve, and it would be permanent and invisible.
+      // A store whose vectors came from another model stays untouched: adding one vector from a second model is exactly the mixed-vector-space corruption `mem embed --all` exists to resolve, and it would be permanent and invisible.
       if (recorded.model === backend.model && recorded.dimension === vector.length) {
         updateFact(db, fact.id, { embedding: vector });
       }
@@ -576,33 +429,13 @@ function formatFactSummary(fact: Fact): string {
   return `${fact.id}  [${fact.kind}/${fact.status}${binding}]${kv}  ${fact.text}`;
 }
 
-/**
- * What `mem show` knows about the fact that replaced this one: the id recovered from the audit log,
- * and the winner itself when it is still in the store (`mem gc` can prune it, and it may since have
- * been superseded in turn -- its own `status` is what says so).
- */
+/** What `mem show` knows about the fact that replaced this one: the id recovered from the audit log, and the winner itself when it is still in the store (`mem gc` can prune it, and it may since have been superseded in turn -- its own `status` is what says so). */
 interface SupersessionEdge {
   readonly winnerId: string;
   readonly winner: Fact | undefined;
 }
 
-/**
- * Renders the supersession edge, or nothing when the fact was not superseded.
- *
- * A superseded fact with no known edge is stated rather than omitted: "retired, cause unknown" is
- * a different and equally useful answer to "what happened to this?" than silence, which the reader
- * would otherwise have to disambiguate from a missing feature.
- *
- * `edge === null` means only "no supersession edge was found in this store's audit log" -- it does
- * NOT mean "nothing superseded this fact". `findSupersedingFactId` (src/db.ts) reads the edge out
- * of `audit_log`. `mem export` carries the edge forward as an optional `superseded_by` field
- * (`factToExportJson`), and `mem import --from-json` restores it as a fresh audit row once every
- * fact in the file has landed (`importFromJson`), so a fact superseded before an export/import round
- * trip keeps its edge as long as the export recorded a winner and that winner resolves somewhere
- * the file or the target store can see. `unknown` below is therefore no longer a blanket casualty of
- * export/import -- it now means either a genuine terminal retirement that never named a winner
- * (`mem forget`, staleness), or a named winner that does not resolve anywhere reachable.
- */
+/** Renders the supersession edge, or nothing when the fact was not superseded. A superseded fact with no known edge is stated rather than omitted: "retired, cause unknown" is a different and equally useful answer to "what happened to this?" than silence, which the reader would otherwise have to disambiguate from a missing feature. `edge === null` means only "no supersession edge was found in this store's audit log" -- it does NOT mean "nothing superseded this fact". `findSupersedingFactId` (src/db.ts) reads the edge out of `audit_log`. `mem export` carries the edge forward as an optional `superseded_by` field (`factToExportJson`), and `mem import --from-json` restores it as a fresh audit row once every fact in the file has landed (`importFromJson`), so a fact superseded before an export/import round trip keeps its edge as long as the export recorded a winner and that winner resolves somewhere the file or the target store can see. `unknown` below is therefore no longer a blanket casualty of export/import -- it now means either a genuine terminal retirement that never named a winner (`mem forget`, staleness), or a named winner that does not resolve anywhere reachable. */
 function formatSupersessionLine(fact: Fact, edge: SupersessionEdge | null): string | null {
   if (fact.status !== "superseded") {
     return null;
@@ -632,9 +465,7 @@ function formatFactDetail(
       const now = new Date();
       const decayed = decayedConfidence(fact, now);
       const isBelowFloor = isDecayedBelowGroundTruth(fact, now);
-      // Decay is continuous, so `decayed < confidence` is true within seconds of capture and would
-      // print "(decayed to 1.00)" on every healthy preference -- clutter that says nothing. The note
-      // appears only once the decayed value differs at the precision it is printed to.
+      // Decay is continuous, so `decayed < confidence` is true within seconds of capture and would print "(decayed to 1.00)" on every healthy preference -- clutter that says nothing. The note appears only once the decayed value differs at the precision it is printed to.
       const decayNote = isBelowFloor
         ? ` (decayed to ${decayed.toFixed(2)}, below ground truth; refresh with mem remember or mem pin to reaffirm)`
         : decayed.toFixed(2) !== fact.confidence.toFixed(2)
@@ -669,10 +500,7 @@ function formatFactDetail(
       lines.push(`  - [${source.storedAt}] ${source.excerpt}`);
     }
   }
-  // The audit log has recorded every capture, edit, pin, and status change since the first release
-  // and nothing could read it back, so the trail that exists so this tool's output can be trusted
-  // was write-only. It matters most for `mem edit`, which overwrites text in place: the previous
-  // wording lives nowhere else in the store once the row is updated.
+  // The audit log has recorded every capture, edit, pin, and status change since the first release and nothing could read it back, so the trail that exists so this tool's output can be trusted was write-only. It matters most for `mem edit`, which overwrites text in place: the previous wording lives nowhere else in the store once the row is updated.
   if (history.length > 0) {
     lines.push("history:");
     for (const entry of history) {
@@ -681,9 +509,7 @@ function formatFactDetail(
   }
   if (related !== null) {
     if (related.length === 0) {
-      // Stated rather than omitted, for the same reason a superseded-with-no-edge fact gets a line
-      // above instead of silence: "shares no terms with anything else in scope" is a real answer,
-      // not a missing feature the reader has to disambiguate from a broken query.
+      // Stated rather than omitted, for the same reason a superseded-with-no-edge fact gets a line above instead of silence: "shares no terms with anything else in scope" is a real answer, not a missing feature the reader has to disambiguate from a broken query.
       lines.push("related: none -- no other fact in scope shares an entity or topic with this one");
     } else {
       lines.push("related:");
@@ -698,13 +524,7 @@ function formatFactDetail(
   return lines.join("\n");
 }
 
-/**
- * Same "pending, unconfirmed" / "contested, excluded" wording `buildDisplay` (retrieval.ts) already
- * uses to flag a withheld fact -- reused verbatim rather than reintroducing a second vocabulary for
- * the same two states. Not routed through `classifyTrust` itself: that needs a freshness verdict and
- * a pool-wide contradiction scan, both of which `retrieve()` already pays for on its own results:
- * for a related fact, pending/contested is fully determined by its own `status` column.
- */
+/** Same "pending, unconfirmed" / "contested, excluded" wording `buildDisplay` (retrieval.ts) already uses to flag a withheld fact -- reused verbatim rather than reintroducing a second vocabulary for the same two states. Not routed through `classifyTrust` itself: that needs a freshness verdict and a pool-wide contradiction scan, both of which `retrieve()` already pays for on its own results: for a related fact, pending/contested is fully determined by its own `status` column. */
 function relatedTrustCaveat(status: FactStatus): string | null {
   if (status === "pending") {
     return "pending, unconfirmed";
@@ -740,12 +560,7 @@ interface ExportedFactJson {
   readonly embedding?: number[] | null;
 }
 
-/**
- * Projects a `Fact` to its plain-JSON shape. `includeEmbedding` defaults to `true` (matching `mem
- * export`'s existing full-fidelity behavior, unchanged by this extraction); `mem list --json` / `mem
- * show --json` pass `false` to drop the field entirely (large, usually null, an internal
- * retrieval-only detail -- see the design plan's council/GLM synthesis).
- */
+/** Projects a `Fact` to its plain-JSON shape. `includeEmbedding` defaults to `true` (matching `mem export`'s existing full-fidelity behavior, unchanged by this extraction); `mem list --json` / `mem show --json` pass `false` to drop the field entirely (large, usually null, an internal retrieval-only detail -- see the design plan's council/GLM synthesis). */
 function factToExportJson(
   fact: Fact,
   options: { readonly includeEmbedding?: boolean; readonly supersededBy?: string | null } = {}
@@ -770,9 +585,7 @@ function factToExportJson(
     confidence: fact.confidence,
     last_surfaced_at: fact.last_surfaced_at ?? null,
     prior_status: fact.prior_status ?? null,
-    // Only meaningful for a superseded fact -- omitted (not `null`) for every other status so an
-    // untouched call site (mem list --json, mem show --json's embedded `fact`) does not start
-    // asserting `superseded_by: null` for a fact nobody checked the audit log for.
+    // Only meaningful for a superseded fact -- omitted (not `null`) for every other status so an untouched call site (mem list --json, mem show --json's embedded `fact`) does not start asserting `superseded_by: null` for a fact nobody checked the audit log for.
     ...(fact.status === "superseded" ? { superseded_by: options.supersededBy ?? null } : {}),
     ...(includeEmbedding ? { embedding: fact.embedding === null ? null : Array.from(fact.embedding) } : {}),
   };
@@ -786,39 +599,17 @@ const EXPORT_MD_KIND_HEADING: Record<FactKind, string> = {
   correction: "Corrections",
 };
 
-/**
- * Renders one fact's text as a single `import.ts` `BULLET_RE`-compatible bullet body (the caller
- * still prepends the `- ` marker). Every transform here exists to survive a specific rule in
- * `extractMarkdownBullets` -- see the comment on each line.
- */
+/** Renders one fact's text as a single `import.ts` `BULLET_RE`-compatible bullet body (the caller still prepends the `- ` marker). Every transform here exists to survive a specific rule in `extractMarkdownBullets` -- see the comment on each line. */
 function factTextToMarkdownBullet(text: string): string {
-  // BULLET_RE is `^(\s*)[-*]\s+(.+)$` -- single line. A raw embedded newline would either truncate
-  // the bullet at the first line break (rest silently lost) or, worse, produce a second line that
-  // is itself a bare `-`/`*`-free continuation extractMarkdownBullets simply skips. Collapse any
-  // run of whitespace containing a line break to one space so the whole fact survives on one line.
+  // BULLET_RE is `^(\s*)[-*]\s+(.+)$` -- single line. A raw embedded newline would either truncate the bullet at the first line break (rest silently lost) or, worse, produce a second line that is itself a bare `-`/`*`-free continuation extractMarkdownBullets simply skips. Collapse any run of whitespace containing a line break to one space so the whole fact survives on one line.
   const collapsed = text.replace(/\s*\r?\n\s*/gu, " ").trim();
-  // A fact whose text is empty (or entirely whitespace) after collapsing would otherwise render as
-  // a bare "- " bullet; extractMarkdownBullets already discards a bullet whose captured text is
-  // empty (`text.length === 0`), so an untouched empty bullet round-trips to nothing. Render a
-  // visible placeholder instead of a silently-dropped line.
+  // A fact whose text is empty (or entirely whitespace) after collapsing would otherwise render as a bare "- " bullet; extractMarkdownBullets already discards a bullet whose captured text is empty (`text.length === 0`), so an untouched empty bullet round-trips to nothing. Render a visible placeholder instead of a silently-dropped line.
   const nonEmpty = collapsed.length === 0 ? "(empty fact text)" : collapsed;
-  // FENCE_RE (`^\s*(```|~~~)`) only fires when a line *opens* with a fence marker after optional
-  // leading whitespace; the `- ` marker this bullet is always prefixed with already makes that
-  // impossible here. Still break up an embedded fence run with a zero-width space -- this file is
-  // published as a shareable, git-reviewable artifact (see --format's help), and a fence sequence
-  // quoted mid-text should not read as a real fence opener to some *other* markdown renderer or a
-  // future importer that lifts the `- ` requirement.
+  // FENCE_RE (`^\s*(```|~~~)`) only fires when a line *opens* with a fence marker after optional leading whitespace; the `- ` marker this bullet is always prefixed with already makes that impossible here. Still break up an embedded fence run with a zero-width space -- this file is published as a shareable, git-reviewable artifact (see --format's help), and a fence sequence quoted mid-text should not read as a real fence opener to some *other* markdown renderer or a future importer that lifts the `- ` requirement.
   return nonEmpty.replace(/(`{3,}|~{3,})/gu, (run) => run.split("").join("​"));
 }
 
-/**
- * `mem export --format md` -- a lossy, human/git-shareable rendering of the same filtered fact set
- * `--format json` exports full-fidelity. Grouped by kind under a level-2 heading, every bullet kept
- * top-level (no nesting) so `NON_PREFERENCE_HEADING_RE`'s nested-bullet suppression never applies
- * regardless of heading text. The leading HTML comment is invisible to `extractMarkdownBullets`
- * (matches neither `HEADING_RE` nor `BULLET_RE`) and records provenance plus the lossiness caveat
- * directly in the artifact, not just in `--help`.
- */
+/** `mem export --format md` -- a lossy, human/git-shareable rendering of the same filtered fact set `--format json` exports full-fidelity. Grouped by kind under a level-2 heading, every bullet kept top-level (no nesting) so `NON_PREFERENCE_HEADING_RE`'s nested-bullet suppression never applies regardless of heading text. The leading HTML comment is invisible to `extractMarkdownBullets` (matches neither `HEADING_RE` nor `BULLET_RE`) and records provenance plus the lossiness caveat directly in the artifact, not just in `--help`. */
 function factsToMarkdown(facts: readonly Fact[]): string {
   const header =
     `<!-- mem export --format md, generated ${new Date().toISOString()} -- lossy: only fact text ` +
@@ -862,48 +653,19 @@ function formatSection(title: string, facts: readonly Fact[], detail?: (fact: Fa
   return lines.join("\n");
 }
 
-/**
- * The newest source excerpt for a pending fact, rendered the same way `mem show` renders one --
- * same `[stored_at] excerpt` shape, no extra escaping, since the excerpt is already screened and
- * truncated at capture time (`buildScreenedExcerpt`). Null when the fact has no source row at all,
- * which is the common case: `mem remember`/`mem suggest` never write one, so most pending facts have
- * nothing to show here.
- *
- * One query per pending fact rather than a new batch lookup in storage.ts -- the pending bucket is
- * already the size a human reviews by hand, so the extra API surface isn't earning its keep.
- */
+/** The newest source excerpt for a pending fact, rendered the same way `mem show` renders one -- same `[stored_at] excerpt` shape, no extra escaping, since the excerpt is already screened and truncated at capture time (`buildScreenedExcerpt`). Null when the fact has no source row at all, which is the common case: `mem remember`/`mem suggest` never write one, so most pending facts have nothing to show here. One query per pending fact rather than a new batch lookup in storage.ts -- the pending bucket is already the size a human reviews by hand, so the extra API surface isn't earning its keep. */
 function formatPendingSourceLine(db: Database.Database, fact: Fact): string | null {
   const [newest] = listSourcesForFact(db, fact.id);
   return newest === undefined ? null : `    source: [${newest.storedAt}] ${newest.excerpt}`;
 }
 
-/**
- * `null` for the common case (`sightings` is 0: never restated, or predates the column, which
- * reads identically -- see `Fact.sightings`'s doc comment). A fact worth showing here is one a
- * human reviewing the queue should weigh more heavily for having been said more than once; the
- * count is display only, same non-gating contract as `formatPendingSourceLine` and
- * `formatPendingContradictionLine` beside it.
- */
+/** `null` for the common case (`sightings` is 0: never restated, or predates the column, which reads identically -- see `Fact.sightings`'s doc comment). A fact worth showing here is one a human reviewing the queue should weigh more heavily for having been said more than once; the count is display only, same non-gating contract as `formatPendingSourceLine` and `formatPendingContradictionLine` beside it. */
 function formatPendingSightingsLine(fact: Fact): string | null {
   const sightings = fact.sightings ?? 0;
   return sightings > 0 ? `    sighted again ${sightings} time${sightings === 1 ? "" : "s"} since` : null;
 }
 
-/**
- * Names the single best-matching live fact a pending `correction` -- or any pending fact carrying a
- * `subject`, since that is exactly what a same-subject contradiction is keyed on -- may contradict
- * once promoted. Reuses `findRelatedFacts`, the same entity/topic-weighted lookup `mem show
- * --related` already runs, rather than inventing a second similarity mechanism for one more bucket.
- *
- * Narrowed to `active`/`pinned` candidates: `findRelatedFacts` also surfaces pending/contested
- * neighbours (labelled, for `mem show --related`'s inspection purpose), but "may contradict" only
- * means something against the ground truth this fact could eventually replace -- another pending or
- * contested fact is not live enough yet to be worth flagging as a rival.
- *
- * A label, not a gate: this never supersedes, changes status, or promotes anything, same contract as
- * `mem show --related`. Only the top match prints, same shape as `formatUnanchoredSuggestionLine`
- * offering only its first viable anchor candidate -- ambiguity narrowed to one line is the point.
- */
+/** Names the single best-matching live fact a pending `correction` -- or any pending fact carrying a `subject`, since that is exactly what a same-subject contradiction is keyed on -- may contradict once promoted. Reuses `findRelatedFacts`, the same entity/topic-weighted lookup `mem show --related` already runs, rather than inventing a second similarity mechanism for one more bucket. Narrowed to `active`/`pinned` candidates: `findRelatedFacts` also surfaces pending/contested neighbours (labelled, for `mem show --related`'s inspection purpose), but "may contradict" only means something against the ground truth this fact could eventually replace -- another pending or contested fact is not live enough yet to be worth flagging as a rival. A label, not a gate: this never supersedes, changes status, or promotes anything, same contract as `mem show --related`. Only the top match prints, same shape as `formatUnanchoredSuggestionLine` offering only its first viable anchor candidate -- ambiguity narrowed to one line is the point. */
 function formatPendingContradictionLine(db: Database.Database, fact: Fact, root: string): string | null {
   if (fact.kind !== "correction" && fact.subject === null) {
     return null;
@@ -921,19 +683,7 @@ function formatPendingContradictionLine(db: Database.Database, fact: Fact, root:
   );
 }
 
-/**
- * A paste-ready `mem edit --anchor` command for an `unanchored` fact, printed only when the
- * suggested predicate would already be `affirmed` -- a suggestion that immediately reads
- * `contradicted` or `unverified` teaches the user the feature is broken rather than helping them.
- *
- * `extractAnchorableTargets` shares its patterns with the `mentionsAnchorableTarget` nomination
- * that put this fact in the bucket at all, so the two can never disagree about what counts as
- * anchorable. `anchorRootFor` resolves the fact's own root (not the bare caller root) the same way
- * `evaluateFactFreshness` does for the `contradicted` bucket above; a fact whose root cannot be
- * resolved (deleted project, foreign machine) has nothing to check against. Candidates are tried in
- * order and the first that passes `anchorPathWithinRoot` *and* evaluates `affirmed` wins -- never a
- * menu of options for one fact.
- */
+/** A paste-ready `mem edit --anchor` command for an `unanchored` fact, printed only when the suggested predicate would already be `affirmed` -- a suggestion that immediately reads `contradicted` or `unverified` teaches the user the feature is broken rather than helping them. `extractAnchorableTargets` shares its patterns with the `mentionsAnchorableTarget` nomination that put this fact in the bucket at all, so the two can never disagree about what counts as anchorable. `anchorRootFor` resolves the fact's own root (not the bare caller root) the same way `evaluateFactFreshness` does for the `contradicted` bucket above; a fact whose root cannot be resolved (deleted project, foreign machine) has nothing to check against. Candidates are tried in order and the first that passes `anchorPathWithinRoot` *and* evaluates `affirmed` wins -- never a menu of options for one fact. */
 function formatUnanchoredSuggestionLine(fact: Fact, root: string): string | null {
   const factRoot = anchorRootFor(fact, root);
   if (factRoot === null) {
@@ -945,11 +695,7 @@ function formatUnanchoredSuggestionLine(fact: Fact, root: string): string | null
     }
     const predicate = `file-exists ${candidate}`;
     if (evaluateAnchor(predicate, factRoot) === "affirmed") {
-      // `mem edit` refuses a source_type=user fact without --force, and most of what a store holds
-      // is user-stated -- so omitting it here would hand the user a command that answers with a
-      // refusal on the common path. The guard exists to stop an agent rewriting a user's own words
-      // unasked; this is the user pasting it themselves, the text is untouched, and the override is
-      // audited either way.
+      // `mem edit` refuses a source_type=user fact without --force, and most of what a store holds is user-stated -- so omitting it here would hand the user a command that answers with a refusal on the common path. The guard exists to stop an agent rewriting a user's own words unasked; this is the user pasting it themselves, the text is untouched, and the override is audited either way.
       const force = fact.source_type === "user" ? " --force" : "";
       return `    mem edit ${fact.id} --anchor "${predicate}"${force}`;
     }
@@ -973,13 +719,7 @@ function formatWiringPlanForInit(plan: WiringPlan): string {
   return plan.entries.map((entry) => `  ${entry.installAction.padEnd(6)} ${entry.path}  (${entry.detail})`).join("\n");
 }
 
-/**
- * `mem init claude-code`'s pre-flight message when the `mem` binary these hooks would invoke can't
- * actually run them -- `null` when there is nothing to refuse (a binary was found and every hook it
- * would run is capable). Named after the binary's own resolved path, not this build's, since that
- * is the one whose flags matter at hook time; see `checkClaudeHookHealth`'s doc comment for why this
- * is decided by capability probe rather than a version-number floor.
- */
+/** `mem init claude-code`'s pre-flight message when the `mem` binary these hooks would invoke can't actually run them -- `null` when there is nothing to refuse (a binary was found and every hook it would run is capable). Named after the binary's own resolved path, not this build's, since that is the one whose flags matter at hook time; see `checkClaudeHookHealth`'s doc comment for why this is decided by capability probe rather than a version-number floor. */
 function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
   if (health.bin === null) {
     return [
@@ -1021,8 +761,7 @@ function formatImportOutcomeLine(outcome: ImportOutcome, dryRun = false): string
     case "skipped_known":
       return `  skipped (already known)  ${where}  "${candidate.text}"`;
     case "skipped_error":
-      // Under --dry-run nothing has been skipped yet, only predicted: "skipped" would read as a
-      // report of something that already happened. The reason text is the real import's, verbatim.
+      // Under --dry-run nothing has been skipped yet, only predicted: "skipped" would read as a report of something that already happened. The reason text is the real import's, verbatim.
       return `  ${dryRun ? "would-skip" : "skipped"} (${outcome.reason})  ${where}  "${candidate.text}"`;
   }
 }
@@ -1061,17 +800,7 @@ function formatImportResult(
 /** Section 6 / review finding S8: "Pins get a re-confirmation nudge in review after N months so a year-old forgotten pin can't stay maximally-trusted forever." ~6 months. */
 const PIN_RECONFIRM_DAYS = 182;
 
-/**
- * When a fact entered the status it currently holds -- the basis for every "how long has it been
- * like *this*" retention clock (the superseded-fact GC window, the pin re-confirmation nudge).
- *
- * These clocks previously read `captured_at`, which never moves, so both were wrong by
- * construction: a fact captured 91 days ago and superseded yesterday was GC'd on the next pass
- * despite the 90-day audit window it was supposed to get, and a pin's re-confirmation nudge could
- * never be cleared because re-pinning does not change when the fact was captured. Falls back to
- * `captured_at` for rows written before `status_changed_at` existed -- the same value those rows
- * were already being judged by, so the migration changes nothing for them.
- */
+/** When a fact entered the status it currently holds -- the basis for every "how long has it been like *this*" retention clock (the superseded-fact GC window, the pin re-confirmation nudge). These clocks previously read `captured_at`, which never moves, so both were wrong by construction: a fact captured 91 days ago and superseded yesterday was GC'd on the next pass despite the 90-day audit window it was supposed to get, and a pin's re-confirmation nudge could never be cleared because re-pinning does not change when the fact was captured. Falls back to `captured_at` for rows written before `status_changed_at` existed -- the same value those rows were already being judged by, so the migration changes nothing for them. */
 function statusChangedAt(fact: Fact): string {
   const changed = fact.status_changed_at;
   return typeof changed === "string" && changed.length > 0 ? changed : fact.captured_at;
@@ -1106,68 +835,25 @@ const REVIEW_SECTION_TITLES: Record<ReviewSection, string> = {
   unanchored: "unanchored but checkable (names a path/URL/config file; consider `mem edit <id> --anchor`)",
 };
 
-/**
- * Kinds eligible for the `unanchored` nomination. `preference` is excluded by construction: a
- * preference is a judgment claim ("prefer tabs over spaces"), and no filesystem predicate can
- * confirm or deny one — mentioning a path incidentally does not make it environment-dependent.
- * The remaining kinds all assert something about the world that an anchor could test.
- */
+/** Kinds eligible for the `unanchored` nomination. `preference` is excluded by construction: a preference is a judgment claim ("prefer tabs over spaces"), and no filesystem predicate can confirm or deny one — mentioning a path incidentally does not make it environment-dependent. The remaining kinds all assert something about the world that an anchor could test. */
 const UNANCHORED_ELIGIBLE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["decision", "fact", "correction"]);
 
-/**
- * Builds the `mem review` listing: pending facts (never auto-promoted, S9), contested facts
- * (deterministic contradiction detection re-run fresh over the live active/pinned pool, never
- * trusting a possibly-stale `status` column -- same discipline as retrieval.ts), anchor-contradicted
- * facts (including pins -- S8: a pin is exempt from decay, never from contradiction/anchor
- * suppression), pins overdue for re-confirmation, and unanchored-but-checkable facts (ground-truth
- * facts carrying no anchor whose text names a path/URL/config file an anchor could be written
- * against -- the one bucket that is a nudge rather than a pending decision).
- *
- * `options.sinceEpoch` restricts every bucket to facts with `epoch > sinceEpoch` (applied at the
- * source -- pending/groundTruth queries -- so contested/contradicted/pins, which are derived from
- * groundTruth, inherit the filter automatically). `options.section` restricts the output to one
- * bucket. `options.summary` prints per-bucket counts instead of full listings.
- */
+/** Builds the `mem review` listing: pending facts (never auto-promoted, S9), contested facts (deterministic contradiction detection re-run fresh over the live active/pinned pool, never trusting a possibly-stale `status` column -- same discipline as retrieval.ts), anchor-contradicted facts (including pins -- S8: a pin is exempt from decay, never from contradiction/anchor suppression), pins overdue for re-confirmation, and unanchored-but-checkable facts (ground-truth facts carrying no anchor whose text names a path/URL/config file an anchor could be written against -- the one bucket that is a nudge rather than a pending decision). `options.sinceEpoch` restricts every bucket to facts with `epoch > sinceEpoch` (applied at the source -- pending/groundTruth queries -- so contested/contradicted/pins, which are derived from groundTruth, inherit the filter automatically). `options.section` restricts the output to one bucket. `options.summary` prints per-bucket counts instead of full listings. */
 function formatReview(db: Database.Database, root: string, options: ReviewOptions = {}): string {
   const epochFilter: FactFilter = options.sinceEpoch !== undefined ? { epochAfter: options.sinceEpoch } : {};
-  // Most-restated first, ties broken by `listFacts`'s own `captured_at DESC` -- `Array.prototype.sort`
-  // is stable, so re-sorting an already-ordered array by sightings alone preserves that secondary
-  // order for every tie exactly as `listFacts` produced it, with no second query needed to express it.
+  // Most-restated first, ties broken by `listFacts`'s own `captured_at DESC` -- `Array.prototype.sort` is stable, so re-sorting an already-ordered array by sightings alone preserves that secondary order for every tie exactly as `listFacts` produced it, with no second query needed to express it.
   const pending = [...listFacts(db, { status: "pending", ...epochFilter })].sort((a, b) => (b.sightings ?? 0) - (a.sightings ?? 0));
-  // Persisted-`contested` facts are part of the detection pool, not just live ground truth. Querying
-  // only active/pinned meant a fact `mem epoch --gc` had already marked contested vanished from the
-  // one bucket that exists to surface it: `mem review --summary` reported `contested: 0` while
-  // `mem recall` was still withholding that fact as contested, and `--promote` refused to touch it.
-  //
-  // The epoch window is deliberately NOT applied here. `detectContradictions` decides by comparing
-  // rivals, so a pool narrowed to one epoch reports a survivor whose rival fell outside the window as
-  // uncontested -- `mem review --since-epoch N` would call clean exactly the fact `mem recall` is
-  // still withholding. The window narrows what the user is asked to review, not what the detector is
-  // allowed to see, so it is applied to the derived buckets at display time instead.
+  // Persisted-`contested` facts are part of the detection pool, not just live ground truth. Querying only active/pinned meant a fact `mem epoch --gc` had already marked contested vanished from the one bucket that exists to surface it: `mem review --summary` reported `contested: 0` while `mem recall` was still withholding that fact as contested, and `--promote` refused to touch it. The epoch window is deliberately NOT applied here. `detectContradictions` decides by comparing rivals, so a pool narrowed to one epoch reports a survivor whose rival fell outside the window as uncontested -- `mem review --since-epoch N` would call clean exactly the fact `mem recall` is still withholding. The window narrows what the user is asked to review, not what the detector is allowed to see, so it is applied to the derived buckets at display time instead.
   const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"] });
 
   const { groups } = detectContradictions(detectionPool);
   const contestedIds = new Set(groups.filter((group) => group.resolution === "contested").flatMap((group) => group.factIds));
-  // Both genuinely-contested facts and any stranded in the status after their rival was forgotten or
-  // edited away. The latter are cleared automatically by the next `mem epoch --gc` reconciliation,
-  // and immediately by `--promote`; either way they are withheld right now, so they belong here.
+  // Both genuinely-contested facts and any stranded in the status after their rival was forgotten or edited away. The latter are cleared automatically by the next `mem epoch --gc` reconciliation, and immediately by `--promote`; either way they are withheld right now, so they belong here.
   const contested = detectionPool.filter((fact) => contestedIds.has(fact.id) || fact.status === "contested");
   const contestedShownIds = new Set(contested.map((fact) => fact.id));
   const groundTruth = detectionPool.filter((fact) => !contestedShownIds.has(fact.id));
 
-  // `anchorRootFor`, not the bare caller root: a project-scoped fact carries the root its anchor is
-  // meaningful relative to, and evaluating it against wherever `mem review` happened to be run
-  // resolves the predicate inside an unrelated checkout. That fix covers project scope: retrieval
-  // has resolved project-scope roots this way since the scope_root fix. `isBoundToRoot` gates the
-  // project case further: a fact not actually bound to `root` is left `unverified` rather than
-  // evaluated at all -- unverified is honest ("cannot confirm or deny from here"), `contradicted`
-  // here would be a lie about a tree the user is not in. A `path`-scoped fact recalled from an
-  // ancestor of its binding is `isBoundToRoot`-true (the file is inside `root`) but was previously
-  // evaluated against the bare caller root regardless of where it was actually captured -- e.g. a
-  // fact anchored `file-absent yarn.lock` against its own project directory, reviewed from that
-  // project's parent, where an unrelated `yarn.lock` happens to exist. `evaluateFactFreshness` closes
-  // that: it falls back to the fact's persisted `captureRoot` (recorded by capture.ts for every
-  // scope) and reports `unverified` rather than a wrong verdict when that root is unknown.
+  // `anchorRootFor`, not the bare caller root: a project-scoped fact carries the root its anchor is meaningful relative to, and evaluating it against wherever `mem review` happened to be run resolves the predicate inside an unrelated checkout. That fix covers project scope: retrieval has resolved project-scope roots this way since the scope_root fix. `isBoundToRoot` gates the project case further: a fact not actually bound to `root` is left `unverified` rather than evaluated at all -- unverified is honest ("cannot confirm or deny from here"), `contradicted` here would be a lie about a tree the user is not in. A `path`-scoped fact recalled from an ancestor of its binding is `isBoundToRoot`-true (the file is inside `root`) but was previously evaluated against the bare caller root regardless of where it was actually captured -- e.g. a fact anchored `file-absent yarn.lock` against its own project directory, reviewed from that project's parent, where an unrelated `yarn.lock` happens to exist. `evaluateFactFreshness` closes that: it falls back to the fact's persisted `captureRoot` (recorded by capture.ts for every scope) and reports `unverified` rather than a wrong verdict when that root is unknown.
   const contradicted = groundTruth.filter(
     (fact) => !contestedIds.has(fact.id) && isBoundToRoot(fact, root) && evaluateFactFreshness(fact, root) === "contradicted"
   );
@@ -1181,11 +867,7 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
     return Number.isFinite(ageDays) && ageDays >= PIN_RECONFIRM_DAYS;
   });
 
-  // An anchorless fact short-circuits to `unverified` (anchors.ts), so it can never reach the
-  // `contradicted` bucket above and, before this bucket existed, reached no bucket at all — it was
-  // invisible to both `mem review` and `mem doctor` no matter how stale it had become. Nominating
-  // only facts that actually name a checkable target keeps this a short, actionable list rather
-  // than a restatement of "everything without an anchor".
+  // An anchorless fact short-circuits to `unverified` (anchors.ts), so it can never reach the `contradicted` bucket above and, before this bucket existed, reached no bucket at all — it was invisible to both `mem review` and `mem doctor` no matter how stale it had become. Nominating only facts that actually name a checkable target keeps this a short, actionable list rather than a restatement of "everything without an anchor".
   const unanchored = groundTruth.filter(
     (fact) =>
       !contestedIds.has(fact.id) &&
@@ -1194,9 +876,7 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
       mentionsAnchorableTarget(fact.text)
   );
 
-  // `pending` is already narrowed at its own query and takes no part in contradiction detection, so
-  // it needs no second pass; every other bucket is derived from the unfiltered detection pool and is
-  // narrowed here.
+  // `pending` is already narrowed at its own query and takes no part in contradiction detection, so it needs no second pass; every other bucket is derived from the unfiltered detection pool and is narrowed here.
   const withinEpoch = (fact: Fact): boolean => options.sinceEpoch === undefined || (fact.epoch ?? 0) > options.sinceEpoch;
   const buckets: Record<ReviewSection, readonly Fact[]> = {
     pending,
@@ -1241,75 +921,35 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
 
 // ─────────────────────────────────────────────────────────────────────────── epoch / retention pass ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Section 6: "superseded facts and offloaded sources are GC'd after N days or M rows (whichever
- * first)." Neither bound applies to a rejection tombstone -- a `superseded` row whose
- * `prior_status` is `pending` -- because that row IS the record of a human's "no" to a suggested
- * fact, not an ordinary contradiction loser. Pruning it would let the same sentence come back and
- * be filed `pending` again as if it had never been asked, silently reversing the decision. See the
- * exemption in `runRetentionPass` below. This makes rejection-tombstone growth unbounded by age or
- * count; it is bounded instead by how often a human rejects a suggestion, which is small.
- */
+/** Section 6: "superseded facts and offloaded sources are GC'd after N days or M rows (whichever first)." Neither bound applies to a rejection tombstone -- a `superseded` row whose `prior_status` is `pending` -- because that row IS the record of a human's "no" to a suggested fact, not an ordinary contradiction loser. Pruning it would let the same sentence come back and be filed `pending` again as if it had never been asked, silently reversing the decision. See the exemption in `runRetentionPass` below. This makes rejection-tombstone growth unbounded by age or count; it is bounded instead by how often a human rejects a suggestion, which is small. */
 const GC_SUPERSEDED_MAX_AGE_DAYS = 90;
 const GC_SUPERSEDED_MAX_ROWS = 1000;
 const GC_SOURCES_MAX_AGE_DAYS = 90;
-/**
- * Section 6: "Audit log rotates." Deliberately an *independent* retention window from the
- * superseded-fact/sources GC bounds above -- and intentionally longer -- so that pruning a fact or
- * its source excerpts never silently prunes the audit history describing how that fact was
- * captured, edited, contradicted, and eventually GC'd. Audit rows outlive the rows they describe
- * (design principle 5: "No black box"); only age rotates them, never a fact-side GC decision.
- */
+/** Section 6: "Audit log rotates." Deliberately an *independent* retention window from the superseded-fact/sources GC bounds above -- and intentionally longer -- so that pruning a fact or its source excerpts never silently prunes the audit history describing how that fact was captured, edited, contradicted, and eventually GC'd. Audit rows outlive the rows they describe (design principle 5: "No black box"); only age rotates them, never a fact-side GC decision. */
 const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
-/**
- * The recall log (`recall_log`: which facts were surfaced to which hook session) is session
- * bookkeeping, not history, but it has two live readers, not zero: a `--delta` recall filters
- * against rows for the *same* session id (`listSurfacedFactIds`), and `getUsefulnessCounts` groups
- * every row store-wide, on both recall paths, to feed the usefulness rank list `mem used` confirms
- * into. A coding-tool session does not live for weeks, so the `--delta` reader stops caring about a
- * row long before this window closes; the usefulness reader keeps caring for as long as the row
- * exists, which is exactly what this window bounds. Same age-only shape as the audit-log window
- * above, with a shorter horizon.
- */
+/** The recall log (`recall_log`: which facts were surfaced to which hook session) is session bookkeeping, not history, but it has two live readers, not zero: a `--delta` recall filters against rows for the *same* session id (`listSurfacedFactIds`), and `getUsefulnessCounts` groups every row store-wide, on both recall paths, to feed the usefulness rank list `mem used` confirms into. A coding-tool session does not live for weeks, so the `--delta` reader stops caring about a row long before this window closes; the usefulness reader keeps caring for as long as the row exists, which is exactly what this window bounds. Same age-only shape as the audit-log window above, with a shorter horizon. */
 const GC_RECALL_LOG_MAX_AGE_DAYS = 30;
 
-/**
- * Runs the retention/GC pass (design plan Section 6): persists deterministic contradiction
- * resolutions over the live ground-truth pool (pinned facts included -- S8), reports (never rewrites)
- * preference decay, prunes superseded facts and offloaded sources past their GC bounds, and rotates
- * the audit log. Gated behind `mem epoch --gc` rather than running on every plain `mem epoch` call:
- * the design plan's Section 4 explicitly defines `mem epoch` as token-goat's cheap, frequently-polled
- * fallback-cache-invalidation read ("a monotonic mem epoch ... readable via `mem epoch`") -- doing
- * write-heavy GC work on every read would defeat that contract.
- */
+/** Runs the retention/GC pass (design plan Section 6): persists deterministic contradiction resolutions over the live ground-truth pool (pinned facts included -- S8), reports (never rewrites) preference decay, prunes superseded facts and offloaded sources past their GC bounds, and rotates the audit log. Gated behind `mem epoch --gc` rather than running on every plain `mem epoch` call: the design plan's Section 4 explicitly defines `mem epoch` as token-goat's cheap, frequently-polled fallback-cache-invalidation read ("a monotonic mem epoch ... readable via `mem epoch`") -- doing write-heavy GC work on every read would defeat that contract. */
 function runRetentionPass(db: Database.Database): string {
   const now = new Date();
 
-  // Includes persisted-`contested` facts, so this pass both detects new contradictions and clears
-  // stale ones: a fact whose rival has since been forgotten or edited into agreement is reinstated
-  // (to `pinned` where it was pinned before) instead of staying withheld forever.
+  // Includes persisted-`contested` facts, so this pass both detects new contradictions and clears stale ones: a fact whose rival has since been forgotten or edited into agreement is reinstated (to `pinned` where it was pinned before) instead of staying withheld forever.
   const updates = reconcileContradictions(db, "epoch_contradiction");
 
   const preferences = listFacts(db, { kind: "preference", status: "active" });
-  // The single definition of the decay curve, shared with `recall`'s correctness gate -- this pass
-  // reports only, and must report on exactly the facts recall will actually downgrade.
+  // The single definition of the decay curve, shared with `recall`'s correctness gate -- this pass reports only, and must report on exactly the facts recall will actually downgrade.
   const decayedCount = preferences.filter((fact) => isDecayedBelowGroundTruth(fact, now)).length;
 
   const supersededCutoff = daysAgoIso(GC_SUPERSEDED_MAX_AGE_DAYS, now);
-  // Ordered and cut by when each fact *became* superseded, not when it was captured. Keying the
-  // 90-day window on `captured_at` deleted a fact superseded yesterday purely because it had been
-  // captured 91 days ago -- destroying the audit trail the soft delete exists to preserve -- and
-  // made the 1000-row cap keep the most recently *authored* facts rather than the most recently
-  // superseded ones.
+  // Ordered and cut by when each fact *became* superseded, not when it was captured. Keying the 90-day window on `captured_at` deleted a fact superseded yesterday purely because it had been captured 91 days ago -- destroying the audit trail the soft delete exists to preserve -- and made the 1000-row cap keep the most recently *authored* facts rather than the most recently superseded ones.
   const superseded = [...listFacts(db, { status: "superseded" })].sort((a, b) =>
     statusChangedAt(b).localeCompare(statusChangedAt(a))
   );
   let prunedFacts = 0;
   let supersededOrdinal = 0;
   superseded.forEach((fact) => {
-    // Rejection tombstone -- see the doc comment on GC_SUPERSEDED_MAX_ROWS above. This row is the
-    // record of a human decision, not an ordinary contradiction loser, so it is exempt from both
-    // the age cutoff and the row cap, and it does not consume a cap slot from the rows that follow.
+    // Rejection tombstone -- see the doc comment on GC_SUPERSEDED_MAX_ROWS above. This row is the record of a human decision, not an ordinary contradiction loser, so it is exempt from both the age cutoff and the row cap, and it does not consume a cap slot from the rows that follow.
     if (fact.prior_status === "pending") {
       return;
     }
@@ -1343,20 +983,14 @@ function runRetentionPass(db: Database.Database): string {
 
 // ─────────────────────────────────────────────────────────────────── consolidate ───────────────────────────────────────────────────────────────────
 
-/**
- * Audit events for the two `mem consolidate` passes. Separate strings, not one shared
- * `"consolidate"`: the audit log is the only record of *why* a fact was superseded, and "it
- * restated fact X" and "nothing ever read it" are different reasons that a later reader must be
- * able to tell apart without re-deriving them.
- */
+/** Audit events for the two `mem consolidate` passes. Separate strings, not one shared `"consolidate"`: the audit log is the only record of *why* a fact was superseded, and "it restated fact X" and "nothing ever read it" are different reasons that a later reader must be able to tell apart without re-deriving them. */
 const CONSOLIDATE_DUPLICATE_EVENT = "consolidate_duplicate";
 const CONSOLIDATE_STALE_EVENT = "consolidate_stale";
 const CONSOLIDATE_GRAPH_STALE_EVENT = "consolidate_graph_stale";
 
 function parseThreshold(raw: string): number {
   const value = Number.parseFloat(raw);
-  // `0` is rejected along with the out-of-range values: every pair of facts with any topics at all
-  // clears a threshold of 0, so it would not mean "loosest" -- it would mean "collapse the store".
+  // `0` is rejected along with the out-of-range values: every pair of facts with any topics at all clears a threshold of 0, so it would not mean "loosest" -- it would mean "collapse the store".
   if (!Number.isFinite(value) || value <= 0 || value > 1) {
     throw new UsageError(`--threshold must be a number greater than 0 and at most 1 (got "${raw}")`);
   }
@@ -1371,11 +1005,7 @@ function parseStaleDays(raw: string): number {
   return value;
 }
 
-/**
- * The one line every applied pass ends on. Says where the superseded facts went in commands the
- * user can actually run, because "reversible" is a claim, and an unbacked claim about a destructive
- * operation is worse than no claim.
- */
+/** The one line every applied pass ends on. Says where the superseded facts went in commands the user can actually run, because "reversible" is a claim, and an unbacked claim about a destructive operation is worse than no claim. */
 const CONSOLIDATE_REVERSIBLE_NOTE =
   "superseded facts stay in the store -- `mem list --status superseded`, `mem show <id>`, " +
   "`mem export --status superseded` -- and every change is in the audit log";
@@ -1399,8 +1029,7 @@ function formatDuplicateClusters(clusters: readonly DuplicateCluster[], threshol
       lines.push(`  ${member.similarity.toFixed(2)}    ${formatFactSummary(member.fact)}`);
     }
     for (const pinned of cluster.retainedPinned) {
-      // Listed, but as an explicit non-action: a pinned duplicate is part of the cluster the user
-      // is being shown, and silently dropping it would make the cluster look smaller than it is.
+      // Listed, but as an explicit non-action: a pinned duplicate is part of the cluster the user is being shown, and silently dropping it would make the cluster look smaller than it is.
       lines.push(`  pinned  ${formatFactSummary(pinned)}  (left alone)`);
     }
   });
@@ -1413,12 +1042,7 @@ function formatDuplicateClusters(clusters: readonly DuplicateCluster[], threshol
   return lines.join("\n");
 }
 
-/**
- * Renders `findCrossScopeDuplicates`'s report, in the same shape `formatDuplicateClusters` uses
- * (a running count, a blank-line-separated block per pair, the applied/dry-run closing line) --
- * `""` when there is nothing to show, so the caller can drop this section entirely rather than
- * print an empty "0 cross-scope duplicates" line the Jaccard pass above never had a reason to.
- */
+/** Renders `findCrossScopeDuplicates`'s report, in the same shape `formatDuplicateClusters` uses (a running count, a blank-line-separated block per pair, the applied/dry-run closing line) -- `""` when there is nothing to show, so the caller can drop this section entirely rather than print an empty "0 cross-scope duplicates" line the Jaccard pass above never had a reason to. */
 function formatCrossScopeDuplicates(duplicates: readonly CrossScopeDuplicate[], applied: boolean): string {
   if (duplicates.length === 0) {
     return "";
@@ -1441,13 +1065,7 @@ function formatCrossScopeDuplicates(duplicates: readonly CrossScopeDuplicate[], 
   return lines.join("\n");
 }
 
-/**
- * Renders `findCrossProjectDuplicates`'s report for `--cross-project`. Always the dry-run shape --
- * there is no `--apply` line to print, because there is no `--apply` path for this pass (see that
- * function's doc comment) -- so the one action offered is the paste-ready `mem edit --scope global`
- * command against the newest fact in each group, mirroring `formatUnanchoredSuggestionLine`'s own
- * `--force`-when-`source_type=user` rule rather than inventing a second one.
- */
+/** Renders `findCrossProjectDuplicates`'s report for `--cross-project`. Always the dry-run shape -- there is no `--apply` line to print, because there is no `--apply` path for this pass (see that function's doc comment) -- so the one action offered is the paste-ready `mem edit --scope global` command against the newest fact in each group, mirroring `formatUnanchoredSuggestionLine`'s own `--force`-when-`source_type=user` rule rather than inventing a second one. */
 function formatCrossProjectDuplicates(groups: readonly CrossProjectDuplicateGroup[]): string {
   if (groups.length === 0) {
     return "no same-kind, same-text facts found under two or more distinct projects";
@@ -1491,12 +1109,7 @@ function formatStaleFacts(facts: readonly Fact[], cutoffIso: string, ageDays: nu
   return lines.join("\n");
 }
 
-/**
- * Renders `findGraphStaleFacts`'s report for `--stale --include-graph-stale`, in the same shape
- * `formatCrossScopeDuplicates` uses -- `""` when there is nothing to show, so the caller can drop
- * this section rather than print an empty one when the signal found nothing beyond what the
- * age-based pass already proposed.
- */
+/** Renders `findGraphStaleFacts`'s report for `--stale --include-graph-stale`, in the same shape `formatCrossScopeDuplicates` uses -- `""` when there is nothing to show, so the caller can drop this section rather than print an empty one when the signal found nothing beyond what the age-based pass already proposed. */
 function formatGraphStaleFacts(facts: readonly GraphStaleFact[], applied: boolean): string {
   if (facts.length === 0) {
     return "";
@@ -1518,13 +1131,7 @@ function formatGraphStaleFacts(facts: readonly GraphStaleFact[], applied: boolea
   return lines.join("\n");
 }
 
-/**
- * Renders `findRelatedFactPairs`'s report for `--related`, in the same shape `formatCrossScopeDuplicates`
- * uses. `--related --apply` persists every pair to `fact_links` (`storage.upsertFactLink`) rather
- * than changing any fact's status -- nothing here is destructive, but the pass still follows this
- * command's own contract that nothing is written until a human has seen the listing and typed
- * `--apply`.
- */
+/** Renders `findRelatedFactPairs`'s report for `--related`, in the same shape `formatCrossScopeDuplicates` uses. `--related --apply` persists every pair to `fact_links` (`storage.upsertFactLink`) rather than changing any fact's status -- nothing here is destructive, but the pass still follows this command's own contract that nothing is written until a human has seen the listing and typed `--apply`. */
 function formatRelatedFacts(pairs: readonly RelatedFactPair[], applied: boolean): string {
   if (pairs.length === 0) {
     return "no related facts found below the duplicate threshold";
@@ -1557,23 +1164,13 @@ interface ConsolidateCliOptions {
   readonly includeGraphStale?: boolean;
 }
 
-/**
- * `mem consolidate` in full: pick the pass, run it read-only, and -- only under `--apply` -- route
- * every loser through `setStatusWithAudit` so the transition is transactional and audit-logged.
- *
- * The two passes deliberately share one command rather than joining `mem epoch --gc`. That pass is
- * the non-interactive retention job a polling consumer may run unattended; giving it the power to
- * supersede *active* facts would make an existing, already-wired invocation newly destructive with
- * no dry run in front of it. `mem consolidate` is the opposite contract: nothing happens until a
- * human has seen the listing and typed `--apply`.
- */
+/** `mem consolidate` in full: pick the pass, run it read-only, and -- only under `--apply` -- route every loser through `setStatusWithAudit` so the transition is transactional and audit-logged. The two passes deliberately share one command rather than joining `mem epoch --gc`. That pass is the non-interactive retention job a polling consumer may run unattended; giving it the power to supersede *active* facts would make an existing, already-wired invocation newly destructive with no dry run in front of it. `mem consolidate` is the opposite contract: nothing happens until a human has seen the listing and typed `--apply`. */
 function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, now: Date): string {
   const stale = options.stale === true;
   const crossProject = options.crossProject === true;
   const related = options.related === true;
   const applied = options.apply === true;
-  // Each flag belongs to exactly one pass and they do not compose (`mem facets` takes the same
-  // line): silently ignoring the one that does not apply would make it look honoured.
+  // Each flag belongs to exactly one pass and they do not compose (`mem facets` takes the same line): silently ignoring the one that does not apply would make it look honoured.
   if (stale && options.threshold !== undefined) {
     throw new UsageError("--threshold applies to the duplicate pass; --stale is bounded by --stale-days");
   }
@@ -1589,8 +1186,7 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
   if (related && (stale || crossProject || options.threshold !== undefined || options.staleDays !== undefined)) {
     throw new UsageError("--related does not compose with --stale/--cross-project/--threshold/--stale-days");
   }
-  // No `--apply` path for this pass at all (see `findCrossProjectDuplicates`'s doc comment): refused
-  // here rather than silently ignored, same as every other flag combination this function rejects.
+  // No `--apply` path for this pass at all (see `findCrossProjectDuplicates`'s doc comment): refused here rather than silently ignored, same as every other flag combination this function rejects.
   if (crossProject && applied) {
     throw new UsageError(
       "--cross-project is report-only -- there is no --apply path; widen scope yourself with the printed `mem edit --scope global` command"
@@ -1615,9 +1211,7 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
     const ageDays = options.staleDays !== undefined ? parseStaleDays(options.staleDays) : DEFAULT_STALE_AGE_DAYS;
     const cutoff = staleCutoff(ageDays, now);
     const facts = findStaleFacts(db, cutoff);
-    // Absent by default (see `findGraphStaleFacts`'s own doc comment on why): only computed at all
-    // when the caller opts in, so a store never sees a wider `--apply` set than it did before this
-    // signal existed unless it explicitly asked for the wider one.
+    // Absent by default (see `findGraphStaleFacts`'s own doc comment on why): only computed at all when the caller opts in, so a store never sees a wider `--apply` set than it did before this signal existed unless it explicitly asked for the wider one.
     const includeGraphStale = options.includeGraphStale === true;
     const graphStale = includeGraphStale
       ? findGraphStaleFacts(
@@ -1653,10 +1247,7 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
 
   const threshold = options.threshold !== undefined ? parseThreshold(options.threshold) : DEFAULT_DUPLICATE_THRESHOLD;
   const clusters = findDuplicateClusters(db, threshold);
-  // Run alongside `findDuplicateClusters`, not inside it: exact-text global/project duplicates are
-  // a shape that pass's own `comparabilityKey` cannot see by design (see `findCrossScopeDuplicates`'s
-  // doc comment), so this is a second, narrower pass over the same live pool rather than a change
-  // to the first one's comparability rule.
+  // Run alongside `findDuplicateClusters`, not inside it: exact-text global/project duplicates are a shape that pass's own `comparabilityKey` cannot see by design (see `findCrossScopeDuplicates`'s doc comment), so this is a second, narrower pass over the same live pool rather than a change to the first one's comparability rule.
   const crossScope = findCrossScopeDuplicates(db);
   if (applied) {
     for (const cluster of clusters) {
@@ -1716,12 +1307,7 @@ interface ImportCliOptions {
   readonly capturedAt?: string;
 }
 
-/**
- * `--scope path` and `--path` are required together: a `scope="path"` fact with no `--path` binds
- * to `root` itself (the exact bug this pairing exists to close -- a "path" fact behaving as a
- * "project" fact), and a bare `--path` with no `--scope path` is a flag the caller almost certainly
- * meant to pair but did not, so it is rejected rather than silently ignored.
- */
+/** `--scope path` and `--path` are required together: a `scope="path"` fact with no `--path` binds to `root` itself (the exact bug this pairing exists to close -- a "path" fact behaving as a "project" fact), and a bare `--path` with no `--scope path` is a flag the caller almost certainly meant to pair but did not, so it is rejected rather than silently ignored. */
 function validateScopePathPairing(rawScope: string | undefined, rawPath: string | undefined): void {
   if (rawScope === "path" && rawPath === undefined) {
     throw new UsageError("--scope path requires --path <file-or-dir>");
@@ -1803,15 +1389,7 @@ interface DreamCliOptions {
   readonly json?: boolean;
 }
 
-/**
- * `mem dream`: print what a configured model thinks follows from the stored facts.
- *
- * Read-only by construction -- this function never writes, and there is no flag that makes it. The
- * question it exists to answer is whether the inferences are worth a review queue, and that is
- * settled by reading them, not by storing them. If they are, the shape is already decided by the
- * rest of the system: `captureSuggested`, landing every candidate `pending` and `derived`, promoted
- * only by an explicit `mem review --promote`.
- */
+/** `mem dream`: print what a configured model thinks follows from the stored facts. Read-only by construction -- this function never writes, and there is no flag that makes it. The question it exists to answer is whether the inferences are worth a review queue, and that is settled by reading them, not by storing them. If they are, the shape is already decided by the rest of the system: `captureSuggested`, landing every candidate `pending` and `derived`, promoted only by an explicit `mem review --promote`. */
 async function runDream(db: Database.Database, options: DreamCliOptions): Promise<string> {
   const config = readDreamConfig();
   if (config === null) {
@@ -1822,17 +1400,7 @@ async function runDream(db: Database.Database, options: DreamCliOptions): Promis
         `you would not paste into a hosted API.`
     );
   }
-  // The same correctness gate `retrieve()` applies before ranking: contradiction resolution runs
-  // over the whole live store, its losers and anything still `contested`/`pending` are dropped, and
-  // an anchor-`contradicted` fact is dropped too. A superseded or contradiction-losing fact is a
-  // fact the store has already decided is wrong, and reasoning over it would produce inferences
-  // grounded in retracted premises -- one step removed, the same P3 failure `retrieve()` guards
-  // against directly. No `--root` flag exists on this command (see the option below), so freshness
-  // evaluates against the current working directory, `resolveRoot`'s own default with no root given.
-  // `db` is still open here (see `withDb`'s caller below, which closes it only after this whole
-  // async command -- including the network call to the configured endpoint -- returns), so this
-  // costs nothing beyond what's already paid: an indexed point lookup per anchor, in exchange for
-  // skipping the anchor's real (filesystem) work whenever a previous call already answered it.
+  // The same correctness gate `retrieve()` applies before ranking: contradiction resolution runs over the whole live store, its losers and anything still `contested`/`pending` are dropped, and an anchor-`contradicted` fact is dropped too. A superseded or contradiction-losing fact is a fact the store has already decided is wrong, and reasoning over it would produce inferences grounded in retracted premises -- one step removed, the same P3 failure `retrieve()` guards against directly. No `--root` flag exists on this command (see the option below), so freshness evaluates against the current working directory, `resolveRoot`'s own default with no root given. `db` is still open here (see `withDb`'s caller below, which closes it only after this whole async command -- including the network call to the configured endpoint -- returns), so this costs nothing beyond what's already paid: an indexed point lookup per anchor, in exchange for skipping the anchor's real (filesystem) work whenever a previous call already answered it.
   const facts = selectVerifiedFacts(listFacts(db, {}), resolveRoot(undefined), undefined, createAnchorCacheStore(db));
   const result = await dream(facts, config, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {});
 
@@ -1850,15 +1418,13 @@ async function runDream(db: Database.Database, options: DreamCliOptions): Promis
     `dream: ${result.model} via ${result.endpointLabel}  facts_sent=${result.sent.length}` +
     (result.available > result.sent.length ? ` of ${result.available} (newest first)` : "");
   if (result.candidates.length === 0) {
-    // Said plainly rather than as an empty section: "nothing follows from these facts" is a real and
-    // expected answer, and a bare header reads like a failure.
+    // Said plainly rather than as an empty section: "nothing follows from these facts" is a real and expected answer, and a bare header reads like a failure.
     return `${header}\nno candidate inferences -- nothing followed from these facts`;
   }
   const lines = [header, `${result.candidates.length} candidate inference(s) -- nothing was written; this is a report`];
   for (const candidate of result.candidates) {
     lines.push(`  [${candidate.kind}] ${candidate.text}`);
-    // Ids, not text: the point of a citation is that the reader can go look, and `mem show <id>` is
-    // how they look.
+    // Ids, not text: the point of a citation is that the reader can go look, and `mem show <id>` is how they look.
     lines.push(`    from: ${candidate.supports.join(" ")}`);
   }
   return lines.join("\n");
@@ -1922,16 +1488,7 @@ declare const __MEM_VERSION__: string | undefined;
 /** The version `mem --version` reports. Never hand-edit: it comes from package.json via the build. The `-dev` fallback only appears when running from source without the bundler. */
 const CLI_VERSION: string = typeof __MEM_VERSION__ === "string" ? __MEM_VERSION__ : "0.0.0-dev";
 
-/**
- * Shared because `remember` and `suggest` must describe the key identically -- two wordings drift,
- * and this one carries an invariant the user cannot otherwise discover.
- *
- * A subject holds exactly one value at a time. `detectContradictions` treats every keyed subject as
- * single-valued by design (that determinism is the point), so capturing a second value against the
- * same subject is read as a correction and supersedes the first rather than adding to a set. A user
- * recording set membership -- supported versions, enabled flags -- wants a distinct subject per
- * member, and nothing but this string tells them so before the first value is silently superseded.
- */
+/** Shared because `remember` and `suggest` must describe the key identically -- two wordings drift, and this one carries an invariant the user cannot otherwise discover. A subject holds exactly one value at a time. `detectContradictions` treats every keyed subject as single-valued by design (that determinism is the point), so capturing a second value against the same subject is read as a correction and supersedes the first rather than adding to a set. A user recording set membership -- supported versions, enabled flags -- wants a distinct subject per member, and nothing but this string tells them so before the first value is silently superseded. */
 const SUBJECT_KEY_HELP =
   "Normalized key for contradiction detection; holds one value at a time, so a later --value " +
   "supersedes the earlier rather than joining it (requires --value)";
@@ -2033,8 +1590,7 @@ export function buildProgram(): Command {
               ? `known ${factNounPhrase(fact.kind)} ${fact.id} (already ${fact.status}; nothing queued for review)\n`
               : `suggested ${factNounPhrase(fact.kind)} ${fact.id} (pending)\n`
         );
-        // Either reuse path returns a pre-existing row with its text verbatim -- nothing for an
-        // embedding call to pick up that the first capture of this sentence did not already attempt.
+        // Either reuse path returns a pre-existing row with its text verbatim -- nothing for an embedding call to pick up that the first capture of this sentence did not already attempt.
         if (!reusedExistingRow) {
           await attachEmbeddingBestEffort(fact);
         }
@@ -2071,10 +1627,7 @@ export function buildProgram(): Command {
           return {
             facts: listed,
             embeddingMeta: getEmbeddingMeta(db) ?? null,
-            // Computed only for superseded facts (findSupersedingFactId's SELECT is per-id, not
-            // free) and only here, once, rather than re-deriving it inside factToExportJson: the
-            // edge this carries forward is what lets `mem import --from-json` restore it without
-            // re-running contradiction resolution.
+            // Computed only for superseded facts (findSupersedingFactId's SELECT is per-id, not free) and only here, once, rather than re-deriving it inside factToExportJson: the edge this carries forward is what lets `mem import --from-json` restore it without re-running contradiction resolution.
             supersededByIds: new Map(
               listed
                 .filter((fact) => fact.status === "superseded")
@@ -2124,17 +1677,14 @@ export function buildProgram(): Command {
         validateScopePathPairing(options.scope, options.path);
         const dryRun = options.dryRun === true;
 
-        // --dry-run opens no database on purpose in either mode: openDb() would mkdirSync + create
-        // the db file, WAL sidecars, and schema on disk, which contradicts --dry-run's "nothing
-        // written". Both plan* functions need only the source file, no db.
+        // --dry-run opens no database on purpose in either mode: openDb() would mkdirSync + create the db file, WAL sidecars, and schema on disk, which contradicts --dry-run's "nothing written". Both plan* functions need only the source file, no db.
         if (hasFromJson) {
           const fromJson = options.fromJson;
           const jsonRoot = resolveRoot(options.root);
           const result = dryRun
             ? planImportFromJson({ path: fromJson, root: jsonRoot })
             : await withDb((db) => importFromJson(db, { path: fromJson, root: jsonRoot }));
-          // A dry run cannot see the store, so duplicate ids are the one refusal it cannot predict.
-          // Say so rather than let a clean plan imply the real import has nothing left to refuse.
+          // A dry run cannot see the store, so duplicate ids are the one refusal it cannot predict. Say so rather than let a clean plan imply the real import has nothing left to refuse.
           const duplicateNote =
             "note: duplicate-id conflicts are not checked in a dry run (that needs the store) -- they surface only on the real import.";
           process.stdout.write(`${formatImportResult(result, dryRun, dryRun ? duplicateNote : undefined)}\n`);
@@ -2142,9 +1692,7 @@ export function buildProgram(): Command {
         }
 
         const fromMd = options.fromMd as string;
-        // Validated once here rather than left to fail per candidate inside the import: a malformed
-        // flag is a usage error, and reporting it as N skipped candidates while exiting 0 would let
-        // a script read a typo'd date as a successful import of zero facts.
+        // Validated once here rather than left to fail per candidate inside the import: a malformed flag is a usage error, and reporting it as N skipped candidates while exiting 0 would let a script read a typo'd date as a successful import of zero facts.
         if (options.capturedAt !== undefined) {
           parseCapturedAtOrThrow(options.capturedAt);
         }
@@ -2163,9 +1711,7 @@ export function buildProgram(): Command {
                 ...(options.capturedAt !== undefined ? { capturedAt: options.capturedAt } : {}),
               })
             );
-        // A dry run cannot see the store, so a bullet matching an already-known fact is the one
-        // skip it cannot predict -- same limitation, same disclosure, as --from-json's duplicate-id
-        // note above.
+        // A dry run cannot see the store, so a bullet matching an already-known fact is the one skip it cannot predict -- same limitation, same disclosure, as --from-json's duplicate-id note above.
         const knownFactNote =
           "note: matches against facts already in the store are not checked in a dry run (that needs the store) -- they surface only on the real import.";
         process.stdout.write(`${formatImportResult(result, dryRun, dryRun ? knownFactNote : undefined)}\n`);
@@ -2226,9 +1772,7 @@ export function buildProgram(): Command {
         if (options.sessionId !== undefined && options.sessionId.trim().length === 0) {
           throw new UsageError("--session-id must not be empty");
         }
-        // Delta is opt-in per call and needs a session to be relative to. Without one there is nothing
-        // to subtract, and silently answering with a full block would hand the caller a response whose
-        // header says what it is -- but not what it was asked for.
+        // Delta is opt-in per call and needs a session to be relative to. Without one there is nothing to subtract, and silently answering with a full block would hand the caller a response whose header says what it is -- but not what it was asked for.
         if (options.delta === true && options.sessionId === undefined && options.hookStdin !== true) {
           throw new UsageError("--delta requires a session id: pass --hook-stdin (session_id from the hook envelope) or --session-id <id>");
         }
@@ -2268,14 +1812,11 @@ export function buildProgram(): Command {
           }
           const contextFiles = parseContextFiles(options.contextFiles);
           const envelope: HookEnvelope = options.hookStdin === true ? await readHookEnvelope() : {};
-          // The envelope's prompt is what the user just asked, so it outranks a positional query the
-          // hook command may have baked in; an explicit --session-id likewise outranks the envelope.
+          // The envelope's prompt is what the user just asked, so it outranks a positional query the hook command may have baked in; an explicit --session-id likewise outranks the envelope.
           const effectiveQuery = envelope.prompt ?? (query !== undefined && query !== "" ? query : undefined);
           const sessionId = options.sessionId ?? envelope.sessionId;
           if (options.delta === true && sessionId === undefined) {
-            // Only reachable via --hook-stdin (the usage check above covers the rest): the envelope
-            // arrived without a session_id. A hook must not exit non-zero over that, and a full
-            // block is a superset of the delta the caller asked for, so degrade to it -- but say so.
+            // Only reachable via --hook-stdin (the usage check above covers the rest): the envelope arrived without a session_id. A hook must not exit non-zero over that, and a full block is a superset of the delta the caller asked for, so degrade to it -- but say so.
             err("mem: --delta ignored: the hook envelope on stdin carried no session_id; returning the full hint set");
           }
           const hintOptions: HintFormatOptions = {
@@ -2297,74 +1838,42 @@ export function buildProgram(): Command {
         }
 
         const root = resolveRoot(options.root);
-        // The whole store, unfiltered. `--since-epoch` is deliberately NOT applied here: `retrieve`
-        // resolves contradictions across its entire input pool before any filter runs, and a
-        // pre-filtered pool is a partial one -- the reinstatement pass then reads a rival's absence
-        // as "nothing left to contest this" and un-contests the survivor. Narrowing in SQL therefore
-        // surfaced a genuinely contested fact as clean ground truth. The bound now rides in
-        // `RetrievalOptions.epochAfter` with every other filter, applied after resolution.
-        // Both reads share one connection: `openStorage` is not free (WAL open plus the schema
-        // migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
+        // The whole store, unfiltered. `--since-epoch` is deliberately NOT applied here: `retrieve` resolves contradictions across its entire input pool before any filter runs, and a pre-filtered pool is a partial one -- the reinstatement pass then reads a rival's absence as "nothing left to contest this" and un-contests the survivor. Narrowing in SQL therefore surfaced a genuinely contested fact as clean ground truth. The bound now rides in `RetrievalOptions.epochAfter` with every other filter, applied after resolution. Both reads share one connection: `openStorage` is not free (WAL open plus the schema migrations `ensureStorageSchema` runs), and splitting them would pay that twice per recall.
         const wantedEntities = options.entity ?? [];
         const { facts, usefulness, embeddingMeta, entityKeys, entityOverlap, graphScores, anchorCacheSnapshot } = await withDb((db) => {
-          // Unconditional, because it costs one indexed lookup per identifier the query actually
-          // contains -- nothing at all for a query with none. It is the signal BM25 cannot carry:
-          // stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts` and then ranks the fact
-          // naming that file no higher than one merely using those words. Computed once here, not
-          // inline per field below, so `graphScores` can reuse it instead of paying for the same
-          // lookup twice.
+          // Unconditional, because it costs one indexed lookup per identifier the query actually contains -- nothing at all for a query with none. It is the signal BM25 cannot carry: stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts` and then ranks the fact naming that file no higher than one merely using those words. Computed once here, not inline per field below, so `graphScores` can reuse it instead of paying for the same lookup twice.
           const entityOverlap = getEntityOverlapForQuery(db, query ?? "");
-          // Hoisted out of the literal below so the anchor-cache prefetch can see it: the roots
-          // anchors are evaluated against are derived from the facts, not from `root` alone.
+          // Hoisted out of the literal below so the anchor-cache prefetch can see it: the roots anchors are evaluated against are derived from the facts, not from `root` alone.
           const allFacts = listFacts(db, {});
           return {
             facts: allFacts,
             usefulness: getUsefulnessCounts(db),
             embeddingMeta: getEmbeddingMeta(db) ?? null,
-            // Read only when something asks for it: this is a full scan of `fact_terms`, and every
-            // recall that passes no `--entity` would pay for a map nothing reads.
+            // Read only when something asks for it: this is a full scan of `fact_terms`, and every recall that passes no `--entity` would pay for a map nothing reads.
             entityKeys: wantedEntities.length > 0 ? getEntityKeysByFact(db) : null,
             entityOverlap,
-            // Propagated from the same entity-overlap seeds, one or two hops out over `fact_terms`
-            // (see `factgraph.getGraphScoresForQuery`) -- empty for the same no-entity queries
-            // `entityOverlap` above already costs nothing for.
+            // Propagated from the same entity-overlap seeds, one or two hops out over `fact_terms` (see `factgraph.getGraphScoresForQuery`) -- empty for the same no-entity queries `entityOverlap` above already costs nothing for.
             graphScores: getGraphScoresForQuery(db, query ?? "", {}, entityOverlap),
-            // One indexed lookup per evaluation root on the connection already open, for the same
-            // reason as every read above: `retrieve()` below must not hold a DB handle across its
-            // embedding round trip, so whatever `anchor_cache` already knows has to be read now.
-            // Keyed on `anchorRootsFor`, not `root`: a `path` fact reached from an ancestor and a
-            // `project` fact bound elsewhere both evaluate against a root that is not this one.
+            // One indexed lookup per evaluation root on the connection already open, for the same reason as every read above: `retrieve()` below must not hold a DB handle across its embedding round trip, so whatever `anchor_cache` already knows has to be read now. Keyed on `anchorRootsFor`, not `root`: a `path` fact reached from an ancestor and a `project` fact bound elsewhere both evaluate against a root that is not this one.
             anchorCacheSnapshot: prefetchAnchorCache(db, anchorRootsFor(allFacts, root)),
           };
         });
-        // Disconnected from storage by construction (see storage.ts's `BufferedAnchorCacheStore`):
-        // `retrieve()` can read and write anchor verdicts through it without ever touching SQLite.
+        // Disconnected from storage by construction (see storage.ts's `BufferedAnchorCacheStore`): `retrieve()` can read and write anchor verdicts through it without ever touching SQLite.
         const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
-        // `null` unless the user configured an embeddings endpoint, in which case ranking fuses a
-        // dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's
-        // vectors came from a different model, because `cosineSimilarity` would compare the two
-        // vector spaces without complaint and rank on noise.
+        // `null` unless the user configured an embeddings endpoint, in which case ranking fuses a dense list alongside BM25. `planEmbeddingRanking` withholds the backend when the store's vectors came from a different model, because `cosineSimilarity` would compare the two vector spaces without complaint and rank on noise.
         const embeddingPlan = planEmbeddingRanking(
           embeddingMeta,
           process.env,
           { timeoutMs: DEFAULT_EMBEDDING_TIMEOUT_MS },
-          // Already-fetched `facts` carry `embedding`, so this costs nothing extra: a store with
-          // vectors but no recorded model (an interrupted `mem embed`, or an import of unknown
-          // provenance) is exactly as incomparable as one from a named different model.
+          // Already-fetched `facts` carry `embedding`, so this costs nothing extra: a store with vectors but no recorded model (an interrupted `mem embed`, or an import of unknown provenance) is exactly as incomparable as one from a named different model.
           embeddingMeta === null && facts.some((fact) => fact.embedding !== null)
         );
         const retrievalOptions: RetrievalOptions = {
-          // Past `mem used` confirmations, fused as a third RRF rank list (see
-          // RetrievalOptions.usefulness). Empty on a store nobody has ever run `mem used` against,
-          // in which case the ranking is byte-for-byte today's BM25 ordering.
+          // Past `mem used` confirmations, fused as a third RRF rank list (see RetrievalOptions.usefulness). Empty on a store nobody has ever run `mem used` against, in which case the ranking is byte-for-byte today's BM25 ordering.
           usefulness,
           query: query ?? "",
           root,
-          // Facts bind to the project they were captured in. Without this, `--root` reached only
-          // anchor evaluation and `--scope project` matched the scope *label* rather than the
-          // binding, so `mem recall --root . --scope project` run in one project surfaced another
-          // project's decisions. `global` facts are unaffected; see RetrievalOptions.restrictToRoot
-          // for why this is a filter inside `retrieve` rather than a narrower `listFacts` query.
+          // Facts bind to the project they were captured in. Without this, `--root` reached only anchor evaluation and `--scope project` matched the scope *label* rather than the binding, so `mem recall --root . --scope project` run in one project surfaced another project's decisions. `global` facts are unaffected; see RetrievalOptions.restrictToRoot for why this is a filter inside `retrieve` rather than a narrower `listFacts` query.
           restrictToRoot: true,
           secretAllowlist: loadAllowlist(root),
           anchorCacheStore,
@@ -2374,24 +1883,17 @@ export function buildProgram(): Command {
           ...(options.ageDays !== undefined && Number.isFinite(options.ageDays) ? { ageDays: options.ageDays } : {}),
           ...(options.limit !== undefined && Number.isFinite(options.limit) ? { limit: options.limit } : {}),
           ...(options.sinceEpoch !== undefined && Number.isFinite(options.sinceEpoch) ? { epochAfter: options.sinceEpoch } : {}),
-          // Both halves ride into `retrieve` rather than narrowing `listFacts` above, for the reason
-          // `RetrievalOptions.entities` documents: an entity-narrowed pool hides a contested fact's
-          // rival from `resolveContradictions`, which then reinstates the survivor and surfaces it
-          // as clean ground truth.
+          // Both halves ride into `retrieve` rather than narrowing `listFacts` above, for the reason `RetrievalOptions.entities` documents: an entity-narrowed pool hides a contested fact's rival from `resolveContradictions`, which then reinstates the survivor and surfaces it as clean ground truth.
           ...(wantedEntities.length > 0 && entityKeys !== null ? { entities: wantedEntities, factEntityKeys: entityKeys } : {}),
           ...(entityOverlap.size > 0 ? { entityOverlap } : {}),
           ...(graphScores.size > 0 ? { graphScores } : {}),
           ...(hintStyle !== "full" ? { hintStyle } : {}),
-          // Default (full) output drops the per-line CTA in favor of one shared trailing footer
-          // line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2
-          // footer precedent) -- terse already omits the CTA on its own, so nothing to override.
+          // Default (full) output drops the per-line CTA in favor of one shared trailing footer line, printed below when results were shown (mirrors integration-seam.ts's TGMEM/2 footer precedent) -- terse already omits the CTA on its own, so nothing to override.
           ...(hintStyle !== "terse" ? { includeDisplayCta: false } : {}),
           ...(embeddingPlan.backend !== null ? { embeddingBackend: embeddingPlan.backend } : {}),
         };
         const { results, totalNonWithheld, shownNonWithheld, anchorBudgetHits } = await retrieve(facts, retrievalOptions);
-        // Printed before the results rather than after: it is a caveat on the ranking that produced
-        // them, and it has to appear on the empty listing below too -- silently ranking lexically
-        // while the user believes their configured endpoint is in play is the failure this guards.
+        // Printed before the results rather than after: it is a caveat on the ranking that produced them, and it has to appear on the empty listing below too -- silently ranking lexically while the user believes their configured endpoint is in play is the failure this guards.
         if (embeddingPlan.incomparable !== null) {
           process.stdout.write(`note: embedding search skipped -- ${embeddingPlan.incomparable}\n`);
         }
@@ -2399,36 +1901,19 @@ export function buildProgram(): Command {
           process.stdout.write("no matching facts\n");
           return;
         }
-        // --stable is a strictly-additive output-ordering override: same facts, same caps, just a
-        // deterministic id order instead of the default relevance/recency order.
+        // --stable is a strictly-additive output-ordering override: same facts, same caps, just a deterministic id order instead of the default relevance/recency order.
         const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
-        // Best-effort durability stamp: plain `mem recall` has no session id to log a `recall_log`
-        // row against, so stamp `facts.last_surfaced_at` directly for the facts actually shown --
-        // otherwise a fact recalled only this way stays eligible for stale-supersede forever,
-        // however often it is actually surfaced. A stamping failure must never fail the recall.
+        // Best-effort durability stamp: plain `mem recall` has no session id to log a `recall_log` row against, so stamp `facts.last_surfaced_at` directly for the facts actually shown -- otherwise a fact recalled only this way stays eligible for stale-supersede forever, however often it is actually surfaced. A stamping failure must never fail the recall.
         try {
           await withDb((db) => {
             markFactsSurfaced(db, ordered.map((result) => result.fact.id), new Date().toISOString());
-            // Same connection, same fail-open contract: any anchor verdict `retrieve()` computed
-            // this call (a fresh evaluation, or a witness mismatch on a prefetched row) is flushed
-            // here rather than opening a second connection for it.
+            // Same connection, same fail-open contract: any anchor verdict `retrieve()` computed this call (a fresh evaluation, or a witness mismatch on a prefetched row) is flushed here rather than opening a second connection for it.
             persistAnchorVerdicts(db, anchorCacheStore.buffer);
           });
         } catch (error) {
           err(`mem: could not mark facts surfaced -- ${extractErrorMessage(error)}`);
         }
-        // A query is a *ranking* input, not a filter: BM25 orders the candidate set and never
-        // removes from it, so `results.length === 0` above cannot fire for a query that simply
-        // matched nothing -- only for one whose filters excluded everything. Without the line
-        // below, `mem recall xyzzy` on a three-fact store returns all three facts in an output
-        // byte-identical to `mem recall` with no query at all: the reader is shown unrelated facts
-        // with no cue that their query contributed nothing to the ordering.
-        //
-        // Every result scoring 0 is the exact signal, and it is the documented meaning of an empty
-        // query ("all candidates tie at score 0", src/retrieval.ts). It also covers the case of a
-        // term so common it appears in every fact -- zero discriminating power, so "did not narrow
-        // these results" is true there too, which is why the wording claims that rather than
-        // claiming the term is absent.
+        // A query is a *ranking* input, not a filter: BM25 orders the candidate set and never removes from it, so `results.length === 0` above cannot fire for a query that simply matched nothing -- only for one whose filters excluded everything. Without the line below, `mem recall xyzzy` on a three-fact store returns all three facts in an output byte-identical to `mem recall` with no query at all: the reader is shown unrelated facts with no cue that their query contributed nothing to the ordering. Every result scoring 0 is the exact signal, and it is the documented meaning of an empty query ("all candidates tie at score 0", src/retrieval.ts). It also covers the case of a term so common it appears in every fact -- zero discriminating power, so "did not narrow these results" is true there too, which is why the wording claims that rather than claiming the term is absent.
         if (query !== undefined && query !== "" && ordered.every((result) => result.score === 0)) {
           process.stdout.write("note: query matched no fact text -- showing most recent instead\n");
         }
@@ -2436,21 +1921,14 @@ export function buildProgram(): Command {
           process.stdout.write(`${shortFactId(result.fact.id)}  ${result.display}\n`);
         }
         if (hintStyle !== "terse") {
-          // The review clause only when something on screen actually needs resolving. Unlike the
-          // wire path, plain recall *shows* withheld facts (annotated), so the trigger is their
-          // presence in the output rather than a count of what was dropped -- but printing the CTA
-          // on every call regardless was the same defect: advice that is always on is not a signal,
-          // and a reader learns to skip the line exactly where it would have mattered.
+          // The review clause only when something on screen actually needs resolving. Unlike the wire path, plain recall *shows* withheld facts (annotated), so the trigger is their presence in the output rather than a count of what was dropped -- but printing the CTA on every call regardless was the same defect: advice that is always on is not a signal, and a reader learns to skip the line exactly where it would have mattered.
           const needsReview = ordered.some((result) => result.trust === "withheld");
           process.stdout.write(`${FOLLOW_UP_SHOW_DETAIL}${needsReview ? `; ${FOLLOW_UP_REVIEW}` : ""}\n`);
         }
         if (shownNonWithheld < totalNonWithheld) {
           process.stdout.write(truncationNotice(shownNonWithheld, totalNonWithheld));
         }
-        // Silent otherwise: a budget-limited "unverified" looks identical on the line above to a
-        // genuine one, and without this an affirmed fact that silently degraded to a hint (or a
-        // contradicted one withheld only by luck of the clock) gives no clue the verdict is a
-        // time-budget artifact rather than a real re-check of its anchor.
+        // Silent otherwise: a budget-limited "unverified" looks identical on the line above to a genuine one, and without this an affirmed fact that silently degraded to a hint (or a contradicted one withheld only by luck of the clock) gives no clue the verdict is a time-budget artifact rather than a real re-check of its anchor.
         if (anchorBudgetHits > 0) {
           process.stdout.write(`note: anchor budget exhausted; ${anchorBudgetHits} freshness verdict${anchorBudgetHits === 1 ? "" : "s"} reported as unverified\n`);
         }
@@ -2494,10 +1972,7 @@ export function buildProgram(): Command {
           return;
         }
         if (facts.length === 0) {
-          // "no facts stored" is a claim about the whole store, so it must not be printed for a run
-          // that only excluded everything with a filter -- `mem list --kind decision` on a store
-          // full of preferences would otherwise report the store as empty, which is false and is
-          // exactly the shape of failure this contract's "nothing found" outcomes exist to avoid.
+          // "no facts stored" is a claim about the whole store, so it must not be printed for a run that only excluded everything with a filter -- `mem list --kind decision` on a store full of preferences would otherwise report the store as empty, which is false and is exactly the shape of failure this contract's "nothing found" outcomes exist to avoid.
           const filtered = Object.keys(filter).length > 0;
           process.stdout.write(filtered ? "no facts match these filters\n" : "no facts stored\n");
           return;
@@ -2530,22 +2005,12 @@ export function buildProgram(): Command {
       guard(async (id: string, options: ShowCliOptions) => {
         const output = await withDb((db) => {
           const fact = resolveIdArgOrThrow(db, id);
-          // `evaluateFactFreshness` rather than a bare `?? fact.scopeRoot` fallback. `scopeRoot` is
-          // documented as an absolute project root only for `scope="project"`; for `scope="path"` it
-          // holds a file, and handing a file path to an anchor predicate as its root is (in
-          // retrieval.ts's own words) strictly worse than the status quo. The old fallback did
-          // exactly that, so `mem show` and `mem recall` could report different freshness for the
-          // same fact -- on the surface the recall footer points the user to for detail. Falling
-          // back further to the fact's persisted `captureRoot` (and to `unverified` when that too is
-          // unknown, or when the query root does not exactly match it) is what keeps `mem show` from
-          // asserting a decisive verdict from an unrelated directory for a `path`-scoped fact.
+          // `evaluateFactFreshness` rather than a bare `?? fact.scopeRoot` fallback. `scopeRoot` is documented as an absolute project root only for `scope="project"`; for `scope="path"` it holds a file, and handing a file path to an anchor predicate as its root is (in retrieval.ts's own words) strictly worse than the status quo. The old fallback did exactly that, so `mem show` and `mem recall` could report different freshness for the same fact -- on the surface the recall footer points the user to for detail. Falling back further to the fact's persisted `captureRoot` (and to `unverified` when that too is unknown, or when the query root does not exactly match it) is what keeps `mem show` from asserting a decisive verdict from an unrelated directory for a `path`-scoped fact.
           const root = resolveRoot(options.root);
           const freshness = evaluateFactFreshness(fact, root);
           const sources = listSourcesForFact(db, fact.id);
           const history = listAuditLogForFact(db, fact.id);
-          // Only for a superseded fact: the audit log's most recent row for an active fact says
-          // something else entirely (a promotion, a pin), and reading a winner id out of it would
-          // be reporting an edge that does not exist.
+          // Only for a superseded fact: the audit log's most recent row for an active fact says something else entirely (a promotion, a pin), and reading a winner id out of it would be reporting an edge that does not exist.
           const winnerId = fact.status === "superseded" ? findSupersedingFactId(db, fact.id) : null;
           const edge: SupersessionEdge | null =
             winnerId === null ? null : { winnerId, winner: getFactById(db, winnerId) };
@@ -2553,14 +2018,12 @@ export function buildProgram(): Command {
           if (options.json === true) {
             const envelope = {
               schemaVersion: JSON_EXPORT_SCHEMA_VERSION,
-              // Reuses `winnerId` (computed above for the top-level `supersededBy` field) rather
-              // than a second `findSupersedingFactId` lookup for the same fact.
+              // Reuses `winnerId` (computed above for the top-level `supersededBy` field) rather than a second `findSupersedingFactId` lookup for the same fact.
               fact: factToExportJson(fact, { includeEmbedding: false, supersededBy: winnerId }),
               freshness,
               sources,
               history,
-              // null covers both "not superseded" and "superseded with no successor"; the fact's own
-              // status distinguishes them, so this stays one nullable field rather than two.
+              // null covers both "not superseded" and "superseded with no successor"; the fact's own status distinguishes them, so this stays one nullable field rather than two.
               supersededBy:
                 edge === null
                   ? null
@@ -2573,9 +2036,7 @@ export function buildProgram(): Command {
                       status: candidate.status,
                       text: candidate.text,
                       sharedTerms: score,
-                      // Same vocabulary as the text output's caveat, so a JSON consumer sees the exact
-                      // wording a human reading `mem show`/`mem recall` output already sees for these
-                      // two states; null for anything already ground-truth-eligible (active/pinned).
+                      // Same vocabulary as the text output's caveat, so a JSON consumer sees the exact wording a human reading `mem show`/`mem recall` output already sees for these two states; null for anything already ground-truth-eligible (active/pinned).
                       caveat: relatedTrustCaveat(candidate.status),
                     })),
                   }
@@ -2646,16 +2107,13 @@ export function buildProgram(): Command {
             if (winner.id === existing.id) {
               throw new UsageError(`fact ${existing.id} cannot supersede itself -- name a different fact with --by`);
             }
-            // A pending/contested/superseded winner is itself withheld from recall, so naming it
-            // would retire this fact in favour of one nothing can surface.
+            // A pending/contested/superseded winner is itself withheld from recall, so naming it would retire this fact in favour of one nothing can surface.
             if (winner.status !== "active" && winner.status !== "pinned") {
               throw new UsageError(
                 `fact ${winner.id} is not live (status: ${winner.status}) -- --by must name an active or pinned fact`
               );
             }
-            // Same `<prefix><id>: <reason>` shape reviewActions writes, so findSupersedingFactId
-            // reads it back for `mem show` and `mem export`. Status is already `superseded`, as
-            // for every other path that names a winner.
+            // Same `<prefix><id>: <reason>` shape reviewActions writes, so findSupersedingFactId reads it back for `mem show` and `mem export`. Status is already `superseded`, as for every other path that names a winner.
             detail = `${SUPERSEDED_BY_FACT_PREFIX}${winner.id}: ${detail}`;
           }
           setStatusWithAudit(db, existing.id, "superseded", "forget", detail);
@@ -2675,12 +2133,7 @@ export function buildProgram(): Command {
       guard(async (id: string) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
-          // Pinning is a promotion to decay-exempt ground truth, so it is gated exactly like
-          // `mem review --promote`. Without this it was a side door around every withheld status:
-          // an id copied out of `mem list` would launder a `pending` suggestion -- never reviewed by
-          // a human, which is the one invariant `captureSuggested` hardcodes its status to protect --
-          // straight into maximal trust, and would equally resurrect a `superseded` or `contested`
-          // fact that recall is deliberately withholding.
+          // Pinning is a promotion to decay-exempt ground truth, so it is gated exactly like `mem review --promote`. Without this it was a side door around every withheld status: an id copied out of `mem list` would launder a `pending` suggestion -- never reviewed by a human, which is the one invariant `captureSuggested` hardcodes its status to protect -- straight into maximal trust, and would equally resurrect a `superseded` or `contested` fact that recall is deliberately withholding.
           if (existing.status !== "active" && existing.status !== "pinned") {
             throw new UsageError(
               `fact ${existing.id} is ${existing.status}, not active -- only an active fact can be pinned. ` +
@@ -2702,32 +2155,23 @@ export function buildProgram(): Command {
     .option("--session-id <id>", "Session whose recall to mark (the same session id the facts were surfaced under)")
     .action(
       guard(async (ids: string[], options: UsedCliOptions) => {
-        // Required rather than defaulted. `recall_log` rows are keyed on the session they were
-        // surfaced under and mem holds no notion of a "current" session (it is a short-lived
-        // single-shot process with no daemon and no state between invocations), so any default here
-        // would be an invented session id matching no row -- reporting "0 marked" for every correct
-        // invocation, which reads as a broken command rather than a missing flag.
+        // Required rather than defaulted. `recall_log` rows are keyed on the session they were surfaced under and mem holds no notion of a "current" session (it is a short-lived single-shot process with no daemon and no state between invocations), so any default here would be an invented session id matching no row -- reporting "0 marked" for every correct invocation, which reads as a broken command rather than a missing flag.
         const session = options.sessionId;
         if (session === undefined || session.trim().length === 0) {
           throw new UsageError("--session-id <id> is required: usefulness is recorded against the session a fact was surfaced in");
         }
         const { updated, resolvedIds, unsurfaced } = await withDb((db) => {
-          // Resolve every id before writing anything: a typo in the third of three ids should not
-          // leave the first two marked, and prefix resolution is exactly where a typo shows up.
+          // Resolve every id before writing anything: a typo in the third of three ids should not leave the first two marked, and prefix resolution is exactly where a typo shows up.
           const facts = ids.map((id) => resolveIdArgOrThrow(db, id));
           const factIds = [...new Set(facts.map((fact) => fact.id))];
           const surfacedCount = db.prepare<[string, string], { c: number }>(
             "SELECT COUNT(*) AS c FROM recall_log WHERE session_id = ? AND fact_id = ?"
           );
           const tx = db.transaction(() => {
-            // Counted per id, not inferred from the batch total: "0 rows updated" across a batch is
-            // ambiguous -- it could mean every id was never surfaced, or that all of them were
-            // already marked useful on an earlier run. Only the first needs telling.
+            // Counted per id, not inferred from the batch total: "0 rows updated" across a batch is ambiguous -- it could mean every id was never surfaced, or that all of them were already marked useful on an earlier run. Only the first needs telling.
             const neverSurfaced = factIds.filter((factId) => (surfacedCount.get(session, factId)?.c ?? 0) === 0);
             const marked = markRecallUsed(db, factIds, session, new Date().toISOString());
-            // One row per fact, matching `forget`/`pin`, so the audit log stays queryable by
-            // `fact_id` -- a single batch row keyed to one arbitrary id of several would make the
-            // other facts' usefulness history invisible to exactly the query the column exists for.
+            // One row per fact, matching `forget`/`pin`, so the audit log stays queryable by `fact_id` -- a single batch row keyed to one arbitrary id of several would make the other facts' usefulness history invisible to exactly the query the column exists for.
             for (const factId of factIds) {
               insertAuditLog(db, {
                 event: "used",
@@ -2739,17 +2183,12 @@ export function buildProgram(): Command {
             }
             return { updated: marked, resolvedIds: factIds, unsurfaced: neverSurfaced };
           });
-          // BEGIN IMMEDIATE for the same reason as `setStatusWithAudit`: this reads (the surfaced
-          // count, and `markRecallUsed`'s own `used_at IS NULL` predicate) before it writes, and the
-          // outer invocation is what decides the whole nest's locking mode -- `markRecallUsed`'s
-          // transaction degrades to a savepoint once this one is open.
+          // BEGIN IMMEDIATE for the same reason as `setStatusWithAudit`: this reads (the surfaced count, and `markRecallUsed`'s own `used_at IS NULL` predicate) before it writes, and the outer invocation is what decides the whole nest's locking mode -- `markRecallUsed`'s transaction degrades to a savepoint once this one is open.
           return tx.immediate();
         });
         process.stdout.write(`marked ${updated} recall row${updated === 1 ? "" : "s"} useful in session ${session}
 `);
-        // Not an error: naming a fact that was never surfaced in this session is a plausible mistake
-        // (wrong session id, or a fact the user read from `mem list` rather than from a recall), and
-        // failing the whole command over it would discard the marks that did land.
+        // Not an error: naming a fact that was never surfaced in this session is a plausible mistake (wrong session id, or a fact the user read from `mem list` rather than from a recall), and failing the whole command over it would discard the marks that did land.
         for (const factId of unsurfaced) {
           process.stdout.write(`note: ${factId} was never surfaced in session ${session} -- nothing to mark
 `);
@@ -2815,17 +2254,9 @@ export function buildProgram(): Command {
           ...(scope !== undefined
             ? { scopeRoot: scope === "global" ? null : scope === "path" ? pathScopeRoot : root }
             : {}),
-          // Recomputed on every scope change, the same way capture does, rather than left at
-          // whatever `scopeRepo` the fact held under its previous scope/root: a rebind to a new
-          // project must drop the old repository's identity (or `isBoundToRoot`'s identity-match
-          // arm keeps serving the fact in the old repo's checkouts), and a rebind onto project
-          // scope from global/path must pick up an identity if one is now available.
+          // Recomputed on every scope change, the same way capture does, rather than left at whatever `scopeRepo` the fact held under its previous scope/root: a rebind to a new project must drop the old repository's identity (or `isBoundToRoot`'s identity-match arm keeps serving the fact in the old repo's checkouts), and a rebind onto project scope from global/path must pick up an identity if one is now available.
           ...(scope !== undefined ? { scopeRepo: resolveScopeRepo(scope, root) } : {}),
-          // A new anchor is validated against *this* command's `--root` a few lines below, and a
-          // scope change rebinds the fact outright -- either way the root the anchor must later be
-          // evaluated against is this one, not wherever the fact was first captured. Leaving the
-          // capture-time value would resolve a freshly written anchor against the original tree,
-          // which is the wrong-root evaluation `anchorRootFor` exists to prevent.
+          // A new anchor is validated against *this* command's `--root` a few lines below, and a scope change rebinds the fact outright -- either way the root the anchor must later be evaluated against is this one, not wherever the fact was first captured. Leaving the capture-time value would resolve a freshly written anchor against the original tree, which is the wrong-root evaluation `anchorRootFor` exists to prevent.
           ...(scope !== undefined || options.anchor !== undefined ? { captureRoot: root } : {}),
         };
         if (Object.keys(patch).length === 0) {
@@ -2969,12 +2400,7 @@ export function buildProgram(): Command {
         "facts, and anchor-contradicted facts are never sent. Freshness re-checks against the current working " +
         "directory (this command takes no root option -- see below), same as any other mem command given none."
     )
-    // Deliberately no --root. Dreaming reasons over the whole live store, and a --root that changed
-    // nothing would repeat the sharpest edge on `mem recall`: a flag the user reads as scoping and
-    // that quietly is not. When per-project dreaming is wanted it should filter facts and say so.
-    // Freshness re-verification (see selectVerifiedFacts) still needs *a* root, so it uses
-    // `resolveRoot`'s own default of process.cwd() -- the same default every other command falls
-    // back to when its own --root is omitted, not a value picked for this command alone.
+    // Deliberately no --root. Dreaming reasons over the whole live store, and a --root that changed nothing would repeat the sharpest edge on `mem recall`: a flag the user reads as scoping and that quietly is not. When per-project dreaming is wanted it should filter facts and say so. Freshness re-verification (see selectVerifiedFacts) still needs *a* root, so it uses `resolveRoot`'s own default of process.cwd() -- the same default every other command falls back to when its own --root is omitted, not a value picked for this command alone.
     .option("--timeout <ms>", "Wall clock for the request (default 60000)", (v) => parseInt(v, 10))
     .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
@@ -3040,16 +2466,13 @@ export function buildProgram(): Command {
     .option("--limit <n>", "Stop after this many facts", (value: string) => Number.parseInt(value, 10))
     .action(
       guard(async (options: EmbedCliOptions) => {
-        // Before the config read on purpose: a malformed flag is a mistake in the invocation itself,
-        // and reporting the environment problem first hides it behind an error the user cannot act
-        // on until they have already fixed this one.
+        // Before the config read on purpose: a malformed flag is a mistake in the invocation itself, and reporting the environment problem first hides it behind an error the user cannot act on until they have already fixed this one.
         assertPositiveFlag("--limit", options.limit);
 
         const config = readEmbeddingConfigForCommand();
         const backend = resolveConfiguredEmbeddingBackend(process.env);
         if (backend === null) {
-          // Unreachable: `readEmbeddingConfigForCommand` already threw for every configuration the
-          // resolver rejects. Kept so the narrowing is real rather than asserted away.
+          // Unreachable: `readEmbeddingConfigForCommand` already threw for every configuration the resolver rejects. Kept so the narrowing is real rather than asserted away.
           throw new UsageError(`embeddings are not configured; set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV}`);
         }
         const summary = await withDb(async (db) => {
@@ -3060,12 +2483,7 @@ export function buildProgram(): Command {
             );
           }
           if (options.all === true) {
-            // Unconditional under --all, not just when the recorded model name differs: the same
-            // model name does not guarantee the same dimension (a repointed LiteLLM/Ollama alias, or
-            // a provider that changed its output size), so leaving same-named vectors in place risks
-            // two dimensions under one recorded model, which nothing downstream could tell apart.
-            // Cleared before the first new vector is written, not after the last: an interrupted
-            // migration then leaves facts with no vector rather than a mixed-dimension store.
+            // Unconditional under --all, not just when the recorded model name differs: the same model name does not guarantee the same dimension (a repointed LiteLLM/Ollama alias, or a provider that changed its output size), so leaving same-named vectors in place risks two dimensions under one recorded model, which nothing downstream could tell apart. Cleared before the first new vector is written, not after the last: an interrupted migration then leaves facts with no vector rather than a mixed-dimension store.
             clearAllEmbeddings(db);
           }
           const pending = listFactsNeedingEmbedding(db, {
@@ -3086,13 +2504,9 @@ export function buildProgram(): Command {
           let embedded = 0;
           let skipped = 0;
           let failed = 0;
-          // Seeded from the recorded dimension only when continuing under the same model and NOT
-          // migrating: under --all the store was just cleared above, so the dimension is unknown
-          // until the endpoint actually answers, not assumed from whatever the old model produced.
+          // Seeded from the recorded dimension only when continuing under the same model and NOT migrating: under --all the store was just cleared above, so the dimension is unknown until the endpoint actually answers, not assumed from whatever the old model produced.
           let dimension: number | null = options.all !== true && recorded !== undefined && recorded.model === config.model ? recorded.dimension : null;
-          // Meta is written as soon as `dimension` is first learned, before that vector is written --
-          // see the write site below -- so an interrupted run leaves a labelled store rather than
-          // vectors with no recorded model.
+          // Meta is written as soon as `dimension` is first learned, before that vector is written -- see the write site below -- so an interrupted run leaves a labelled store rather than vectors with no recorded model.
           let metaWritten = dimension !== null;
           let firstFailure: string | null = null;
           let firstSkip: string | null = null;
@@ -3102,8 +2516,7 @@ export function buildProgram(): Command {
             try {
               vectors = await backend.embedBatch(batch.map((row) => row.text));
             } catch (error) {
-              // One bad batch costs that batch only. The batches already written stay written, and
-              // the run reports what it managed rather than throwing away completed work.
+              // One bad batch costs that batch only. The batches already written stay written, and the run reports what it managed rather than throwing away completed work.
               failed += batch.length;
               firstFailure ??= extractErrorMessage(error);
               continue;
@@ -3116,10 +2529,7 @@ export function buildProgram(): Command {
               }
               dimension ??= vector.length;
               if (vector.length !== dimension) {
-                // An endpoint that changed dimension mid-run (or, under a plain non---all run, an
-                // endpoint that now answers a different dimension than the store already holds).
-                // Writing it would put two vector spaces in one store, which is the corruption this
-                // command exists to undo.
+                // An endpoint that changed dimension mid-run (or, under a plain non---all run, an endpoint that now answers a different dimension than the store already holds). Writing it would put two vector spaces in one store, which is the corruption this command exists to undo.
                 skipped += 1;
                 firstSkip ??= `the endpoint returned ${vector.length}-dimension vectors, but the store holds ${dimension}-dimension vectors`;
                 continue;
@@ -3141,16 +2551,7 @@ export function buildProgram(): Command {
           return;
         }
         if (summary.embedded === 0) {
-          // Total failure: nothing was written, so this is not a success with a zero count. The
-          // message names the first cause rather than a bare count, which on its own would leave a
-          // user with no idea whether the endpoint was down, wrong, or answering nonsense. A
-          // dimension mismatch (`firstSkip`) is itself a real, nameable cause -- distinct from "no
-          // vector returned", which now means only that the batch produced fewer vectors than texts.
-          //
-          // `UsageError` (exit 1), not a bare `Error` (exit 2): every way this is reached is
-          // something about the user's environment -- an endpoint that is down, wrong, or answering
-          // a shape mem cannot read -- rather than a bug inside mem, and exit 2 is reserved for the
-          // latter.
+          // Total failure: nothing was written, so this is not a success with a zero count. The message names the first cause rather than a bare count, which on its own would leave a user with no idea whether the endpoint was down, wrong, or answering nonsense. A dimension mismatch (`firstSkip`) is itself a real, nameable cause -- distinct from "no vector returned", which now means only that the batch produced fewer vectors than texts. `UsageError` (exit 1), not a bare `Error` (exit 2): every way this is reached is something about the user's environment -- an endpoint that is down, wrong, or answering a shape mem cannot read -- rather than a bug inside mem, and exit 2 is reserved for the latter.
           throw new UsageError(
             `embedded 0 facts; ${summary.failed} failed, ${summary.skipped} skipped -- ${summary.firstFailure ?? summary.firstSkip ?? "no vector returned"}`
           );
@@ -3175,9 +2576,7 @@ export function buildProgram(): Command {
     .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
       guard(async (options: FacetsCliOptions) => {
-        // Each mode answers a different question and they do not compose: `--fact` inspects one
-        // fact, `--list-entities` reads the whole index, `--all` writes. Silently letting one win
-        // would make the ignored flag look honoured.
+        // Each mode answers a different question and they do not compose: `--fact` inspects one fact, `--list-entities` reads the whole index, `--all` writes. Silently letting one win would make the ignored flag look honoured.
         const modes = [options.all === true, options.fact !== undefined, options.listEntities === true, options.backfill === true].filter(Boolean).length;
         if (modes > 1) {
           throw new UsageError("--all, --backfill, --fact, and --list-entities are mutually exclusive");
@@ -3194,8 +2593,7 @@ export function buildProgram(): Command {
           writeOutput(options.json, { fact, entities, topics }, () =>
             [
               `fact: ${fact}`,
-              // "none" rather than an empty line: a fact whose text names no identifier legitimately
-              // has no entities, and a blank value reads as a failed lookup instead of an answer.
+              // "none" rather than an empty line: a fact whose text names no identifier legitimately has no entities, and a blank value reads as a failed lookup instead of an answer.
               `entities: ${entities.length > 0 ? entities.join(", ") : "none"}`,
               `topics: ${topics.length > 0 ? topics.join(", ") : "none"}`,
               ...(terms.length === 0 ? ["note: no terms stored yet -- run `mem facets` to backfill"] : []),
@@ -3260,12 +2658,7 @@ export function buildProgram(): Command {
         const toolName = parseToolName(tool);
         const wiring = getToolWiring(toolName);
         const wiringOpts = toWiringOpts(options);
-        // Only claude-code writes hooks a shell invokes unattended later, on whatever `mem` PATH
-        // resolves to at that later time -- a config text change here can be byte-perfect and the
-        // hooks it wrote can still fail every time, silently, if that binary can't run them. The
-        // other tools' wiring (AGENTS.md instructions, tasks.json) is read and invoked directly by
-        // an agent or a human, not delegated to a `command -v mem && mem ...` shell guard, so they
-        // have no equivalent failure mode this check would catch.
+        // Only claude-code writes hooks a shell invokes unattended later, on whatever `mem` PATH resolves to at that later time -- a config text change here can be byte-perfect and the hooks it wrote can still fail every time, silently, if that binary can't run them. The other tools' wiring (AGENTS.md instructions, tasks.json) is read and invoked directly by an agent or a human, not delegated to a `command -v mem && mem ...` shell guard, so they have no equivalent failure mode this check would catch.
         if (toolName === "claude-code" && options.force !== true) {
           const refusal = describeHookHealthRefusal(checkClaudeHookHealth(CLAUDE_HOOK_EVENTS));
           if (refusal !== null) {
@@ -3313,9 +2706,7 @@ export function buildProgram(): Command {
               lines.push(`${name}:`, formatWiringResult(wiring.uninstall(wiringOpts)));
             }
           } catch (error) {
-            // Only --all catches and continues: a single named tool's uninstall keeps throwing so
-            // guard() reports its real exit code (1 user error, 2 internal). With --all, one tool's
-            // conflict must not hide that every tool before it already finished uninstalling.
+            // Only --all catches and continues: a single named tool's uninstall keeps throwing so guard() reports its real exit code (1 user error, 2 internal). With --all, one tool's conflict must not hide that every tool before it already finished uninstalling.
             if (options.all !== true) {
               throw error;
             }
@@ -3333,23 +2724,10 @@ export function buildProgram(): Command {
   return program;
 }
 
-/**
- * Parses `argv` and dispatches. Sets `process.exitCode`; callers (src/main.ts) should let the
- * process exit naturally so buffered stdout flushes first, rather than calling `process.exit()`.
- */
+/** Parses `argv` and dispatches. Sets `process.exitCode`; callers (src/main.ts) should let the process exit naturally so buffered stdout flushes first, rather than calling `process.exit()`. */
 export async function run(argv: string[] = process.argv): Promise<void> {
   const program = buildProgram();
-  // Commander's exitOverride lets us catch its internal exits (help, version, unknown command)
-  // instead of letting it call process.exit() mid-flush.
-  //
-  // It is not inherited: a Command applies it to itself alone, so setting it only on the root left
-  // all 15 subcommands calling `process.exit()` directly on any parse error of their own -- exactly
-  // the mid-flush exit the line above exists to prevent, and the same class as the EPIPE truncation
-  // fixed in 0.3.0. It also made the `commander.`-prefixed branch below unreachable for every
-  // subcommand: a subcommand parse failure surfaced here as a plain Error with no `code`, so it was
-  // classified as an internal bug (exit 2) rather than the usage error (exit 1) the contract
-  // specifies. Production masked this -- Commander's own `process.exit(1)` happened to produce the
-  // right code before our handler ran -- which is why only the in-process path could reveal it.
+  // Commander's exitOverride lets us catch its internal exits (help, version, unknown command) instead of letting it call process.exit() mid-flush. It is not inherited: a Command applies it to itself alone, so setting it only on the root left all 15 subcommands calling `process.exit()` directly on any parse error of their own -- exactly the mid-flush exit the line above exists to prevent, and the same class as the EPIPE truncation fixed in 0.3.0. It also made the `commander.`-prefixed branch below unreachable for every subcommand: a subcommand parse failure surfaced here as a plain Error with no `code`, so it was classified as an internal bug (exit 2) rather than the usage error (exit 1) the contract specifies. Production masked this -- Commander's own `process.exit(1)` happened to produce the right code before our handler ran -- which is why only the in-process path could reveal it.
   program.exitOverride();
   for (const command of program.commands) {
     command.exitOverride();
@@ -3368,13 +2746,11 @@ export async function run(argv: string[] = process.argv): Promise<void> {
       return;
     }
     if (typeof code === "string" && code.startsWith("commander.")) {
-      // Any other Commander parse failure (invalid option, excess arguments, ...) is still a
-      // usage error; Commander already wrote its diagnostic to stderr.
+      // Any other Commander parse failure (invalid option, excess arguments, ...) is still a usage error; Commander already wrote its diagnostic to stderr.
       process.exitCode = EXIT_USER_ERROR;
       return;
     }
-    // Non-Commander errors escaping an action can only be bugs (guard() catches everything a
-    // handler throws), so classify per the contract rather than assuming user error.
+    // Non-Commander errors escaping an action can only be bugs (guard() catches everything a handler throws), so classify per the contract rather than assuming user error.
     err(`mem: ${extractErrorMessage(error)}`);
     process.exitCode = exitCodeForError(error);
   }

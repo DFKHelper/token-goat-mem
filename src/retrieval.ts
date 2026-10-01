@@ -1,30 +1,4 @@
-/**
- * Hybrid retrieval (design plan Section 3 "Retrieval", P8, review S10).
- *
- * Pipeline: BM25 lexical search always runs (a small in-process implementation, no external search
- * engine dependency). Embedding search is optional and pluggable — a caller may inject an
- * `EmbeddingBackend` (or a lazy loader for one); if none is given, or the injected backend fails or
- * times out, embedding search is skipped entirely and the BM25 ranking stands alone. When both
- * signals are available they are fused via Reciprocal Rank Fusion (RRF).
- *
- * This module never imports or dynamically loads any concrete embedding package itself — mem is
- * local-only and zero-network by default (P7, Section 3), so owning backend discovery here would
- * risk a network-capable dependency being pulled in implicitly. Instead, `EmbeddingBackend` is a
- * narrow interface a caller plugs in; this module only ever calls into an already-resolved (or
- * explicitly lazy) backend under a hard timeout. src/embeddings.ts supplies mem's own backend, and
- * builds one only when the user has explicitly configured an endpoint.
- *
- * After ranking, every candidate goes through a correctness gate (P1/P3/P4/P8) before it can be
- * surfaced:
- *   1. Contradiction re-check (contradiction.ts) — recomputed fresh against the live candidate pool,
- *      never trusting a possibly-stale `status` column alone.
- *   2. Freshness re-check (anchors.ts) — the fact's anchor is re-evaluated against `root` right now.
- *   3. Two-gate trust classification (P8) — relevance (from ranking) decides what is considered;
- *      trust (provenance x freshness x contradiction x, for preferences, age-decay) decides how it
- *      may be surfaced: ground-truth, hint-to-verify, or withheld.
- *   4. A self-caveating `display` string is generated per fact so a consumer can never present a
- *      hint as unconditional truth by accident (S3) — the caveat travels with the payload.
- */
+/** Hybrid retrieval (design plan Section 3 "Retrieval", P8, review S10). Pipeline: BM25 lexical search always runs (a small in-process implementation, no external search engine dependency). Embedding search is optional and pluggable — a caller may inject an `EmbeddingBackend` (or a lazy loader for one); if none is given, or the injected backend fails or times out, embedding search is skipped entirely and the BM25 ranking stands alone. When both signals are available they are fused via Reciprocal Rank Fusion (RRF). This module never imports or dynamically loads any concrete embedding package itself — mem is local-only and zero-network by default (P7, Section 3), so owning backend discovery here would risk a network-capable dependency being pulled in implicitly. Instead, `EmbeddingBackend` is a narrow interface a caller plugs in; this module only ever calls into an already-resolved (or explicitly lazy) backend under a hard timeout. src/embeddings.ts supplies mem's own backend, and builds one only when the user has explicitly configured an endpoint. After ranking, every candidate goes through a correctness gate (P1/P3/P4/P8) before it can be surfaced: 1. Contradiction re-check (contradiction.ts) — recomputed fresh against the live candidate pool, never trusting a possibly-stale `status` column alone. 2. Freshness re-check (anchors.ts) — the fact's anchor is re-evaluated against `root` right now. 3. Two-gate trust classification (P8) — relevance (from ranking) decides what is considered; trust (provenance x freshness x contradiction x, for preferences, age-decay) decides how it may be surfaced: ground-truth, hint-to-verify, or withheld. 4. A self-caveating `display` string is generated per fact so a consumer can never present a hint as unconditional truth by accident (S3) — the caveat travels with the payload. */
 
 import { resolve as resolvePath, sep } from "node:path";
 
@@ -36,18 +10,7 @@ import { identityMatches, isBoundToRoot } from "./projectIdentity.js";
 import { ageInDays } from "./timeUtils.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
 
-/**
- * An embedding backend, injected by the caller. `embed` may be sync or async. Whether a given
- * backend honors mem's zero-network default is a property of what the caller chooses to inject, not
- * something this module can enforce.
- *
- * src/embeddings.ts is the one implementation mem ships: an OpenAI-compatible HTTP backend that
- * exists only when the user points `TOKEN_GOAT_MEM_EMBED_URL` at an endpoint (a localhost model
- * server keeps the zero-network property intact). It is still injected through this interface --
- * lazy, optional, timeout-bounded, and never imported by this module, so an unconfigured install
- * ranks on BM25 alone with no code path that could open a socket. That fail-open behavior is
- * enforced by tests/unit/retrieval.test.ts.
- */
+/** An embedding backend, injected by the caller. `embed` may be sync or async. Whether a given backend honors mem's zero-network default is a property of what the caller chooses to inject, not something this module can enforce. src/embeddings.ts is the one implementation mem ships: an OpenAI-compatible HTTP backend that exists only when the user points `TOKEN_GOAT_MEM_EMBED_URL` at an endpoint (a localhost model server keeps the zero-network property intact). It is still injected through this interface -- lazy, optional, timeout-bounded, and never imported by this module, so an unconfigured install ranks on BM25 alone with no code path that could open a socket. That fail-open behavior is enforced by tests/unit/retrieval.test.ts. */
 export interface EmbeddingBackend {
   embed(text: string): Promise<Float32Array> | Float32Array;
 }
@@ -70,37 +33,11 @@ export interface RetrievalOptions {
   readonly scope?: FactScope;
   /** Exclude facts captured more than this many days ago. */
   readonly ageDays?: number;
-  /**
-   * Exclusive lower bound on `Fact.epoch` -- the backing filter for `mem recall --since-epoch <n>`.
-   *
-   * Deliberately applied here rather than in the caller's SQL. `retrieve` resolves contradictions
-   * across its whole input pool *before* any filter runs, so a pre-filtered pool is a partial pool --
-   * and `resolveContradictions`'s reinstatement pass reads the absence of a rival as "nothing is left
-   * to contest this fact" and un-contests it. Filtering by epoch in SQL therefore let a genuinely
-   * contested fact whose rival fell outside the epoch window surface as ordinary ground truth,
-   * silently defeating the withholding gate. Every other filter already lives here for this reason;
-   * epoch was the lone outlier because it was the only one the caller could express in SQL.
-   */
+  /** Exclusive lower bound on `Fact.epoch` -- the backing filter for `mem recall --since-epoch <n>`. Deliberately applied here rather than in the caller's SQL. `retrieve` resolves contradictions across its whole input pool *before* any filter runs, so a pre-filtered pool is a partial pool -- and `resolveContradictions`'s reinstatement pass reads the absence of a rival as "nothing is left to contest this fact" and un-contests it. Filtering by epoch in SQL therefore let a genuinely contested fact whose rival fell outside the epoch window surface as ordinary ground truth, silently defeating the withholding gate. Every other filter already lives here for this reason; epoch was the lone outlier because it was the only one the caller could express in SQL. */
   readonly epochAfter?: number;
-  /**
-   * When true, drop facts whose scope binding does not resolve to {@link root} -- a `project` fact
-   * belonging to a different project, or a `path` fact bound outside this tree. `global` facts always
-   * survive. Defaults to `false`, which is the store-wide behaviour every existing caller relies on.
-   *
-   * This is a filter, not a pre-selection, for the reason spelled out on {@link epochAfter}: narrowing
-   * the pool before `retrieve` runs hides a fact's rival from `resolveContradictions`, whose
-   * reinstatement pass then reads that absence as "nothing contests this" and surfaces a genuinely
-   * contested fact as clean ground truth. Scope-binding is exactly the filter most likely to separate
-   * two rivals (a contradiction is keyed on subject + scope, so rivals routinely differ by scopeRoot),
-   * so applying it early would defeat the withholding gate on precisely the facts it exists to catch.
-   */
+  /** When true, drop facts whose scope binding does not resolve to {@link root} -- a `project` fact belonging to a different project, or a `path` fact bound outside this tree. `global` facts always survive. Defaults to `false`, which is the store-wide behaviour every existing caller relies on. This is a filter, not a pre-selection, for the reason spelled out on {@link epochAfter}: narrowing the pool before `retrieve` runs hides a fact's rival from `resolveContradictions`, whose reinstatement pass then reads that absence as "nothing contests this" and surfaces a genuinely contested fact as clean ground truth. Scope-binding is exactly the filter most likely to separate two rivals (a contradiction is keyed on subject + scope, so rivals routinely differ by scopeRoot), so applying it early would defeat the withholding gate on precisely the facts it exists to catch. */
   readonly restrictToRoot?: boolean;
-  /**
-   * Declares that the `facts` handed to `retrieve` were already narrowed to this caller's scope (the
-   * hint seam's `isInScope` pre-filter), so scope-specificity shadowing can run over them as-is.
-   * `restrictToRoot` implies the same thing by filtering the pool itself; with neither, `retrieve`
-   * cannot tell which facts apply here and does no shadowing.
-   */
+  /** Declares that the `facts` handed to `retrieve` were already narrowed to this caller's scope (the hint seam's `isInScope` pre-filter), so scope-specificity shadowing can run over them as-is. `restrictToRoot` implies the same thing by filtering the pool itself; with neither, `retrieve` cannot tell which facts apply here and does no shadowing. */
   readonly poolIsInScope?: boolean;
   /** Cap on the number of results returned, applied after ranking and gating. */
   readonly limit?: number;
@@ -112,158 +49,34 @@ export interface RetrievalOptions {
   readonly embeddingBackend?: EmbeddingBackend | EmbeddingBackendLoader;
   /** Hard budget for loading/calling the embedding backend. Default `DEFAULT_EMBEDDING_TIMEOUT_MS`. */
   readonly embeddingTimeoutMs?: number;
-  /**
-   * `.mem/allowlist` entries (see capture.ts's `loadAllowlist`/`screenForSecrets`), used to decide
-   * whether the query itself is safe to send to an embedding endpoint. A query that trips secret
-   * screening skips dense ranking entirely -- BM25 still runs and results still return -- mirroring
-   * the capture-side invariant that text failing screening is never handed to an endpoint. Omitted =
-   * empty allowlist (screening still runs, just with no exemptions).
-   */
+  /** `.mem/allowlist` entries (see capture.ts's `loadAllowlist`/`screenForSecrets`), used to decide whether the query itself is safe to send to an embedding endpoint. A query that trips secret screening skips dense ranking entirely -- BM25 still runs and results still return -- mirroring the capture-side invariant that text failing screening is never handed to an endpoint. Omitted = empty allowlist (screening still runs, just with no exemptions). */
   readonly secretAllowlist?: readonly string[];
   /** Hard overall budget for anchor re-evaluation across all candidates. Default `DEFAULT_ANCHOR_TIME_BUDGET_MS`. */
   readonly anchorTimeBudgetMs?: number;
-  /**
-   * Optional cross-process anchor verdict cache (anchors.ts's `AnchorCacheStore`), threaded through
-   * to every `evaluateAnchor` call this module makes. Passed in rather than opened here for the same
-   * reason as {@link usefulness}/{@link factEntityKeys} above: this module ranks and gates, it does
-   * not open databases. Omitted = today's behavior, in-process memoization only.
-   */
+  /** Optional cross-process anchor verdict cache (anchors.ts's `AnchorCacheStore`), threaded through to every `evaluateAnchor` call this module makes. Passed in rather than opened here for the same reason as {@link usefulness}/{@link factEntityKeys} above: this module ranks and gates, it does not open databases. Omitted = today's behavior, in-process memoization only. */
   readonly anchorCacheStore?: AnchorCacheStore;
-  /**
-   * When `false`, `display` omits its trailing `" — <follow-up command>"` suffix (the "CTA"),
-   * emitting only the bare caveated fact text. Defaults to `true` (today's exact display format,
-   * unchanged). integration-seam.ts's TGMEM/2 wire format sets this `false` and instead emits one
-   * shared footer line summarizing follow-up commands once, rather than repeating the same CTA on
-   * every line (see integration-seam.ts's version-2 grammar doc comment).
-   */
+  /** When `false`, `display` omits its trailing `" — <follow-up command>"` suffix (the "CTA"), emitting only the bare caveated fact text. Defaults to `true` (today's exact display format, unchanged). integration-seam.ts's TGMEM/2 wire format sets this `false` and instead emits one shared footer line summarizing follow-up commands once, rather than repeating the same CTA on every line (see integration-seam.ts's version-2 grammar doc comment). */
   readonly includeDisplayCta?: boolean;
-  /**
-   * Controls `display`'s verbosity. `"full"` (default) is today's exact format: the full-word kind
-   * label (`decision`, `correction`; `pref`/`fact` were already short) plus, when `includeDisplayCta`
-   * allows it, the trailing CTA. `"terse"` drops the CTA unconditionally (the caller is assumed to
-   * already know the follow-up commands) and shortens every kind label to its 4-character wire tag
-   * (`pref`/`dec`/`fact`/`corr`, matching integration-seam.ts's `PROTOCOL_KIND_TAG`) for a
-   * single-line-per-fact recall a human can scan quickly. It also elides a body past
-   * `TERSE_TEXT_BUDGET`, marking the elision and naming `mem show <id>` -- without that, a
-   * `MAX_TEXT_LENGTH` fact made a 500-character "terse" line and the style delivered nothing it
-   * promised. `"full"` never elides.
-   */
+  /** Controls `display`'s verbosity. `"full"` (default) is today's exact format: the full-word kind label (`decision`, `correction`; `pref`/`fact` were already short) plus, when `includeDisplayCta` allows it, the trailing CTA. `"terse"` drops the CTA unconditionally (the caller is assumed to already know the follow-up commands) and shortens every kind label to its 4-character wire tag (`pref`/`dec`/`fact`/`corr`, matching integration-seam.ts's `PROTOCOL_KIND_TAG`) for a single-line-per-fact recall a human can scan quickly. It also elides a body past `TERSE_TEXT_BUDGET`, marking the elision and naming `mem show <id>` -- without that, a `MAX_TEXT_LENGTH` fact made a 500-character "terse" line and the style delivered nothing it promised. `"full"` never elides. */
   readonly hintStyle?: "full" | "terse";
-  /**
-   * Per-fact recall bookkeeping (`storage.getUsefulnessCounts`): how often each fact was surfaced and
-   * how often someone confirmed that surfacing useful via `mem used`. Omitted = no usefulness signal,
-   * which is exactly today's ranking.
-   *
-   * Fused as a third RRF rank list rather than applied as a score multiplier, and that is the whole
-   * point of carrying counts here instead of a precomputed boost factor. RRF is rank-based and
-   * therefore scale-free; BM25 scores are unbounded and corpus-dependent, so a multiplier or an
-   * absolute "useful enough" threshold tuned against a 40-fact store drifts silently as the store
-   * grows and starts either swamping relevance or vanishing under it. `applyKindBoost` in this file
-   * has exactly that flaw and is not the pattern to copy.
-   *
-   * A fact absent from this map contributes nothing, the same way a missing id already behaves in
-   * `reciprocalRankFusion` -- so a never-surfaced fact is neither rewarded nor punished, which is the
-   * only honest reading of "no feedback yet".
-   *
-   * With a non-empty query this is a tiebreaker among facts the query has evidence for (lexical,
-   * entity, graph, or a top embedding hit), never evidence itself: a useful fact the query has
-   * nothing to do with does not vote. An empty query applies it unfiltered.
-   */
+  /** Per-fact recall bookkeeping (`storage.getUsefulnessCounts`): how often each fact was surfaced and how often someone confirmed that surfacing useful via `mem used`. Omitted = no usefulness signal, which is exactly today's ranking. Fused as a third RRF rank list rather than applied as a score multiplier, and that is the whole point of carrying counts here instead of a precomputed boost factor. RRF is rank-based and therefore scale-free; BM25 scores are unbounded and corpus-dependent, so a multiplier or an absolute "useful enough" threshold tuned against a 40-fact store drifts silently as the store grows and starts either swamping relevance or vanishing under it. `applyKindBoost` in this file has exactly that flaw and is not the pattern to copy. A fact absent from this map contributes nothing, the same way a missing id already behaves in `reciprocalRankFusion` -- so a never-surfaced fact is neither rewarded nor punished, which is the only honest reading of "no feedback yet". With a non-empty query this is a tiebreaker among facts the query has evidence for (lexical, entity, graph, or a top embedding hit), never evidence itself: a useful fact the query has nothing to do with does not vote. An empty query applies it unfiltered. */
   readonly usefulness?: ReadonlyMap<string, { surfaced: number; used: number }>;
-  /**
-   * Entity facets a fact must carry to survive, matched case-insensitively against
-   * {@link factEntityKeys}. Repeated values AND together: `["src/cli.ts", "--hint-format"]` keeps
-   * only facts mentioning both. Empty or omitted = no entity filtering.
-   *
-   * A filter here rather than a narrower candidate pool, for the reason spelled out on
-   * {@link epochAfter} and {@link restrictToRoot}: `retrieve` resolves contradictions across its
-   * whole input pool before any filter runs, and `resolveContradictions`'s reinstatement pass reads
-   * the absence of a rival as "nothing is left to contest this fact" and un-contests it. An
-   * entity-narrowed pool is exactly the shape that separates two rivals -- the losing fact often
-   * words the same claim with a different identifier -- so pre-filtering would surface a genuinely
-   * contested fact as clean ground truth.
-   */
+  /** Entity facets a fact must carry to survive, matched case-insensitively against {@link factEntityKeys}. Repeated values AND together: `["src/cli.ts", "--hint-format"]` keeps only facts mentioning both. Empty or omitted = no entity filtering. A filter here rather than a narrower candidate pool, for the reason spelled out on {@link epochAfter} and {@link restrictToRoot}: `retrieve` resolves contradictions across its whole input pool before any filter runs, and `resolveContradictions`'s reinstatement pass reads the absence of a rival as "nothing is left to contest this fact" and un-contests it. An entity-narrowed pool is exactly the shape that separates two rivals -- the losing fact often words the same claim with a different identifier -- so pre-filtering would surface a genuinely contested fact as clean ground truth. */
   readonly entities?: readonly string[];
-  /**
-   * Per-fact entity lookup keys (`storage.getEntityKeysByFact`), backing {@link entities}.
-   *
-   * Passed in rather than read here for the same reason as {@link usefulness}: this module ranks and
-   * gates, it does not open databases. A fact absent from the map carries no entities and is
-   * excluded by any non-empty {@link entities} filter -- which is also the honest answer for a fact
-   * captured before facet extraction existed, until `mem facets` backfills it.
-   */
+  /** Per-fact entity lookup keys (`storage.getEntityKeysByFact`), backing {@link entities}. Passed in rather than read here for the same reason as {@link usefulness}: this module ranks and gates, it does not open databases. A fact absent from the map carries no entities and is excluded by any non-empty {@link entities} filter -- which is also the honest answer for a fact captured before facet extraction existed, until `mem facets` backfills it. */
   readonly factEntityKeys?: ReadonlyMap<string, ReadonlySet<string>>;
-  /**
-   * How many of the *query's* own entities each fact carries (`storage.getEntityOverlapForQuery`),
-   * fused as one more RRF rank list.
-   *
-   * Distinct from {@link entities}, which is a filter the caller opts into by naming an identifier
-   * on the command line. This is a ranking signal derived from the query text itself, and it exists
-   * because BM25 cannot see identifiers: it stems `src/retrieval.ts` to `src`/`retriev`/`ts` and
-   * then scores a fact naming that file no higher than one using those three words in a sentence.
-   * Dogfooded against a three-fact store, the fact naming the file ranked *last*. The entity layer
-   * already knew the difference; nothing consulted it unless the caller passed `--entity`, which
-   * requires already knowing the answer.
-   *
-   * A vote, never an override -- it joins {@link usefulness} and the embedding list in fusion, so a
-   * fact that merely carries the identifier cannot displace one that carries it and matches the
-   * rest of the query. Empty whenever the query names no identifier, which is the guard that keeps
-   * this off the queries it has no signal for: see the zero-score BM25 note in `retrieve` for the
-   * dogfooding incident that rule comes from.
-   *
-   * Passed in rather than read here for the same reason as {@link usefulness}: this module ranks
-   * and gates, it does not open databases.
-   */
+  /** How many of the *query's* own entities each fact carries (`storage.getEntityOverlapForQuery`), fused as one more RRF rank list. Distinct from {@link entities}, which is a filter the caller opts into by naming an identifier on the command line. This is a ranking signal derived from the query text itself, and it exists because BM25 cannot see identifiers: it stems `src/retrieval.ts` to `src`/`retriev`/`ts` and then scores a fact naming that file no higher than one using those three words in a sentence. Dogfooded against a three-fact store, the fact naming the file ranked *last*. The entity layer already knew the difference; nothing consulted it unless the caller passed `--entity`, which requires already knowing the answer. A vote, never an override -- it joins {@link usefulness} and the embedding list in fusion, so a fact that merely carries the identifier cannot displace one that carries it and matches the rest of the query. Empty whenever the query names no identifier, which is the guard that keeps this off the queries it has no signal for: see the zero-score BM25 note in `retrieve` for the dogfooding incident that rule comes from. Passed in rather than read here for the same reason as {@link usefulness}: this module ranks and gates, it does not open databases. */
   readonly entityOverlap?: ReadonlyMap<string, number>;
-  /**
-   * How strongly each fact is connected, by shared terms, to the facts {@link entityOverlap}
-   * finds -- `factgraph.getGraphScoresForQuery`'s seeded, IDF-damped propagation over the
-   * `fact_terms` co-occurrence graph, fused as a fourth RRF rank list.
-   *
-   * Where {@link entityOverlap} answers "does the query name this fact", this answers "is this
-   * fact strongly connected to what the query names, even though the query never says so" -- a
-   * fact reached only through a shared term, never through the identifier itself, surfaces here
-   * and nowhere else. A vote, never an override, for the same reason as {@link entityOverlap}: it
-   * joins fusion rather than replacing anything, so it cannot displace a fact that actually
-   * matches the rest of the query.
-   *
-   * Passed in rather than read here for the same reason as {@link usefulness}: this module ranks
-   * and gates, it does not open databases or walk graphs -- see ARCHITECTURE.md's one-way
-   * dependency rule, which this field exists specifically not to violate.
-   */
+  /** How strongly each fact is connected, by shared terms, to the facts {@link entityOverlap} finds -- `factgraph.getGraphScoresForQuery`'s seeded, IDF-damped propagation over the `fact_terms` co-occurrence graph, fused as a fourth RRF rank list. Where {@link entityOverlap} answers "does the query name this fact", this answers "is this fact strongly connected to what the query names, even though the query never says so" -- a fact reached only through a shared term, never through the identifier itself, surfaces here and nowhere else. A vote, never an override, for the same reason as {@link entityOverlap}: it joins fusion rather than replacing anything, so it cannot displace a fact that actually matches the rest of the query. Passed in rather than read here for the same reason as {@link usefulness}: this module ranks and gates, it does not open databases or walk graphs -- see ARCHITECTURE.md's one-way dependency rule, which this field exists specifically not to violate. */
   readonly graphScores?: ReadonlyMap<string, number>;
 }
 
 export interface RetrievedFact {
   readonly fact: Fact;
   readonly score: number;
-  /**
-   * Whether this fact's own text matched the query lexically -- `true` exactly when BM25 scored it
-   * above zero, before any fusion, boost, or tie-break touched it.
-   *
-   * Carried separately from {@link score} because the two answer different questions and only one
-   * of them is stable. `score` is a *ranking* number whose scale depends on which signals were
-   * available: raw BM25 when it is the only list, an RRF value when an embedding or usefulness list
-   * joins it. A consumer asking "did this fact actually match, or is it filler the caps swept in?"
-   * needs an answer that does not change meaning when a second signal is switched on -- and
-   * `score !== 0` silently stops being that answer the moment fusion runs, because RRF gives every
-   * ranked id at least `1/(k+n)`. integration-seam.ts's `--delta` suppression asks exactly that
-   * question, and read `score` for it until this field existed; enabling either usefulness feedback
-   * or an embedding backend would have disabled delta suppression store-wide with nothing failing.
-   *
-   * A query-less call leaves this `false` for every fact, which is correct: nothing was asked, so
-   * nothing matched.
-   */
+  /** Whether this fact's own text matched the query lexically -- `true` exactly when BM25 scored it above zero, before any fusion, boost, or tie-break touched it. Carried separately from {@link score} because the two answer different questions and only one of them is stable. `score` is a *ranking* number whose scale depends on which signals were available: raw BM25 when it is the only list, an RRF value when an embedding or usefulness list joins it. A consumer asking "did this fact actually match, or is it filler the caps swept in?" needs an answer that does not change meaning when a second signal is switched on -- and `score !== 0` silently stops being that answer the moment fusion runs, because RRF gives every ranked id at least `1/(k+n)`. integration-seam.ts's `--delta` suppression asks exactly that question, and read `score` for it until this field existed; enabling either usefulness feedback or an embedding backend would have disabled delta suppression store-wide with nothing failing. A query-less call leaves this `false` for every fact, which is correct: nothing was asked, so nothing matched. */
   readonly matchedQuery: boolean;
-  /**
-   * True when the query produced evidence for this fact by any signal, not only the lexical one:
-   * a BM25 hit, entity overlap, a graph score, or a place within the top
-   * {@link QUERY_EVIDENCE_EMBED_TOP_N} of the embedding ranking. `matchedQuery` is deliberately
-   * lexical-only (it drives the "nothing matched" footer), which made it the wrong question for
-   * `--delta`: a fact found purely by embedding or entity was suppressed as already-sent even though
-   * it answered this prompt. Also the gate on which facts the usefulness prior may vote for.
-   * `false` for every fact of an empty query -- nothing was asked, so nothing is evidence.
-   */
+  /** True when the query produced evidence for this fact by any signal, not only the lexical one: a BM25 hit, entity overlap, a graph score, or a place within the top {@link QUERY_EVIDENCE_EMBED_TOP_N} of the embedding ranking. `matchedQuery` is deliberately lexical-only (it drives the "nothing matched" footer), which made it the wrong question for `--delta`: a fact found purely by embedding or entity was suppressed as already-sent even though it answered this prompt. Also the gate on which facts the usefulness prior may vote for. `false` for every fact of an empty query -- nothing was asked, so nothing is evidence. */
   readonly queryEvidence: boolean;
   readonly freshness: AnchorVerdict;
   readonly contradiction: ContradictionOutcome;
@@ -272,11 +85,7 @@ export interface RetrievedFact {
   readonly display: string;
 }
 
-/**
- * Default overall anchor-evaluation budget for one `retrieve` call. Kept well under the token-goat
- * seam's ~150ms hard timeout (Section 4) so anchor re-validation never becomes the reason a
- * `--hint-format` call blows its budget; the remainder is left for BM25/ranking/formatting.
- */
+/** Default overall anchor-evaluation budget for one `retrieve` call. Kept well under the token-goat seam's ~150ms hard timeout (Section 4) so anchor re-validation never becomes the reason a `--hint-format` call blows its budget; the remainder is left for BM25/ranking/formatting. */
 export const DEFAULT_ANCHOR_TIME_BUDGET_MS = 100;
 
 /** Default budget for loading and calling an injected embedding backend before giving up on it. */
@@ -288,25 +97,10 @@ export const PREFERENCE_CONFIDENCE_HALF_LIFE_DAYS = 180;
 /** Below this decayed confidence, an otherwise-affirmed preference downgrades from ground-truth to hint (Section 6). */
 export const GROUND_TRUTH_CONFIDENCE_FLOOR = 0.5;
 
-/**
- * Default cap on non-withheld results returned by `retrieve()` when the caller does not pass an
- * explicit `options.limit`. Withheld results (`trust === "withheld"` -- pending/contested/
- * contradicted) are never subject to this cap: a fact needing human attention must never be pushed
- * off the end of the default result set just because 20 clean facts outrank it. `superseded` is
- * absent from that list on purpose: it classifies as withheld (see the precedence spec on
- * `classifyTrust`), but `retrieve()` drops superseded facts from the candidate pool before ranking,
- * so one never reaches this cap to be exempted from it. Lives here rather
- * than in cli.ts because the withheld-exempt slicing it bounds happens inside `retrieve()` itself.
- */
+/** Default cap on non-withheld results returned by `retrieve()` when the caller does not pass an explicit `options.limit`. Withheld results (`trust === "withheld"` -- pending/contested/ contradicted) are never subject to this cap: a fact needing human attention must never be pushed off the end of the default result set just because 20 clean facts outrank it. `superseded` is absent from that list on purpose: it classifies as withheld (see the precedence spec on `classifyTrust`), but `retrieve()` drops superseded facts from the candidate pool before ranking, so one never reaches this cap to be exempted from it. Lives here rather than in cli.ts because the withheld-exempt slicing it bounds happens inside `retrieve()` itself. */
 export const DEFAULT_RECALL_LIMIT = 20;
 
-/**
- * How many of the embedding ranking's top facts count as "the query has evidence for this fact".
- * The embedding list ranks every comparable fact (cosine similarity is defined for all of them), so
- * membership alone proves nothing; only the head is a claim that the query is about the fact. Tied
- * to the recall limit because a fact below that cut would not be shown on the strength of the
- * embedding anyway.
- */
+/** How many of the embedding ranking's top facts count as "the query has evidence for this fact". The embedding list ranks every comparable fact (cosine similarity is defined for all of them), so membership alone proves nothing; only the head is a claim that the query is about the fact. Tied to the recall limit because a fact below that cut would not be shown on the strength of the embedding anyway. */
 export const QUERY_EVIDENCE_EMBED_TOP_N = DEFAULT_RECALL_LIMIT;
 
 /** Preferences/corrections are recalled aggressively (P6) — a small ranking boost relative to precision-biased decisions/facts. */
@@ -316,31 +110,11 @@ const BM25_K1 = 1.5;
 const BM25_B = 0.75;
 const RRF_K = 60;
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// Porter stemmer (M.F. Porter, "An algorithm for suffix stripping", 1980).
-//
-// Applied inside `tokenize` itself, so it runs identically at index time (`computeBm25Scores`
-// building document term frequencies) and query time (the same function scoring the query) --
-// there is no separate index to go stale, since BM25 here recomputes term statistics fresh over
-// the candidate pool on every `retrieve()` call. Without stemming, "commits" and "commit", or
-// "test" and "testing", shared no token and could not match each other at all.
-//
-// Written inline rather than taken as a dependency: the algorithm is fully specified by Porter's
-// paper and is small (five steps), and this project deliberately removed `zod` and `sqlite-vec`
-// for being unreachable weight -- a dependency for ~150 lines of well-specified, testable logic
-// isn't a good trade. Only ASCII-lowercase alphabetic tokens are stemmed; a token containing a
-// digit (already produced by `tokenize`'s split, e.g. "es6") passes through unchanged, since the
-// algorithm's vowel/consonant rules are meaningless applied to digits.
-// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ───────────────────────────────────────────────────────────────────────────────────────────── Porter stemmer (M.F. Porter, "An algorithm for suffix stripping", 1980). Applied inside `tokenize` itself, so it runs identically at index time (`computeBm25Scores` building document term frequencies) and query time (the same function scoring the query) -- there is no separate index to go stale, since BM25 here recomputes term statistics fresh over the candidate pool on every `retrieve()` call. Without stemming, "commits" and "commit", or "test" and "testing", shared no token and could not match each other at all. Written inline rather than taken as a dependency: the algorithm is fully specified by Porter's paper and is small (five steps), and this project deliberately removed `zod` and `sqlite-vec` for being unreachable weight -- a dependency for ~150 lines of well-specified, testable logic isn't a good trade. Only ASCII-lowercase alphabetic tokens are stemmed; a token containing a digit (already produced by `tokenize`'s split, e.g. "es6") passes through unchanged, since the algorithm's vowel/consonant rules are meaningless applied to digits. ─────────────────────────────────────────────────────────────────────────────────────────────
 
 const VOWEL_LETTERS = new Set(["a", "e", "i", "o", "u"]);
 
-/**
- * Whether the letter at `i` counts as a consonant under Porter's definition: any letter other
- * than a, e, i, o, u, and other than "y" preceded by a consonant (so "y" at word start, or "y"
- * preceded by a vowel, counts as a consonant -- e.g. the two consonants in "toy" are t and y,
- * while both y's in "syzygy" count as vowels).
- */
+/** Whether the letter at `i` counts as a consonant under Porter's definition: any letter other than a, e, i, o, u, and other than "y" preceded by a consonant (so "y" at word start, or "y" preceded by a vowel, counts as a consonant -- e.g. the two consonants in "toy" are t and y, while both y's in "syzygy" count as vowels). */
 function isConsonant(word: string, i: number): boolean {
   const ch = word[i];
   if (ch === undefined) {
@@ -413,11 +187,7 @@ function withoutSuffix(word: string, suffix: string): [string, boolean] {
   return [word, false];
 }
 
-/**
- * Applies the first rule in `rules` whose suffix matches `word` and whose stem satisfies its
- * condition, replacing the suffix with the rule's replacement. Rules are checked longest-suffix
- * first within each Porter step, matching the paper's "longest matching suffix wins" convention.
- */
+/** Applies the first rule in `rules` whose suffix matches `word` and whose stem satisfies its condition, replacing the suffix with the rule's replacement. Rules are checked longest-suffix first within each Porter step, matching the paper's "longest matching suffix wins" convention. */
 function applyStep(word: string, rules: ReadonlyArray<readonly [string, string, ((stem: string) => boolean)?]>): string {
   const bySuffixLengthDesc = [...rules].sort((a, b) => b[0].length - a[0].length);
   for (const [suffix, replacement, condition] of bySuffixLengthDesc) {
@@ -566,24 +336,7 @@ export function _stemForTests(word: string): string {
   return porterStem(word.toLowerCase());
 }
 
-/**
- * Standard English function words dropped from both documents and queries before stemming: the
- * articles, prepositions, auxiliaries, pronouns, conjunctions, and interrogatives a prompt is made
- * of regardless of topic. Kept deliberately small -- the long tails of published stopword lists are
- * where the damage lives, and no domain term belongs here.
- *
- * Why it exists: `--delta` re-sends an already-surfaced fact whenever it scores non-zero for the
- * current prompt, and without this list a prompt like "what is the plan for today" scored against
- * most of a store on `the`/`is`/`for` alone (measured: 5 of 6 logged facts re-sent), which is the
- * difference between delta working and not.
- *
- * Negations are NOT in this list, on purpose: `no`, `not`, `nor`, `never`, `none`, `neither`,
- * `nothing`, `without`, `cannot`, `dont`, `cant`, `wont` are content words here. This store holds
- * preferences and corrections that are frequently negative ("never commit secrets", "don't use
- * npm"), so negation is meaning, not noise. Do not "complete" the list with them later. `n't`
- * contractions are expanded to `... not` before tokenizing (see `expandNegatedContractions`) so
- * "don't"/"can't"/"won't" keep their `not` when the apostrophe split discards the `t`.
- */
+/** Standard English function words dropped from both documents and queries before stemming: the articles, prepositions, auxiliaries, pronouns, conjunctions, and interrogatives a prompt is made of regardless of topic. Kept deliberately small -- the long tails of published stopword lists are where the damage lives, and no domain term belongs here. Why it exists: `--delta` re-sends an already-surfaced fact whenever it scores non-zero for the current prompt, and without this list a prompt like "what is the plan for today" scored against most of a store on `the`/`is`/`for` alone (measured: 5 of 6 logged facts re-sent), which is the difference between delta working and not. Negations are NOT in this list, on purpose: `no`, `not`, `nor`, `never`, `none`, `neither`, `nothing`, `without`, `cannot`, `dont`, `cant`, `wont` are content words here. This store holds preferences and corrections that are frequently negative ("never commit secrets", "don't use npm"), so negation is meaning, not noise. Do not "complete" the list with them later. `n't` contractions are expanded to `... not` before tokenizing (see `expandNegatedContractions`) so "don't"/"can't"/"won't" keep their `not` when the apostrophe split discards the `t`. */
 export const STOPWORDS: ReadonlySet<string> = new Set([
   // articles
   "a", "an", "the",
@@ -607,11 +360,7 @@ export const STOPWORDS: ReadonlySet<string> = new Set([
   "please", "just", "also", "very", "too", "s", "t",
 ]);
 
-/**
- * `can't` -> `can not`, `won't` -> `will not`, and any other `xn't` -> `x not`, so the negation
- * survives the apostrophe split in {@link tokenize} as the content word `not` (never a stopword)
- * instead of the orphaned single letter `t`.
- */
+/** `can't` -> `can not`, `won't` -> `will not`, and any other `xn't` -> `x not`, so the negation survives the apostrophe split in {@link tokenize} as the content word `not` (never a stopword) instead of the orphaned single letter `t`. */
 function expandNegatedContractions(text: string): string {
   return text
     .replace(/\bcan't\b/gu, "can not")
@@ -619,13 +368,7 @@ function expandNegatedContractions(text: string): string {
     .replace(/n't\b/gu, " not");
 }
 
-/**
- * The lexical index's notion of a term: lowercase, split on non-alphanumerics, stopword-filtered,
- * Porter-stemmed. Exported for `facets.ts`, whose `topic` facet has to be exactly this and not
- * merely something like it -- a second tokenizer that must agree with this one would diverge on the
- * first change to either. The import direction is one-way (facets -> retrieval) on purpose: this
- * module stays a pure ranking/gating module with no knowledge of storage or facets.
- */
+/** The lexical index's notion of a term: lowercase, split on non-alphanumerics, stopword-filtered, Porter-stemmed. Exported for `facets.ts`, whose `topic` facet has to be exactly this and not merely something like it -- a second tokenizer that must agree with this one would diverge on the first change to either. The import direction is one-way (facets -> retrieval) on purpose: this module stays a pure ranking/gating module with no knowledge of storage or facets. */
 export function tokenize(text: string): string[] {
   return expandNegatedContractions(text.toLowerCase())
     .split(/[^a-z0-9]+/u)
@@ -633,13 +376,7 @@ export function tokenize(text: string): string[] {
     .map(stemToken);
 }
 
-/**
- * Scores each document against `query` using BM25 (Robertson/Sparck-Jones, `+1`-smoothed IDF so
- * common terms never produce a negative score). Corpus statistics (document frequency, average
- * length) are computed over `docs` itself, i.e. the already-filtered candidate pool — the searchable
- * universe for this call, not the whole store. Each document's text is `text` plus, if present,
- * `subject`/`value`, so structured facts also match on their normalized key/value.
- */
+/** Scores each document against `query` using BM25 (Robertson/Sparck-Jones, `+1`-smoothed IDF so common terms never produce a negative score). Corpus statistics (document frequency, average length) are computed over `docs` itself, i.e. the already-filtered candidate pool — the searchable universe for this call, not the whole store. Each document's text is `text` plus, if present, `subject`/`value`, so structured facts also match on their normalized key/value. */
 export function computeBm25Scores(docs: readonly Fact[], query: string): Map<string, number> {
   const scores = new Map<string, number>();
   const queryTerms = [...new Set(tokenize(query))];
@@ -655,8 +392,7 @@ export function computeBm25Scores(docs: readonly Fact[], query: string): Map<str
   let totalLength = 0;
 
   for (const doc of docs) {
-    // Include the decision's rationale in lexical matching so queries matching only the "why"
-    // field can find it (e.g., "why did we choose Node.js?" searches the "why" field too).
+    // Include the decision's rationale in lexical matching so queries matching only the "why" field can find it (e.g., "why did we choose Node.js?" searches the "why" field too).
     const tokens = tokenize(`${doc.text} ${doc.subject ?? ""} ${doc.value ?? ""} ${doc.why ?? ""}`);
     docTokens.set(doc.id, tokens);
     totalLength += tokens.length;
@@ -711,36 +447,8 @@ export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
   return dot / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-/**
- * Orders candidates by how well their past surfacings paid off, for fusion as a third RRF list.
- *
- * Only facts with at least one confirmed-useful recall are ranked. A fact nobody has ever been shown
- * has no evidence either way, and putting it at the bottom of this list would punish every newly
- * captured fact for the crime of being new -- a feedback loop where unseen facts stay unseen. Leaving
- * it out makes it contribute nothing, which is what `reciprocalRankFusion` already does with a
- * missing id. Surfaced-but-never-confirmed is the same non-claim: `mem used` is opt-in, so a zero
- * used count means "nobody said either way", not "someone said no".
- *
- * Excluding zero-used facts is also what keeps this list *empty* -- and therefore keeps fusion off
- * entirely -- on every store nobody has run `mem used` against. That is load-bearing rather than
- * incidental: integration-seam.ts's `--delta` filter distinguishes a query match from filler by
- * testing `score !== 0`, and RRF never emits 0, so a list that went non-empty the moment any recall
- * had ever been logged would silently disable delta suppression for every install. See the note on
- * the `usefulness` option passed from that file for the residual case once feedback does exist.
- *
- * Used count descending, then *lower* surfaced count wins: a fact used 2 of 2 times is a stronger
- * signal than one used 2 of 50, where the other 48 surfacings say the opposite. `captured_at`
- * descending settles the remainder so the list is a total order and the fused scores are stable
- * across runs -- without it, two equally-useful facts would swap places on `Array.prototype.sort`'s
- * implementation-defined ordering and make recall output non-reproducible.
- */
-/**
- * Candidates ordered by how many of the query's entities each carries, most first.
- *
- * Facts carrying none are omitted rather than ranked last: a rank list is a statement about the
- * facts it contains, and padding it with the rest would make "carries no identifier from the query"
- * vote with the same machinery as "carries one".
- */
+/** Orders candidates by how well their past surfacings paid off, for fusion as a third RRF list. Only facts with at least one confirmed-useful recall are ranked. A fact nobody has ever been shown has no evidence either way, and putting it at the bottom of this list would punish every newly captured fact for the crime of being new -- a feedback loop where unseen facts stay unseen. Leaving it out makes it contribute nothing, which is what `reciprocalRankFusion` already does with a missing id. Surfaced-but-never-confirmed is the same non-claim: `mem used` is opt-in, so a zero used count means "nobody said either way", not "someone said no". Excluding zero-used facts is also what keeps this list *empty* -- and therefore keeps fusion off entirely -- on every store nobody has run `mem used` against. That is load-bearing rather than incidental: integration-seam.ts's `--delta` filter distinguishes a query match from filler by testing `score !== 0`, and RRF never emits 0, so a list that went non-empty the moment any recall had ever been logged would silently disable delta suppression for every install. See the note on the `usefulness` option passed from that file for the residual case once feedback does exist. Used count descending, then *lower* surfaced count wins: a fact used 2 of 2 times is a stronger signal than one used 2 of 50, where the other 48 surfacings say the opposite. `captured_at` descending settles the remainder so the list is a total order and the fused scores are stable across runs -- without it, two equally-useful facts would swap places on `Array.prototype.sort`'s implementation-defined ordering and make recall output non-reproducible. */
+/** Candidates ordered by how many of the query's entities each carries, most first. Facts carrying none are omitted rather than ranked last: a rank list is a statement about the facts it contains, and padding it with the rest would make "carries no identifier from the query" vote with the same machinery as "carries one". */
 function entityOverlapRanking(candidates: readonly Fact[], overlap: RetrievalOptions["entityOverlap"]): string[] {
   if (overlap === undefined || overlap.size === 0) {
     return [];
@@ -755,13 +463,7 @@ function entityOverlapRanking(candidates: readonly Fact[], overlap: RetrievalOpt
   return scored.map((entry) => entry.fact.id);
 }
 
-/**
- * Candidates ordered by `factgraph`'s propagated score, most-connected first. Filtering
- * `score > 0` is what keeps a degenerate all-zero (or absent) map out of fusion -- the same
- * treatment {@link entityOverlapRanking} gives a zero-count map, for the same reason: a ranking
- * where nothing actually differs is not a signal, and letting it vote lets fusion's rank spacing
- * pull scores off their true value for free.
- */
+/** Candidates ordered by `factgraph`'s propagated score, most-connected first. Filtering `score > 0` is what keeps a degenerate all-zero (or absent) map out of fusion -- the same treatment {@link entityOverlapRanking} gives a zero-count map, for the same reason: a ranking where nothing actually differs is not a signal, and letting it vote lets fusion's rank spacing pull scores off their true value for free. */
 function graphScoreRanking(candidates: readonly Fact[], graphScores: RetrievalOptions["graphScores"]): string[] {
   if (graphScores === undefined || graphScores.size === 0) {
     return [];
@@ -794,11 +496,7 @@ function usefulnessRanking(candidates: readonly Fact[], usefulness: RetrievalOpt
   return scored.map((entry) => entry.fact.id);
 }
 
-/**
- * Fuses multiple rank-ordered id lists via Reciprocal Rank Fusion: `score(d) = sum(1 / (k + rank))`
- * over every list `d` appears in (1-indexed rank). An id missing from a list simply contributes
- * nothing from that list — lists need not cover the same ids.
- */
+/** Fuses multiple rank-ordered id lists via Reciprocal Rank Fusion: `score(d) = sum(1 / (k + rank))` over every list `d` appears in (1-indexed rank). An id missing from a list simply contributes nothing from that list — lists need not cover the same ids. */
 export function reciprocalRankFusion(rankLists: ReadonlyArray<readonly string[]>, k: number = RRF_K): Map<string, number> {
   const fused = new Map<string, number>();
   for (const list of rankLists) {
@@ -819,10 +517,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
       },
       (error: unknown) => {
         clearTimeout(timer);
-        // Forwards the backend's own rejection reason verbatim. `prefer-promise-reject-errors` wants
-        // an Error, but this is a pass-through, not an origination: an embedding backend is
-        // caller-supplied and may reject with anything, and wrapping it here would bury the original
-        // reason the caller needs to diagnose it.
+        // Forwards the backend's own rejection reason verbatim. `prefer-promise-reject-errors` wants an Error, but this is a pass-through, not an origination: an embedding backend is caller-supplied and may reject with anything, and wrapping it here would bury the original reason the caller needs to diagnose it.
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         fail(error);
       },
@@ -864,13 +559,7 @@ function contradictionFromStatus(status: FactStatus): ContradictionOutcome {
   return "none";
 }
 
-/**
- * Section 6 preference time-decay, computed fresh from `captured_at` on every read and never
- * persisted back to `confidence`. Exported because `mem epoch --gc` reports a decayed-below-floor
- * count and must report on exactly the facts `recall` will actually downgrade -- it previously
- * hand-reimplemented this formula against the same exported constants, which left two copies of the
- * curve with nothing asserting they agreed.
- */
+/** Section 6 preference time-decay, computed fresh from `captured_at` on every read and never persisted back to `confidence`. Exported because `mem epoch --gc` reports a decayed-below-floor count and must report on exactly the facts `recall` will actually downgrade -- it previously hand-reimplemented this formula against the same exported constants, which left two copies of the curve with nothing asserting they agreed. */
 export function decayedConfidence(fact: Fact, now: Date): number {
   if (fact.kind !== "preference" || fact.status === "pinned") {
     return fact.confidence;
@@ -887,32 +576,7 @@ export function isDecayedBelowGroundTruth(fact: Fact, now: Date): boolean {
   return fact.kind === "preference" && fact.status !== "pinned" && decayedConfidence(fact, now) < GROUND_TRUTH_CONFIDENCE_FLOOR;
 }
 
-/**
- * Two-gate trust classification (P8). Relevance already decided this fact was worth considering;
- * this decides how it may be surfaced.
- *
- * Precedence spec (normative): when the three trust signals -- lifecycle `status`/contradiction
- * outcome, anchor `freshness`, and decay-adjusted `confidence` -- conflict, they are consulted in
- * this strict order, and an earlier rule always wins over every later one:
- *
- *   1. status / contradiction (strongest): `status="pending"` (S9), or a contradiction outcome of
- *      `superseded`/`contested` (P4) => "withheld". No freshness verdict or confidence can rescue a
- *      fact the lifecycle/dedup layer has excluded. (`superseded` facts are also filtered out of
- *      the candidate pool by `retrieve()` before this function runs; the check here is defensive
- *      for any direct caller.)
- *   2. anchor freshness `contradicted` (P3/S1) => "withheld" -- including for `pinned` facts
- *      (S8: a pin exempts a fact from time-decay only, never from anchor suppression).
- *   3. anchor freshness `affirmed` => "ground-truth", unless the decay-adjusted confidence of a
- *      non-pinned preference has fallen below `GROUND_TRUTH_CONFIDENCE_FLOOR` (Section 6), in
- *      which case => "hint". Confidence/decay is the weakest signal: it can only ever downgrade an
- *      affirmed fact to a hint -- it never withholds, and never upgrades anything.
- *   4. anchor freshness `unverified` (the fallthrough) => "hint" regardless of confidence: a fact
- *      whose proposition cannot currently be confirmed is never ground truth, no matter how
- *      confident (P1/P3).
- *
- * `buildDisplay` mirrors this exact precedence order when choosing its caveat wording, so the
- * trust level and the self-caveating display string can never disagree about which signal won.
- */
+/** Two-gate trust classification (P8). Relevance already decided this fact was worth considering; this decides how it may be surfaced. Precedence spec (normative): when the three trust signals -- lifecycle `status`/contradiction outcome, anchor `freshness`, and decay-adjusted `confidence` -- conflict, they are consulted in this strict order, and an earlier rule always wins over every later one: 1. status / contradiction (strongest): `status="pending"` (S9), or a contradiction outcome of `superseded`/`contested` (P4) => "withheld". No freshness verdict or confidence can rescue a fact the lifecycle/dedup layer has excluded. (`superseded` facts are also filtered out of the candidate pool by `retrieve()` before this function runs; the check here is defensive for any direct caller.) 2. anchor freshness `contradicted` (P3/S1) => "withheld" -- including for `pinned` facts (S8: a pin exempts a fact from time-decay only, never from anchor suppression). 3. anchor freshness `affirmed` => "ground-truth", unless the decay-adjusted confidence of a non-pinned preference has fallen below `GROUND_TRUTH_CONFIDENCE_FLOOR` (Section 6), in which case => "hint". Confidence/decay is the weakest signal: it can only ever downgrade an affirmed fact to a hint -- it never withholds, and never upgrades anything. 4. anchor freshness `unverified` (the fallthrough) => "hint" regardless of confidence: a fact whose proposition cannot currently be confirmed is never ground truth, no matter how confident (P1/P3). `buildDisplay` mirrors this exact precedence order when choosing its caveat wording, so the trust level and the self-caveating display string can never disagree about which signal won. */
 function classifyTrust(fact: Fact, freshness: AnchorVerdict, contradiction: ContradictionOutcome, now: Date): TrustLevel {
   if (fact.status === "pending" || contradiction !== "none") {
     return "withheld";
@@ -941,41 +605,10 @@ const TERSE_KIND_LABEL: Record<FactKind, string> = {
   correction: "corr",
 };
 
-/**
- * Longest fact body `hintStyle: "terse"` emits before eliding, in characters.
- *
- * Terse shortened the kind label and dropped the CTA, and then emitted the body whole -- so a
- * 500-character fact (`MAX_TEXT_LENGTH`, src/capture.ts) produced a 500-character "terse" line.
- * The style's own docstring promises "single-line-per-fact recall a human can scan quickly", which
- * a paragraph is not, and the four characters saved on the label were rounding error against it.
- *
- * 140 rather than something larger because the number has to be short enough that a reader takes
- * the line in at a glance, which is the only thing terse is for; the full text is one indexed
- * lookup away and the elision marker names the command.
- */
+/** Longest fact body `hintStyle: "terse"` emits before eliding, in characters. Terse shortened the kind label and dropped the CTA, and then emitted the body whole -- so a 500-character fact (`MAX_TEXT_LENGTH`, src/capture.ts) produced a 500-character "terse" line. The style's own docstring promises "single-line-per-fact recall a human can scan quickly", which a paragraph is not, and the four characters saved on the label were rounding error against it. 140 rather than something larger because the number has to be short enough that a reader takes the line in at a glance, which is the only thing terse is for; the full text is one indexed lookup away and the elision marker names the command. */
 const TERSE_TEXT_BUDGET = 140;
 
-/**
- * Elides an over-long body for `hintStyle: "terse"`, marking the elision and naming the recovery.
- *
- * The marker is not decoration. A silently shortened fact is the same failure class as a silently
- * capped payload: an agent handed half a constraint acts on half a constraint, and is worse off
- * than one handed none, because nothing on the line says a clause is missing. So the marker states
- * that text was dropped, how much, and the command that returns it -- an agent reading a truncated
- * line can tell it is truncated without comparing against anything.
- *
- * `<id>` stays a literal placeholder rather than the fact's own id, which is the wording the
- * TGMEM footer already uses. Both surfaces that render a terse display carry the id on the same
- * line already (`--hint-format`'s `id=` field, plain `mem recall`'s leading short id), so
- * interpolating the real 36-character UUID here spent 45 characters to save 85 -- a net 40 in the
- * one mode whose entire purpose is brevity. Measured on a real store before this was changed.
- *
- * The surrogate back-off is not theoretical: a fact body containing an emoji or any other
- * astral-plane character can put a surrogate pair across the budget boundary, and `slice` alone
- * would keep the high half. That survives `JSON.stringify` (it escapes to `\udXXX`) and is valid
- * JSON, so no parser would complain -- it would just render as a replacement character in the one
- * surface a user reads. Backing off one unit costs a character and cannot produce a lone half.
- */
+/** Elides an over-long body for `hintStyle: "terse"`, marking the elision and naming the recovery. The marker is not decoration. A silently shortened fact is the same failure class as a silently capped payload: an agent handed half a constraint acts on half a constraint, and is worse off than one handed none, because nothing on the line says a clause is missing. So the marker states that text was dropped, how much, and the command that returns it -- an agent reading a truncated line can tell it is truncated without comparing against anything. `<id>` stays a literal placeholder rather than the fact's own id, which is the wording the TGMEM footer already uses. Both surfaces that render a terse display carry the id on the same line already (`--hint-format`'s `id=` field, plain `mem recall`'s leading short id), so interpolating the real 36-character UUID here spent 45 characters to save 85 -- a net 40 in the one mode whose entire purpose is brevity. Measured on a real store before this was changed. The surrogate back-off is not theoretical: a fact body containing an emoji or any other astral-plane character can put a surrogate pair across the budget boundary, and `slice` alone would keep the high half. That survives `JSON.stringify` (it escapes to `\udXXX`) and is valid JSON, so no parser would complain -- it would just render as a replacement character in the one surface a user reads. Backing off one unit costs a character and cannot produce a lone half. */
 function elideForTerse(text: string): string {
   if (text.length <= TERSE_TEXT_BUDGET) {
     return text;
@@ -989,12 +622,7 @@ function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
 
-/**
- * Builds the self-caveating `display` string for a fact (S3). Preferences and corrections always
- * carry a "(verify)"-style caveat regardless of trust level (P6 — under-recall is unsafe for these
- * kinds, so they are always presented as hints-to-verify, never as a bald assertion) — decisions and
- * facts, which the agent won't invent a wrong default for on a miss, are shown plainly once affirmed.
- */
+/** Builds the self-caveating `display` string for a fact (S3). Preferences and corrections always carry a "(verify)"-style caveat regardless of trust level (P6 — under-recall is unsafe for these kinds, so they are always presented as hints-to-verify, never as a bald assertion) — decisions and facts, which the agent won't invent a wrong default for on a miss, are shown plainly once affirmed. */
 function buildDisplay(
   fact: Fact,
   freshness: AnchorVerdict,
@@ -1003,10 +631,7 @@ function buildDisplay(
   terse: boolean = false
 ): string {
   const label = terse ? TERSE_KIND_LABEL[fact.kind] : KIND_LABEL[fact.kind];
-  // Once, above every branch: the body is the same string in all seven of them, and eliding at each
-  // return would leave the next branch added here the one that quietly emits 500 characters.
-  // The reason rides on the body so every branch carries it; terse mode drops it with the rest of
-  // the ceremony, since a terse line is a budget-bound reminder, not the place a decision is argued.
+  // Once, above every branch: the body is the same string in all seven of them, and eliding at each return would leave the next branch added here the one that quietly emits 500 characters. The reason rides on the body so every branch carries it; terse mode drops it with the rest of the ceremony, since a terse line is a budget-bound reminder, not the place a decision is argued.
   const reason = !terse && typeof fact.why === "string" ? ` (why: ${fact.why})` : "";
   const body = (terse ? elideForTerse(fact.text) : fact.text) + reason;
   const showCommand = `mem show ${fact.id}`;
@@ -1040,58 +665,16 @@ function applyKindBoost(fact: Fact, score: number): number {
   return fact.kind === "preference" || fact.kind === "correction" ? score * AGGRESSIVE_RECALL_BOOST : score;
 }
 
-/**
- * Mirrors storage.ts's `normalizeSubject` (trim + lowercase) exactly. Duplicated rather than
- * imported: every stored `Fact.subject` already passed through storage.ts's normalization at
- * write time, but an `options.subject` filter value comes straight from a caller (e.g. the CLI's
- * raw `--subject` string) and is never normalized before reaching this module. Without this, a
- * naturally-cased `--subject Package-Manager` would silently match zero facts against a subject
- * stored as `"package-manager"` -- an exact `!==` comparison, no error, just an empty result.
- */
+/** Mirrors storage.ts's `normalizeSubject` (trim + lowercase) exactly. Duplicated rather than imported: every stored `Fact.subject` already passed through storage.ts's normalization at write time, but an `options.subject` filter value comes straight from a caller (e.g. the CLI's raw `--subject` string) and is never normalized before reaching this module. Without this, a naturally-cased `--subject Package-Manager` would silently match zero facts against a subject stored as `"package-manager"` -- an exact `!==` comparison, no error, just an empty result. */
 function normalizeSubjectForFilter(subject: string): string {
   return subject.trim().toLowerCase();
 }
 
-/**
- * The root a fact's anchor is meaningful relative to.
- *
- * mem's stated topology is one `~/.mem` shared across every project, and plain `mem recall` reads
- * the whole store -- so without this, every fact's anchor was evaluated against whichever `--root`
- * the *caller* happened to pass. A project-scoped fact from project A recalled from project B had
- * its `file-exists` predicate resolved inside B, producing a confident `contradicted` (and, where
- * sibling checkouts share filenames, a confident `affirmed`) about a file the fact never referred
- * to. Freshness is the trust signal this tool exists to provide, so a wrong verdict is worse than
- * no verdict.
- *
- * `scope="project"` is redirected to `queryRoot` on an identity match, because only there is
- * `scopeRoot` documented (types.ts) to be an absolute *project root directory* AND is there a
- * `scopeRepo` identity to widen the match with. `scope="path"` stores a file or directory inside
- * some project, not a root an anchor predicate can run under -- for it, the fact's `captureRoot`
- * (the `--root` it was captured under, recorded by `capture.ts`'s `applyOptionalFields`) is the only
- * honest root, but with no identity to widen it, it is used only when `queryRoot` is an *exact*
- * match for it; any other root (an ancestor -- a `path` fact's binding is deliberately visible from
- * every ancestor of its `scopeRoot`, so this is the common monorepo-hook-at-repo-root case, not a
- * rare one -- a descendant, or an unrelated directory) returns `null` rather than guess.
- * `scope="global"` is deliberately left on `queryRoot` unconditionally: a global fact carries no
- * location binding at all, and its anchor (if any) is meant to be re-checked against wherever the
- * caller currently is, not pinned to wherever it was captured -- see the function body for why this
- * is not the same defect as `path` scope's.
- *
- * Returns `null` when no such root is known for `scope="path"` -- a row written before
- * `captureRoot` existed, one imported from an envelope that carries none, or `queryRoot` is not an
- * exact match for a known `captureRoot`. Every caller must treat `null` as "cannot evaluate this
- * anchor", i.e. `unverified`, never as `affirmed` or `contradicted` (design principle P3): asserting
- * a decisive verdict off the wrong root is worse than admitting mem cannot check.
- */
+/** The root a fact's anchor is meaningful relative to. mem's stated topology is one `~/.mem` shared across every project, and plain `mem recall` reads the whole store -- so without this, every fact's anchor was evaluated against whichever `--root` the *caller* happened to pass. A project-scoped fact from project A recalled from project B had its `file-exists` predicate resolved inside B, producing a confident `contradicted` (and, where sibling checkouts share filenames, a confident `affirmed`) about a file the fact never referred to. Freshness is the trust signal this tool exists to provide, so a wrong verdict is worse than no verdict. `scope="project"` is redirected to `queryRoot` on an identity match, because only there is `scopeRoot` documented (types.ts) to be an absolute *project root directory* AND is there a `scopeRepo` identity to widen the match with. `scope="path"` stores a file or directory inside some project, not a root an anchor predicate can run under -- for it, the fact's `captureRoot` (the `--root` it was captured under, recorded by `capture.ts`'s `applyOptionalFields`) is the only honest root, but with no identity to widen it, it is used only when `queryRoot` is an *exact* match for it; any other root (an ancestor -- a `path` fact's binding is deliberately visible from every ancestor of its `scopeRoot`, so this is the common monorepo-hook-at-repo-root case, not a rare one -- a descendant, or an unrelated directory) returns `null` rather than guess. `scope="global"` is deliberately left on `queryRoot` unconditionally: a global fact carries no location binding at all, and its anchor (if any) is meant to be re-checked against wherever the caller currently is, not pinned to wherever it was captured -- see the function body for why this is not the same defect as `path` scope's. Returns `null` when no such root is known for `scope="path"` -- a row written before `captureRoot` existed, one imported from an envelope that carries none, or `queryRoot` is not an exact match for a known `captureRoot`. Every caller must treat `null` as "cannot evaluate this anchor", i.e. `unverified`, never as `affirmed` or `contradicted` (design principle P3): asserting a decisive verdict off the wrong root is worse than admitting mem cannot check. */
 export function anchorRootFor(fact: Fact, queryRoot: string): string | null {
   if (fact.scope === "project") {
     if (typeof fact.scopeRoot === "string" && fact.scopeRoot.trim().length > 0) {
-      // `isBoundToRoot` puts this fact in scope for a query root that is not its own `scopeRoot`
-      // whenever `identityMatches(fact.scopeRepo, queryRoot)` holds -- a worktree or second clone of
-      // the same repository. Evaluating the anchor against the capture-time `scopeRoot` in that case
-      // reads ground truth off a tree the user is not in (a lockfile the query root deleted, a file
-      // the query root added). Only redirect on an actual identity match, not merely because the two
-      // roots differ, so a fact bound to the same directory it was captured in is untouched.
+      // `isBoundToRoot` puts this fact in scope for a query root that is not its own `scopeRoot` whenever `identityMatches(fact.scopeRepo, queryRoot)` holds -- a worktree or second clone of the same repository. Evaluating the anchor against the capture-time `scopeRoot` in that case reads ground truth off a tree the user is not in (a lockfile the query root deleted, a file the query root added). Only redirect on an actual identity match, not merely because the two roots differ, so a fact bound to the same directory it was captured in is untouched.
       if (normalizePath(resolvePath(fact.scopeRoot)) === normalizePath(resolvePath(queryRoot))) {
         return fact.scopeRoot;
       }
@@ -1100,63 +683,27 @@ export function anchorRootFor(fact: Fact, queryRoot: string): string | null {
       }
       return fact.scopeRoot;
     }
-    // A `project` fact with no `scopeRoot` at all never happens via a real capture (`capture.ts`
-    // always sets it for every scope but `global`) -- this is untouched, pre-existing behavior for
-    // whatever test fixture or corrupted row reaches it, deliberately preserved rather than folded
-    // into the `path` handling below.
+    // A `project` fact with no `scopeRoot` at all never happens via a real capture (`capture.ts` always sets it for every scope but `global`) -- this is untouched, pre-existing behavior for whatever test fixture or corrupted row reaches it, deliberately preserved rather than folded into the `path` handling below.
     return queryRoot;
   }
   if (fact.scope === "path") {
-    // Unlike the `project` branch above there is no `scopeRepo` identity to widen this with -- the
-    // scope records none (types.ts) -- so the capture root is the only thing that makes a
-    // `path`-scoped anchor evaluable at all. Without it there is no honest verdict: the pre-column
-    // code handed the anchor the bare `queryRoot`, which is how a `file-absent` fact came back
-    // `affirmed` from a directory where the file plainly existed.
+    // Unlike the `project` branch above there is no `scopeRepo` identity to widen this with -- the scope records none (types.ts) -- so the capture root is the only thing that makes a `path`-scoped anchor evaluable at all. Without it there is no honest verdict: the pre-column code handed the anchor the bare `queryRoot`, which is how a `file-absent` fact came back `affirmed` from a directory where the file plainly existed.
     if (typeof fact.captureRoot !== "string" || fact.captureRoot.trim().length === 0) {
       return null;
     }
     const captureRoot = normalizePath(resolvePath(fact.captureRoot));
     const normalizedQueryRoot = normalizePath(resolvePath(queryRoot));
-    // The capture root itself, and any ancestor of it, can both evaluate this anchor honestly: the
-    // anchor's target was validated to sit inside `captureRoot` at capture time, and a caller
-    // standing at or above that directory has the very tree the predicate describes. This is the
-    // case the fix exists for -- `isBoundToRoot` widens a `path` fact to every ancestor of its
-    // binding precisely so a monorepo hook running at the repository root still sees a package's
-    // facts, and answering `unverified` there would caveat the fact forever on every prompt for the
-    // one user who most needs the anchor.
-    //
-    // Every other root is refused. A descendant may not contain the target at all, and an unrelated
-    // root (a second clone, another machine's checkout of the same layout) would have the anchor
-    // read ground truth off a tree the caller is not in -- the failure the `project` branch above
-    // uses `scopeRepo` identity to avoid, and `path` scope records no identity to avoid it with.
+    // The capture root itself, and any ancestor of it, can both evaluate this anchor honestly: the anchor's target was validated to sit inside `captureRoot` at capture time, and a caller standing at or above that directory has the very tree the predicate describes. This is the case the fix exists for -- `isBoundToRoot` widens a `path` fact to every ancestor of its binding precisely so a monorepo hook running at the repository root still sees a package's facts, and answering `unverified` there would caveat the fact forever on every prompt for the one user who most needs the anchor. Every other root is refused. A descendant may not contain the target at all, and an unrelated root (a second clone, another machine's checkout of the same layout) would have the anchor read ground truth off a tree the caller is not in -- the failure the `project` branch above uses `scopeRepo` identity to avoid, and `path` scope records no identity to avoid it with.
     if (captureRoot === normalizedQueryRoot || captureRoot.startsWith(normalizedQueryRoot + sep)) {
       return fact.captureRoot;
     }
     return null;
   }
-  // `global` scope carries no location binding at all -- it is in scope everywhere, by definition
-  // (`isInScope`/`isBoundToRoot` never even consult a root for it) -- so unlike `path`, there is no
-  // "wrong tree" a global fact's anchor could be evaluated against: a global fact's anchor is
-  // deliberately re-checked against wherever the caller currently is on every query, not pinned to
-  // wherever it happened to be captured (a preference like "uses pnpm not npm", anchored to
-  // `pnpm-lock.yaml`, is meant to verify against the *current* project's lockfile, not the one that
-  // was open the day it was stated). `captureRoot` is still recorded for a global fact (capture.ts),
-  // but `anchorRootFor` intentionally does not consult it here -- see the item-4 finding in the task
-  // this column was added for. Existing `buildHint`/`mem recall` coverage exercises this queryRoot
-  // fallback directly and would regress if it changed.
+  // `global` scope carries no location binding at all -- it is in scope everywhere, by definition (`isInScope`/`isBoundToRoot` never even consult a root for it) -- so unlike `path`, there is no "wrong tree" a global fact's anchor could be evaluated against: a global fact's anchor is deliberately re-checked against wherever the caller currently is on every query, not pinned to wherever it happened to be captured (a preference like "uses pnpm not npm", anchored to `pnpm-lock.yaml`, is meant to verify against the *current* project's lockfile, not the one that was open the day it was stated). `captureRoot` is still recorded for a global fact (capture.ts), but `anchorRootFor` intentionally does not consult it here -- see the item-4 finding in the task this column was added for. Existing `buildHint`/`mem recall` coverage exercises this queryRoot fallback directly and would regress if it changed.
   return queryRoot;
 }
 
-/**
- * The distinct set of roots `anchorRootFor` will actually evaluate `facts`' anchors against, for a
- * query at `queryRoot`.
- *
- * Exists so a caller can prime a persistent anchor cache with the keys the evaluation will really
- * use. The query root alone is not that set: a `path` fact redirects to its own `captureRoot` when
- * `queryRoot` is an ancestor, and a `project` fact bound elsewhere stays on its `scopeRoot` unless
- * the recall is `restrictToRoot`. Pure, and deliberately kept beside `anchorRootFor` so the two
- * cannot drift -- this module still touches no storage.
- */
+/** The distinct set of roots `anchorRootFor` will actually evaluate `facts`' anchors against, for a query at `queryRoot`. Exists so a caller can prime a persistent anchor cache with the keys the evaluation will really use. The query root alone is not that set: a `path` fact redirects to its own `captureRoot` when `queryRoot` is an ancestor, and a `project` fact bound elsewhere stays on its `scopeRoot` unless the recall is `restrictToRoot`. Pure, and deliberately kept beside `anchorRootFor` so the two cannot drift -- this module still touches no storage. */
 export function anchorRootsFor(facts: readonly Fact[], queryRoot: string): string[] {
   const roots = new Set<string>();
   for (const fact of facts) {
@@ -1172,13 +719,7 @@ export function anchorRootsFor(facts: readonly Fact[], queryRoot: string): strin
 }
 
 
-/**
- * Evaluates `fact`'s anchor against the root it was actually captured under, rather than a bare
- * caller-supplied root. Wraps `anchorRootFor` + `evaluateAnchor` so the one place that knows how to
- * turn "capture root unknown" into `unverified` (rather than handing `evaluateAnchor` a fabricated
- * root, or a `null` it does not accept) is not re-derived at each of this function's three callers
- * (`retrieve` below, `mem review`'s `formatReview`, and `mem show`, all in cli.ts/retrieval.ts).
- */
+/** Evaluates `fact`'s anchor against the root it was actually captured under, rather than a bare caller-supplied root. Wraps `anchorRootFor` + `evaluateAnchor` so the one place that knows how to turn "capture root unknown" into `unverified` (rather than handing `evaluateAnchor` a fabricated root, or a `null` it does not accept) is not re-derived at each of this function's three callers (`retrieve` below, `mem review`'s `formatReview`, and `mem show`, all in cli.ts/retrieval.ts). */
 export function evaluateFactFreshness(
   fact: Fact,
   queryRoot: string,
@@ -1194,13 +735,7 @@ export function evaluateFactFreshness(
 }
 
 
-/**
- * Mirrors facets.ts's `normalizeTermKey` (trim + lowercase) exactly, and is duplicated for the same
- * reason `normalizeSubjectForFilter` above duplicates storage.ts's `normalizeSubject`: every stored
- * key already passed through the real function at write time, while an `options.entities` value
- * arrives raw from a caller (the CLI's `--entity` string). Importing facets.ts here would also
- * reverse this module's one-way dependency -- facets.ts imports `tokenize` from here.
- */
+/** Mirrors facets.ts's `normalizeTermKey` (trim + lowercase) exactly, and is duplicated for the same reason `normalizeSubjectForFilter` above duplicates storage.ts's `normalizeSubject`: every stored key already passed through the real function at write time, while an `options.entities` value arrives raw from a caller (the CLI's `--entity` string). Importing facets.ts here would also reverse this module's one-way dependency -- facets.ts imports `tokenize` from here. */
 function normalizeEntityForFilter(entity: string): string {
   return entity.trim().toLowerCase();
 }
@@ -1224,14 +759,12 @@ function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boole
       return false;
     }
   }
-  // `epoch` is optional on Fact (types.ts): an absent value means "predates the epoch column" and is
-  // treated as 0, so a legacy row is excluded by any positive bound rather than silently included.
+  // `epoch` is optional on Fact (types.ts): an absent value means "predates the epoch column" and is treated as 0, so a legacy row is excluded by any positive bound rather than silently included.
   if (options.epochAfter !== undefined && (fact.epoch ?? 0) <= options.epochAfter) {
     return false;
   }
   if (options.entities !== undefined && options.entities.length > 0) {
-    // A fact with no entry in the map carries no entities at all, so no non-empty requirement can
-    // be satisfied -- an empty set here and a missing key mean the same thing to this loop.
+    // A fact with no entry in the map carries no entities at all, so no non-empty requirement can be satisfied -- an empty set here and a missing key mean the same thing to this loop.
     const carried = options.factEntityKeys?.get(fact.id) ?? new Set<string>();
     for (const required of options.entities) {
       if (!carried.has(normalizeEntityForFilter(required))) {
@@ -1243,59 +776,21 @@ function matchesFilters(fact: Fact, options: RetrievalOptions, now: Date): boole
 }
 
 export interface RetrieveOutcome {
-  /**
-   * Final, trust-annotated, self-caveating results in surfacing order. Every withheld result
-   * (`trust === "withheld"`) is always included, regardless of `totalNonWithheld`/`shownNonWithheld`
-   * or the effective limit -- only non-withheld results are ever capped.
-   */
+  /** Final, trust-annotated, self-caveating results in surfacing order. Every withheld result (`trust === "withheld"`) is always included, regardless of `totalNonWithheld`/`shownNonWithheld` or the effective limit -- only non-withheld results are ever capped. */
   readonly results: readonly RetrievedFact[];
   /** Count of non-withheld results that matched, before the default/explicit limit was applied. */
   readonly totalNonWithheld: number;
   /** Count of non-withheld results actually included in `results` (i.e. `min(totalNonWithheld, effectiveLimit)`). */
   readonly shownNonWithheld: number;
-  /**
-   * How many facts' freshness verdict is a budget artifact -- `evaluateAnchor`'s shared
-   * `anchorTimeBudgetMs` deadline was already exhausted by the time that fact's anchor was
-   * evaluated, so it was forced to `"unverified"` regardless of what the predicate would otherwise
-   * have found -- rather than a genuine `affirmed`/`contradicted`/`unverified` outcome. Zero in the
-   * common case where the store is small enough (or the deadline generous enough) that every anchor
-   * finishes in time.
-   */
+  /** How many facts' freshness verdict is a budget artifact -- `evaluateAnchor`'s shared `anchorTimeBudgetMs` deadline was already exhausted by the time that fact's anchor was evaluated, so it was forced to `"unverified"` regardless of what the predicate would otherwise have found -- rather than a genuine `affirmed`/`contradicted`/`unverified` outcome. Zero in the common case where the store is small enough (or the deadline generous enough) that every anchor finishes in time. */
   readonly anchorBudgetHits: number;
-  /**
-   * How many results this call removed from `results` because the caller asked for `hintFormat`.
-   *
-   * Zero for every other caller, and that is the point rather than an omission: withheld results are
-   * *included* in `results` for an ordinary caller, so nothing was kept from it and there is nothing
-   * to disclose. Only `hintFormat` drops them, and a wire payload that drops them silently is
-   * byte-indistinguishable from one saying the project has nothing awaiting review -- which is the
-   * steady state on any install where `mem init` wired the `Stop` hook that fills the queue.
-   */
+  /** How many results this call removed from `results` because the caller asked for `hintFormat`. Zero for every other caller, and that is the point rather than an omission: withheld results are *included* in `results` for an ordinary caller, so nothing was kept from it and there is nothing to disclose. Only `hintFormat` drops them, and a wire payload that drops them silently is byte-indistinguishable from one saying the project has nothing awaiting review -- which is the steady state on any install where `mem init` wired the `Stop` hook that fills the queue. */
   readonly withheldCount: number;
-  /**
-   * True when no rank list existed for this call at all -- no lexical match, no embedding signal, no
-   * usefulness signal (for a non-empty query, usefulness counts only on facts the query has evidence
-   * for) -- so every fact tied at zero and `results` is ordered by recency (a pin,
-   * where present) rather than relevance. Distinct from asking whether any individual result
-   * "matched": `matchedQuery` (`RetrievedFact`) is read off the pre-fusion BM25 map alone, so it is
-   * `false` for every result of a query answered purely by embedding signal, even though that query
-   * unambiguously matched something. This field is the only reliable way to ask "was there nothing
-   * to match against at all" -- see `retrieve`'s own `zeroSignal` local, which this carries out to
-   * callers that need to say so (the seam's recall footer) without recomputing it from `results`.
-   */
+  /** True when no rank list existed for this call at all -- no lexical match, no embedding signal, no usefulness signal (for a non-empty query, usefulness counts only on facts the query has evidence for) -- so every fact tied at zero and `results` is ordered by recency (a pin, where present) rather than relevance. Distinct from asking whether any individual result "matched": `matchedQuery` (`RetrievedFact`) is read off the pre-fusion BM25 map alone, so it is `false` for every result of a query answered purely by embedding signal, even though that query unambiguously matched something. This field is the only reliable way to ask "was there nothing to match against at all" -- see `retrieve`'s own `zeroSignal` local, which this carries out to callers that need to say so (the seam's recall footer) without recomputing it from `results`. */
   readonly zeroSignal: boolean;
 }
 
-/**
- * The correctness gate `retrieve()` applies before ranking, extracted so another consumer of the
- * live store -- today only `mem dream`'s premise pool -- can filter to facts mem would actually
- * assert without reimplementing contradiction resolution and freshness evaluation by hand. `facts`
- * may be the full store contents (this does its own status filtering, same as `retrieve()`).
- *
- * Excludes: `superseded`, `pending`, `contested`, and contradiction losers (mirrors
- * `contradictionFromStatus`'s "withheld" outcomes), plus anything anchor-`contradicted` against
- * `root`. `unverified` is not grounds for exclusion here either -- only `contradicted` is.
- */
+/** The correctness gate `retrieve()` applies before ranking, extracted so another consumer of the live store -- today only `mem dream`'s premise pool -- can filter to facts mem would actually assert without reimplementing contradiction resolution and freshness evaluation by hand. `facts` may be the full store contents (this does its own status filtering, same as `retrieve()`). Excludes: `superseded`, `pending`, `contested`, and contradiction losers (mirrors `contradictionFromStatus`'s "withheld" outcomes), plus anything anchor-`contradicted` against `root`. `unverified` is not grounds for exclusion here either -- only `contradicted` is. */
 export function selectVerifiedFacts(
   facts: readonly Fact[],
   root: string,
@@ -1312,27 +807,17 @@ export function selectVerifiedFacts(
   });
 }
 
-/**
- * Runs the full hybrid-retrieval + correctness-gate pipeline over `facts` and returns ranked,
- * trust-annotated, self-caveating results. `facts` may be the full store contents — this function
- * does its own status filtering (never surfacing `superseded` facts, recomputing contradictions
- * fresh) so callers do not need to pre-filter by status.
- */
+/** Runs the full hybrid-retrieval + correctness-gate pipeline over `facts` and returns ranked, trust-annotated, self-caveating results. `facts` may be the full store contents — this function does its own status filtering (never surfacing `superseded` facts, recomputing contradictions fresh) so callers do not need to pre-filter by status. */
 export async function retrieve(facts: readonly Fact[], options: RetrievalOptions): Promise<RetrieveOutcome> {
   const now = options.now ?? new Date();
   const anchorDeadline = Date.now() + (options.anchorTimeBudgetMs ?? DEFAULT_ANCHOR_TIME_BUDGET_MS);
 
-  // Superseded facts are excluded up front — "kept for audit, not surfaced" (P4) is unconditional,
-  // unlike pending/contested which can still appear (caveated) outside --hint-format.
+  // Superseded facts are excluded up front — "kept for audit, not surfaced" (P4) is unconditional, unlike pending/contested which can still appear (caveated) outside --hint-format.
   const liveCandidates = facts.filter((fact) => fact.status !== "superseded");
   const { facts: resolved } = resolveContradictions(liveCandidates);
   const pool = resolved.filter((fact) => fact.status !== "superseded");
 
-  // A more specific in-scope fact overrides a same-subject, different-value broader one (a project's
-  // `package-manager = pnpm` over a global `npm`). Computed over the in-scope pool *before* the
-  // kind/subject/age/entity filters, so narrowing the query never removes the overriding fact and
-  // lets the broader one resurface. A per-recall exclusion only: nothing is written to the store. An
-  // override whose anchor is contradicted is withheld itself, so it must not take the broader fact down with it.
+  // A more specific in-scope fact overrides a same-subject, different-value broader one (a project's `package-manager = pnpm` over a global `npm`). Computed over the in-scope pool *before* the kind/subject/age/entity filters, so narrowing the query never removes the overriding fact and lets the broader one resurface. A per-recall exclusion only: nothing is written to the store. An override whose anchor is contradicted is withheld itself, so it must not take the broader fact down with it.
   const shadowed =
     options.restrictToRoot === true || options.poolIsInScope === true
       ? scopeShadowedIds(
@@ -1342,11 +827,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       : new Set<string>();
   const filtered = pool.filter((fact) => !shadowed.has(fact.id) && matchesFilters(fact, options, now));
   if (filtered.length === 0) {
-    // `zeroSignal: false` here, not `true`: this is an empty candidate pool (nothing survived
-    // scope/status filtering, possibly an empty store), not a real pool that no rank list could
-    // match against. The seam's "nothing matched this query" footer clause keys off `zeroSignal`
-    // specifically to describe the latter -- asserting it here would fire that clause for an empty
-    // store, which has nothing to do with the query at all.
+    // `zeroSignal: false` here, not `true`: this is an empty candidate pool (nothing survived scope/status filtering, possibly an empty store), not a real pool that no rank list could match against. The seam's "nothing matched this query" footer clause keys off `zeroSignal` specifically to describe the latter -- asserting it here would fire that clause for an empty store, which has nothing to do with the query at all.
     return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0, withheldCount: 0, zeroSignal: false };
   }
 
@@ -1355,16 +836,11 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     const delta = (bm25Scores.get(b.id) ?? 0) - (bm25Scores.get(a.id) ?? 0);
     return delta !== 0 ? delta : b.captured_at.localeCompare(a.captured_at);
   });
-  // Only facts the query actually matched. The zero-score tail of `bm25Ranked` is pure recency
-  // order, and handing it to RRF made recency vote on relevance -- the same flaw the all-zero case
-  // below guards against, just hiding in the tail of an otherwise informative list. This mirrors
-  // `entityOverlapRanking` / `graphScoreRanking`, which only ever carry positive signals.
+  // Only facts the query actually matched. The zero-score tail of `bm25Ranked` is pure recency order, and handing it to RRF made recency vote on relevance -- the same flaw the all-zero case below guards against, just hiding in the tail of an otherwise informative list. This mirrors `entityOverlapRanking` / `graphScoreRanking`, which only ever carry positive signals.
   const bm25RankIds = bm25Ranked.filter((fact) => (bm25Scores.get(fact.id) ?? 0) > 0).map((fact) => fact.id);
 
   let embeddingRankIds: string[] = [];
-  // A query that trips secret screening is never handed to the embedding endpoint -- BM25 still
-  // ranks it (nothing here narrows `filtered` or skips the lexical pass), only the outbound call is
-  // skipped, mirroring the capture-side invariant that screened-out text is never sent off-machine.
+  // A query that trips secret screening is never handed to the embedding endpoint -- BM25 still ranks it (nothing here narrows `filtered` or skips the lexical pass), only the outbound call is skipped, mirroring the capture-side invariant that screened-out text is never sent off-machine.
   const queryTripsScreening =
     options.query.trim().length > 0 && screenForSecrets({ query: options.query }, options.secretAllowlist ?? []).length > 0;
   if (options.query.trim().length > 0 && !queryTripsScreening) {
@@ -1374,12 +850,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       if (embeddable.length > 0) {
         const queryVector = await embedQuery(backend, options.query, options.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
         if (queryVector !== null) {
-          // Vectors of a different length than the query's are dropped rather than compared.
-          // `cosineSimilarity` would happily compare them over `Math.min` of the two lengths and
-          // return a confident number about two vector spaces that share no axes -- a wrong ranking
-          // with no error and no log. The store-wide version of this (a model swap) is caught
-          // earlier by `planEmbeddingRanking` in embeddings.ts; this is the per-fact backstop for a
-          // store that is mid-migration or was written by more than one backend.
+          // Vectors of a different length than the query's are dropped rather than compared. `cosineSimilarity` would happily compare them over `Math.min` of the two lengths and return a confident number about two vector spaces that share no axes -- a wrong ranking with no error and no log. The store-wide version of this (a model swap) is caught earlier by `planEmbeddingRanking` in embeddings.ts; this is the per-fact backstop for a store that is mid-migration or was written by more than one backend.
           const comparable = embeddable.filter((fact) => fact.embedding.length === queryVector.length);
           const similarity = new Map<string, number>(comparable.map((fact) => [fact.id, cosineSimilarity(queryVector, fact.embedding)]));
           embeddingRankIds = [...comparable].sort((a, b) => (similarity.get(b.id) ?? -1) - (similarity.get(a.id) ?? -1)).map((fact) => fact.id);
@@ -1388,21 +859,11 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     }
   }
 
-  // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a
-  // fourth signal is one push rather than another doubling of cases.
+  // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a fourth signal is one push rather than another doubling of cases.
   const entityRankIds = entityOverlapRanking(filtered, options.entityOverlap);
   const graphRankIds = graphScoreRanking(filtered, options.graphScores);
 
-  // Which facts the query itself produced evidence for: a lexical hit, an entity or graph signal,
-  // or a place near the top of the embedding ranking. `embeddingRankIds` ranks *every* comparable
-  // fact, so on its own it would make everything "evidence"; only its head counts.
-  //
-  // Usefulness is a prior about a fact, not evidence about the query. Left ungated, a fact that was
-  // once confirmed useful fused above a genuine lexical match it had nothing to do with (and the
-  // seam's elbow cutoff then dropped the real match), and for a query nothing matched it made the
-  // rank-list set non-empty, hiding the "nothing matched" footer and the zero-signal pin ordering.
-  // With an empty query (browse / SessionStart) there is no evidence to require, so usefulness
-  // ranks as before.
+  // Which facts the query itself produced evidence for: a lexical hit, an entity or graph signal, or a place near the top of the embedding ranking. `embeddingRankIds` ranks *every* comparable fact, so on its own it would make everything "evidence"; only its head counts. Usefulness is a prior about a fact, not evidence about the query. Left ungated, a fact that was once confirmed useful fused above a genuine lexical match it had nothing to do with (and the seam's elbow cutoff then dropped the real match), and for a query nothing matched it made the rank-list set non-empty, hiding the "nothing matched" footer and the zero-signal pin ordering. With an empty query (browse / SessionStart) there is no evidence to require, so usefulness ranks as before.
   const hasQuery = options.query.trim().length > 0;
   const queryEvidenceIds = new Set<string>();
   if (hasQuery) {
@@ -1415,34 +876,17 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const usefulnessRankIds = usefulnessRanking(filtered, options.usefulness).filter((id) => !hasQuery || queryEvidenceIds.has(id));
   const extraRankLists = [embeddingRankIds, usefulnessRankIds, entityRankIds, graphRankIds].filter((list) => list.length > 0);
 
-  // A BM25 list where every score is zero is a *ranking* but not a *signal*: nothing matched, so
-  // `bm25Ranked`'s sort fell through to its `captured_at` tie-break and the list is now pure recency
-  // order. Handing that to RRF lets recency vote on relevance with exactly the same weight as a real
-  // signal -- and it does the most damage on the queries embeddings exist to answer, the ones with no
-  // lexical overlap at all. Found by dogfooding, not by the suite: against a real 768-dim endpoint,
-  // "how do we roll out new versions to production" over a 4-fact store ranked
-  // `deployments use blue-green` *third*, because the recency list outvoted the embedding list
-  // everywhere except the bottom pair. Every ranking test until then used a query that did match
-  // lexically, so the zero case never reached fusion.
+  // A BM25 list where every score is zero is a *ranking* but not a *signal*: nothing matched, so `bm25Ranked`'s sort fell through to its `captured_at` tie-break and the list is now pure recency order. Handing that to RRF lets recency vote on relevance with exactly the same weight as a real signal -- and it does the most damage on the queries embeddings exist to answer, the ones with no lexical overlap at all. Found by dogfooding, not by the suite: against a real 768-dim endpoint, "how do we roll out new versions to production" over a 4-fact store ranked `deployments use blue-green` *third*, because the recency list outvoted the embedding list everywhere except the bottom pair. Every ranking test until then used a query that did match lexically, so the zero case never reached fusion.
   const bm25IsInformative = bm25RankIds.length > 0;
   const rankLists = bm25IsInformative ? [bm25RankIds, ...extraRankLists] : extraRankLists;
 
-  // Fusion runs only when there is something to fuse *with*: RRF over a single list is that list's
-  // own ranks relabelled, so for BM25 alone it would spend a scale change to buy nothing, and the
-  // raw scores are kept instead. An embedding-only list is the one exception -- it is already the
-  // sole signal, and RRF is simply how its ranks become scores.
-  //
-  // Note that "is this score zero" is no longer a safe way to ask "did this fact match the query":
-  // it is true of the raw-BM25 path and false under RRF, which is precisely why `matchedQuery`
-  // exists as its own field rather than being inferred from `score` downstream.
+  // Fusion runs only when there is something to fuse *with*: RRF over a single list is that list's own ranks relabelled, so for BM25 alone it would spend a scale change to buy nothing, and the raw scores are kept instead. An embedding-only list is the one exception -- it is already the sole signal, and RRF is simply how its ranks become scores. Note that "is this score zero" is no longer a safe way to ask "did this fact match the query": it is true of the raw-BM25 path and false under RRF, which is precisely why `matchedQuery` exists as its own field rather than being inferred from `score` downstream.
   let fusedScores: Map<string, number>;
   if (rankLists.length === 0) {
-    // Nothing matched and no auxiliary signal exists: every fact ties at zero and the caller's own
-    // recency tie-break orders them, exactly as it did before any of this existed.
+    // Nothing matched and no auxiliary signal exists: every fact ties at zero and the caller's own recency tie-break orders them, exactly as it did before any of this existed.
     fusedScores = new Map<string, number>(filtered.map((fact) => [fact.id, 0]));
   } else if (rankLists.length === 1 && bm25IsInformative) {
-    // `bm25RankIds` now holds only matches, so non-matching facts are scored 0 from `filtered`
-    // (the `--delta` contract: a fact that matched nothing scores exactly 0 under raw BM25).
+    // `bm25RankIds` now holds only matches, so non-matching facts are scored 0 from `filtered` (the `--delta` contract: a fact that matched nothing scores exactly 0 under raw BM25).
     fusedScores = new Map<string, number>(filtered.map((fact) => [fact.id, bm25Scores.get(fact.id) ?? 0]));
   } else {
     fusedScores = reciprocalRankFusion(rankLists);
@@ -1460,8 +904,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     return {
       fact,
       score: applyKindBoost(fact, fusedScores.get(fact.id) ?? 0),
-      // Read off the pre-fusion BM25 map on purpose: this is the lexical-match question, not the
-      // ranking one, and it has to keep the same meaning whether or not a second rank list exists.
+      // Read off the pre-fusion BM25 map on purpose: this is the lexical-match question, not the ranking one, and it has to keep the same meaning whether or not a second rank list exists.
       matchedQuery: (bm25Scores.get(fact.id) ?? 0) > 0,
       queryEvidence: queryEvidenceIds.has(fact.id),
       freshness,
@@ -1480,18 +923,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const visible = options.hintFormat === true ? results.filter((result) => result.trust !== "withheld") : results;
   const withheldCount = results.length - visible.length;
 
-  // With no rank list at all -- no query, no embedding signal, no usefulness signal (and with a
-  // query present, usefulness only counts for facts the query has evidence for, so usefulness data
-  // alone never makes a query that matched nothing look like it had signal) -- every score
-  // ties at zero and this sort falls through to its recency tie-break, so the cap below keeps the
-  // newest `limit` facts and silently drops everything older. That is exactly the shape of the
-  // `SessionStart` recall `mem init` installs, and a pinned fact is precisely the fact the user has
-  // said must not be lost: behind 20 newer facts it vanished from the one call it was pinned for.
-  //
-  // Pinned facts therefore sort ahead of the rest *only in that zero-signal case*. When any real
-  // signal exists, relevance decides and a pin changes nothing -- letting a pin outrank a lexical
-  // match would turn `mem pin` into a ranking cheat code, and a pinned fact irrelevant to the query
-  // would displace the fact that answers it.
+  // With no rank list at all -- no query, no embedding signal, no usefulness signal (and with a query present, usefulness only counts for facts the query has evidence for, so usefulness data alone never makes a query that matched nothing look like it had signal) -- every score ties at zero and this sort falls through to its recency tie-break, so the cap below keeps the newest `limit` facts and silently drops everything older. That is exactly the shape of the `SessionStart` recall `mem init` installs, and a pinned fact is precisely the fact the user has said must not be lost: behind 20 newer facts it vanished from the one call it was pinned for. Pinned facts therefore sort ahead of the rest *only in that zero-signal case*. When any real signal exists, relevance decides and a pin changes nothing -- letting a pin outrank a lexical match would turn `mem pin` into a ranking cheat code, and a pinned fact irrelevant to the query would displace the fact that answers it.
   const zeroSignal = rankLists.length === 0;
   visible.sort((a, b) => {
     if (zeroSignal) {
@@ -1504,10 +936,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at);
   });
 
-  // Non-withheld results are capped at the effective limit; withheld results (pending/contested/
-  // contradicted) are never subject to it -- a fact needing human attention must never be silently
-  // pushed off the end of the default result set by 20 unrelated clean facts outranking it.
-  // `superseded` is not listed: those facts were filtered out of the pool above and never get here.
+  // Non-withheld results are capped at the effective limit; withheld results (pending/contested/ contradicted) are never subject to it -- a fact needing human attention must never be silently pushed off the end of the default result set by 20 unrelated clean facts outranking it. `superseded` is not listed: those facts were filtered out of the pool above and never get here.
   const effectiveLimit = options.limit ?? DEFAULT_RECALL_LIMIT;
   const nonWithheld = visible.filter((result) => result.trust !== "withheld");
   const shownNonWithheldResults = nonWithheld.slice(0, effectiveLimit);

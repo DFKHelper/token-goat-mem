@@ -1,7 +1,4 @@
-/**
- * Guard tests over documentation claims to catch inconsistencies between
- * docs and the actual implementation.
- */
+/** Guard tests over documentation claims to catch inconsistencies between docs and the actual implementation. */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -15,15 +12,11 @@ describe("documentation consistency guards", () => {
     return readFileSync(join(REPO_ROOT, relativePath), "utf8");
   };
 
-  // Get all doc files. Derived from TOOL_NAMES for the per-tool integration docs, so a new tool
-  // added to that list without a matching docs/integrations/<tool>.md fails this guard instead of
-  // shipping silently undocumented. README.md/AGENTS.md/CLAUDE.md are the fixed, non-per-tool
-  // entries.
+  // Get all doc files. Derived from TOOL_NAMES for the per-tool integration docs, so a new tool added to that list without a matching docs/integrations/<tool>.md fails this guard instead of shipping silently undocumented. README.md/AGENTS.md/CLAUDE.md are the fixed, non-per-tool entries.
   const getAllDocFiles = (): string[] => {
     return [
       "README.md",
-      // AGENTS.md and CLAUDE.md are read by an agent every turn, so a false claim in either
-      // misleads more often than one in README -- they belong inside this guard, not outside it.
+      // AGENTS.md and CLAUDE.md are read by an agent every turn, so a false claim in either misleads more often than one in README -- they belong inside this guard, not outside it.
       "AGENTS.md",
       "CLAUDE.md",
       ...TOOL_NAMES.map((tool) => `docs/integrations/${tool}.md`),
@@ -44,8 +37,7 @@ describe("documentation consistency guards", () => {
 
     it("no doc file claims token-goat calls, invokes, or runs 'mem recall'", () => {
       const files = getAllDocFiles();
-      // Allows intervening words ("token-goat optionally calls") and optional backticks around
-      // the tool name: CLAUDE.md carried exactly that phrasing past the original stricter pattern.
+      // Allows intervening words ("token-goat optionally calls") and optional backticks around the tool name: CLAUDE.md carried exactly that phrasing past the original stricter pattern.
       const pattern = /`?token-goat`?\s+(?:\w+\s+){0,2}(calls|invokes|runs)\s+`?mem recall/i;
       for (const filePath of files) {
         const content = readDocFile(filePath);

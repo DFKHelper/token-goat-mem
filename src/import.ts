@@ -1,23 +1,4 @@
-/**
- * `mem import --from-md <path>` -- the mem-side half of the "advisory CLAUDE.md->mem migration
- * probe" (the other half, `token-goat baseline --suggest-mem`, lives in the token-goat repo and is
- * not this module's concern; this module only needs to be a well-behaved producer of `pending`
- * facts through the existing trust path).
- *
- * Parses a markdown file (CLAUDE.md-style) for bullet-list lines that look like preference/
- * decision-shaped statements, and hands each qualifying bullet to `capture.ts`'s `captureSuggested`
- * -- the exact same `pending`, never-auto-promoted trust path any other suggested/derived fact goes
- * through (S9). There is deliberately no code path here that can write `status: "active"`; this
- * module does not call `captureExplicit` or `setFactStatus` at all. Promotion is exclusively `mem
- * review --promote`, already wired in cli.ts -- this module does not add a second one.
- *
- * The heuristic for "looks like a preference/decision statement" is intentionally shallow (a
- * classifier is out of scope): a single-line `-`/`*` bullet, outside a fenced code block, that is
- * not a *nested* sub-bullet under an obviously structural/non-preference heading (e.g.
- * "Architecture", "File Structure"). Ambiguous cases are imported rather than filtered out -- the
- * safety property comes from every candidate landing as `pending` (human confirmation required via
- * `mem review --promote`), not from pre-filtering cleverness.
- */
+/** `mem import --from-md <path>` -- the mem-side half of the "advisory CLAUDE.md->mem migration probe" (the other half, `token-goat baseline --suggest-mem`, lives in the token-goat repo and is not this module's concern; this module only needs to be a well-behaved producer of `pending` facts through the existing trust path). Parses a markdown file (CLAUDE.md-style) for bullet-list lines that look like preference/ decision-shaped statements, and hands each qualifying bullet to `capture.ts`'s `captureSuggested` -- the exact same `pending`, never-auto-promoted trust path any other suggested/derived fact goes through (S9). There is deliberately no code path here that can write `status: "active"`; this module does not call `captureExplicit` or `setFactStatus` at all. Promotion is exclusively `mem review --promote`, already wired in cli.ts -- this module does not add a second one. The heuristic for "looks like a preference/decision statement" is intentionally shallow (a classifier is out of scope): a single-line `-`/`*` bullet, outside a fenced code block, that is not a *nested* sub-bullet under an obviously structural/non-preference heading (e.g. "Architecture", "File Structure"). Ambiguous cases are imported rather than filtered out -- the safety property comes from every candidate landing as `pending` (human confirmation required via `mem review --promote`), not from pre-filtering cleverness. */
 
 import { relative, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -36,12 +17,7 @@ import { isBoundToRoot } from "./projectIdentity.js";
 import { factsByTextHash, listFacts } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
 
-/**
- * Thrown for a file-read problem (missing file, permission denied, etc.) -- distinct from
- * per-bullet candidate problems which are reported as `skipped_error` outcomes instead.
- * Registered in `cli.ts`'s `exitCodeForError` as a user error (exit 1): a missing `--from-md`
- * file is bad input, not an internal bug.
- */
+/** Thrown for a file-read problem (missing file, permission denied, etc.) -- distinct from per-bullet candidate problems which are reported as `skipped_error` outcomes instead. Registered in `cli.ts`'s `exitCodeForError` as a user error (exit 1): a missing `--from-md` file is bad input, not an internal bug. */
 export class MarkdownImportError extends Error {
   constructor(message: string) {
     super(message);
@@ -64,19 +40,10 @@ const HEADING_RE = /^(#{1,6})\s+(.*)$/u;
 const BULLET_RE = /^(\s*)[-*]\s+(.+)$/u;
 const FENCE_RE = /^\s*(```|~~~)/u;
 
-/**
- * Headings whose *nested* bullets describe file/directory layout or system structure rather than a
- * preference or decision a human stated -- not a general topic blocklist, and only excludes nested
- * (indented) bullets under one of these headings. Top-level bullets and bullets under any other
- * heading are still candidates; per this module's doc comment, the review gate (not this list) is
- * the actual safety boundary.
- */
+/** Headings whose *nested* bullets describe file/directory layout or system structure rather than a preference or decision a human stated -- not a general topic blocklist, and only excludes nested (indented) bullets under one of these headings. Top-level bullets and bullets under any other heading are still candidates; per this module's doc comment, the review gate (not this list) is the actual safety boundary. */
 const NON_PREFERENCE_HEADING_RE = /\b(architecture|file structure|file organization|directory structure)\b/iu;
 
-/**
- * Extracts candidate bullets from raw markdown text. Pure and file-IO-free so it can be unit-tested
- * against synthetic fixtures without touching disk.
- */
+/** Extracts candidate bullets from raw markdown text. Pure and file-IO-free so it can be unit-tested against synthetic fixtures without touching disk. */
 export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
   const lines = markdown.split(/\r?\n/u);
   const bullets: MarkdownBullet[] = [];
@@ -95,9 +62,7 @@ export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
       } else if (marker === fenceChar) {
         fenceChar = null;
       }
-      // A fence line using the non-matching marker while already inside a fence is just
-      // ordinary content of that fence (e.g. a `~~~` line inside a ``` block) -- fall through
-      // to the `inFence` check below rather than treating it as a close/reopen.
+      // A fence line using the non-matching marker while already inside a fence is just ordinary content of that fence (e.g. a `~~~` line inside a ``` block) -- fall through to the `inFence` check below rather than treating it as a close/reopen.
       continue;
     }
     if (fenceChar !== null) {
@@ -144,18 +109,7 @@ export interface ImportFromMarkdownOptions {
   readonly kind?: FactKind;
   /** File or directory each imported fact is bound to when `scope === "path"`, forwarded verbatim to `captureSuggested`'s `path` field (resolved against `root`, never against ambient `process.cwd()`). Named distinctly from `path` (the markdown file being imported) to avoid confusing the two. */
   readonly boundPath?: string;
-  /**
-   * ISO 8601 timestamp recorded as every imported fact's `captured_at`, instead of the moment of
-   * the import. A CLAUDE.md's rules are usually older than the store reading them, and stamping
-   * them `now` tells time-decay and contradiction precedence the opposite.
-   *
-   * No automatic default: there is no reliable machine-readable age for a markdown file. `mtime` is
-   * reset to checkout time by `git clone` (so it reads as "today" on precisely the fresh checkout
-   * where an import is most likely) and restored backups can carry arbitrary ones, while the real
-   * answer -- the file's last commit date -- needs git history this codebase deliberately does not
-   * shell out for. So the caller supplies it, and `mem import --help` shows the one-liner that
-   * produces the commit date.
-   */
+  /** ISO 8601 timestamp recorded as every imported fact's `captured_at`, instead of the moment of the import. A CLAUDE.md's rules are usually older than the store reading them, and stamping them `now` tells time-decay and contradiction precedence the opposite. No automatic default: there is no reliable machine-readable age for a markdown file. `mtime` is reset to checkout time by `git clone` (so it reads as "today" on precisely the fresh checkout where an import is most likely) and restored backups can carry arbitrary ones, while the real answer -- the file's last commit date -- needs git history this codebase deliberately does not shell out for. So the caller supplies it, and `mem import --help` shows the one-liner that produces the commit date. */
   readonly capturedAt?: string;
   /** When true, extracts and reports candidates but writes nothing (`captureSuggested` is never called). */
   readonly dryRun?: boolean;
@@ -166,11 +120,7 @@ export interface ImportCandidate {
   readonly line: number;
   /** `<resolved file path>:<line>` -- stored verbatim as the imported fact's `source_ref` for provenance. */
   readonly sourceRef: string;
-  /**
-   * The untouched source line this candidate was extracted from -- the raw material for this
-   * candidate's `sources` excerpt. Optional because `ImportCandidate` is shared with
-   * `exportImport.ts`'s `--from-json` path, which has no markdown line to point at.
-   */
+  /** The untouched source line this candidate was extracted from -- the raw material for this candidate's `sources` excerpt. Optional because `ImportCandidate` is shared with `exportImport.ts`'s `--from-json` path, which has no markdown line to point at. */
   readonly rawLine?: string;
 }
 
@@ -192,12 +142,7 @@ function dedupKey(sourceRef: string, text: string): string {
   return `${sourceRef}::${text}`;
 }
 
-/**
- * Reuses the same in-memory-filter pattern cli.ts's own `recall`/`review` commands already use for
- * `listFacts(db, {})` -- there is no `source_ref`/`source_type` column in `FactFilter` (storage.ts),
- * so filtering after a full list is the existing convention here, not a new mechanism invented for
- * this command.
- */
+/** Reuses the same in-memory-filter pattern cli.ts's own `recall`/`review` commands already use for `listFacts(db, {})` -- there is no `source_ref`/`source_type` column in `FactFilter` (storage.ts), so filtering after a full list is the existing convention here, not a new mechanism invented for this command. */
 function existingImportKeys(db: Database.Database): Set<string> {
   const keys = new Set<string>();
   for (const fact of listFacts(db, {})) {
@@ -208,19 +153,11 @@ function existingImportKeys(db: Database.Database): Set<string> {
   return keys;
 }
 
-/**
- * Reads and parses `options.path` into import candidates and their `dry_run` outcomes *without
- * opening a database*. This is the entire body of a `--dry-run` import, factored out so the CLI can
- * preview an import without side effects: opening mem's SQLite store (`openDb`) does `mkdirSync` +
- * creates the db file, WAL sidecars, and schema on disk, which would contradict `--dry-run`'s
- * documented "nothing written" contract for a project that has no store yet.
- */
+/** Reads and parses `options.path` into import candidates and their `dry_run` outcomes *without opening a database*. This is the entire body of a `--dry-run` import, factored out so the CLI can preview an import without side effects: opening mem's SQLite store (`openDb`) does `mkdirSync` + creates the db file, WAL sidecars, and schema on disk, which would contradict `--dry-run`'s documented "nothing written" contract for a project that has no store yet. */
 export function planImportFromMarkdown(options: Pick<ImportFromMarkdownOptions, "path">): ImportResult {
   const filePath = resolve(options.path);
 
-  // Wrap file stat and read to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
-  // rather than internal errors: a missing or unreadable file is a user error (bad input path),
-  // not a bug.
+  // Wrap file stat and read to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors rather than internal errors: a missing or unreadable file is a user error (bad input path), not a bug.
   const stat = statFileWithErrorMapping(filePath, MarkdownImportError);
 
   if (stat.size > MAX_IMPORT_FILE_SIZE_BYTES) {
@@ -240,13 +177,7 @@ export function planImportFromMarkdown(options: Pick<ImportFromMarkdownOptions, 
   return { filePath, candidates, outcomes: candidates.map((candidate) => ({ status: "dry_run", candidate })) };
 }
 
-/**
- * Parses `options.path` for qualifying bullets and, unless `options.dryRun`, imports each
- * non-duplicate candidate as a `pending`, `source_type: "derived"` fact via `captureSuggested` --
- * the identical trust path every other suggested/derived fact goes through. A candidate that fails
- * capture-time validation (e.g. text too long) or secret screening is skipped and reported, not
- * fatal to the rest of the import; any other error propagates.
- */
+/** Parses `options.path` for qualifying bullets and, unless `options.dryRun`, imports each non-duplicate candidate as a `pending`, `source_type: "derived"` fact via `captureSuggested` -- the identical trust path every other suggested/derived fact goes through. A candidate that fails capture-time validation (e.g. text too long) or secret screening is skipped and reported, not fatal to the rest of the import; any other error propagates. */
 export function importFromMarkdown(db: Database.Database, options: ImportFromMarkdownOptions): ImportResult {
   const plan = planImportFromMarkdown(options);
   if (options.dryRun === true) {
@@ -257,9 +188,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
   const seen = existingImportKeys(db);
   const kind = options.kind ?? IMPORT_KIND;
   const scope = options.scope ?? IMPORT_SCOPE_DEFAULT;
-  // Relative to root, not the resolved absolute path in candidate.sourceRef -- an excerpt is
-  // audit-facing text a human reads, and an absolute path is noise a fact's own scopeRoot already
-  // carries.
+  // Relative to root, not the resolved absolute path in candidate.sourceRef -- an excerpt is audit-facing text a human reads, and an absolute path is noise a fact's own scopeRoot already carries.
   const relativePath = relative(options.root, filePath);
   const outcomes: ImportOutcome[] = [];
   for (const candidate of candidates) {
@@ -268,19 +197,11 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       outcomes.push({ status: "skipped_duplicate", candidate });
       continue;
     }
-    // One indexed lookup per candidate (`idx_facts_text_hash`), same rationale as `scan-session`'s
-    // own per-candidate lookup: a file's bullet count is typically far smaller than the store's
-    // total fact count, so this avoids reading the whole facts table once per bullet.
-    //
-    // Same rule `scan-session` and `retrieval.ts` use for what recall may surface: a text match
-    // bound to an unrelated project's scope_root must not suppress this candidate, so `isBoundToRoot`
-    // gates it rather than a bare text-index hit.
+    // One indexed lookup per candidate (`idx_facts_text_hash`), same rationale as `scan-session`'s own per-candidate lookup: a file's bullet count is typically far smaller than the store's total fact count, so this avoids reading the whole facts table once per bullet. Same rule `scan-session` and `retrieval.ts` use for what recall may surface: a text match bound to an unrelated project's scope_root must not suppress this candidate, so `isBoundToRoot` gates it rather than a bare text-index hit.
     const boundMatches = factsByTextHash(db, candidate.text).filter((fact) => isBoundToRoot(fact, options.root));
     if (boundMatches.length > 0) {
       outcomes.push({ status: "skipped_known", candidate });
-      // A restatement of a `pending` suggestion, re-imported from a later revision of the same
-      // file, is evidence for `mem review`'s human reader (`recordSighting`'s own doc comment);
-      // a match against anything else has no pending row to record a sighting against.
+      // A restatement of a `pending` suggestion, re-imported from a later revision of the same file, is evidence for `mem review`'s human reader (`recordSighting`'s own doc comment); a match against anything else has no pending row to record a sighting against.
       for (const fact of boundMatches) {
         if (fact.status === "pending") {
           recordSighting(db, fact.id, `${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root);
@@ -289,9 +210,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       continue;
     }
 
-    // Screened separately from candidate.text: a bullet's own line can carry a secret the
-    // heuristic-trimmed candidate text did not (e.g. a trailing inline token past where the bullet
-    // parser stopped). `null` (screened positive) means no source row, never a blocked import.
+    // Screened separately from candidate.text: a bullet's own line can carry a secret the heuristic-trimmed candidate text did not (e.g. a trailing inline token past where the bullet parser stopped). `null` (screened positive) means no source row, never a blocked import.
     const sourceExcerpt = buildScreenedExcerpt(`${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root, candidate.text);
     const input: CaptureSuggestedInput = {
       text: candidate.text,

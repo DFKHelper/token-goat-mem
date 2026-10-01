@@ -1,13 +1,4 @@
-/**
- * End-to-end tests for `mem reflect`: the pending-suggestion worklist an agent resolves at the end
- * of a session, update-before-create.
- *
- * `mem scan-session` files durable-sounding sentences as pending and stops there; nothing ever
- * asks the agent that said them whether they restate, change, or add to what the store already
- * knows. `mem reflect` lists each pending suggestion beside the live facts it most resembles and
- * spells out the three resolutions. Driven through the real `run()` against a real database; the
- * Stop-hook mode needs piped stdin and lives in tests/bundle/reflect-hook.test.ts.
- */
+/** End-to-end tests for `mem reflect`: the pending-suggestion worklist an agent resolves at the end of a session, update-before-create. `mem scan-session` files durable-sounding sentences as pending and stops there; nothing ever asks the agent that said them whether they restate, change, or add to what the store already knows. `mem reflect` lists each pending suggestion beside the live facts it most resembles and spells out the three resolutions. Driven through the real `run()` against a real database; the Stop-hook mode needs piped stdin and lives in tests/bundle/reflect-hook.test.ts. */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

@@ -19,10 +19,7 @@ let db: Database.Database;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-capture-test-"));
-  // storage.ts's insertFact (which capture.ts writes through) needs the full storage schema
-  // (facts.epoch, added by ensureStorageSchema's migration) -- openStorage() is what every real
-  // `mem` invocation actually opens with (cli.ts's withDb), so tests exercising capture.ts should
-  // too, not the narrower db.ts-only openDb().
+  // storage.ts's insertFact (which capture.ts writes through) needs the full storage schema (facts.epoch, added by ensureStorageSchema's migration) -- openStorage() is what every real `mem` invocation actually opens with (cli.ts's withDb), so tests exercising capture.ts should too, not the narrower db.ts-only openDb().
   db = openStorage(join(root, "mem.db"));
 });
 
@@ -66,14 +63,11 @@ describe("captureExplicit", () => {
       value: "pnpm",
       root,
     });
-    // capture.ts trims and passes subject through untouched; storage.ts's insertFact is the single
-    // place that normalizes it (trim + lowercase, no whitespace collapsing) -- see src/storage.ts.
+    // capture.ts trims and passes subject through untouched; storage.ts's insertFact is the single place that normalizes it (trim + lowercase, no whitespace collapsing) -- see src/storage.ts.
     expect(fact.subject).toBe("package manager");
     expect(fact.value).toBe("pnpm");
 
-    // Both orphans trip the same pairing guard, but CaptureValidationError covers 19 distinct
-    // messages -- without pinning one, either assertion would be satisfied by any other guard in
-    // the function, including the length cap a later test exists to check.
+    // Both orphans trip the same pairing guard, but CaptureValidationError covers 19 distinct messages -- without pinning one, either assertion would be satisfied by any other guard in the function, including the length cap a later test exists to check.
     expect(() => captureExplicit(db, { text: "orphan subject", kind: "fact", subject: "x", root })).toThrow(
       CaptureValidationError
     );
@@ -262,13 +256,7 @@ describe("loadAllowlist", () => {
   });
 });
 
-/**
- * SECURITY.md documents where screening stops, using these three strings as its worked example. A
- * documented boundary drifts as silently as any other doc claim -- and this one drifting in the
- * permissive direction would be read by users as a guarantee the code no longer honours -- so the
- * examples are asserted rather than left as prose. If a change here makes one of these fail, the
- * fix is to update SECURITY.md in the same commit, not to delete the case.
- */
+/** SECURITY.md documents where screening stops, using these three strings as its worked example. A documented boundary drifts as silently as any other doc claim -- and this one drifting in the permissive direction would be read by users as a guarantee the code no longer honours -- so the examples are asserted rather than left as prose. If a change here makes one of these fail, the fix is to update SECURITY.md in the same commit, not to delete the case. */
 describe("the screening floor SECURITY.md documents", () => {
   const screen = (text: string): readonly unknown[] => screenForSecrets({ text }, []);
 
@@ -281,8 +269,7 @@ describe("the screening floor SECURITY.md documents", () => {
   });
 
   it("stores a short secret stated in prose, which is the documented limit", () => {
-    // No separator, not hex, and 14 characters is under the entropy floor. Raising that floor is
-    // what would start refusing ordinary project facts, so this is an accepted position.
+    // No separator, not hex, and 14 characters is under the entropy floor. Raising that floor is what would start refusing ordinary project facts, so this is an accepted position.
     expect(screen("the staging password is Xk9mP2vL8nQ4wR")).toHaveLength(0);
   });
 

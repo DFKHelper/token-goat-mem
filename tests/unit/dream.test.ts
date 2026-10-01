@@ -1,11 +1,4 @@
-/**
- * Unit tests for src/dream.ts.
- *
- * `fetchImpl` is injected rather than the network being mocked globally: what needs proving is this
- * module's own request shaping and, far more importantly, its checking of whatever comes back. The
- * endpoint is a model, so its output is the untrusted input here — every test below is really a test
- * that a bad reply produces a dropped candidate or a named error, never a plausible-looking fact.
- */
+/** Unit tests for src/dream.ts. `fetchImpl` is injected rather than the network being mocked globally: what needs proving is this module's own request shaping and, far more importantly, its checking of whatever comes back. The endpoint is a model, so its output is the untrusted input here — every test below is really a test that a bad reply produces a dropped candidate or a named error, never a plausible-looking fact. */
 
 import { describe, expect, it } from "vitest";
 
@@ -68,13 +61,7 @@ describe("readDreamConfig", () => {
   });
 
   it("refuses a configuration that is set but unusable rather than silently disabling itself", () => {
-    // Half-configured is a typo, not a decision to run without dreaming -- reporting it as "off"
-    // would leave the user believing the endpoint was being called.
-    //
-    // Each case asserts the *message*, not just the class: with the model left unset, every one of
-    // these would throw a DreamConfigError for the missing model regardless of whether the guard
-    // under test exists, so a class-only assertion passes on a build where the scheme check has
-    // been deleted. The model is supplied here so the named guard is the only thing that can fire.
+    // Half-configured is a typo, not a decision to run without dreaming -- reporting it as "off" would leave the user believing the endpoint was being called. Each case asserts the *message*, not just the class: with the model left unset, every one of these would throw a DreamConfigError for the missing model regardless of whether the guard under test exists, so a class-only assertion passes on a build where the scheme check has been deleted. The model is supplied here so the named guard is the only thing that can fire.
     const model = { [DREAM_MODEL_ENV]: "m" };
     expect(() => readDreamConfig({ ...model, [DREAM_URL_ENV]: "not a url" })).toThrow(DreamConfigError);
     expect(() => readDreamConfig({ ...model, [DREAM_URL_ENV]: "not a url" })).toThrow(/not a valid URL/u);
@@ -105,8 +92,7 @@ describe("dream", () => {
   });
 
   it("sends no request at all when there is nothing to cross-reference", async () => {
-    // One fact cannot produce a cross-fact inference, so calling the endpoint would be paying for an
-    // answer that can only be empty.
+    // One fact cannot produce a cross-fact inference, so calling the endpoint would be paying for an answer that can only be empty.
     let called = false;
     const spy = (async () => {
       called = true;
@@ -118,9 +104,7 @@ describe("dream", () => {
   });
 
   it("drops a candidate that cites fewer than two facts", async () => {
-    // A statement following from one fact is a restatement of it. The cross-fact step is the entire
-    // reason to spend a model call, so a single-citation candidate is not a weaker inference -- it
-    // is not an inference.
+    // A statement following from one fact is a restatement of it. The cross-fact step is the entire reason to spend a model call, so a single-citation candidate is not a weaker inference -- it is not an inference.
     const result = await dream(FACTS, CONFIG, {
       fetchImpl: replyWith(candidatesJson([{ text: "releases are manual", kind: "fact", supports: [1] }])),
     });
@@ -128,8 +112,7 @@ describe("dream", () => {
   });
 
   it("drops a candidate citing a fact that was never sent", async () => {
-    // A citation the reader cannot follow looks like grounding and is not. Out-of-range indices are
-    // dropped rather than clamped: clamping would silently re-point the claim at a different fact.
+    // A citation the reader cannot follow looks like grounding and is not. Out-of-range indices are dropped rather than clamped: clamping would silently re-point the claim at a different fact.
     const result = await dream(FACTS, CONFIG, {
       fetchImpl: replyWith(candidatesJson([{ text: "invented", kind: "fact", supports: [1, 99] }])),
     });
@@ -154,8 +137,7 @@ describe("dream", () => {
   });
 
   it("keeps the good candidates when one element of the reply is malformed", async () => {
-    // One bad element is a model being imprecise, not an endpoint being broken -- discarding the
-    // whole run would make the command's usefulness depend on the model's worst output.
+    // One bad element is a model being imprecise, not an endpoint being broken -- discarding the whole run would make the command's usefulness depend on the model's worst output.
     const result = await dream(FACTS, CONFIG, {
       fetchImpl: replyWith(
         candidatesJson([
@@ -169,16 +151,14 @@ describe("dream", () => {
   });
 
   it("accepts a reply wrapped in a code fence", async () => {
-    // Bare JSON is what the prompt asks for and a stray fence is the commonest deviation; failing
-    // the run over it would be brittle for no gain.
+    // Bare JSON is what the prompt asks for and a stray fence is the commonest deviation; failing the run over it would be brittle for no gain.
     const fenced = "```json\n" + candidatesJson([{ text: "deploys are manual", kind: "fact", supports: [1, 2] }]) + "\n```";
     const result = await dream(FACTS, CONFIG, { fetchImpl: replyWith(fenced) });
     expect(result.candidates).toHaveLength(1);
   });
 
   it("reports an endpoint failure by status without echoing its body", async () => {
-    // A failing endpoint's body routinely echoes request headers back, which is the one place an API
-    // key would otherwise reach a user-visible error.
+    // A failing endpoint's body routinely echoes request headers back, which is the one place an API key would otherwise reach a user-visible error.
     const failing = (async () => new Response("Authorization: Bearer sk-secret", { status: 500 })) as unknown as typeof fetch;
     await expect(dream(FACTS, { ...CONFIG, apiKey: "sk-secret" }, { fetchImpl: failing })).rejects.toThrow(
       /returned HTTP 500/u

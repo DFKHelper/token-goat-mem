@@ -1,24 +1,4 @@
-/**
- * `mem restore`'s engine: replaces the live store's contents with a snapshot's, without ever handing
- * the live file to anything but the live store's own connection.
- *
- * 1. **Stage.** The snapshot is copied (SQLite's online backup API) to a private file beside the live
- *    store, so neither the snapshot nor the live store is opened for writing while it is judged.
- * 2. **Validate.** The copy must pass `integrity_check`, carry a schema version this mem can read, and
- *    hold a `facts` table with every column mem has always required -- a SQLite file that merely has a
- *    table called `facts` is not a mem store.
- * 3. **Migrate.** The copy is brought up to the current schema, so a snapshot an older mem took
- *    restores into the columns this one reads.
- * 4. **Swap.** The live store is snapshotted (`pre-restore`), then, in one immediate transaction on
- *    the live connection, every table is emptied and refilled from the attached copy and the epoch is
- *    moved past both stores. Readers see the old store or the new one, never a mix, and a writer that
- *    slipped in after the pre-restore snapshot is detected (the epoch moved) and the swap retried, so
- *    that snapshot always holds exactly what the restore replaced.
- *
- * A failure in steps 1-3 is an {@link UnusableSnapshotError} and leaves the live store and the backup
- * directory untouched. Opens skip the automatic snapshot (`autoSnapshot: false`): its pruning could
- * otherwise delete the very auto snapshot being restored.
- */
+/** `mem restore`'s engine: replaces the live store's contents with a snapshot's, without ever handing the live file to anything but the live store's own connection. 1. **Stage.** The snapshot is copied (SQLite's online backup API) to a private file beside the live store, so neither the snapshot nor the live store is opened for writing while it is judged. 2. **Validate.** The copy must pass `integrity_check`, carry a schema version this mem can read, and hold a `facts` table with every column mem has always required -- a SQLite file that merely has a table called `facts` is not a mem store. 3. **Migrate.** The copy is brought up to the current schema, so a snapshot an older mem took restores into the columns this one reads. 4. **Swap.** The live store is snapshotted (`pre-restore`), then, in one immediate transaction on the live connection, every table is emptied and refilled from the attached copy and the epoch is moved past both stores. Readers see the old store or the new one, never a mix, and a writer that slipped in after the pre-restore snapshot is detected (the epoch moved) and the swap retried, so that snapshot always holds exactly what the restore replaced. A failure in steps 1-3 is an {@link UnusableSnapshotError} and leaves the live store and the backup directory untouched. Opens skip the automatic snapshot (`autoSnapshot: false`): its pruning could otherwise delete the very auto snapshot being restored. */
 
 import Database from "better-sqlite3";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -53,10 +33,7 @@ export interface RestoreResult {
   preRestore: Snapshot;
 }
 
-/**
- * The `facts` columns every mem schema has had since the first: NOT NULL with no migration that adds
- * them. A table missing any of them is someone else's `facts`.
- */
+/** The `facts` columns every mem schema has had since the first: NOT NULL with no migration that adds them. A table missing any of them is someone else's `facts`. */
 const REQUIRED_FACT_COLUMNS = ["id", "text", "kind", "scope", "source_type", "captured_at", "status", "confidence"] as const;
 
 /** How many times the swap is retried when the live store changes under the pre-restore snapshot. */
@@ -163,11 +140,7 @@ function swap(options: RestoreOptions, staged: string): RestoreResult {
   }
 }
 
-/**
- * Empties every live table and refills it from the attached copy, then moves the epoch past both
- * stores. Runs inside the caller's transaction; foreign keys are checked at its commit, so tables can
- * be filled in any order.
- */
+/** Empties every live table and refills it from the attached copy, then moves the epoch past both stores. Runs inside the caller's transaction; foreign keys are checked at its commit, so tables can be filled in any order. */
 function replaceContents(live: Database.Database, replacedEpoch: number): number {
   live.pragma("defer_foreign_keys = ON");
   const liveTables = tableNames(live, "main");

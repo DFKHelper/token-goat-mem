@@ -100,9 +100,7 @@ describe("runMigrations on a fresh database", () => {
 
 describe("runMigrations on the upgrade path", () => {
   it("migrates an old-shape database, backfilling every baseline column without losing data", () => {
-    // Build a database at the shape this phase's baseline migration exists to fix: only the
-    // original `facts`/`audit_log`/`meta` columns, and `user_version` never set (reads `0`), the
-    // same as every real database created before this migration runner existed.
+    // Build a database at the shape this phase's baseline migration exists to fix: only the original `facts`/`audit_log`/`meta` columns, and `user_version` never set (reads `0`), the same as every real database created before this migration runner existed.
     const db = openDb(dbPath);
     db.exec("ALTER TABLE facts DROP COLUMN epoch");
     db.exec("ALTER TABLE facts DROP COLUMN scope_repo");
@@ -174,9 +172,7 @@ describe("runMigrations on the upgrade path", () => {
   });
 
   it("migrates a database that already has every column but user_version = 0, without error or duplication", () => {
-    // The real in-the-wild case: every applyIdempotentAlter-era database already carries every
-    // baseline column (added on some earlier open, before this migration runner existed to stamp a
-    // version), but has never had `user_version` set.
+    // The real in-the-wild case: every applyIdempotentAlter-era database already carries every baseline column (added on some earlier open, before this migration runner existed to stamp a version), but has never had `user_version` set.
     const db = openDb(dbPath);
     db.pragma("user_version = 0");
     db.close();
@@ -184,10 +180,7 @@ describe("runMigrations on the upgrade path", () => {
     const reopened = openDb(dbPath);
     try {
       expect(reopened.pragma("user_version", { simple: true })).toBe(HIGHEST_VERSION);
-      // Re-running ADD COLUMN against a column that was already there would throw "duplicate
-      // column" under the old applyIdempotentAlter mechanism if the swallow ever regressed; here
-      // it simply never runs, because hasColumn already found the column. Either way, this must
-      // not throw and must not create a second copy of any table or index.
+      // Re-running ADD COLUMN against a column that was already there would throw "duplicate column" under the old applyIdempotentAlter mechanism if the swallow ever regressed; here it simply never runs, because hasColumn already found the column. Either way, this must not throw and must not create a second copy of any table or index.
       const indexCount = (
         reopened
           .prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'index' AND name = 'idx_facts_text_hash'")
@@ -202,8 +195,7 @@ describe("runMigrations on the upgrade path", () => {
 
 describe("facts.text_hash backfill (v4)", () => {
   it("backfills every NULL text_hash row and leaves a re-run a no-op", () => {
-    // Force the exact pre-v4 shape: text_hash present (v2) but NULL, as every row written before
-    // this migration existed would be.
+    // Force the exact pre-v4 shape: text_hash present (v2) but NULL, as every row written before this migration existed would be.
     const db = openDb(dbPath);
     db.prepare(
       `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)
@@ -219,8 +211,7 @@ describe("facts.text_hash backfill (v4)", () => {
       };
       expect(row.text_hash).toBe(hashFactText("Uses PNPM  not npm."));
 
-      // Re-running must not touch an already-hashed row (nothing pending at user_version already
-      // at HIGHEST_VERSION), and must not throw.
+      // Re-running must not touch an already-hashed row (nothing pending at user_version already at HIGHEST_VERSION), and must not throw.
       const result = runMigrations(reopened);
       expect(result.applied).toEqual([]);
       const rowAgain = reopened.prepare("SELECT text_hash FROM facts WHERE id = ?").get("needs-backfill") as {
@@ -233,9 +224,7 @@ describe("facts.text_hash backfill (v4)", () => {
   });
 
   it("does not overwrite a hash a later write already computed", () => {
-    // A row inserted directly at user_version 3 (text_hash column exists, but this row's own
-    // insert already set it, unlike the backfill fixture above) must survive the v4 step
-    // unchanged -- the backfill only ever touches `text_hash IS NULL` rows.
+    // A row inserted directly at user_version 3 (text_hash column exists, but this row's own insert already set it, unlike the backfill fixture above) must survive the v4 step unchanged -- the backfill only ever touches `text_hash IS NULL` rows.
     const db = openDb(dbPath);
     db.prepare(
       `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence, text_hash)
@@ -285,9 +274,7 @@ describe("anchor_cache", () => {
 
 describe("fact_links (v5)", () => {
   it("upgrades an existing v4 database, with rows already present, to v5 without loss", () => {
-    // A real store immediately before this phase: baseline through the v4 text_hash backfill, with
-    // facts and their fact_terms rows already written -- `findRelatedFactPairs`/`upsertFactLink`
-    // read exactly this shape on their first run after upgrade.
+    // A real store immediately before this phase: baseline through the v4 text_hash backfill, with facts and their fact_terms rows already written -- `findRelatedFactPairs`/`upsertFactLink` read exactly this shape on their first run after upgrade.
     const db = openDb(dbPath);
     db.prepare(
       `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)

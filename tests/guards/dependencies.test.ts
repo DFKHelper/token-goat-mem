@@ -1,17 +1,4 @@
-/**
- * Source-level guard that every declared runtime dependency is actually reachable from `src/`.
- *
- * `dependencies` and `optionalDependencies` are the only part of package.json a user pays for: they
- * are installed on every `npm install -g token-goat-mem`. A package listed there and imported
- * nowhere is pure install weight, and nothing in a green suite notices -- `zod@^4.4.3` sat in
- * `dependencies` unimported by a single line, and `sqlite-vec` in `optionalDependencies` referenced
- * only by a comment, through six releases.
- *
- * Deliberately source-level and deliberately one-directional. It cannot catch the opposite error (an
- * import with no declaration), because esbuild's `external` list, not this file, decides what has to
- * be resolvable at runtime -- and a missing declaration fails loudly at install time anyway, where an
- * unused one fails silently forever.
- */
+/** Source-level guard that every declared runtime dependency is actually reachable from `src/`. `dependencies` and `optionalDependencies` are the only part of package.json a user pays for: they are installed on every `npm install -g token-goat-mem`. A package listed there and imported nowhere is pure install weight, and nothing in a green suite notices -- `zod@^4.4.3` sat in `dependencies` unimported by a single line, and `sqlite-vec` in `optionalDependencies` referenced only by a comment, through six releases. Deliberately source-level and deliberately one-directional. It cannot catch the opposite error (an import with no declaration), because esbuild's `external` list, not this file, decides what has to be resolvable at runtime -- and a missing declaration fails loudly at install time anyway, where an unused one fails silently forever. */
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";

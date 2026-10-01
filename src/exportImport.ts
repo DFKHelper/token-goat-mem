@@ -1,24 +1,4 @@
-/**
- * `mem import --from-json <path>` -- the full-fidelity counterpart to `mem import --from-md`
- * (src/import.ts). Where the markdown importer extracts *candidate* facts from prose and always
- * quarantines them as `pending` (S9), this module imports the literal output of `mem export`: a
- * JSON envelope of already-decided facts (any status, any source_type) produced by `listFacts(db,
- * {})`. Round-tripping through export/import must reproduce each fact exactly -- same `id`, same
- * `status`, same `confidence`, same `captured_at` -- so this module does NOT go through
- * `capture.ts`'s `captureSuggested`/`captureExplicit` (both of those force their own status/
- * confidence/captured_at, which would silently corrupt a re-import). It calls `insertFact`
- * (src/storage.ts) directly instead, relying on `NewFact.id` (src/types.ts) to preserve the
- * original id.
- *
- * Despite bypassing the capture pipeline's status/confidence handling, every import still goes
- * through the same secret-screening gate (`screenForSecrets`, design principle 7) before a fact is
- * written -- a hand-edited or tampered JSON export is still untrusted input at this module's
- * boundary.
- *
- * Reuses `import.ts`'s `ImportResult`/`ImportOutcome`/`ImportCandidate` types rather than defining
- * a parallel shape: the CLI's `formatImportResult` (src/cli.ts) is already generic over
- * `{ filePath, outcomes }`, so both import modes render through the same summary/line formatting.
- */
+/** `mem import --from-json <path>` -- the full-fidelity counterpart to `mem import --from-md` (src/import.ts). Where the markdown importer extracts *candidate* facts from prose and always quarantines them as `pending` (S9), this module imports the literal output of `mem export`: a JSON envelope of already-decided facts (any status, any source_type) produced by `listFacts(db, {})`. Round-tripping through export/import must reproduce each fact exactly -- same `id`, same `status`, same `confidence`, same `captured_at` -- so this module does NOT go through `capture.ts`'s `captureSuggested`/`captureExplicit` (both of those force their own status/ confidence/captured_at, which would silently corrupt a re-import). It calls `insertFact` (src/storage.ts) directly instead, relying on `NewFact.id` (src/types.ts) to preserve the original id. Despite bypassing the capture pipeline's status/confidence handling, every import still goes through the same secret-screening gate (`screenForSecrets`, design principle 7) before a fact is written -- a hand-edited or tampered JSON export is still untrusted input at this module's boundary. Reuses `import.ts`'s `ImportResult`/`ImportOutcome`/`ImportCandidate` types rather than defining a parallel shape: the CLI's `formatImportResult` (src/cli.ts) is already generic over `{ filePath, outcomes }`, so both import modes render through the same summary/line formatting. */
 
 import { isAbsolute, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -42,13 +22,7 @@ export const MAX_IMPORT_FILE_SIZE_BYTES = 50_000_000;
 
 const FACT_SOURCE_TYPES: readonly FactSourceType[] = ["user", "derived"];
 
-/**
- * Thrown for a whole-file problem (malformed JSON, missing/mismatched `schemaVersion`, missing
- * `facts` array) -- distinct from a single bad fact within an otherwise-valid envelope, which is a
- * per-item `skipped_error` outcome instead (see module doc comment). Registered in `cli.ts`'s
- * `exitCodeForError` as a user error (exit 1): a malformed `--from-json` file is bad input, not an
- * internal bug.
- */
+/** Thrown for a whole-file problem (malformed JSON, missing/mismatched `schemaVersion`, missing `facts` array) -- distinct from a single bad fact within an otherwise-valid envelope, which is a per-item `skipped_error` outcome instead (see module doc comment). Registered in `cli.ts`'s `exitCodeForError` as a user error (exit 1): a malformed `--from-json` file is bad input, not an internal bug. */
 export class JsonImportError extends Error {
   constructor(message: string) {
     super(message);
@@ -64,20 +38,11 @@ interface ParsedEntry {
   readonly newFact: (NewFact & { id: string }) | null;
   /** Set only when `newFact` is `null`. */
   readonly reason: string | null;
-  /**
-   * The `superseded_by` id this entry's export row named, or `null` when absent or not a non-empty
-   * string. Not a `NewFact` field (there is no `superseded_by` fact column) so it travels alongside
-   * the parsed fact rather than inside it, to be resolved against the post-import store once every
-   * fact in the file has landed (`importFromJson`) -- see that function for why per-row resolution
-   * during this parse would drop a winner named later in the same file.
-   */
+  /** The `superseded_by` id this entry's export row named, or `null` when absent or not a non-empty string. Not a `NewFact` field (there is no `superseded_by` fact column) so it travels alongside the parsed fact rather than inside it, to be resolved against the post-import store once every fact in the file has landed (`importFromJson`) -- see that function for why per-row resolution during this parse would drop a winner named later in the same file. */
   readonly supersededByRaw: string | null;
 }
 
-/**
- * `text.guess` for a structurally-invalid entry, used only so its `ImportCandidate.text` isn't
- * empty in the reported outcome line -- never used for anything that reaches storage.
- */
+/** `text.guess` for a structurally-invalid entry, used only so its `ImportCandidate.text` isn't empty in the reported outcome line -- never used for anything that reaches storage. */
 function textGuess(obj: Record<string, unknown> | null, index: number): string {
   if (obj !== null && typeof obj["text"] === "string" && obj["text"].trim().length > 0) {
     return obj["text"];
@@ -85,16 +50,7 @@ function textGuess(obj: Record<string, unknown> | null, index: number): string {
   return `<invalid fact at index ${index}>`;
 }
 
-/**
- * Validates one `facts[]` entry against the minimum `NewFact`-shaped requirements (text, kind,
- * scope, source_type, id) plus the optional fields' types, and -- when valid -- converts it into an
- * insert-ready `NewFact` (including the JSON `embedding: number[] | null` -> `Float32Array | null`
- * conversion, the exact inverse of `mem export`'s `Array.from(embedding)` in cli.ts). Pure: does not
- * touch the DB or screen for secrets (that is `importFromJson`'s job, since it needs `root` for
- * `.mem/allowlist`). `root` is used here only to bound a non-global fact's `scopeRoot`
- * (`undefined` when the caller has no root -- e.g. `planImportFromJson`'s dry run -- in which case
- * only the absolute-path shape is checked, not containment).
- */
+/** Validates one `facts[]` entry against the minimum `NewFact`-shaped requirements (text, kind, scope, source_type, id) plus the optional fields' types, and -- when valid -- converts it into an insert-ready `NewFact` (including the JSON `embedding: number[] | null` -> `Float32Array | null` conversion, the exact inverse of `mem export`'s `Array.from(embedding)` in cli.ts). Pure: does not touch the DB or screen for secrets (that is `importFromJson`'s job, since it needs `root` for `.mem/allowlist`). `root` is used here only to bound a non-global fact's `scopeRoot` (`undefined` when the caller has no root -- e.g. `planImportFromJson`'s dry run -- in which case only the absolute-path shape is checked, not containment). */
 /** Generous ceiling on an imported fact id: a uuid is 36 characters, so this leaves room for any reasonable external id scheme while refusing an unbounded string as a primary key. */
 const MAX_IMPORTED_ID_LENGTH = 128;
 
@@ -115,11 +71,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   if (typeof obj["id"] !== "string" || obj["id"].trim().length === 0) {
     return fail(`facts[${index}] is missing a valid "id"`);
   }
-  // `--from-json` preserves each fact's exported id verbatim, so an id that does not look like the
-  // uuid-shaped ids mem generates is accepted into the store and then unreachable: every id-taking
-  // command resolves a prefix through storage's `ID_PREFIX_PATTERN`, which rejects anything outside
-  // `[0-9a-f-]` before it ever queries. The fact would exist, list, and recall, but could never be
-  // shown, edited, pinned, or forgotten -- with no diagnostic anywhere explaining why.
+  // `--from-json` preserves each fact's exported id verbatim, so an id that does not look like the uuid-shaped ids mem generates is accepted into the store and then unreachable: every id-taking command resolves a prefix through storage's `ID_PREFIX_PATTERN`, which rejects anything outside `[0-9a-f-]` before it ever queries. The fact would exist, list, and recall, but could never be shown, edited, pinned, or forgotten -- with no diagnostic anywhere explaining why.
   if (!ID_PREFIX_PATTERN.test(obj["id"]) || obj["id"].length > MAX_IMPORTED_ID_LENGTH) {
     return fail(
       `facts[${index}] has a malformed "id" ${JSON.stringify(obj["id"])} ` +
@@ -142,20 +94,10 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
       `facts[${index}] has scope ${JSON.stringify(scopeForBindingCheck)} but no "scopeRoot" binding (expected an absolute path)`
     );
   }
-  // Set below only for a project fact whose own `scopeRoot` falls outside `--root` but whose
-  // `scopeRepo` identifies the same repository `--root` is a checkout of (an export restored onto
-  // another machine, or into a second clone/worktree) -- rebinding to the caller's own `--root`
-  // rather than rejecting, since AGENTS.md/CHANGELOG.md promise export/import survives a move to
-  // another machine, where the fact's recorded `scopeRoot` path does not exist and there is no
-  // `--root` the user could otherwise pass. The oracle concern this whole check exists for
-  // (`anchorRootFor` using an imported `scopeRoot` verbatim as an anchor-evaluation root) does not
-  // apply to the rebound value -- it IS the caller's own `--root`.
+  // Set below only for a project fact whose own `scopeRoot` falls outside `--root` but whose `scopeRepo` identifies the same repository `--root` is a checkout of (an export restored onto another machine, or into a second clone/worktree) -- rebinding to the caller's own `--root` rather than rejecting, since AGENTS.md/CHANGELOG.md promise export/import survives a move to another machine, where the fact's recorded `scopeRoot` path does not exist and there is no `--root` the user could otherwise pass. The oracle concern this whole check exists for (`anchorRootFor` using an imported `scopeRoot` verbatim as an anchor-evaluation root) does not apply to the rebound value -- it IS the caller's own `--root`.
   let rebindScopeRootTo: string | null = null;
   if (scopeForBindingCheck !== "global" && hasBoundScopeRoot) {
-    // `anchorRootFor` (src/retrieval.ts) uses a project-scoped fact's `scopeRoot` verbatim as the
-    // anchor-evaluation root, so an imported row that smuggles in an arbitrary directory becomes a
-    // file-existence/content-substring oracle against any path on disk, not just the caller's
-    // `--root`. Reject at import time rather than let it reach storage.
+    // `anchorRootFor` (src/retrieval.ts) uses a project-scoped fact's `scopeRoot` verbatim as the anchor-evaluation root, so an imported row that smuggles in an arbitrary directory becomes a file-existence/content-substring oracle against any path on disk, not just the caller's `--root`. Reject at import time rather than let it reach storage.
     const scopeRootValue = obj["scopeRoot"] as string;
     if (!isAbsolute(scopeRootValue)) {
       return fail(`facts[${index}] has a "scopeRoot" that is not an absolute path: ${JSON.stringify(scopeRootValue)}`);
@@ -171,16 +113,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
       }
     }
   }
-  // Same containment discipline as `scopeRoot` just above, and for the same reason:
-  // `anchorRootFor` (src/retrieval.ts) uses a `path`/`global`-scoped fact's `captureRoot` verbatim
-  // as the anchor-evaluation root, so an imported row that smuggles in an arbitrary directory
-  // becomes a file-existence/content-substring oracle against any path on disk. Unlike `scopeRoot`,
-  // there is no forced-null branch for `scope="global"` here -- `captureRoot` is exactly what makes
-  // a global fact's anchor evaluable at all (item 4 of the fix this comment describes), so nulling
-  // it on import would silently regress every re-imported anchored global fact back to `unverified`.
-  // Also unlike `scopeRoot`, there is no `scopeRepo`-identity rebind path for anything but `project`
-  // scope (path/global carry no repository identity) -- so a `captureRoot` outside `root` with no
-  // identity match is rejected rather than guessed at.
+  // Same containment discipline as `scopeRoot` just above, and for the same reason: `anchorRootFor` (src/retrieval.ts) uses a `path`/`global`-scoped fact's `captureRoot` verbatim as the anchor-evaluation root, so an imported row that smuggles in an arbitrary directory becomes a file-existence/content-substring oracle against any path on disk. Unlike `scopeRoot`, there is no forced-null branch for `scope="global"` here -- `captureRoot` is exactly what makes a global fact's anchor evaluable at all (item 4 of the fix this comment describes), so nulling it on import would silently regress every re-imported anchored global fact back to `unverified`. Also unlike `scopeRoot`, there is no `scopeRepo`-identity rebind path for anything but `project` scope (path/global carry no repository identity) -- so a `captureRoot` outside `root` with no identity match is rejected rather than guessed at.
   let rebindCaptureRootTo: string | null = null;
   if (typeof obj["captureRoot"] === "string") {
     const captureRootValue = obj["captureRoot"];
@@ -230,12 +163,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     if (capturedAtStr.length === 0 || isNaN(Date.parse(capturedAtStr))) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}`);
     }
-    // Stricter validation: ensure the string round-trips back to the exact canonical ISO-8601
-    // form produced by `new Date().toISOString()` (the only form this codebase ever writes for
-    // captured_at — see capture.ts/storage.ts). This catches JavaScript's lenient Date.parse
-    // behavior (e.g., "2026/07/14" or "July 14 2026" parse but are not ISO-8601) while still
-    // guaranteeing captured_at remains lexicographically comparable for chronological ordering
-    // (design principle: contradiction-resolution, GC cutoff).
+    // Stricter validation: ensure the string round-trips back to the exact canonical ISO-8601 form produced by `new Date().toISOString()` (the only form this codebase ever writes for captured_at — see capture.ts/storage.ts). This catches JavaScript's lenient Date.parse behavior (e.g., "2026/07/14" or "July 14 2026" parse but are not ISO-8601) while still guaranteeing captured_at remains lexicographically comparable for chronological ordering (design principle: contradiction-resolution, GC cutoff).
     const roundTrip = new Date(capturedAtStr).toISOString();
     if (roundTrip !== capturedAtStr) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}: expected canonical form ${JSON.stringify(roundTrip)}`);
@@ -249,9 +177,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     if (lastSurfacedAtStr.length === 0 || isNaN(Date.parse(lastSurfacedAtStr))) {
       return fail(`facts[${index}] has an invalid ISO-8601 "last_surfaced_at" ${JSON.stringify(lastSurfacedAtStr)}`);
     }
-    // Same canonical-form check as `captured_at` above, for the same reason: `last_surfaced_at` is
-    // compared lexicographically (storage.ts's `markFactsSurfaced` MAXes it against itself), so a
-    // non-canonical but Date.parse-able string would silently corrupt that comparison.
+    // Same canonical-form check as `captured_at` above, for the same reason: `last_surfaced_at` is compared lexicographically (storage.ts's `markFactsSurfaced` MAXes it against itself), so a non-canonical but Date.parse-able string would silently corrupt that comparison.
     const roundTrip = new Date(lastSurfacedAtStr).toISOString();
     if (roundTrip !== lastSurfacedAtStr) {
       return fail(
@@ -269,9 +195,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     embedding = Float32Array.from(rawEmbedding);
   }
 
-  // Plain conditional assignment (not spreading possibly-`undefined` values into the literal),
-  // same discipline as capture.ts's applyOptionalFields: tsconfig's exactOptionalPropertyTypes
-  // rejects writing `undefined` into NewFact's optional fields.
+  // Plain conditional assignment (not spreading possibly-`undefined` values into the literal), same discipline as capture.ts's applyOptionalFields: tsconfig's exactOptionalPropertyTypes rejects writing `undefined` into NewFact's optional fields.
   const newFact: NewFact & { id: string } = {
     id: obj["id"],
     text: obj["text"],
@@ -291,9 +215,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     newFact.value = null;
   }
   if (newFact.scope === "global") {
-    // Global ignores scopeRoot everywhere it is read (isBoundToRoot, isInScope both short-circuit
-    // on scope before ever looking at it) -- normalize rather than fail so a stray binding on a
-    // global fact round-trips cleanly instead of becoming a per-item error.
+    // Global ignores scopeRoot everywhere it is read (isBoundToRoot, isInScope both short-circuit on scope before ever looking at it) -- normalize rather than fail so a stray binding on a global fact round-trips cleanly instead of becoming a per-item error.
     newFact.scopeRoot = null;
   } else if (rebindScopeRootTo !== null) {
     newFact.scopeRoot = rebindScopeRootTo;
@@ -302,10 +224,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   } else if (obj["scopeRoot"] === null) {
     newFact.scopeRoot = null;
   }
-  // No global-forced-null branch here, unlike `scopeRoot` above -- see the validation comment for
-  // why. Otherwise the same three cases: rebound (project, identity match, outside root), preserved
-  // verbatim (already inside root, or `root` undefined so no containment check ran), or absent
-  // entirely (an export written before this column existed).
+  // No global-forced-null branch here, unlike `scopeRoot` above -- see the validation comment for why. Otherwise the same three cases: rebound (project, identity match, outside root), preserved verbatim (already inside root, or `root` undefined so no containment check ran), or absent entirely (an export written before this column existed).
   if (rebindCaptureRootTo !== null) {
     newFact.captureRoot = rebindCaptureRootTo;
   } else if (typeof obj["captureRoot"] === "string") {
@@ -313,10 +232,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   } else if (obj["captureRoot"] === null) {
     newFact.captureRoot = null;
   }
-  // Preserved verbatim rather than recomputed from the importing machine's checkout: the identity
-  // describes the project the fact was captured in, and re-deriving it here would silently rebind
-  // an imported fact to whatever repository the importer happens to be standing in. Absent on any
-  // export written before identities existed, which correctly leaves the fact path-bound.
+  // Preserved verbatim rather than recomputed from the importing machine's checkout: the identity describes the project the fact was captured in, and re-deriving it here would silently rebind an imported fact to whatever repository the importer happens to be standing in. Absent on any export written before identities existed, which correctly leaves the fact path-bound.
   if (newFact.scope !== "project") {
     newFact.scopeRepo = null;
   } else if (typeof obj["scopeRepo"] === "string") {
@@ -329,8 +245,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   } else if (obj["source_ref"] === null) {
     newFact.source_ref = null;
   }
-  // Absent on any export written before the column existed, which leaves the fact with no recorded
-  // reason -- the same as a capture that never passed --why.
+  // Absent on any export written before the column existed, which leaves the fact with no recorded reason -- the same as a capture that never passed --why.
   if (typeof obj["why"] === "string") {
     newFact.why = obj["why"];
   } else if (obj["why"] === null) {
@@ -361,27 +276,9 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     newFact.prior_status = null;
   }
 
-  // Apply the same structural guards every other write path enforces (capture.ts's
-  // `validateFactFieldsOrThrow` -- text/subject length limits, subject/value pairing). This is
-  // reused, not redefined, so the limits/rules can never drift out of sync with
-  // captureExplicit/captureSuggested/mem edit. Deliberately does NOT touch status/confidence: this
-  // module's full-fidelity round-trip contract (see header comment) is unaffected -- only
-  // structural shape is gated here, not trust level.
-  //
-  // Deliberately does NOT call `validateFactEditOrThrow` (which additionally enforces
-  // `validateAnchorSyntax`'s CLI-facing arity check): that check exists only because `mem remember`/
-  // `mem edit` parse the anchor out of a flat CLI string with a fixed delimiter scheme, where a
-  // multi-word `file-contains`/`file-not-contains` substring would be ambiguous to parse. A JSON
-  // `anchor` field is already a structured, unambiguous string -- there's no parsing step for a
-  // multi-word substring to be ambiguous in -- so the arity check does not apply here, and skipping
-  // it restores json-import's original documented exemption (a previously-exported fact with a
-  // multi-word substring anchor must round-trip back in). `anchors.ts`'s `evaluateAnchor` never
-  // throws on a malformed or unrecognized anchor regardless of arity -- it safely returns
-  // `"unverified"` -- so this exemption carries no crash risk at evaluation time.
+  // Apply the same structural guards every other write path enforces (capture.ts's `validateFactFieldsOrThrow` -- text/subject length limits, subject/value pairing). This is reused, not redefined, so the limits/rules can never drift out of sync with captureExplicit/captureSuggested/mem edit. Deliberately does NOT touch status/confidence: this module's full-fidelity round-trip contract (see header comment) is unaffected -- only structural shape is gated here, not trust level. Deliberately does NOT call `validateFactEditOrThrow` (which additionally enforces `validateAnchorSyntax`'s CLI-facing arity check): that check exists only because `mem remember`/ `mem edit` parse the anchor out of a flat CLI string with a fixed delimiter scheme, where a multi-word `file-contains`/`file-not-contains` substring would be ambiguous to parse. A JSON `anchor` field is already a structured, unambiguous string -- there's no parsing step for a multi-word substring to be ambiguous in -- so the arity check does not apply here, and skipping it restores json-import's original documented exemption (a previously-exported fact with a multi-word substring anchor must round-trip back in). `anchors.ts`'s `evaluateAnchor` never throws on a malformed or unrecognized anchor regardless of arity -- it safely returns `"unverified"` -- so this exemption carries no crash risk at evaluation time.
   try {
-    // Plain conditional assignment (not spreading possibly-`undefined` values into the literal),
-    // same discipline as this file's own newFact construction above: tsconfig's
-    // exactOptionalPropertyTypes rejects writing `undefined` into an optional `string | null` field.
+    // Plain conditional assignment (not spreading possibly-`undefined` values into the literal), same discipline as this file's own newFact construction above: tsconfig's exactOptionalPropertyTypes rejects writing `undefined` into an optional `string | null` field.
     const fieldsPatch: { text?: string; subject?: string | null; value?: string | null; why?: string | null } = {
       text: newFact.text,
     };
@@ -402,10 +299,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     throw error;
   }
 
-  // Optional, and not checked by any exhaustive-keys guard against JSON_EXPORT_SCHEMA_VERSION: an
-  // export written before this field existed simply omits it, and one written by a newer mem with
-  // fields of its own still parses. A wrong type or an explicit `null` (the exporting store already
-  // knew of no winner) both collapse to the same "nothing to resolve" case as absent.
+  // Optional, and not checked by any exhaustive-keys guard against JSON_EXPORT_SCHEMA_VERSION: an export written before this field existed simply omits it, and one written by a newer mem with fields of its own still parses. A wrong type or an explicit `null` (the exporting store already knew of no winner) both collapse to the same "nothing to resolve" case as absent.
   const supersededByRaw =
     typeof obj["superseded_by"] === "string" && obj["superseded_by"].trim().length > 0 ? obj["superseded_by"] : null;
 
@@ -413,27 +307,8 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   return { candidate, newFact, reason: null, supersededByRaw };
 }
 
-/**
- * Reads and validates `path` into per-entry results (`ParsedEntry`), without touching the DB.
- * Shared by `planImportFromJson` and `importFromJson` so envelope/shape validation only lives in
- * one place. Throws `JsonImportError` for a whole-file problem (bad JSON, wrong `schemaVersion`,
- * missing `facts` array); an individual bad fact is instead reflected per-entry (`newFact: null`).
- */
-/**
- * Validates the envelope-level `embeddingMeta` field written by `mem export` (the model/dimension
- * `facts[].embedding` vectors were produced by, or `null` when the exporting store never recorded
- * one). Distinguishes three states, matching `EmbeddingMeta | null`'s own null-is-meaningful shape
- * plus "the field does not exist at all":
- *  - absent (`undefined`): an envelope written before this field existed. The vectors it carries,
- *    if any, have unknown provenance -- never treated as if they came from the model importing them.
- *  - `null`: the exporting store had no recorded model (nothing was ever embedded there, or that
- *    store was itself already in the unlabelled state) -- also unknown provenance.
- *  - `{ model, dimension }`: known provenance, importable as-is into a store recorded under the same
- *    model/dimension, or adoptable by a store that has never recorded one of its own.
- * A malformed value is rejected outright, same discipline as every per-fact field in
- * `validateJsonFact`: never coerced into a shape that would make an unknown-provenance vector look
- * labelled.
- */
+/** Reads and validates `path` into per-entry results (`ParsedEntry`), without touching the DB. Shared by `planImportFromJson` and `importFromJson` so envelope/shape validation only lives in one place. Throws `JsonImportError` for a whole-file problem (bad JSON, wrong `schemaVersion`, missing `facts` array); an individual bad fact is instead reflected per-entry (`newFact: null`). */
+/** Validates the envelope-level `embeddingMeta` field written by `mem export` (the model/dimension `facts[].embedding` vectors were produced by, or `null` when the exporting store never recorded one). Distinguishes three states, matching `EmbeddingMeta | null`'s own null-is-meaningful shape plus "the field does not exist at all": - absent (`undefined`): an envelope written before this field existed. The vectors it carries, if any, have unknown provenance -- never treated as if they came from the model importing them. - `null`: the exporting store had no recorded model (nothing was ever embedded there, or that store was itself already in the unlabelled state) -- also unknown provenance. - `{ model, dimension }`: known provenance, importable as-is into a store recorded under the same model/dimension, or adoptable by a store that has never recorded one of its own. A malformed value is rejected outright, same discipline as every per-fact field in `validateJsonFact`: never coerced into a shape that would make an unknown-provenance vector look labelled. */
 function validateEmbeddingMetaField(envelope: Record<string, unknown>, filePath: string): EmbeddingMeta | null | undefined {
   const raw = envelope["embeddingMeta"];
   if (raw === undefined) {
@@ -464,9 +339,7 @@ function parseJsonFacts(
 ): { readonly filePath: string; readonly entries: readonly ParsedEntry[]; readonly embeddingMeta: EmbeddingMeta | null | undefined } {
   const filePath = resolve(path);
 
-  // Wrap file operations to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors
-  // rather than internal errors: a missing or unreadable file is a user error (bad input path),
-  // not a bug.
+  // Wrap file operations to reclassify filesystem errors (ENOENT, EACCES, etc.) as user errors rather than internal errors: a missing or unreadable file is a user error (bad input path), not a bug.
   const stat = statFileWithErrorMapping(filePath, JsonImportError);
 
   if (stat.size > MAX_IMPORT_FILE_SIZE_BYTES) {
@@ -503,20 +376,10 @@ function parseJsonFacts(
 
 // ─────────────────────────────────────────────────────────────────────────── Import orchestration ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Reads and validates `options.path` into import candidates and their outcomes *without opening a
- * database* -- the entire body of a `--dry-run` import, same rationale as
- * `planImportFromMarkdown` (src/import.ts): opening mem's SQLite store does `mkdirSync` + creates
- * the db file/WAL sidecars/schema on disk, which would contradict `--dry-run`'s "nothing written"
- * contract. Unlike `planImportFromMarkdown`, a structurally invalid fact is already reported as
- * `skipped_error` here (not deferred to the real import), since shape validation needs no DB access
- * either.
- */
+/** Reads and validates `options.path` into import candidates and their outcomes *without opening a database* -- the entire body of a `--dry-run` import, same rationale as `planImportFromMarkdown` (src/import.ts): opening mem's SQLite store does `mkdirSync` + creates the db file/WAL sidecars/schema on disk, which would contradict `--dry-run`'s "nothing written" contract. Unlike `planImportFromMarkdown`, a structurally invalid fact is already reported as `skipped_error` here (not deferred to the real import), since shape validation needs no DB access either. */
 export function planImportFromJson(options: { readonly path: string; readonly root?: string | undefined }): ImportResult {
   const root = resolve(options.root ?? process.cwd());
-  // Same `root` the real import parses under, so the "scopeRoot outside the import root" rejection
-  // runs here too: a dry run that reports `would-import` for a fact the real run refuses is a
-  // promise the command cannot keep.
+  // Same `root` the real import parses under, so the "scopeRoot outside the import root" rejection runs here too: a dry run that reports `would-import` for a fact the real run refuses is a promise the command cannot keep.
   const { filePath, entries } = parseJsonFacts(options.path, root);
   const allowlist = loadAllowlist(root);
   const candidates = entries.map((entry) => entry.candidate);
@@ -524,10 +387,7 @@ export function planImportFromJson(options: { readonly path: string; readonly ro
     if (entry.newFact === null) {
       return { status: "skipped_error", candidate: entry.candidate, reason: entry.reason ?? "invalid fact" };
     }
-    // Secret screening is pure (fact text plus the on-disk allowlist, no database), so the dry run
-    // can reproduce the real import's refusal reason verbatim. Duplicate-id detection is the one
-    // check it cannot reproduce -- that needs the store -- and `formatImportResult` says so rather
-    // than letting a clean-looking plan imply there is nothing left to find.
+    // Secret screening is pure (fact text plus the on-disk allowlist, no database), so the dry run can reproduce the real import's refusal reason verbatim. Duplicate-id detection is the one check it cannot reproduce -- that needs the store -- and `formatImportResult` says so rather than letting a clean-looking plan imply there is nothing left to find.
     const matches = screenFactFields({ ...entry.newFact, sourceRef: entry.newFact.source_ref }, allowlist);
     if (matches.length > 0) {
       return {
@@ -559,23 +419,7 @@ interface PlannedSkip {
   readonly outcome: ImportOutcome;
 }
 
-/**
- * Imports every valid, non-duplicate fact from `options.path` via `insertFact` directly (not
- * `capture.ts`), preserving each fact's original `id`/`status`/`confidence`/`captured_at`/
- * `source_type` exactly as exported. A fact whose `id` already exists in the target store is
- * `skipped_duplicate` -- this is what makes re-running an import against the same store idempotent.
- * A fact that fails shape validation or secret screening is `skipped_error`, not fatal to the rest
- * of the import.
- *
- * Every DB write for this import -- both the skip-audit rows for duplicates/secrets and each
- * successful `insertFact` paired with its own `json_import` audit row -- runs inside a single
- * `db.transaction()`. This guarantees an unexpected exception anywhere in the batch rolls back
- * every write together: a crash mid-import can never leave a fact without its audit row, nor an
- * audit row (skip or import) that outlives a rollback of the work it describes. Per-fact
- * validation/secret/duplicate detection happens beforehand (pure reads and checks, no writes), so
- * it does not itself trigger or need that rollback -- only the writes it decides on are deferred
- * into the transaction.
- */
+/** Imports every valid, non-duplicate fact from `options.path` via `insertFact` directly (not `capture.ts`), preserving each fact's original `id`/`status`/`confidence`/`captured_at`/ `source_type` exactly as exported. A fact whose `id` already exists in the target store is `skipped_duplicate` -- this is what makes re-running an import against the same store idempotent. A fact that fails shape validation or secret screening is `skipped_error`, not fatal to the rest of the import. Every DB write for this import -- both the skip-audit rows for duplicates/secrets and each successful `insertFact` paired with its own `json_import` audit row -- runs inside a single `db.transaction()`. This guarantees an unexpected exception anywhere in the batch rolls back every write together: a crash mid-import can never leave a fact without its audit row, nor an audit row (skip or import) that outlives a rollback of the work it describes. Per-fact validation/secret/duplicate detection happens beforehand (pure reads and checks, no writes), so it does not itself trigger or need that rollback -- only the writes it decides on are deferred into the transaction. */
 export function importFromJson(db: Database.Database, options: ImportFromJsonOptions): ImportResult {
   if (options.dryRun === true) {
     return planImportFromJson(options);
@@ -585,12 +429,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
 
   const allowlist = loadAllowlist(root);
 
-  // Vectors are only ever carried into the target store when their provenance is known AND
-  // comparable to whatever is already there -- P3 (mem may decline, never assert the opposite of
-  // what it knows). An envelope with no `embeddingMeta` (written before this field existed) or an
-  // explicit `null` (the exporting store never recorded one) both count as unknown provenance, same
-  // as a target store that already holds vectors nobody recorded a model for
-  // (`targetHasUnlabelledVectors`): none of these may be treated as compatible with anything.
+  // Vectors are only ever carried into the target store when their provenance is known AND comparable to whatever is already there -- P3 (mem may decline, never assert the opposite of what it knows). An envelope with no `embeddingMeta` (written before this field existed) or an explicit `null` (the exporting store never recorded one) both count as unknown provenance, same as a target store that already holds vectors nobody recorded a model for (`targetHasUnlabelledVectors`): none of these may be treated as compatible with anything.
   const targetEmbeddingMeta = getEmbeddingMeta(db) ?? null;
   const targetHasUnlabelledVectors = targetEmbeddingMeta === null && countEmbeddedFacts(db) > 0;
   const importCompatibleWithTarget =
@@ -599,9 +438,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
     targetEmbeddingMeta !== null &&
     targetEmbeddingMeta.model === envelopeEmbeddingMeta.model &&
     targetEmbeddingMeta.dimension === envelopeEmbeddingMeta.dimension;
-  // A target with no recorded model at all -- and none of its own unlabelled vectors to protect --
-  // adopts the envelope's model rather than discarding vectors that would otherwise be perfectly
-  // usable, e.g. restoring an export onto a fresh machine.
+  // A target with no recorded model at all -- and none of its own unlabelled vectors to protect -- adopts the envelope's model rather than discarding vectors that would otherwise be perfectly usable, e.g. restoring an export onto a fresh machine.
   const adoptableEmbeddingMeta: EmbeddingMeta | null =
     envelopeEmbeddingMeta !== undefined && envelopeEmbeddingMeta !== null && targetEmbeddingMeta === null && !targetHasUnlabelledVectors
       ? envelopeEmbeddingMeta
@@ -669,9 +506,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
   });
 
   const insertedFacts = new Map<number, Fact>();
-  // Ids that were absent during classification above but present by the time the write lock was
-  // taken -- i.e. a concurrent import inserted them in between. See the re-check inside the
-  // transaction for why they are recorded rather than allowed to fail.
+  // Ids that were absent during classification above but present by the time the write lock was taken -- i.e. a concurrent import inserted them in between. See the re-check inside the transaction for why they are recorded rather than allowed to fail.
   const lateDuplicates = new Set<number>();
   const tx = db.transaction((): void => {
     for (const skip of skips) {
@@ -679,11 +514,7 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
     }
     let insertedAnyEmbedding = false;
     for (const { index, newFact } of toInsert) {
-      // The dedupe check in the classification pass ran before this transaction took the write lock,
-      // so a concurrent import can have inserted the same id in between. Re-checking under the lock
-      // keeps that case a per-row skip: without it the insert hits the `facts.id` primary key and
-      // rolls back this entire batch, so an import that overlaps another by one fact loses every
-      // fact it was going to add rather than the one that was already there.
+      // The dedupe check in the classification pass ran before this transaction took the write lock, so a concurrent import can have inserted the same id in between. Re-checking under the lock keeps that case a per-row skip: without it the insert hits the `facts.id` primary key and rolls back this entire batch, so an import that overlaps another by one fact loses every fact it was going to add rather than the one that was already there.
       if (getFactById(db, newFact.id) !== undefined) {
         lateDuplicates.add(index);
         insertAuditLog(db, {
@@ -705,17 +536,9 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
       });
     }
 
-    // Second pass, run only after every fact in this file has been inserted above -- not per-row
-    // during that loop -- because a file can name a winner id that appears later in its own list,
-    // and per-row resolution would silently drop that edge. `getFactById` here reads the
-    // post-import store, so a forward reference within this same file already resolves, and so does
-    // a winner that already existed in the target store before this import ran. A winner id absent
-    // from both the file and the store is left alone: no audit row, no throw -- the store's own
-    // `superseded_by: unknown` caveat (`findSupersedingFactId`, `formatSupersessionLine` in cli.ts)
-    // then stands, honestly, instead of asserting an edge nothing ever recorded.
+    // Second pass, run only after every fact in this file has been inserted above -- not per-row during that loop -- because a file can name a winner id that appears later in its own list, and per-row resolution would silently drop that edge. `getFactById` here reads the post-import store, so a forward reference within this same file already resolves, and so does a winner that already existed in the target store before this import ran. A winner id absent from both the file and the store is left alone: no audit row, no throw -- the store's own `superseded_by: unknown` caveat (`findSupersedingFactId`, `formatSupersessionLine` in cli.ts) then stands, honestly, instead of asserting an edge nothing ever recorded.
     for (const { index, newFact, supersededByRaw } of toInsert) {
-      // `lateDuplicates` means this row lost its concurrent-insert race (see the re-check above) and
-      // was never actually written this run -- nothing here for this loop to attach an edge to.
+      // `lateDuplicates` means this row lost its concurrent-insert race (see the re-check above) and was never actually written this run -- nothing here for this loop to attach an edge to.
       if (newFact.status !== "superseded" || supersededByRaw === null || lateDuplicates.has(index)) {
         continue;
       }
@@ -729,15 +552,12 @@ export function importFromJson(db: Database.Database, options: ImportFromJsonOpt
       });
     }
 
-    // Adopting the envelope's model only when a fact carrying one of its vectors actually landed:
-    // recording a model for a store that ended up with zero vectors from this import would claim
-    // provenance for nothing.
+    // Adopting the envelope's model only when a fact carrying one of its vectors actually landed: recording a model for a store that ended up with zero vectors from this import would claim provenance for nothing.
     if (adoptableEmbeddingMeta !== null && insertedAnyEmbedding) {
       setEmbeddingMeta(db, adoptableEmbeddingMeta);
     }
   });
-  // BEGIN IMMEDIATE: `insertFact` reads the epoch before writing and degrades to a savepoint inside
-  // this outer transaction, so the outer variant decides concurrency safety. See storage.insertFact.
+  // BEGIN IMMEDIATE: `insertFact` reads the epoch before writing and degrades to a savepoint inside this outer transaction, so the outer variant decides concurrency safety. See storage.insertFact.
   tx.immediate();
 
   for (const skip of skips) {

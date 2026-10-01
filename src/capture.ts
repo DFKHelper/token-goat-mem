@@ -1,39 +1,4 @@
-/**
- * The two-mode capture pipeline (design plan Section 3, principles P1/P7,
- * review findings S7/S9).
- *
- * - `captureExplicit` — the user (or agent, on the user's behalf) said
- *   "remember X". Always `source_type: "user"`, always `status: "active"`
- *   immediately. This is the primary path.
- * - `captureSuggested` — a conservative extractor proposes a candidate fact.
- *   Always `status: "pending"`, no matter what the caller asks for: a
- *   pending fact NEVER auto-promotes via time, repetition, or a confidence
- *   number alone (S9 — the old "auto-confirm low-risk preferences" carve-out
- *   was exactly the injection hole and stays removed). Promotion happens
- *   only through an explicit `mem review` / `pin` / `edit` action elsewhere
- *   in the codebase; this module has no code path that can write
- *   `status: "active"` for a suggested candidate. `source_type: "derived"`
- *   facts (extracted from file/tool content, not something the user said)
- *   are quarantined hardest: capture defaults to the more suspicious
- *   `"derived"` when the caller doesn't say otherwise, and — because both
- *   modes force their own status regardless of input — a derived fact can
- *   never enter storage as anything but `pending`.
- *
- * Every capture is secret-screened first (design principle 7: "NEVER
- * persisted by default: secrets/credentials, high-entropy tokens... ").
- * Screening is deny-by-default: a match blocks the write outright (not a
- * redact-and-store) unless the exact matched value is listed in the
- * project's `.mem/allowlist`. There is no broad "disable this pattern"
- * escape hatch — the allowlist is a narrow, per-value, auditable override.
- *
- * The actual fact row is written via src/storage.ts's `insertFact` (the
- * canonical typed CRUD entry point per src/types.ts's own doc comments on
- * `NewFact`) rather than raw SQL here, so subject normalization, embedding
- * packing, `scope_root` handling, and epoch bumping all go through the one
- * place that owns them. Every successful or blocked capture is additionally
- * recorded in `audit_log` (design principle 5), which storage.ts does not
- * touch — that stays this module's responsibility.
- */
+/** The two-mode capture pipeline (design plan Section 3, principles P1/P7, review findings S7/S9). - `captureExplicit` — the user (or agent, on the user's behalf) said "remember X". Always `source_type: "user"`, always `status: "active"` immediately. This is the primary path. - `captureSuggested` — a conservative extractor proposes a candidate fact. Always `status: "pending"`, no matter what the caller asks for: a pending fact NEVER auto-promotes via time, repetition, or a confidence number alone (S9 — the old "auto-confirm low-risk preferences" carve-out was exactly the injection hole and stays removed). Promotion happens only through an explicit `mem review` / `pin` / `edit` action elsewhere in the codebase; this module has no code path that can write `status: "active"` for a suggested candidate. `source_type: "derived"` facts (extracted from file/tool content, not something the user said) are quarantined hardest: capture defaults to the more suspicious `"derived"` when the caller doesn't say otherwise, and — because both modes force their own status regardless of input — a derived fact can never enter storage as anything but `pending`. Every capture is secret-screened first (design principle 7: "NEVER persisted by default: secrets/credentials, high-entropy tokens... "). Screening is deny-by-default: a match blocks the write outright (not a redact-and-store) unless the exact matched value is listed in the project's `.mem/allowlist`. There is no broad "disable this pattern" escape hatch — the allowlist is a narrow, per-value, auditable override. The actual fact row is written via src/storage.ts's `insertFact` (the canonical typed CRUD entry point per src/types.ts's own doc comments on `NewFact`) rather than raw SQL here, so subject normalization, embedding packing, `scope_root` handling, and epoch bumping all go through the one place that owns them. Every successful or blocked capture is additionally recorded in `audit_log` (design principle 5), which storage.ts does not touch — that stays this module's responsibility. */
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -67,12 +32,7 @@ const MAX_VALUE_LENGTH = 500;
 const MAX_SOURCE_REF_LENGTH = 500;
 const MAX_RATIONALE_LENGTH = 500;
 
-/**
- * Longest excerpt persisted to `sources.excerpt` (see storage.ts's Source doc: "Never the full
- * source content -- callers are responsible for redacting/truncating"). ~600 chars covers a full
- * user turn or markdown bullet line's causal context without the audit trail becoming a second copy
- * of the transcript/file it was pulled from.
- */
+/** Longest excerpt persisted to `sources.excerpt` (see storage.ts's Source doc: "Never the full source content -- callers are responsible for redacting/truncating"). ~600 chars covers a full user turn or markdown bullet line's causal context without the audit trail becoming a second copy of the transcript/file it was pulled from. */
 export const MAX_SOURCE_EXCERPT_LENGTH = 600;
 
 const EXCERPT_TRUNCATION_MARKER = "…";
@@ -90,17 +50,7 @@ export class CaptureValidationError extends Error {
   }
 }
 
-/**
- * Anchor predicates capture accepts, syntax-only (arg count and character
- * safety — not existence or semantics; that is evaluated later by
- * src/anchors.ts against real fs/git state at recall time). Must stay in
- * sync with the predicate set src/anchors.ts actually evaluates
- * (file-newer-than, file-exists, file-absent, file-contains, file-not-contains,
- * newest-of, glob-exists, git-branch-is, git-tracked, package-version, valid-until) — accepting a
- * predicate here that anchors.ts does not recognize would silently downgrade
- * it to permanently "unverified" with no capture-time warning, and no
- * arbitrary-shell anchors are permitted at all (Section 3 / review S4).
- */
+/** Anchor predicates capture accepts, syntax-only (arg count and character safety — not existence or semantics; that is evaluated later by src/anchors.ts against real fs/git state at recall time). Must stay in sync with the predicate set src/anchors.ts actually evaluates (file-newer-than, file-exists, file-absent, file-contains, file-not-contains, newest-of, glob-exists, git-branch-is, git-tracked, package-version, valid-until) — accepting a predicate here that anchors.ts does not recognize would silently downgrade it to permanently "unverified" with no capture-time warning, and no arbitrary-shell anchors are permitted at all (Section 3 / review S4). */
 export class InvalidAnchorError extends Error {
   constructor(anchor: string, reason: string) {
     super(
@@ -113,13 +63,7 @@ export class InvalidAnchorError extends Error {
   }
 }
 
-/**
- * A `SecretMatch` reduced to what a caller of `SecretDetectedError` legitimately needs -- which
- * pattern fired, which field, and a masked preview -- with the raw matched literal dropped. The
- * whole purpose of {@link SecretDetectedError} is that the credential must not travel any further;
- * retaining `matched` on a field as public as `matches` would let any `JSON.stringify(err)` or log
- * of the caught error echo the secret straight back out.
- */
+/** A `SecretMatch` reduced to what a caller of `SecretDetectedError` legitimately needs -- which pattern fired, which field, and a masked preview -- with the raw matched literal dropped. The whole purpose of {@link SecretDetectedError} is that the credential must not travel any further; retaining `matched` on a field as public as `matches` would let any `JSON.stringify(err)` or log of the caught error echo the secret straight back out. */
 export interface SecretMatchSummary {
   readonly patternName: string;
   readonly field: string;
@@ -127,11 +71,7 @@ export interface SecretMatchSummary {
   readonly length: number;
 }
 
-/**
- * Thrown when a captured value matches a secret pattern that is not covered
- * by an explicit `.mem/allowlist` entry. Deny-by-default (design principle
- * 7): the write is refused outright, not redacted-and-stored.
- */
+/** Thrown when a captured value matches a secret pattern that is not covered by an explicit `.mem/allowlist` entry. Deny-by-default (design principle 7): the write is refused outright, not redacted-and-stored. */
 export class SecretDetectedError extends Error {
   readonly matches: readonly SecretMatchSummary[];
 
@@ -180,21 +120,7 @@ const SECRET_PATTERNS: readonly SecretPattern[] = [
     name: "password-assignment",
     regex: /\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"]?[^\s'"]{6,}['"]?/gi,
   },
-  /**
-   * A long hex run written near a credential word, in prose rather than assignment syntax.
-   *
-   * The entropy fallback below deliberately exempts pure-hex tokens so that quoting a commit SHA in
-   * a fact does not read as a credential -- but HMAC signing secrets, webhook secrets, and plenty of
-   * API keys are also pure hex, so that exemption doubled as a blanket bypass for an entire common
-   * secret format. `password-assignment` above did not close it either: it requires a `:`/`=`
-   * separator, and `the webhook signing secret is <64 hex>` has neither.
-   *
-   * Scoped to hex specifically, and only within a short window of a credential word, because that
-   * is exactly the class the exemption creates a hole in: a non-hex high-entropy secret is still
-   * caught by the entropy fallback on its own, so widening this pattern past hex would add false
-   * positives without adding coverage. A SHA that genuinely appears next to the word "secret" is
-   * the accepted cost, and the error message names the `.mem/allowlist` escape hatch.
-   */
+  /** A long hex run written near a credential word, in prose rather than assignment syntax. The entropy fallback below deliberately exempts pure-hex tokens so that quoting a commit SHA in a fact does not read as a credential -- but HMAC signing secrets, webhook secrets, and plenty of API keys are also pure hex, so that exemption doubled as a blanket bypass for an entire common secret format. `password-assignment` above did not close it either: it requires a `:`/`=` separator, and `the webhook signing secret is <64 hex>` has neither. Scoped to hex specifically, and only within a short window of a credential word, because that is exactly the class the exemption creates a hole in: a non-hex high-entropy secret is still caught by the entropy fallback on its own, so widening this pattern past hex would add false positives without adding coverage. A SHA that genuinely appears next to the word "secret" is the accepted cost, and the error message names the `.mem/allowlist` escape hatch. */
   {
     name: "secret-keyword-hex",
     regex: /(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|signing[_-]?(?:key|secret))\b[^\n]{0,32}?\b[0-9a-fA-F]{32,}\b/gi,
@@ -206,19 +132,7 @@ const GENERIC_TOKEN = /[A-Za-z0-9+/_=-]{32,}/g;
 const HEX_ONLY = /^[0-9a-f]+$/i;
 const DIGITS_ONLY = /^[0-9]{32,}$/;
 
-/**
- * Hex-token lengths that correspond to a canonical content hash a project fact legitimately quotes:
- * md5 (32), sha1 (40), sha256 (64). Anything else -- 48, 96, 33 -- is not a hash anyone writes down,
- * and is far likelier an HMAC or API secret, so it gets no exemption from the entropy fallback.
- *
- * The exemption used to be unconditional for any hex run of 32 or more characters, which was
- * strictly broader than its own stated rationale ("git SHAs, ids"): git SHAs are 7-12 characters
- * abbreviated and 40 in full, so nothing under 32 ever reached {@link GENERIC_TOKEN}'s floor and
- * nothing above 64 was ever a SHA. Perfect separation is impossible -- a 64-hex string is
- * genuinely ambiguous between sha256 and an HMAC secret -- so the ambiguous lengths stay exempt
- * here and are covered instead by the `secret-keyword-hex` pattern above, which only fires when the
- * surrounding text says it is a credential.
- */
+/** Hex-token lengths that correspond to a canonical content hash a project fact legitimately quotes: md5 (32), sha1 (40), sha256 (64). Anything else -- 48, 96, 33 -- is not a hash anyone writes down, and is far likelier an HMAC or API secret, so it gets no exemption from the entropy fallback. The exemption used to be unconditional for any hex run of 32 or more characters, which was strictly broader than its own stated rationale ("git SHAs, ids"): git SHAs are 7-12 characters abbreviated and 40 in full, so nothing under 32 ever reached {@link GENERIC_TOKEN}'s floor and nothing above 64 was ever a SHA. Perfect separation is impossible -- a 64-hex string is genuinely ambiguous between sha256 and an HMAC secret -- so the ambiguous lengths stay exempt here and are covered instead by the `secret-keyword-hex` pattern above, which only fires when the surrounding text says it is a credential. */
 const CANONICAL_HEX_HASH_LENGTHS: ReadonlySet<number> = new Set([32, 40, 64]);
 
 /** Whether a token is a pure-hex run of a length that plausibly denotes a content hash rather than a secret. */
@@ -240,21 +154,7 @@ function shannonEntropy(value: string): number {
   return entropy;
 }
 
-/**
- * Fields that legitimately contain long, forward-slash-delimited path-shaped values -- an anchor's
- * fs/git predicate argument, or a `sourceRef` provenance pointer (`<path>:<line>`, but for
- * `mem remember --source-ref` a free-form, user/agent-supplied string, so it is NOT exempt from
- * `SECRET_PATTERNS` or from a slash-free high-entropy token) -- so a slash-containing token is
- * excluded from the *generic* high-entropy-token heuristic below: `GENERIC_TOKEN`'s alphabet
- * includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` or
- * `src/very/long/path.ts:123` argument over ~32 chars can exceed the entropy threshold purely from
- * directory-name variety, with no secret present at all. The exemption only applies to a matched
- * token that contains "/" (a Windows `\` counts as "/" here, since `mem scan-session` stamps a
- * native transcript path) -- a prefix-less high-entropy secret with no path separator (an
- * unlabeled credential with no recognized `SECRET_PATTERNS` prefix) is still caught by the entropy
- * fallback. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields
- * regardless.
- */
+/** Fields that legitimately contain long, forward-slash-delimited path-shaped values -- an anchor's fs/git predicate argument, or a `sourceRef` provenance pointer (`<path>:<line>`, but for `mem remember --source-ref` a free-form, user/agent-supplied string, so it is NOT exempt from `SECRET_PATTERNS` or from a slash-free high-entropy token) -- so a slash-containing token is excluded from the *generic* high-entropy-token heuristic below: `GENERIC_TOKEN`'s alphabet includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` or `src/very/long/path.ts:123` argument over ~32 chars can exceed the entropy threshold purely from directory-name variety, with no secret present at all. The exemption only applies to a matched token that contains "/" (a Windows `\` counts as "/" here, since `mem scan-session` stamps a native transcript path) -- a prefix-less high-entropy secret with no path separator (an unlabeled credential with no recognized `SECRET_PATTERNS` prefix) is still caught by the entropy fallback. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields regardless. */
 const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor", "sourceRef"]);
 
 /** One `/`-delimited segment of a path-shaped token: a lowercase word (or digits) with `.`/`_`/`-` joining further lowercase words -- `agent-self-compaction`, `session_continuity.md`, `v2`. Deliberately rejects uppercase, `+`, and `=`, which is what separates a filename from a base64/random credential. */
@@ -267,22 +167,7 @@ function isPathSegment(segment: string): boolean {
   return PATH_SEGMENT.test(segment) && segment.split(/[._-]/).every((run) => run.length <= MAX_UNBROKEN_SEGMENT_RUN);
 }
 
-/**
- * Whether a token is shaped like a relative filesystem path of ordinary lowercase identifiers,
- * which the *generic* entropy heuristic must not flag: the same directory-name variety that the
- * `GENERIC_ENTROPY_EXEMPT_FIELDS` comment above describes for anchors also pushes a perfectly
- * benign path quoted inside a fact's `text` over the threshold (`agent-self-compaction/superman-state`
- * scores 3.88 against a 3.8 cutoff), and a decision fact naturally cites file paths.
- *
- * The exemption is shape-based, never merely slash-based, because real credentials do contain
- * slashes -- an AWS secret access key (`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, entropy 4.66)
- * is exactly the prefix-less secret this entropy fallback exists to catch. Requiring every segment
- * to be lowercase-word-shaped rejects it on the uppercase alone, as it does base64 blobs (`+`/`=`)
- * and mixed-case tokens generally. Two or more non-empty segments are required so a single long
- * lowercase run can never buy an exemption just by carrying one slash. Named `SECRET_PATTERNS`
- * still run against every field regardless of this, so a recognized credential format is caught
- * even when it happens to look path-like.
- */
+/** Whether a token is shaped like a relative filesystem path of ordinary lowercase identifiers, which the *generic* entropy heuristic must not flag: the same directory-name variety that the `GENERIC_ENTROPY_EXEMPT_FIELDS` comment above describes for anchors also pushes a perfectly benign path quoted inside a fact's `text` over the threshold (`agent-self-compaction/superman-state` scores 3.88 against a 3.8 cutoff), and a decision fact naturally cites file paths. The exemption is shape-based, never merely slash-based, because real credentials do contain slashes -- an AWS secret access key (`wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY`, entropy 4.66) is exactly the prefix-less secret this entropy fallback exists to catch. Requiring every segment to be lowercase-word-shaped rejects it on the uppercase alone, as it does base64 blobs (`+`/`=`) and mixed-case tokens generally. Two or more non-empty segments are required so a single long lowercase run can never buy an exemption just by carrying one slash. Named `SECRET_PATTERNS` still run against every field regardless of this, so a recognized credential format is caught even when it happens to look path-like. */
 function isPathShapedToken(token: string): boolean {
   if (!token.includes("/")) {
     return false;
@@ -294,27 +179,7 @@ function isPathShapedToken(token: string): boolean {
 /** One `[._-]`-delimited word of a prose-shaped identifier: pure lowercase letters, no digits, no separators of its own -- deliberately narrower than `PATH_SEGMENT` (which allows digits and internal `[._-]` runs), because a slash-less token has no directory-name convention to lean on and so gets no benefit of the doubt beyond plain English words. */
 const PROSE_WORD = /^[a-z]+$/;
 
-/**
- * Whether a slash-free token is shaped like a kebab/snake/dotted-case prose identifier --
- * `subagent-git-discard-prohibition`, the kind of descriptive `mem remember --subject`/`--value`
- * key this project's own CLAUDE.md tells agents to pass -- which the generic entropy heuristic must
- * not flag. `isPathShapedToken` above already exempts this shape when it contains a slash; a
- * slash-less kebab identifier never reaches that check (it returns early on `!token.includes("/")`)
- * and so falls straight through to `generic-high-entropy-token` once it clears 32 characters, which
- * a descriptive multi-word subject key does routinely.
- *
- * Every named `SECRET_PATTERNS` entry (aws-access-key-id, github-token, slack-token, jwt, ...) runs
- * unconditionally before this; this exemption only ever reaches the *unlabeled, prefix-less*
- * entropy fallback. A real prefix-less secret is essentially always drawn from a base64/hex
- * alphabet or carries digits/mixed case, so requiring every `[._-]`-delimited word to be pure
- * lowercase letters -- no digits, no uppercase -- excludes it outright: it is what keeps a
- * Slack-style `xoxb-1234567890-...` shape (or any base64 `+`/`=`/mixed-case blob) out of the
- * exemption even if its named pattern were ever loosened. Two or more words are required so a
- * single long lowercase run can never buy the exemption on its own, and each word is still capped
- * at `MAX_UNBROKEN_SEGMENT_RUN` (the same bound `isPathSegment` uses for a path segment's internal
- * runs) -- a real English word doesn't reach that length, whereas an unbroken lowercase run that
- * long is the shape of a random token, not prose.
- */
+/** Whether a slash-free token is shaped like a kebab/snake/dotted-case prose identifier -- `subagent-git-discard-prohibition`, the kind of descriptive `mem remember --subject`/`--value` key this project's own CLAUDE.md tells agents to pass -- which the generic entropy heuristic must not flag. `isPathShapedToken` above already exempts this shape when it contains a slash; a slash-less kebab identifier never reaches that check (it returns early on `!token.includes("/")`) and so falls straight through to `generic-high-entropy-token` once it clears 32 characters, which a descriptive multi-word subject key does routinely. Every named `SECRET_PATTERNS` entry (aws-access-key-id, github-token, slack-token, jwt, ...) runs unconditionally before this; this exemption only ever reaches the *unlabeled, prefix-less* entropy fallback. A real prefix-less secret is essentially always drawn from a base64/hex alphabet or carries digits/mixed case, so requiring every `[._-]`-delimited word to be pure lowercase letters -- no digits, no uppercase -- excludes it outright: it is what keeps a Slack-style `xoxb-1234567890-...` shape (or any base64 `+`/`=`/mixed-case blob) out of the exemption even if its named pattern were ever loosened. Two or more words are required so a single long lowercase run can never buy the exemption on its own, and each word is still capped at `MAX_UNBROKEN_SEGMENT_RUN` (the same bound `isPathSegment` uses for a path segment's internal runs) -- a real English word doesn't reach that length, whereas an unbroken lowercase run that long is the shape of a random token, not prose. */
 function isProseShapedToken(token: string): boolean {
   const words = token.split(/[._-]/).filter((word) => word.length > 0);
   return words.length >= 2 && words.every((word) => PROSE_WORD.test(word) && word.length <= MAX_UNBROKEN_SEGMENT_RUN);
@@ -336,9 +201,7 @@ function scanField(field: string, value: string): SecretMatch[] {
   }
 
   const exemptField = GENERIC_ENTROPY_EXEMPT_FIELDS.has(field);
-  // A Windows path's `\` is outside GENERIC_TOKEN's alphabet, so without this a
-  // `C:\...\<session-uuid>.jsonl#turn3` sourceRef splits into bare, slash-free segments and a
-  // high-entropy session UUID loses the path exemption it gets on POSIX.
+  // A Windows path's `\` is outside GENERIC_TOKEN's alphabet, so without this a `C:\...\<session-uuid>.jsonl#turn3` sourceRef splits into bare, slash-free segments and a high-entropy session UUID loses the path exemption it gets on POSIX.
   const genericValue = exemptField ? value.replaceAll("\\", "/") : value;
   GENERIC_TOKEN.lastIndex = 0;
   let g = GENERIC_TOKEN.exec(genericValue);
@@ -368,12 +231,7 @@ function redactPreview(matched: string): string {
   return `${matched.slice(0, 4)}${masked}${matched.slice(-2)}`;
 }
 
-/**
- * Scans a set of named fields against the secret-pattern and entropy
- * heuristics, dropping any match whose exact text is covered by
- * `allowlist`. Exported so a `mem doctor` / `review` command can reuse the
- * same screening logic to audit already-stored allowlist entries.
- */
+/** Scans a set of named fields against the secret-pattern and entropy heuristics, dropping any match whose exact text is covered by `allowlist`. Exported so a `mem doctor` / `review` command can reuse the same screening logic to audit already-stored allowlist entries. */
 export function screenForSecrets(
   fields: Readonly<Record<string, string | null | undefined>>,
   allowlist: readonly string[]
@@ -393,15 +251,7 @@ export function screenForSecrets(
   return matches;
 }
 
-/**
- * Loads the narrow, explicit secret-screening override list from
- * `<root>/.mem/allowlist` (design principle 7 / Open Question 1). One exact
- * value per line; blank lines and lines starting with `#` are ignored.
- * Entries are exact-match strings, not patterns or category names — the
- * allowlist can only exempt specific, already-reviewed values, never
- * silently disable a whole detector. Missing file means an empty allowlist,
- * not an error: most projects will never need one.
- */
+/** Loads the narrow, explicit secret-screening override list from `<root>/.mem/allowlist` (design principle 7 / Open Question 1). One exact value per line; blank lines and lines starting with `#` are ignored. Entries are exact-match strings, not patterns or category names — the allowlist can only exempt specific, already-reviewed values, never silently disable a whole detector. Missing file means an empty allowlist, not an error: most projects will never need one. */
 export function loadAllowlist(root: string): string[] {
   const allowlistPath = join(root, ".mem", "allowlist");
   if (!existsSync(allowlistPath)) {
@@ -414,22 +264,7 @@ export function loadAllowlist(root: string): string[] {
     .filter((line) => line.length > 0 && !line.startsWith("#"));
 }
 
-/**
- * Builds a `sources.excerpt` for a derived-capture fact (scan-session, `mem import --from-md`), or
- * `null` when `raw` carries a secret the extracted fact text did not -- the raw material (a whole
- * user turn, a whole file line) is a larger surface than the sentence pulled from it, so screening
- * the sentence alone (already done by `screenInputOrThrow`) is not enough to trust the excerpt.
- * Screened against the *untruncated* text so a secret sitting past `MAX_SOURCE_EXCERPT_LENGTH`
- * cannot slip through by being cut off before the check runs; only a confirmed-clean excerpt is
- * then truncated for storage. Never called for `mem remember`/`mem suggest`: there the user's own
- * text *is* the fact, and a source row echoing it back would be provenance noise, not evidence.
- *
- * When `factText` is provided, the excerpt is windowed around the first occurrence of the fact
- * text in `raw` (matched through `normalizeFactText` to ignore whitespace/case/trailing-period
- * differences), ensuring the source excerpt actually contains the evidence. If the fact text is
- * not found in raw, falls back to head truncation as a safe default. If `factText` is omitted,
- * always truncates from the head (today's behavior).
- */
+/** Builds a `sources.excerpt` for a derived-capture fact (scan-session, `mem import --from-md`), or `null` when `raw` carries a secret the extracted fact text did not -- the raw material (a whole user turn, a whole file line) is a larger surface than the sentence pulled from it, so screening the sentence alone (already done by `screenInputOrThrow`) is not enough to trust the excerpt. Screened against the *untruncated* text so a secret sitting past `MAX_SOURCE_EXCERPT_LENGTH` cannot slip through by being cut off before the check runs; only a confirmed-clean excerpt is then truncated for storage. Never called for `mem remember`/`mem suggest`: there the user's own text *is* the fact, and a source row echoing it back would be provenance noise, not evidence. When `factText` is provided, the excerpt is windowed around the first occurrence of the fact text in `raw` (matched through `normalizeFactText` to ignore whitespace/case/trailing-period differences), ensuring the source excerpt actually contains the evidence. If the fact text is not found in raw, falls back to head truncation as a safe default. If `factText` is omitted, always truncates from the head (today's behavior). */
 export function buildScreenedExcerpt(raw: string, root: string, factText?: string): string | null {
   const allowlist = loadAllowlist(root);
   if (screenForSecrets({ excerpt: raw }, allowlist).length > 0) {
@@ -476,12 +311,7 @@ export function buildScreenedExcerpt(raw: string, root: string, factText?: strin
   return `${raw.slice(0, MAX_SOURCE_EXCERPT_LENGTH)}${EXCERPT_TRUNCATION_MARKER}`;
 }
 
-/**
- * Finds the position of a normalized text sequence within a larger string, accounting for
- * whitespace and case differences. Returns the byte position in the original string where
- * the normalized match starts, or -1 if not found. Used to ensure source excerpts contain
- * the actual fact text they provide evidence for.
- */
+/** Finds the position of a normalized text sequence within a larger string, accounting for whitespace and case differences. Returns the byte position in the original string where the normalized match starts, or -1 if not found. Used to ensure source excerpts contain the actual fact text they provide evidence for. */
 function findNormalizedTextPosition(raw: string, factText: string): number {
   const normalizedFact = normalizeFactText(factText);
   const lowerRaw = raw.toLowerCase();
@@ -543,23 +373,10 @@ const ANCHOR_ARITY: Readonly<Record<string, number | { readonly min: number }>> 
 
 const DISALLOWED_ANCHOR_ARG_LITERALS = ";&|`$<>";
 
-/**
- * Placeholder root used only to run {@link anchorPathWithinRoot}'s containment math at syntax-check
- * time, before the real `--root` for a `mem remember`/`mem edit` invocation is even known (this
- * validation runs on the raw CLI string). The actual value is irrelevant to the check: a `..`
- * segment escapes *any* root, and an absolute argument resolves to itself regardless of root, so
- * either always fails containment against this (or any) placeholder. The evaluator (`src/anchors.ts`)
- * re-derives and re-checks containment against the real root on every evaluation regardless -- this
- * is purely an early, capture-time rejection so a doomed-to-`unverified`-forever anchor is refused
- * with an error instead of silently rotting.
- */
+/** Placeholder root used only to run {@link anchorPathWithinRoot}'s containment math at syntax-check time, before the real `--root` for a `mem remember`/`mem edit` invocation is even known (this validation runs on the raw CLI string). The actual value is irrelevant to the check: a `..` segment escapes *any* root, and an absolute argument resolves to itself regardless of root, so either always fails containment against this (or any) placeholder. The evaluator (`src/anchors.ts`) re-derives and re-checks containment against the real root on every evaluation regardless -- this is purely an early, capture-time rejection so a doomed-to-`unverified`-forever anchor is refused with an error instead of silently rotting. */
 const ANCHOR_SYNTAX_CHECK_ROOT = resolve("/mem-anchor-syntax-check-placeholder");
 
-/**
- * Argument indices, for a given predicate, that are filesystem paths and must therefore stay within
- * whatever root the anchor is later evaluated against -- no `..` traversal, no absolute path. Indices
- * outside a predicate's own arity are simply never reached by the caller's loop.
- */
+/** Argument indices, for a given predicate, that are filesystem paths and must therefore stay within whatever root the anchor is later evaluated against -- no `..` traversal, no absolute path. Indices outside a predicate's own arity are simply never reached by the caller's loop. */
 function pathArgIndices(predicate: string, argCount: number): readonly number[] {
   switch (predicate) {
     case "file-newer-than":
@@ -592,13 +409,7 @@ function hasDisallowedAnchorChar(arg: string): boolean {
   return false;
 }
 
-/**
- * Rejects an anchor the real predicates cannot parse. Exported so fixtures that construct `Fact`
- * rows directly -- bypassing `captureFact`, and with it this check -- can still assert their anchors
- * are the syntax `anchors.ts` actually evaluates. `eval/fixtures.ts` carried colon-glued anchors
- * (`"file-exists:package.json"`) for exactly as long as nothing validated them: `tokenize` splits on
- * whitespace, so every one of them was a single unknown token that silently read `unverified`.
- */
+/** Rejects an anchor the real predicates cannot parse. Exported so fixtures that construct `Fact` rows directly -- bypassing `captureFact`, and with it this check -- can still assert their anchors are the syntax `anchors.ts` actually evaluates. `eval/fixtures.ts` carried colon-glued anchors (`"file-exists:package.json"`) for exactly as long as nothing validated them: `tokenize` splits on whitespace, so every one of them was a single unknown token that silently read `unverified`. */
 export function validateAnchorSyntax(anchor: string): void {
   const tokens = anchor.trim().split(/\s+/u).filter((token) => token.length > 0);
   const [predicate, ...args] = tokens;
@@ -612,11 +423,7 @@ export function validateAnchorSyntax(anchor: string): void {
       `unknown predicate "${predicate}" (expected one of ${Object.keys(ANCHOR_ARITY).join(", ")})`
     );
   }
-  // `file-contains`/`file-not-contains`'s substring argument may legitimately contain whitespace
-  // (anchors.ts's evaluator parses it via a raw-regex pre-pass, not plain whitespace-splitting) --
-  // this whitespace-split syntax check only accepts single-token substrings for those two
-  // predicates. A multi-word substring anchor must be written via `mem import --from-json`, which
-  // bypasses this syntax gate entirely.
+  // `file-contains`/`file-not-contains`'s substring argument may legitimately contain whitespace (anchors.ts's evaluator parses it via a raw-regex pre-pass, not plain whitespace-splitting) -- this whitespace-split syntax check only accepts single-token substrings for those two predicates. A multi-word substring anchor must be written via `mem import --from-json`, which bypasses this syntax gate entirely.
   const arityOk = typeof arity === "number" ? args.length === arity : args.length >= arity.min;
   if (!arityOk) {
     const expected = typeof arity === "number" ? `${arity}` : `at least ${arity.min}`;
@@ -627,21 +434,14 @@ export function validateAnchorSyntax(anchor: string): void {
       throw new InvalidAnchorError(anchor, `argument "${arg}" contains disallowed characters`);
     }
   }
-  // `valid-until` is the one predicate whose argument is neither a path nor a free string, and a
-  // typo in it is silent in the worst direction: anchors.ts reads an unparseable date as
-  // `unverified`, so `valid-untill 2026-12-31` (or `valid-until next friday`) would store cleanly
-  // and then caveat the fact forever, which is the exact rot this whole gate exists to prevent.
+  // `valid-until` is the one predicate whose argument is neither a path nor a free string, and a typo in it is silent in the worst direction: anchors.ts reads an unparseable date as `unverified`, so `valid-untill 2026-12-31` (or `valid-until next friday`) would store cleanly and then caveat the fact forever, which is the exact rot this whole gate exists to prevent.
   if (predicate === "valid-until") {
     const [rawDate] = args;
     if (rawDate === undefined || Number.isNaN(new Date(rawDate).getTime())) {
       throw new InvalidAnchorError(anchor, `"${rawDate ?? ""}" is not an ISO 8601 date (e.g. 2026-12-31)`);
     }
   }
-  // Reject a path argument that can never affirm: one that escapes whatever root it will later be
-  // evaluated against (`../x`) or names an absolute location (`/etc/passwd`, `C:\Windows\...`).
-  // `resolveWithinRoot`/`anchorPathWithinRoot` would return `null` for these at every future
-  // evaluation, forever `unverified` -- tell the user now, at capture time, instead of letting the
-  // fact rot silently.
+  // Reject a path argument that can never affirm: one that escapes whatever root it will later be evaluated against (`../x`) or names an absolute location (`/etc/passwd`, `C:\Windows\...`). `resolveWithinRoot`/`anchorPathWithinRoot` would return `null` for these at every future evaluation, forever `unverified` -- tell the user now, at capture time, instead of letting the fact rot silently.
   for (const index of pathArgIndices(predicate, args.length)) {
     const arg = args[index];
     if (arg === undefined) {
@@ -656,12 +456,7 @@ export function validateAnchorSyntax(anchor: string): void {
   }
 }
 
-/**
- * A rationale (a fact's `why`, a review decision's `reason`) is optional, but one that is present
- * must say something: an empty one would render as `why: ` on every recall, and an over-long one is
- * a pasted transcript, not a rationale (the same design principle 7a limit `text` has). `null`
- * clears a `why` and is always allowed.
- */
+/** A rationale (a fact's `why`, a review decision's `reason`) is optional, but one that is present must say something: an empty one would render as `why: ` on every recall, and an over-long one is a pasted transcript, not a rationale (the same design principle 7a limit `text` has). `null` clears a `why` and is always allowed. */
 function validateRationaleOrThrow(label: "why" | "reason", rationale: string | null | undefined): void {
   if (typeof rationale !== "string") {
     return;
@@ -674,23 +469,14 @@ function validateRationaleOrThrow(label: "why" | "reason", rationale: string | n
   }
 }
 
-/**
- * Validates and secret-screens a `mem review --reason`, returning it trimmed. The reason is stored in
- * the audit log, which is as durable as the fact table, so it gets the same deny-by-default screening
- * (and the same `.mem/allowlist` escape hatch) a fact's own text does.
- */
+/** Validates and secret-screens a `mem review --reason`, returning it trimmed. The reason is stored in the audit log, which is as durable as the fact table, so it gets the same deny-by-default screening (and the same `.mem/allowlist` escape hatch) a fact's own text does. */
 export function screenReviewReasonOrThrow(db: Database.Database, reason: string, root: string): string {
   validateRationaleOrThrow("reason", reason);
   refuseSecretsOrThrow(db, screenForSecrets({ reason }, loadAllowlist(root)), "review");
   return reason.trim();
 }
 
-/**
- * The free-text fact fields secret screening covers. One list for every whole-fact write path
- * (capture and both JSON-import passes), so a new stored column cannot be screened on one path and
- * stored unscreened by another. `mem edit` screens per edited field instead (cli.ts's
- * `AUDIT_SCREENED_FIELDS`).
- */
+/** The free-text fact fields secret screening covers. One list for every whole-fact write path (capture and both JSON-import passes), so a new stored column cannot be screened on one path and stored unscreened by another. `mem edit` screens per edited field instead (cli.ts's `AUDIT_SCREENED_FIELDS`). */
 export interface ScreenableFactFields {
   readonly text: string;
   readonly subject?: string | null | undefined;
@@ -714,20 +500,7 @@ export function screenFactFields(fields: ScreenableFactFields, allowlist: readon
   );
 }
 
-/**
- * Applies the field-level guards `mem remember`/`captureExplicit` enforce (length limits,
- * emptiness, subject/value pairing) to a patch of fact fields, WITHOUT the CLI-facing
- * anchor-syntax arity check (see `validateAnchorSyntax`). Only validates fields actually present in
- * the patch; a `null` clears the field and is not validated (clearing is always safe).
- *
- * Deliberately anchor-syntax-agnostic: this is the shared base used both by `validateFactEditOrThrow`
- * (which adds the arity check back on top, since `mem edit` takes CLI-string input just like `mem
- * remember`) and by JSON import (which must NOT apply the arity check -- a JSON `anchor` field is
- * structured data, not a CLI-parsed string, so there is no parsing ambiguity for a multi-word
- * `file-contains`/`file-not-contains` substring to create). Anchor *correctness* for callers that
- * skip the arity check is still guaranteed: `anchors.ts`'s `evaluateAnchor` never throws on a
- * malformed or unrecognized anchor string regardless of arity -- it just returns `"unverified"`.
- */
+/** Applies the field-level guards `mem remember`/`captureExplicit` enforce (length limits, emptiness, subject/value pairing) to a patch of fact fields, WITHOUT the CLI-facing anchor-syntax arity check (see `validateAnchorSyntax`). Only validates fields actually present in the patch; a `null` clears the field and is not validated (clearing is always safe). Deliberately anchor-syntax-agnostic: this is the shared base used both by `validateFactEditOrThrow` (which adds the arity check back on top, since `mem edit` takes CLI-string input just like `mem remember`) and by JSON import (which must NOT apply the arity check -- a JSON `anchor` field is structured data, not a CLI-parsed string, so there is no parsing ambiguity for a multi-word `file-contains`/`file-not-contains` substring to create). Anchor *correctness* for callers that skip the arity check is still guaranteed: `anchors.ts`'s `evaluateAnchor` never throws on a malformed or unrecognized anchor string regardless of arity -- it just returns `"unverified"`. */
 export function validateFactFieldsOrThrow(patch: {
   readonly text?: string;
   readonly subject?: string | null;
@@ -765,10 +538,7 @@ export function validateFactFieldsOrThrow(patch: {
       throw new CaptureValidationError(`value exceeds ${MAX_VALUE_LENGTH} characters`);
     }
   }
-  // Enforce subject/value pairing: if both are present in the patch and are strings (not null),
-  // they must both be non-empty. This mirrors captureExplicit's rule: "subject and value must
-  // be provided together or not at all (design P4: contradiction detection keys on subject+value
-  // pairs -- a lone key is unusable)".
+  // Enforce subject/value pairing: if both are present in the patch and are strings (not null), they must both be non-empty. This mirrors captureExplicit's rule: "subject and value must be provided together or not at all (design P4: contradiction detection keys on subject+value pairs -- a lone key is unusable)".
   const hasSubjectInPatch = typeof patch.subject === "string" && patch.subject.trim().length > 0;
   const hasValueInPatch = typeof patch.value === "string" && patch.value.trim().length > 0;
   if (hasSubjectInPatch !== hasValueInPatch) {
@@ -779,17 +549,7 @@ export function validateFactFieldsOrThrow(patch: {
   }
 }
 
-/**
- * Applies the same field-level guards `mem remember`/`captureExplicit` enforce (length limits,
- * emptiness, anchor syntax) to a `mem edit` patch -- editing is a distinct write path from capture
- * and was previously exempt from all of this, letting an edit store a fact capture would have
- * rejected (an over-length text, an empty text, or a malformed anchor that permanently evaluates
- * "unverified"). Only validates fields actually present in the patch; a `null` clears the field and
- * is not validated (clearing is always safe).
- *
- * `mem edit`, like `mem remember`, takes CLI-string input, so it keeps the anchor-syntax arity
- * check (`validateAnchorSyntax`) that JSON import is exempt from -- see `validateFactFieldsOrThrow`.
- */
+/** Applies the same field-level guards `mem remember`/`captureExplicit` enforce (length limits, emptiness, anchor syntax) to a `mem edit` patch -- editing is a distinct write path from capture and was previously exempt from all of this, letting an edit store a fact capture would have rejected (an over-length text, an empty text, or a malformed anchor that permanently evaluates "unverified"). Only validates fields actually present in the patch; a `null` clears the field and is not validated (clearing is always safe). `mem edit`, like `mem remember`, takes CLI-string input, so it keeps the anchor-syntax arity check (`validateAnchorSyntax`) that JSON import is exempt from -- see `validateFactFieldsOrThrow`. */
 export function validateFactEditOrThrow(patch: {
   readonly text?: string;
   readonly subject?: string | null;
@@ -821,43 +581,18 @@ export interface CaptureExplicitInput {
   readonly why?: string;
   /** Project root, used to resolve `.mem/allowlist` and (for project/path scope) recorded as the fact's `scopeRoot`. Required, never defaulted to ambient `process.cwd()` (matches src/anchors.ts's explicit-root discipline). */
   readonly root: string;
-  /**
-   * File (or directory) this fact is bound to, required when `scope === "path"` and rejected
-   * otherwise. Resolved against `root` -- never against ambient `process.cwd()` -- and stored as
-   * `scopeRoot`. Without this, `scope: "path"` had no way to bind to anything narrower than `root`
-   * itself, which made a "path" fact behave exactly like a "project" fact (isInScope/isBoundToRoot
-   * both resolve `scope="path"`'s binding the same way `scope="project"` resolves its own).
-   */
+  /** File (or directory) this fact is bound to, required when `scope === "path"` and rejected otherwise. Resolved against `root` -- never against ambient `process.cwd()` -- and stored as `scopeRoot`. Without this, `scope: "path"` had no way to bind to anything narrower than `root` itself, which made a "path" fact behave exactly like a "project" fact (isInScope/isBoundToRoot both resolve `scope="path"`'s binding the same way `scope="project"` resolves its own). */
   readonly path?: string;
 }
 
 export interface CaptureSuggestedInput extends CaptureExplicitInput {
-  /**
-   * ISO 8601 timestamp to record as the fact's `captured_at`, instead of the moment of the call.
-   *
-   * Offered on the suggested path only, and the asymmetry is the point: `captureExplicit` is the
-   * user saying something *now*, so the clock is the truth. A suggested fact is extracted from an
-   * artifact that already existed -- a CLAUDE.md whose rules predate this store by years -- and
-   * stamping those with today's date tells `captured_at`'s two consumers (time-decay, and
-   * contradiction precedence, which prefers the newer fact) that a years-old convention is the
-   * freshest thing in the store.
-   *
-   * Rejected if unparseable or in the future: a future timestamp would win every precedence
-   * comparison against facts that have not happened yet.
-   */
+  /** ISO 8601 timestamp to record as the fact's `captured_at`, instead of the moment of the call. Offered on the suggested path only, and the asymmetry is the point: `captureExplicit` is the user saying something *now*, so the clock is the truth. A suggested fact is extracted from an artifact that already existed -- a CLAUDE.md whose rules predate this store by years -- and stamping those with today's date tells `captured_at`'s two consumers (time-decay, and contradiction precedence, which prefers the newer fact) that a years-old convention is the freshest thing in the store. Rejected if unparseable or in the future: a future timestamp would win every precedence comparison against facts that have not happened yet. */
   readonly capturedAt?: string;
   /** Defaults to `"derived"` — the more suspicious option — when omitted, per the quarantine-hardest rule (Section 3). */
   readonly sourceType?: FactSourceType;
   /** Advisory only: always clamped to `[0, SUGGESTED_CONFIDENCE_CAP]` regardless of what is requested, since a pending/suggested fact can never carry full trust (S9). */
   readonly confidence?: number;
-  /**
-   * A pre-screened, pre-truncated excerpt of the raw material the candidate was pulled from (see
-   * `buildScreenedExcerpt`), stored as one `sources` row alongside the fact in the same transaction.
-   * Only `mem scan-session` and `mem import --from-md` set this -- both extract a short candidate
-   * from raw material genuinely larger than the fact (a whole user turn, a whole file line), which is
-   * exactly the provenance gap the `sources` table exists to close. `mem suggest <text>` must never
-   * set this: there the caller's text *is* the fact, so a source row would just echo it back.
-   */
+  /** A pre-screened, pre-truncated excerpt of the raw material the candidate was pulled from (see `buildScreenedExcerpt`), stored as one `sources` row alongside the fact in the same transaction. Only `mem scan-session` and `mem import --from-md` set this -- both extract a short candidate from raw material genuinely larger than the fact (a whole user turn, a whole file line), which is exactly the provenance gap the `sources` table exists to close. `mem suggest <text>` must never set this: there the caller's text *is* the fact, so a source row would just echo it back. */
   readonly sourceExcerpt?: string;
 }
 
@@ -869,19 +604,9 @@ export interface CaptureResult {
   readonly promotedFromPending?: boolean;
   /** Count of additional `pending` duplicates of the same restated sentence superseded alongside the promotion. See {@link captureExplicit}. */
   readonly supersededPendingDuplicateCount?: number;
-  /**
-   * True when the text matched an existing `pending` fact and this call recorded a sighting on it
-   * (see {@link recordSighting}) instead of filing a second row. See {@link captureSuggested}.
-   * Never implies promotion or a status change -- `fact` is the pre-existing `pending` row, sighted
-   * again, nothing more.
-   */
+  /** True when the text matched an existing `pending` fact and this call recorded a sighting on it (see {@link recordSighting}) instead of filing a second row. See {@link captureSuggested}. Never implies promotion or a status change -- `fact` is the pre-existing `pending` row, sighted again, nothing more. */
   readonly sighted?: boolean;
-  /**
-   * True when the text matched a fact already bound to this root that was *not* `pending` --
-   * `active`, `superseded`, anything -- so no row was filed and no sighting recorded. `fact` is the
-   * pre-existing row, untouched. Mutually exclusive with {@link sighted}: a `pending` match takes
-   * the sighting path, everything else lands here. See {@link captureSuggested}.
-   */
+  /** True when the text matched a fact already bound to this root that was *not* `pending` -- `active`, `superseded`, anything -- so no row was filed and no sighting recorded. `fact` is the pre-existing row, untouched. Mutually exclusive with {@link sighted}: a `pending` match takes the sighting path, everything else lands here. See {@link captureSuggested}. */
   readonly alreadyKnown?: boolean;
 }
 
@@ -946,21 +671,11 @@ export function screenInputOrThrow(
   factId: string | null = null
 ): void {
   const allowlist = loadAllowlist(root);
-  // sourceRef is scanned like any other field: for the `mem import --from-md` path it's a
-  // programmatically constructed "<resolved path>:<line>" provenance pointer, but `mem remember
-  // --source-ref <ref>` accepts an arbitrary user/agent-supplied string, so it must not be
-  // excluded outright. It's in GENERIC_ENTROPY_EXEMPT_FIELDS instead (see that comment): named
-  // SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy
-  // fallback, so the legitimate "<path>:<line>" false-positive is still avoided without leaving a
-  // prefix-less secret unscreened.
+  // sourceRef is scanned like any other field: for the `mem import --from-md` path it's a programmatically constructed "<resolved path>:<line>" provenance pointer, but `mem remember --source-ref <ref>` accepts an arbitrary user/agent-supplied string, so it must not be excluded outright. It's in GENERIC_ENTROPY_EXEMPT_FIELDS instead (see that comment): named SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy fallback, so the legitimate "<path>:<line>" false-positive is still avoided without leaving a prefix-less secret unscreened.
   refuseSecretsOrThrow(db, screenFactFields(input, allowlist), auditEvent, factId);
 }
 
-/**
- * The one place a screened write is refused: records `<auditEvent>_blocked_secret` (field and pattern
- * names only, never the matched value) and throws. Shared so every refusal leaves the same trail and
- * `SecretDetectedError` keeps a single message.
- */
+/** The one place a screened write is refused: records `<auditEvent>_blocked_secret` (field and pattern names only, never the matched value) and throws. Shared so every refusal leaves the same trail and `SecretDetectedError` keeps a single message. */
 function refuseSecretsOrThrow(
   db: Database.Database,
   matches: readonly SecretMatch[],
@@ -978,24 +693,8 @@ function refuseSecretsOrThrow(
   throw new SecretDetectedError(matches);
 }
 
-/**
- * Builds the shared, always-present part of a `NewFact` for either capture
- * mode, then lets each caller layer on its mode-specific fields (subject,
- * anchor, sourceRef, scopeRoot) -- kept as plain conditional assignment
- * (rather than spreading possibly-`undefined` values into the literal)
- * because `NewFact`'s optional fields are typed without an explicit
- * `| undefined`, and `exactOptionalPropertyTypes` (tsconfig.json) rejects
- * writing `undefined` into them.
- */
-/**
- * Validates a caller-supplied `capturedAt` and returns it in the canonical ISO form the column
- * stores, so a legal-but-differently-spelled timestamp (`2024-01-02`, an offset other than Z) does
- * not break the lexical comparability `captured_at` is documented to have (types.ts).
- *
- * A future timestamp is refused rather than clamped: it would win every contradiction-precedence
- * comparison and sit permanently at the top of any recency ordering, and silently rewriting the
- * value a caller asked for would hide that they got something other than what they requested.
- */
+/** Builds the shared, always-present part of a `NewFact` for either capture mode, then lets each caller layer on its mode-specific fields (subject, anchor, sourceRef, scopeRoot) -- kept as plain conditional assignment (rather than spreading possibly-`undefined` values into the literal) because `NewFact`'s optional fields are typed without an explicit `| undefined`, and `exactOptionalPropertyTypes` (tsconfig.json) rejects writing `undefined` into them. */
+/** Validates a caller-supplied `capturedAt` and returns it in the canonical ISO form the column stores, so a legal-but-differently-spelled timestamp (`2024-01-02`, an offset other than Z) does not break the lexical comparability `captured_at` is documented to have (types.ts). A future timestamp is refused rather than clamped: it would win every contradiction-precedence comparison and sit permanently at the top of any recency ordering, and silently rewriting the value a caller asked for would hide that they got something other than what they requested. */
 export function parseCapturedAtOrThrow(raw: string): string {
   const trimmed = raw.trim();
   const parsed = new Date(trimmed);
@@ -1010,13 +709,7 @@ export function parseCapturedAtOrThrow(raw: string): string {
   return parsed.toISOString();
 }
 
-/**
- * What a restatement carries onto the fact it reaffirms, and the audit phrase for each field it
- * actually changed. The user's latest statement wins: an anchor, source ref, or why on the
- * restatement replaces the stored one, and a field the restatement omits says nothing new and leaves
- * the stored value alone. Shared by both of `captureExplicit`'s reaffirm paths (a live fact, and a
- * pending one the restatement promotes) so they cannot disagree about which fields that covers.
- */
+/** What a restatement carries onto the fact it reaffirms, and the audit phrase for each field it actually changed. The user's latest statement wins: an anchor, source ref, or why on the restatement replaces the stored one, and a field the restatement omits says nothing new and leaves the stored value alone. Shared by both of `captureExplicit`'s reaffirm paths (a live fact, and a pending one the restatement promotes) so they cannot disagree about which fields that covers. */
 function restatementUpdates(newFact: NewFact, prior: Fact): { updates: RestatementUpdates; changed: string[] } {
   const updates: { anchor?: string; sourceRef?: string; why?: string } = {};
   const changed: string[] = [];
@@ -1061,12 +754,7 @@ function applyOptionalFields(
   if (input.why !== undefined) {
     target.why = input.why.trim();
   }
-  // Recorded for every scope, not just `path`/`project`: `retrieval.ts`'s `anchorRootFor` needs a
-  // capture-time root to evaluate a `scope="path"` fact's anchor against (its `scopeRoot` is the
-  // bound file, not a directory an anchor predicate can run under) and a `scope="global"` fact has
-  // no `scopeRoot` at all, yet its anchor -- if it has one -- still needs a root to mean anything.
-  // `scope="project"` already has `scopeRoot` for this, but recording it here too costs nothing and
-  // keeps the column meaning "the root this fact was captured under" uniformly across every scope.
+  // Recorded for every scope, not just `path`/`project`: `retrieval.ts`'s `anchorRootFor` needs a capture-time root to evaluate a `scope="path"` fact's anchor against (its `scopeRoot` is the bound file, not a directory an anchor predicate can run under) and a `scope="global"` fact has no `scopeRoot` at all, yet its anchor -- if it has one -- still needs a root to mean anything. `scope="project"` already has `scopeRoot` for this, but recording it here too costs nothing and keeps the column meaning "the root this fact was captured under" uniformly across every scope.
   target.captureRoot = resolve(root);
   if (scope !== "global") {
     const trimmedPath = input.path?.trim();
@@ -1086,28 +774,12 @@ function applyOptionalFields(
   }
 }
 
-/**
- * Repository identity to record as a fact's `scopeRepo` for the given scope/root, or null when
- * `scope` never carries one -- every scope but `project` (`path` facts bind to a file rather than
- * to a project, and `global` facts are in scope everywhere already) -- or when no identity is
- * available for `root`, the common case outside a repository with a remote (src/projectIdentity.ts).
- * Recorded alongside `scopeRoot`, never instead of it: the path stays the primary binding (and the
- * anchor evaluation root), and the identity only widens which roots can also claim the fact.
- *
- * Factored out of `applyOptionalFields` so `mem edit --scope` (src/cli.ts) can recompute
- * `scopeRepo` the same way capture does when a fact's scope binding changes, instead of leaving it
- * stuck at whatever identity it held under the fact's previous scope/root.
- */
+/** Repository identity to record as a fact's `scopeRepo` for the given scope/root, or null when `scope` never carries one -- every scope but `project` (`path` facts bind to a file rather than to a project, and `global` facts are in scope everywhere already) -- or when no identity is available for `root`, the common case outside a repository with a remote (src/projectIdentity.ts). Recorded alongside `scopeRoot`, never instead of it: the path stays the primary binding (and the anchor evaluation root), and the identity only widens which roots can also claim the fact. Factored out of `applyOptionalFields` so `mem edit --scope` (src/cli.ts) can recompute `scopeRepo` the same way capture does when a fact's scope binding changes, instead of leaving it stuck at whatever identity it held under the fact's previous scope/root. */
 export function resolveScopeRepo(scope: FactScope, root: string): string | null {
   return scope === "project" ? resolveProjectIdentity(root) : null;
 }
 
-/**
- * Inserts a fact, its capture audit row, and (when given) its one source excerpt atomically -- all
- * run inside a single `db.transaction()` (nesting `storageInsertFact`'s own transaction via
- * savepoint, the same pattern exportImport.ts's `importFromJson` uses) so a crash partway through can
- * never leave a fact with no audit entry, or a source row pointing at a fact that was rolled back.
- */
+/** Inserts a fact, its capture audit row, and (when given) its one source excerpt atomically -- all run inside a single `db.transaction()` (nesting `storageInsertFact`'s own transaction via savepoint, the same pattern exportImport.ts's `importFromJson` uses) so a crash partway through can never leave a fact with no audit entry, or a source row pointing at a fact that was rolled back. */
 function writeFact(
   db: Database.Database,
   newFact: NewFact,
@@ -1123,39 +795,11 @@ function writeFact(
     }
     return fact;
   });
-  // BEGIN IMMEDIATE: the inner `storageInsertFact` reads the epoch before writing, and once this
-  // outer transaction is open the inner one degrades to a savepoint -- so the outer variant is the
-  // one that decides whether the read-then-write pair is safe against a concurrent writer under WAL.
-  // See storage.insertFact for the full SQLITE_BUSY_SNAPSHOT rationale.
+  // BEGIN IMMEDIATE: the inner `storageInsertFact` reads the epoch before writing, and once this outer transaction is open the inner one degrades to a savepoint -- so the outer variant is the one that decides whether the read-then-write pair is safe against a concurrent writer under WAL. See storage.insertFact for the full SQLITE_BUSY_SNAPSHOT rationale.
   return tx.immediate();
 }
 
-/**
- * Records a repeat sighting of a `pending` fact: `mem scan-session`/`mem import --from-md` matched
- * a candidate's text to `factId`, already queued and awaiting `mem review --promote`, instead of
- * finding nothing and writing a second pending row. A restated preference is evidence a human
- * reviewing the queue should see, not noise to drop with a bare `continue` -- which is what both
- * callers did before this existed.
- *
- * Screens `raw` through `buildScreenedExcerpt` exactly like a first capture -- not optional here:
- * a sighting is still raw session/file material, the same secret surface a first capture has, and
- * "it's only a sighting" is not a reason to skip the check that content otherwise always gets.
- *
- * Returns `false`, writing nothing, in the two cases where under-counting is the safe direction:
- *  - `buildScreenedExcerpt` returns `null` (screened positive) -- there is no clean excerpt to
- *    write and, with no excerpt, no independent evidence to dedup a later real sighting against;
- *  - an identical excerpt is already stored for this fact. `sources` carries no locator column
- *    (`id, fact_id, excerpt, stored_at`) pointing back at which transcript position or file line
- *    produced it, so excerpt equality is the only key available to tell "the same statement, seen
- *    again by a second hook firing over the same transcript" (`mem scan-session` runs at both
- *    `Stop` and `PreCompact`) from "a genuine restatement" -- and a genuine restatement arrives
- *    with different surrounding context, so a different excerpt, every time.
- *
- * Never touches `status`: this function has no path that can promote, demote, or otherwise change
- * a fact's state, however many times it is called. That invariant -- a `pending` fact promotes only
- * through `mem review --promote`, never by time or repetition -- predates this function and nothing
- * here weakens it.
- */
+/** Records a repeat sighting of a `pending` fact: `mem scan-session`/`mem import --from-md` matched a candidate's text to `factId`, already queued and awaiting `mem review --promote`, instead of finding nothing and writing a second pending row. A restated preference is evidence a human reviewing the queue should see, not noise to drop with a bare `continue` -- which is what both callers did before this existed. Screens `raw` through `buildScreenedExcerpt` exactly like a first capture -- not optional here: a sighting is still raw session/file material, the same secret surface a first capture has, and "it's only a sighting" is not a reason to skip the check that content otherwise always gets. Returns `false`, writing nothing, in the two cases where under-counting is the safe direction: - `buildScreenedExcerpt` returns `null` (screened positive) -- there is no clean excerpt to write and, with no excerpt, no independent evidence to dedup a later real sighting against; - an identical excerpt is already stored for this fact. `sources` carries no locator column (`id, fact_id, excerpt, stored_at`) pointing back at which transcript position or file line produced it, so excerpt equality is the only key available to tell "the same statement, seen again by a second hook firing over the same transcript" (`mem scan-session` runs at both `Stop` and `PreCompact`) from "a genuine restatement" -- and a genuine restatement arrives with different surrounding context, so a different excerpt, every time. Never touches `status`: this function has no path that can promote, demote, or otherwise change a fact's state, however many times it is called. That invariant -- a `pending` fact promotes only through `mem review --promote`, never by time or repetition -- predates this function and nothing here weakens it. */
 export function recordSighting(db: Database.Database, factId: string, raw: string, root: string): boolean {
   const excerpt = buildScreenedExcerpt(raw, root);
   if (excerpt === null) {
@@ -1164,10 +808,7 @@ export function recordSighting(db: Database.Database, factId: string, raw: strin
   if (listSourcesForFact(db, factId).some((source) => source.excerpt === excerpt)) {
     return false;
   }
-  // Both writes are two separate columns on two separate rows describing the same event; a crash
-  // between them must not leave a source excerpt with no corresponding count, or vice versa.
-  // BEGIN IMMEDIATE, matching every other transaction in this module -- see storage.insertFact's
-  // SQLITE_BUSY_SNAPSHOT rationale for why a deferred transaction is the wrong default here too.
+  // Both writes are two separate columns on two separate rows describing the same event; a crash between them must not leave a source excerpt with no corresponding count, or vice versa. BEGIN IMMEDIATE, matching every other transaction in this module -- see storage.insertFact's SQLITE_BUSY_SNAPSHOT rationale for why a deferred transaction is the wrong default here too.
   const tx = db.transaction((): void => {
     insertSource(db, { factId, excerpt });
     incrementSightings(db, factId);
@@ -1176,12 +817,7 @@ export function recordSighting(db: Database.Database, factId: string, raw: strin
   return true;
 }
 
-/**
- * Explicit capture: the user (or an agent on the user's behalf) said
- * "remember X". Stored `active` immediately, `source_type: "user"` always
- * (there is no parameter to override either — explicit capture is
- * definitionally user-stated, maximal-trust input, design principle P1).
- */
+/** Explicit capture: the user (or an agent on the user's behalf) said "remember X". Stored `active` immediately, `source_type: "user"` always (there is no parameter to override either — explicit capture is definitionally user-stated, maximal-trust input, design principle P1). */
 export function captureExplicit(db: Database.Database, input: CaptureExplicitInput): CaptureResult {
   const { text, root } = validateCommonInput(input);
   screenInputOrThrow(db, input, root, "capture_explicit");
@@ -1197,24 +833,11 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
   };
   applyOptionalFields(newFact, input, scope, root);
 
-  // Saying the same thing again reaffirms it rather than duplicating it. Without this, a repeated
-  // preference wrote a second row while the first one's decay clock kept running -- so the facts a
-  // user cared enough to restate were precisely the ones drifting below the ground-truth floor,
-  // and `mem recall` showed the same sentence twice with two different confidences.
-  //
-  // Explicit capture only. `captureSuggested` deliberately does not reaffirm: its candidates come
-  // from file and transcript content, and letting derived text refresh a user-stated fact's clock
-  // would hand a `CLAUDE.md` the power to keep a fact alive that the user never restated.
-  // The lookup and the reaffirm-or-insert it decides between must be one atomic unit: read outside
-  // the transaction (as this used to do) let two concurrent `mem remember` of the same sentence both
-  // see "nothing to reaffirm" and both insert -- the exact duplicate reaffirm exists to prevent.
+  // Saying the same thing again reaffirms it rather than duplicating it. Without this, a repeated preference wrote a second row while the first one's decay clock kept running -- so the facts a user cared enough to restate were precisely the ones drifting below the ground-truth floor, and `mem recall` showed the same sentence twice with two different confidences. Explicit capture only. `captureSuggested` deliberately does not reaffirm: its candidates come from file and transcript content, and letting derived text refresh a user-stated fact's clock would hand a `CLAUDE.md` the power to keep a fact alive that the user never restated. The lookup and the reaffirm-or-insert it decides between must be one atomic unit: read outside the transaction (as this used to do) let two concurrent `mem remember` of the same sentence both see "nothing to reaffirm" and both insert -- the exact duplicate reaffirm exists to prevent.
   const tx = db.transaction((): CaptureResult => {
     const existing = findReaffirmableFact(db, newFact);
     if (existing !== undefined) {
-      // The user's latest statement wins: an anchor or source-ref carried on this restatement
-      // replaces whatever the existing row had, rather than being silently discarded (see
-      // reaffirmFact's doc comment). Omitted here means "say nothing new" -- the existing value,
-      // anchor included, is left untouched.
+      // The user's latest statement wins: an anchor or source-ref carried on this restatement replaces whatever the existing row had, rather than being silently discarded (see reaffirmFact's doc comment). Omitted here means "say nothing new" -- the existing value, anchor included, is left untouched.
       const restated = restatementUpdates(newFact, existing);
       const refreshed = reaffirmFact(db, existing.id, new Date(), restated.updates);
       if (refreshed === undefined) {
@@ -1229,15 +852,7 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
       return { fact: refreshed, reaffirmed: true };
     }
 
-    // No live fact to reaffirm -- but the same sentence may already be sitting in the review queue
-    // as one or more `pending` suggestions (`mem suggest`, or a JSON import, can file the identical
-    // sentence more than once; that non-dedup is a separate, deliberately untouched concern). Stating
-    // it explicitly answers the queue for this sentence, not just for one row of it: the
-    // earliest-suggested match is promoted to `active` -- the only place a `pending` fact turns
-    // `active` other than an explicit `mem review --promote`, since restating it *is* that explicit
-    // confirmation -- and every other matching pending duplicate is superseded through the same
-    // status machinery `mem review`/`mem consolidate` use, so each carries a proper `prior_status`,
-    // `status_changed_at`, and audit entry rather than being silently left stranded in the queue.
+    // No live fact to reaffirm -- but the same sentence may already be sitting in the review queue as one or more `pending` suggestions (`mem suggest`, or a JSON import, can file the identical sentence more than once; that non-dedup is a separate, deliberately untouched concern). Stating it explicitly answers the queue for this sentence, not just for one row of it: the earliest-suggested match is promoted to `active` -- the only place a `pending` fact turns `active` other than an explicit `mem review --promote`, since restating it *is* that explicit confirmation -- and every other matching pending duplicate is superseded through the same status machinery `mem review`/`mem consolidate` use, so each carries a proper `prior_status`, `status_changed_at`, and audit entry rather than being silently left stranded in the queue.
     const [primary, ...duplicates] = findReaffirmablePendingFacts(db, newFact);
     if (primary !== undefined) {
       const restated = restatementUpdates(newFact, primary);
@@ -1281,20 +896,11 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
 
     return { fact: writeFact(db, newFact, "capture_explicit", (f) => `stored active ${factNounPhrase(f.kind)} (scope=${f.scope})`) };
   });
-  // BEGIN IMMEDIATE, for the same reason as `writeFact`: this reads (`findReaffirmableFact`) before
-  // it writes, and once this outer transaction is open, the nested `writeFact` transaction it may
-  // call degrades to a savepoint -- so this outer invocation is the one that decides whether the
-  // read-then-write pair is safe against a concurrent writer under WAL.
+  // BEGIN IMMEDIATE, for the same reason as `writeFact`: this reads (`findReaffirmableFact`) before it writes, and once this outer transaction is open, the nested `writeFact` transaction it may call degrades to a savepoint -- so this outer invocation is the one that decides whether the read-then-write pair is safe against a concurrent writer under WAL.
   return tx.immediate();
 }
 
-/**
- * Suggested capture: a conservative extractor proposes a candidate fact.
- * Always stored `pending` — there is no parameter to request `active`, so
- * no caller (however it phrases the request) can make a suggested candidate
- * skip human confirmation (S9). `source_type` defaults to `"derived"`, the
- * more heavily quarantined option, when the caller does not specify it.
- */
+/** Suggested capture: a conservative extractor proposes a candidate fact. Always stored `pending` — there is no parameter to request `active`, so no caller (however it phrases the request) can make a suggested candidate skip human confirmation (S9). `source_type` defaults to `"derived"`, the more heavily quarantined option, when the caller does not specify it. */
 export function captureSuggested(db: Database.Database, input: CaptureSuggestedInput): CaptureResult {
   const { text, root } = validateCommonInput(input);
   screenInputOrThrow(db, input, root, "capture_suggested");
@@ -1314,8 +920,7 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
     kind: input.kind,
     scope,
     source_type: sourceType,
-    // Never active, never anything else: this is the single place a suggested fact's status is
-    // decided, and it is hardcoded so no caller input can reach "active" through this path.
+    // Never active, never anything else: this is the single place a suggested fact's status is decided, and it is hardcoded so no caller input can reach "active" through this path.
     status: "pending",
     confidence,
   };
@@ -1324,15 +929,7 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
   }
   applyOptionalFields(newFact, input, scope, root);
 
-  // The same restatement rule `mem scan-session`/`mem import --from-md` apply before ever reaching
-  // this function, reused here rather than re-derived, so `mem suggest <text>` called twice counts
-  // the repetition identically instead of under-counting it.
-  //
-  // Those callers draw two different boundaries, and this has to draw both. A bound match of *any*
-  // status suppresses the insert (`import.ts`'s `skipped_known`): filing a pending row for a
-  // sentence the store already holds as `active` queues a human decision that was already made,
-  // which is precisely the noise `mem review` exists to be free of. Only a `pending` match gets a
-  // sighting, because only a pending row has anything to record one against.
+  // The same restatement rule `mem scan-session`/`mem import --from-md` apply before ever reaching this function, reused here rather than re-derived, so `mem suggest <text>` called twice counts the repetition identically instead of under-counting it. Those callers draw two different boundaries, and this has to draw both. A bound match of *any* status suppresses the insert (`import.ts`'s `skipped_known`): filing a pending row for a sentence the store already holds as `active` queues a human decision that was already made, which is precisely the noise `mem review` exists to be free of. Only a `pending` match gets a sighting, because only a pending row has anything to record one against.
   const boundMatches = factsByTextHash(db, text).filter((fact) => isBoundToRoot(fact, root));
   const pendingMatch = boundMatches.find((fact) => fact.status === "pending");
   if (pendingMatch !== undefined) {

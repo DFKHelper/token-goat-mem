@@ -1,12 +1,4 @@
-/**
- * `mem reflect --hook-stdin` as the Claude Code Stop hook runs it: the built bundle, a real Stop
- * envelope piped on stdin.
- *
- * The contract a Stop hook has to honour is narrow. Blocking (`{"decision":"block"}` on stdout)
- * makes the agent keep working, so reflect may block only when it has something new to say --
- * suggestions this very run filed -- and must never block while `stop_hook_active` says the agent
- * is already continuing because of a Stop hook, or it loops. Every other outcome is silence.
- */
+/** `mem reflect --hook-stdin` as the Claude Code Stop hook runs it: the built bundle, a real Stop envelope piped on stdin. The contract a Stop hook has to honour is narrow. Blocking (`{"decision":"block"}` on stdout) makes the agent keep working, so reflect may block only when it has something new to say -- suggestions this very run filed -- and must never block while `stop_hook_active` says the agent is already continuing because of a Stop hook, or it loops. Every other outcome is silence. */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,8 +62,7 @@ describe("mem reflect --hook-stdin (built bundle, Stop envelope on stdin)", () =
   });
 
   it("stays silent on the next stop once the same statements were already filed", () => {
-    // The dedupe is the store itself: a restated sentence is a sighting of the existing pending
-    // fact, not a new one, so there is nothing new to block on and no extra state to keep.
+    // The dedupe is the store itself: a restated sentence is a sighting of the existing pending fact, not a new one, so there is nothing new to block on and no extra state to keep.
     writeTranscript(["Never commit generated files to the repository."]);
     expect(reflect(stopEnvelope()).stdout).not.toBe("");
     const again = reflect(stopEnvelope());

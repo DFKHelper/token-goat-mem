@@ -1,11 +1,4 @@
-/**
- * Drives one `mem` invocation through the real `run()` entry point (the one src/main.ts calls) and
- * captures what it wrote, for every in-process end-to-end test file.
- *
- * Shared rather than duplicated, and a plain module rather than a `.test.ts` one so importing it does
- * not re-register the importing file's tests. The out-of-process equivalent, for the shipped bundle,
- * lives in tests/bundle/.
- */
+/** Drives one `mem` invocation through the real `run()` entry point (the one src/main.ts calls) and captures what it wrote, for every in-process end-to-end test file. Shared rather than duplicated, and a plain module rather than a `.test.ts` one so importing it does not re-register the importing file's tests. The out-of-process equivalent, for the shipped bundle, lives in tests/bundle/. */
 import { vi } from "vitest";
 
 import { run } from "../../src/cli.js";
@@ -16,12 +9,7 @@ export interface CliResult {
   readonly exitCode: number | undefined;
 }
 
-/**
- * Runs one CLI invocation, capturing everything written to stdout/stderr instead of letting it hit
- * the real streams, and returning the resulting `process.exitCode`. Resets `process.exitCode` to
- * `undefined` immediately after each call so a command that intentionally exercises the error path
- * (exit code 1) never leaks into the exit code of the vitest process itself.
- */
+/** Runs one CLI invocation, capturing everything written to stdout/stderr instead of letting it hit the real streams, and returning the resulting `process.exitCode`. Resets `process.exitCode` to `undefined` immediately after each call so a command that intentionally exercises the error path (exit code 1) never leaks into the exit code of the vitest process itself. */
 export async function runCli(args: readonly string[]): Promise<CliResult> {
   let stdout = "";
   let stderr = "";

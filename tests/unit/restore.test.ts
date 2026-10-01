@@ -1,11 +1,4 @@
-/**
- * `restoreStore` (src/restore.ts): the swap that replaces the live store's rows with a validated,
- * migrated copy of a snapshot, inside one transaction on the live connection.
- *
- * The CLI-level behaviour is covered end to end in tests/backup.test.ts; these tests reach the race
- * that only a seam can reproduce -- another process writing between the pre-restore snapshot and the
- * swap -- and the refusals that must leave the live store untouched.
- */
+/** `restoreStore` (src/restore.ts): the swap that replaces the live store's rows with a validated, migrated copy of a snapshot, inside one transaction on the live connection. The CLI-level behaviour is covered end to end in tests/backup.test.ts; these tests reach the race that only a seam can reproduce -- another process writing between the pre-restore snapshot and the swap -- and the refusals that must leave the live store untouched. */
 import Database from "better-sqlite3";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

@@ -1,10 +1,4 @@
-/**
- * End-to-end tests for `mem review --reason <text>`.
- *
- * A review decision is the one moment a human explains why a withheld fact is kept or dropped; the
- * reason rides on that transition's audit row so `mem log` answers "why was this rejected?" later,
- * without a second fact to keep in sync. Driven through the real `run()` against a real database.
- */
+/** End-to-end tests for `mem review --reason <text>`. A review decision is the one moment a human explains why a withheld fact is kept or dropped; the reason rides on that transition's audit row so `mem log` answers "why was this rejected?" later, without a second fact to keep in sync. Driven through the real `run()` against a real database. */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

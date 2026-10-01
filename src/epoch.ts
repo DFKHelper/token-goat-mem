@@ -1,12 +1,4 @@
-/**
- * The write epoch's read and write primitives (design plan Section 4: "every write bumps it").
- *
- * Kept apart from src/storage.ts, which owns *when* the epoch moves (every fact write bumps it in the
- * same transaction), so that src/db.ts and src/backup.ts can read it while a connection is being
- * opened -- before migrations run -- without importing storage.ts, which itself imports db.ts.
- * Nothing outside storage.ts should call `writeEpoch`: an epoch moved without an accompanying write
- * no longer describes the store it stamps.
- */
+/** The write epoch's read and write primitives (design plan Section 4: "every write bumps it"). Kept apart from src/storage.ts, which owns *when* the epoch moves (every fact write bumps it in the same transaction), so that src/db.ts and src/backup.ts can read it while a connection is being opened -- before migrations run -- without importing storage.ts, which itself imports db.ts. Nothing outside storage.ts should call `writeEpoch`: an epoch moved without an accompanying write no longer describes the store it stamps. */
 
 import type Database from "better-sqlite3";
 

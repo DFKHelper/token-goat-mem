@@ -82,10 +82,7 @@ describe("detectContradictions", () => {
   });
 
   it("keeps identical subject+scope in different project roots independent (no cross-project contradiction)", () => {
-    // Regression: mem's store is shared across every project, so two project-scoped facts with the
-    // same subject but bound to *different* roots must not collide into one contradiction bucket --
-    // otherwise `mem review` / `mem epoch --gc` would persist a supersede transition, silently
-    // clobbering one project's fact because an unrelated project chose a different value.
+    // Regression: mem's store is shared across every project, so two project-scoped facts with the same subject but bound to *different* roots must not collide into one contradiction bucket -- otherwise `mem review` / `mem epoch --gc` would persist a supersede transition, silently clobbering one project's fact because an unrelated project chose a different value.
     const facts = [
       makeFact({ id: "proj-a", subject: "package-manager", value: "npm", scope: "project", scopeRoot: "/home/me/project-a" }),
       makeFact({ id: "proj-b", subject: "package-manager", value: "pnpm", scope: "project", scopeRoot: "/home/me/project-b" }),
@@ -98,11 +95,7 @@ describe("detectContradictions", () => {
   });
 
   it("resolves a conflict between two clones of the SAME repository (same scope_repo, different scope_root)", () => {
-    // Reproduces the reported defect: two clones/worktrees of one upstream repo share a scope_repo
-    // identity (src/projectIdentity.ts) but have different absolute scopeRoot paths. Recall already
-    // widens a project fact's binding to match on scope_repo (isBoundToRoot/isInScope), so both facts
-    // are served as current from either clone -- contradiction detection must key the same way or the
-    // correction captured in the second clone never supersedes the decision it corrects.
+    // Reproduces the reported defect: two clones/worktrees of one upstream repo share a scope_repo identity (src/projectIdentity.ts) but have different absolute scopeRoot paths. Recall already widens a project fact's binding to match on scope_repo (isBoundToRoot/isInScope), so both facts are served as current from either clone -- contradiction detection must key the same way or the correction captured in the second clone never supersedes the decision it corrects.
     const facts = [
       makeFact({
         id: "clone-a",
@@ -133,9 +126,7 @@ describe("detectContradictions", () => {
   });
 
   it("keeps two DIFFERENT repositories independent when they share neither root nor repo", () => {
-    // Mirror of "keeps identical subject+scope in different project roots independent" above, but
-    // for the scope_repo-keyed branch: two unrelated repositories, at different roots with
-    // different identities, must never collapse into one bucket.
+    // Mirror of "keeps identical subject+scope in different project roots independent" above, but for the scope_repo-keyed branch: two unrelated repositories, at different roots with different identities, must never collapse into one bucket.
     const facts = [
       makeFact({
         id: "repo-a",
@@ -162,13 +153,7 @@ describe("detectContradictions", () => {
   });
 
   it("resolves a conflict between a legacy fact (scope_repo NULL) and a newer one at the SAME root", () => {
-    // This is the primary, common-case regression a per-fact "scope_repo if present, else
-    // scope_root" key would introduce: scope_repo shipped after this fact shape already existed
-    // (or shipped before the project ever gained a remote), so every fact in an existing store has
-    // scope_repo NULL. A correction captured at the same root after scope_repo starts being written
-    // must still supersede the fact it corrects -- same normalized scope_root always shares a
-    // bucket, independent of scope_repo, per computeProjectIdentityGroups's non-negotiable
-    // invariant (src/contradiction.ts).
+    // This is the primary, common-case regression a per-fact "scope_repo if present, else scope_root" key would introduce: scope_repo shipped after this fact shape already existed (or shipped before the project ever gained a remote), so every fact in an existing store has scope_repo NULL. A correction captured at the same root after scope_repo starts being written must still supersede the fact it corrects -- same normalized scope_root always shares a bucket, independent of scope_repo, per computeProjectIdentityGroups's non-negotiable invariant (src/contradiction.ts).
     const facts = [
       makeFact({
         id: "legacy",
@@ -199,10 +184,7 @@ describe("detectContradictions", () => {
   });
 
   it("bridges two clones that share neither root nor repo directly, through a same-directory fact that has both", () => {
-    // Concrete case from computeProjectIdentityGroups's doc comment: X (root P, repo R) and Y (root
-    // P, repo null) share a root; X and Z (root Q, repo R) share a repo; Y and Z share neither
-    // directly. All three name one project and must resolve as a single three-way contradiction,
-    // bridged through X -- not two separate, unresolved pairs.
+    // Concrete case from computeProjectIdentityGroups's doc comment: X (root P, repo R) and Y (root P, repo null) share a root; X and Z (root Q, repo R) share a repo; Y and Z share neither directly. All three name one project and must resolve as a single three-way contradiction, bridged through X -- not two separate, unresolved pairs.
     const x = makeFact({
       id: "x",
       subject: "package-manager",
@@ -328,10 +310,7 @@ describe("detectContradictions", () => {
   });
 
   it("resolves rather than contests when tied-top-precedence facts agree with each other and only a lower-precedence fact disagrees", () => {
-    // Two independently-captured `user` facts tied in precedence (same provenance rank, same
-    // captured_at) both say the SAME value; a third, clearly lower-precedence `derived` fact says
-    // something different. There is no real ambiguity here -- the tied leaders agree with each
-    // other -- so the shared value should win outright and only the outranked fact is superseded.
+    // Two independently-captured `user` facts tied in precedence (same provenance rank, same captured_at) both say the SAME value; a third, clearly lower-precedence `derived` fact says something different. There is no real ambiguity here -- the tied leaders agree with each other -- so the shared value should win outright and only the outranked fact is superseded.
     const facts = [
       makeFact({
         id: "user-a",
@@ -391,9 +370,7 @@ describe("detectContradictions", () => {
     }
   });
 
-  // Regression: `contested` used to be excluded from detection, which made the status
-  // unfalsifiable -- nothing that could clear it could see it, so a fact stayed withheld from
-  // ground truth forever even after the contradiction that caused it was gone.
+  // Regression: `contested` used to be excluded from detection, which made the status unfalsifiable -- nothing that could clear it could see it, so a fact stayed withheld from ground truth forever even after the contradiction that caused it was gone.
   it("re-evaluates already-contested facts and emits nothing new while the contradiction still stands", () => {
     const facts = [
       makeFact({ id: "a", subject: "linter", value: "eslint", status: "contested" }),
@@ -561,11 +538,7 @@ describe("sameContradictionBucket", () => {
   });
 
   it("DOES bucket a legacy fact (no scope_repo) with a same-directory fact that has a scope_repo", () => {
-    // Non-negotiable: two facts at the same normalized scope_root always share a bucket, whatever
-    // their scope_repo. scope_repo is unreleased at the time of this fix -- every fact in every
-    // existing store has it NULL -- so treating "legacy, no scope_repo" as a rare edge case would in
-    // fact split the ordinary single-checkout case for the entire installed base. A prior version of
-    // this test asserted the opposite (false); that encoded exactly the regression this one pins.
+    // Non-negotiable: two facts at the same normalized scope_root always share a bucket, whatever their scope_repo. scope_repo is unreleased at the time of this fix -- every fact in every existing store has it NULL -- so treating "legacy, no scope_repo" as a rare edge case would in fact split the ordinary single-checkout case for the entire installed base. A prior version of this test asserted the opposite (false); that encoded exactly the regression this one pins.
     const legacy = makeFact({ id: "legacy", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: null });
     const newer = makeFact({ id: "newer", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: "github.com/acme/repo#." });
     const groups = computeContradictionBucketGroups([legacy, newer]);
@@ -582,10 +555,7 @@ describe("sameContradictionBucket", () => {
   });
 
   it("bridges a legacy fact to a different clone once a same-directory, repo-tagged fact is present in the population", () => {
-    // Same two facts as the "absent a bridging fact" case above, but this time the population also
-    // contains a third fact at legacy's own root that carries the shared scope_repo -- the exact
-    // bridge computeProjectIdentityGroups's doc comment describes. legacy and otherClone still share
-    // neither field directly, but both now resolve to the same connected component through bridge.
+    // Same two facts as the "absent a bridging fact" case above, but this time the population also contains a third fact at legacy's own root that carries the shared scope_repo -- the exact bridge computeProjectIdentityGroups's doc comment describes. legacy and otherClone still share neither field directly, but both now resolve to the same connected component through bridge.
     const legacy = makeFact({ id: "legacy", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: null });
     const bridge = makeFact({ id: "bridge", subject: "package-manager", scope: "project", scopeRoot: "/w/a", scopeRepo: "github.com/acme/repo#." });
     const otherClone = makeFact({ id: "other", subject: "package-manager", scope: "project", scopeRoot: "/w/b", scopeRepo: "github.com/acme/repo#." });

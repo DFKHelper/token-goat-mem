@@ -1,25 +1,4 @@
-/**
- * A run in which nothing succeeded must be distinguishable from one in which everything did.
- *
- * `src/cli.ts` states the exit-code half of this contract normatively: exit 0 is success, and
- * "nothing found" outcomes are successes rather than errors. That is a deliberate position and it
- * holds -- but it means the exit code deliberately carries *no* signal for an empty result, so the
- * entire burden of distinguishing "found nothing" from "found everything" falls on stdout. Where
- * stdout does not carry it either, the command is silent about having done nothing, which is the
- * same failure class as a seam that withholds facts while claiming to be complete.
- *
- * The sweep at the bottom of this file walks every registered command in that state. Two commands
- * failed it when it was first written, and their regressions are pinned individually above:
- *
- *   - `mem recall <query>` returned the entire store for a query that matched nothing, in output
- *     byte-identical to `mem recall` with no query at all. A query is a ranking input, not a
- *     filter -- BM25 orders the candidate set and never removes from it -- so the existing
- *     `results.length === 0` branch could not fire for a non-matching query, and the "no matching
- *     facts" outcome `src/cli.ts` documents was unreachable by that path.
- *   - `mem list --kind decision` printed "no facts stored" on a store that was not empty. The
- *     message is a claim about the whole store; a filter excluding everything is a different fact
- *     about the world, and reporting it as an empty store is simply false.
- */
+/** A run in which nothing succeeded must be distinguishable from one in which everything did. `src/cli.ts` states the exit-code half of this contract normatively: exit 0 is success, and "nothing found" outcomes are successes rather than errors. That is a deliberate position and it holds -- but it means the exit code deliberately carries *no* signal for an empty result, so the entire burden of distinguishing "found nothing" from "found everything" falls on stdout. Where stdout does not carry it either, the command is silent about having done nothing, which is the same failure class as a seam that withholds facts while claiming to be complete. The sweep at the bottom of this file walks every registered command in that state. Two commands failed it when it was first written, and their regressions are pinned individually above: - `mem recall <query>` returned the entire store for a query that matched nothing, in output byte-identical to `mem recall` with no query at all. A query is a ranking input, not a filter -- BM25 orders the candidate set and never removes from it -- so the existing `results.length === 0` branch could not fire for a non-matching query, and the "no matching facts" outcome `src/cli.ts` documents was unreachable by that path. - `mem list --kind decision` printed "no facts stored" on a store that was not empty. The message is a claim about the whole store; a filter excluding everything is a different fact about the world, and reporting it as an empty store is simply false. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -66,8 +45,7 @@ describe("recall reports a query that ranked nothing", () => {
     const nonsense = await runCli(["recall", "xyzzyplughquux", "--root", root]);
     const unqueried = await runCli(["recall", "--root", root]);
 
-    // This is the assertion the defect actually violated: before the fix these two were the same
-    // bytes, so no consumer -- human or otherwise -- could tell a failed query from no query.
+    // This is the assertion the defect actually violated: before the fix these two were the same bytes, so no consumer -- human or otherwise -- could tell a failed query from no query.
     expect(nonsense.stdout).not.toBe(unqueried.stdout);
   });
 
@@ -91,11 +69,7 @@ describe("recall reports a query that ranked nothing", () => {
     await seed();
     const result = await runCli(["recall", "xyzzyplughquux", "--hint-format", "--root", root]);
 
-    // `--hint-format` now honors a query the same way plain `recall` does (see cli.test.ts's
-    // hint-format query coverage): BM25 orders the candidate set and never removes from it, and
-    // TGMEM/2's grammar has no room for a human-facing "matched nothing" note (its lines are
-    // machine-parsed, not prose) -- so a query that matches no fact text still surfaces every
-    // fact, tied at score 0, exactly as a bare `--hint-format` would.
+    // `--hint-format` now honors a query the same way plain `recall` does (see cli.test.ts's hint-format query coverage): BM25 orders the candidate set and never removes from it, and TGMEM/2's grammar has no room for a human-facing "matched nothing" note (its lines are machine-parsed, not prose) -- so a query that matches no fact text still surfaces every fact, tied at score 0, exactly as a bare `--hint-format` would.
     expect(result.exitCode).toBe(0);
     expect(result.stdout.startsWith("TGMEM/2\n")).toBe(true);
     expect(result.stdout).toContain("uses vitest for tests");
@@ -120,12 +94,7 @@ describe("list distinguishes an empty store from an empty filter result", () => 
   });
 });
 
-/**
- * The sweep proper. Each case is a command run in a state where nothing succeeded, paired with the
- * signal that makes that state legible. Commands are grouped by which half of the contract carries
- * the signal, because the two halves fail differently: an exit-code command that regresses to 0
- * starts reporting failure as success, while a stdout command that loses its line goes silent.
- */
+/** The sweep proper. Each case is a command run in a state where nothing succeeded, paired with the signal that makes that state legible. Commands are grouped by which half of the contract carries the signal, because the two halves fail differently: an exit-code command that regresses to 0 starts reporting failure as success, while a stdout command that loses its line goes silent. */
 describe("no-signal sweep: every command distinguishes total failure from total success", () => {
   const MISSING = "00000000-0000-4000-8000-000000000000";
 
@@ -133,9 +102,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
   const failsLoudly: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["remember (invalid kind)", ["remember", "x", "--kind", "bogus"]],
     ["remember (secret refused)", ["remember", "api_key = sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", "--kind", "fact"]],
-    // `mem embed` with no endpoint configured. The sweep's own state -- nothing succeeded -- is the
-    // only state this command has without one, and exiting 0 in silence would look like a backfill
-    // that found nothing to do.
+    // `mem embed` with no endpoint configured. The sweep's own state -- nothing succeeded -- is the only state this command has without one, and exiting 0 in silence would look like a backfill that found nothing to do.
     ["embed (embeddings not configured)", ["embed"]],
     ["show (no such id)", ["show", MISSING]],
     ["forget (no such id)", ["forget", MISSING]],
@@ -155,8 +122,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     });
   }
 
-  // Commands whose "nothing found" state is a success by contract: stdout must carry the signal,
-  // because the exit code deliberately does not.
+  // Commands whose "nothing found" state is a success by contract: stdout must carry the signal, because the exit code deliberately does not.
   interface StdoutCase {
     readonly label: string;
     /** `list` and `review` take no `--root`, so each case carries its own exact argv. */
@@ -171,8 +137,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     { label: "review (nothing pending)", args: () => ["review"], seeded: true, signal: /nothing needs review/u },
     { label: "recall (filter excludes all)", args: () => ["recall", "--kind", "decision", "--root", root], seeded: true, signal: /no matching facts/u },
     { label: "recall (query ranks nothing)", args: () => ["recall", "xyzzyplughquux", "--root", root], seeded: true, signal: /query matched no fact text/u },
-    // A backfill over a store with nothing left to extract is the command's own "nothing
-    // succeeded" state, and exit 0 in silence would be indistinguishable from a run that worked.
+    // A backfill over a store with nothing left to extract is the command's own "nothing succeeded" state, and exit 0 in silence would be indistinguishable from a run that worked.
     { label: "facets (nothing to backfill)", args: () => ["facets"], seeded: false, signal: /no facts need facet extraction/u },
     { label: "facets (no entities extracted)", args: () => ["facets", "--list-entities"], seeded: false, signal: /no entities extracted yet/u },
   ];
@@ -191,11 +156,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     });
   }
 
-  // Parse errors are the one "nothing succeeded" state Commander owns rather than mem. They were
-  // reaching the wrong exit code in-process because `exitOverride()` is per-Command and was set
-  // only on the root, so a subcommand threw a plain Error instead of a coded CommanderError and
-  // was classified as an internal bug. Production masked it: Commander's own `process.exit(1)`
-  // produced the right code before mem's handler ran, at the cost of exiting mid-flush.
+  // Parse errors are the one "nothing succeeded" state Commander owns rather than mem. They were reaching the wrong exit code in-process because `exitOverride()` is per-Command and was set only on the root, so a subcommand threw a plain Error instead of a coded CommanderError and was classified as an internal bug. Production masked it: Commander's own `process.exit(1)` produced the right code before mem's handler ran, at the cost of exiting mid-flush.
   const parseErrors: ReadonlyArray<readonly [string, readonly string[]]> = [
     ["unknown option on a subcommand", ["list", "--bogus"]],
     ["option belonging to a different subcommand", ["list", "--root", "/tmp"]],
@@ -211,8 +172,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
   }
 
   it("still exits 0 for help and version, on the root and on a subcommand alike", async () => {
-    // exitOverride turns Commander's help/version into thrown control flow, so extending it to
-    // subcommands could plausibly have turned `mem list --help` into a failure. It does not.
+    // exitOverride turns Commander's help/version into thrown control flow, so extending it to subcommands could plausibly have turned `mem list --help` into a failure. It does not.
     for (const args of [["--help"], ["--version"], ["list", "--help"], ["recall", "--help"]]) {
       const result = await runCli(args);
       expect(result.exitCode).toBe(0);
@@ -228,9 +188,7 @@ describe("no-signal sweep: every command distinguishes total failure from total 
     const { writeFileSync } = await import("node:fs");
     writeFileSync(path, exported.stdout, "utf8");
 
-    // Re-importing an existing export is the canonical all-rejected run: every candidate is a
-    // duplicate. Exit 0 is correct per the contract (nothing failed; the import was idempotent),
-    // which is exactly why stdout has to carry the fact that no rows were written.
+    // Re-importing an existing export is the canonical all-rejected run: every candidate is a duplicate. Exit 0 is correct per the contract (nothing failed; the import was idempotent), which is exactly why stdout has to carry the fact that no rows were written.
     const reimported = await runCli(["import", "--from-json", path, "--root", root]);
 
     expect(reimported.exitCode).toBe(0);

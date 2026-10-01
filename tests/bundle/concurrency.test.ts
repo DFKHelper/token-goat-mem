@@ -1,23 +1,4 @@
-/**
- * Several real `mem` processes writing and reading one store at the same time.
- *
- * mem has no daemon: every command is a short-lived process that opens the SQLite file, does its
- * work under `BEGIN IMMEDIATE`, and exits. Nothing in-process can exercise the part of that design
- * that matters most -- separate OS processes contending for one WAL database -- because a single
- * `Database` handle serialises everything by construction. The in-process race tests
- * (tests/capture.test.ts, tests/exportImport.test.ts) pin one interleave deterministically; this
- * one lets the scheduler pick thousands of them and checks the invariants that must hold under all.
- *
- * The workers start against a store that does not exist yet, so schema creation and migrations race
- * too: the first-open path is where a concurrent `CREATE`/`ALTER` would surface as a SQLITE_BUSY or
- * a "duplicate column" failure.
- *
- * Invariants asserted:
- *  - every command exits 0, and nothing on stderr names SQLITE_BUSY or a locked database;
- *  - no write is lost: each worker's unique facts are all present exactly once;
- *  - the reaffirm path stays atomic across processes: one sentence stated by every worker, several
- *    times, is one row, and every statement of it after the first is audited as a reaffirm.
- */
+/** Several real `mem` processes writing and reading one store at the same time. mem has no daemon: every command is a short-lived process that opens the SQLite file, does its work under `BEGIN IMMEDIATE`, and exits. Nothing in-process can exercise the part of that design that matters most -- separate OS processes contending for one WAL database -- because a single `Database` handle serialises everything by construction. The in-process race tests (tests/capture.test.ts, tests/exportImport.test.ts) pin one interleave deterministically; this one lets the scheduler pick thousands of them and checks the invariants that must hold under all. The workers start against a store that does not exist yet, so schema creation and migrations race too: the first-open path is where a concurrent `CREATE`/`ALTER` would surface as a SQLITE_BUSY or a "duplicate column" failure. Invariants asserted: - every command exits 0, and nothing on stderr names SQLITE_BUSY or a locked database; - no write is lost: each worker's unique facts are all present exactly once; - the reaffirm path stays atomic across processes: one sentence stated by every worker, several times, is one row, and every statement of it after the first is audited as a reaffirm. */
 
 import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";

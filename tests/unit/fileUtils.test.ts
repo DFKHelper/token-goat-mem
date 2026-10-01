@@ -1,10 +1,4 @@
-/**
- * `src/fileUtils.ts` is the shared boundary where a raw filesystem errno becomes a message a user
- * reads, and it had no test file of its own -- its branches were only ever reached incidentally,
- * through whichever importer happened to hit a missing file. That leaves the messages themselves
- * unpinned: the module's whole job is that `mem import --from-md /nope` says "file not found" and
- * not "ENOENT: no such file or directory, open '/nope'", and nothing asserted it.
- */
+/** `src/fileUtils.ts` is the shared boundary where a raw filesystem errno becomes a message a user reads, and it had no test file of its own -- its branches were only ever reached incidentally, through whichever importer happened to hit a missing file. That leaves the messages themselves unpinned: the module's whole job is that `mem import --from-md /nope` says "file not found" and not "ENOENT: no such file or directory, open '/nope'", and nothing asserted it. */
 import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -66,8 +60,7 @@ describe("readFileWithErrorMapping", () => {
   });
 
   it("falls back to the underlying message for an error with no recognised code", () => {
-    // A NUL in the path is rejected by node before any syscall, so the thrown error carries
-    // ERR_INVALID_ARG_VALUE rather than an errno -- the branch no filesystem state can produce.
+    // A NUL in the path is rejected by node before any syscall, so the thrown error carries ERR_INVALID_ARG_VALUE rather than an errno -- the branch no filesystem state can produce.
     expect(() => readFileWithErrorMapping(join(dir, "a\u0000b"), TestError)).toThrow(TestError);
     expect(() => readFileWithErrorMapping(join(dir, "a\u0000b"), TestError)).toThrow(/^cannot read file: /u);
   });

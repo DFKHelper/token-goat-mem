@@ -1,12 +1,4 @@
-/**
- * The runtime every `mem` command action shares: the exit-code contract, the error-to-exit-code
- * mapping, the `guard` wrapper, and the handful of helpers each command needs to reach the store.
- *
- * It lives apart from cli.ts so a command can be registered from its own module (timeline.ts,
- * reflect.ts, ...) without importing cli.ts, which would make the dependency circular. cli.ts
- * re-exports the public part (`EXIT_*`, `UsageError`) so its own importers are unaffected. The
- * normative exit-code contract is documented in cli.ts's module doc comment.
- */
+/** The runtime every `mem` command action shares: the exit-code contract, the error-to-exit-code mapping, the `guard` wrapper, and the handful of helpers each command needs to reach the store. It lives apart from cli.ts so a command can be registered from its own module (timeline.ts, reflect.ts, ...) without importing cli.ts, which would make the dependency circular. cli.ts re-exports the public part (`EXIT_*`, `UsageError`) so its own importers are unaffected. The normative exit-code contract is documented in cli.ts's module doc comment. */
 
 import { readFileSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
@@ -27,11 +19,7 @@ export const EXIT_SUCCESS = 0;
 export const EXIT_USER_ERROR = 1;
 export const EXIT_INTERNAL_ERROR = 2;
 
-/**
- * A user/usage error: the invocation itself was wrong (bad option value, unknown fact id, invalid
- * state transition, ...). Maps to `EXIT_USER_ERROR`; anything else thrown from a command action is
- * treated as internal (`EXIT_INTERNAL_ERROR`).
- */
+/** A user/usage error: the invocation itself was wrong (bad option value, unknown fact id, invalid state transition, ...). Maps to `EXIT_USER_ERROR`; anything else thrown from a command action is treated as internal (`EXIT_INTERNAL_ERROR`). */
 export class UsageError extends Error {
   constructor(message: string) {
     super(message);
@@ -49,10 +37,7 @@ export function exitCodeForError(error: unknown): number {
     error instanceof WiringUserUnsupportedError ||
     error instanceof JsonImportError ||
     error instanceof MarkdownImportError ||
-    // A misconfigured dream endpoint is a typo in an environment variable the user set, so it is
-    // theirs to fix and exits 1. `DreamRequestError` deliberately stays at 2: an endpoint that is
-    // down, slow, or answering with nonsense is neither a bad invocation nor a bug in mem, and 2 is
-    // the closer of the two codes this CLI has -- a caller should retry it, not re-read its flags.
+    // A misconfigured dream endpoint is a typo in an environment variable the user set, so it is theirs to fix and exits 1. `DreamRequestError` deliberately stays at 2: an endpoint that is down, slow, or answering with nonsense is neither a bad invocation nor a bug in mem, and 2 is the closer of the two codes this CLI has -- a caller should retry it, not re-read its flags.
     error instanceof DreamConfigError
     ? EXIT_USER_ERROR
     : EXIT_INTERNAL_ERROR;
@@ -98,13 +83,7 @@ export function resolveRoot(explicit: string | undefined): string {
   return resolvePath(explicit ?? process.cwd());
 }
 
-/**
- * Throws a `UsageError` when a transcript the caller named with `--transcript` cannot be read. Only
- * for an explicit path: there a missing file is a typo in *this* invocation, whereas a hook's
- * envelope path is background convenience that must fail open (`scanTranscript` swallows the same
- * error for it, deliberately). Checked up front so "nothing found" can never stand in for a scan
- * that never ran.
- */
+/** Throws a `UsageError` when a transcript the caller named with `--transcript` cannot be read. Only for an explicit path: there a missing file is a typo in *this* invocation, whereas a hook's envelope path is background convenience that must fail open (`scanTranscript` swallows the same error for it, deliberately). Checked up front so "nothing found" can never stand in for a scan that never ran. */
 export function assertTranscriptReadable(command: string, transcriptPath: string): void {
   try {
     readFileSync(transcriptPath, "utf8");
@@ -113,14 +92,7 @@ export function assertTranscriptReadable(command: string, transcriptPath: string
   }
 }
 
-/**
- * Resolves a fact id argument (full id or git-style short prefix, `resolveFactIdOrPrefix` in
- * storage.ts) to the fact it names, or throws the same `UsageError` shape every id-accepting command
- * already used before short prefixes existed (`no such fact: <id>`), plus a new ambiguity error
- * listing every matching id. Every id-accepting command (`show`, `forget`, `pin`, `edit`, `review
- * --promote`, `review --reject`, `log --fact`) should use the resolved fact's own `.id` for any
- * subsequent write/lookup, never the raw user-typed argument.
- */
+/** Resolves a fact id argument (full id or git-style short prefix, `resolveFactIdOrPrefix` in storage.ts) to the fact it names, or throws the same `UsageError` shape every id-accepting command already used before short prefixes existed (`no such fact: <id>`), plus a new ambiguity error listing every matching id. Every id-accepting command (`show`, `forget`, `pin`, `edit`, `review --promote`, `review --reject`, `log --fact`) should use the resolved fact's own `.id` for any subsequent write/lookup, never the raw user-typed argument. */
 export function resolveIdArgOrThrow(db: Database.Database, id: string): Fact {
   const resolution = resolveFactIdOrPrefix(db, id);
   if (resolution.kind === "not-found") {
@@ -147,16 +119,7 @@ export function ambiguousIdError(id: string, matches: readonly string[]): UsageE
 /** Rows a listing command (`list`, `recall`, `log`) prints when `--limit` is not given. */
 export const DEFAULT_LIST_LIMIT = 20;
 
-/**
- * Characters of a fact id a listing (`recall`, `log`) prints ahead of each line.
- *
- * Recall's footer says `mem show <id> for detail`, but the 0.2.2 change that replaced the per-line
- * CTA with one shared footer also removed the only place an id was ever printed -- leaving the
- * footer instructing the user to use something the command never showed them. Eight hex characters
- * is the same git-style prefix `resolveFactIdOrPrefix` already resolves, so the printed handle can
- * be pasted straight back into `show`, `forget`, `edit`, or `log --fact`; an ambiguous prefix is
- * reported with its candidates rather than silently resolving to the wrong fact.
- */
+/** Characters of a fact id a listing (`recall`, `log`) prints ahead of each line. Recall's footer says `mem show <id> for detail`, but the 0.2.2 change that replaced the per-line CTA with one shared footer also removed the only place an id was ever printed -- leaving the footer instructing the user to use something the command never showed them. Eight hex characters is the same git-style prefix `resolveFactIdOrPrefix` already resolves, so the printed handle can be pasted straight back into `show`, `forget`, `edit`, or `log --fact`; an ambiguous prefix is reported with its candidates rather than silently resolving to the wrong fact. */
 export const SHORT_ID_LENGTH = 8;
 
 export function shortFactId(id: string): string {
@@ -180,12 +143,7 @@ export function writeOutput(json: boolean | undefined, data: unknown, plain: () 
 
 // ─────────────────────────────────────────────────────────────────────────── Flag validation ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Rejects a numeric flag below 1. Numeric flags are parsed with `parseInt`, so a non-numeric
- * argument arrives as `NaN` and is rejected here too; `undefined` -- the flag was not given -- passes.
- * `expected` completes the message ("--limit must be a positive integer") so each flag keeps the
- * wording its users and tests already see.
- */
+/** Rejects a numeric flag below 1. Numeric flags are parsed with `parseInt`, so a non-numeric argument arrives as `NaN` and is rejected here too; `undefined` -- the flag was not given -- passes. `expected` completes the message ("--limit must be a positive integer") so each flag keeps the wording its users and tests already see. */
 export function assertPositiveFlag(flag: string, value: number | undefined, expected = "a positive integer"): void {
   if (value !== undefined && (!Number.isFinite(value) || value < 1)) {
     throw new UsageError(`${flag} must be ${expected}`);

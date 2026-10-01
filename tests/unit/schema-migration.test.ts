@@ -1,21 +1,4 @@
-/**
- * Guards the two ways an edit to a `CREATE TABLE IF NOT EXISTS` block can break every database
- * already on disk while leaving a suite that starts from an empty file entirely green.
- *
- * `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists. So a schema change
- * reaches an existing user's store only through `migrations.ts`'s `runMigrations` steps, and only
- * for the changes `ALTER TABLE` is capable of expressing:
- *
- *  - a new column IS expressible, but only if someone remembers to add the matching ALTER;
- *  - a widened `CHECK (... IN (...))` enum is NOT expressible at all, because a CHECK is frozen
- *    into the table at creation time and `ALTER TABLE` cannot amend one.
- *
- * Neither failure is visible to a test that creates its database from scratch: `CREATE TABLE` does
- * all the work there, and the migration path is never taken. These tests therefore build their
- * fixtures by *removing* schema from a live database rather than by hand-writing an old one -- a
- * hand-written copy of an old schema drifts from the real one and starts agreeing with whatever
- * migration it was written alongside, which is precisely how this class of defect survives review.
- */
+/** Guards the two ways an edit to a `CREATE TABLE IF NOT EXISTS` block can break every database already on disk while leaving a suite that starts from an empty file entirely green. `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists. So a schema change reaches an existing user's store only through `migrations.ts`'s `runMigrations` steps, and only for the changes `ALTER TABLE` is capable of expressing: - a new column IS expressible, but only if someone remembers to add the matching ALTER; - a widened `CHECK (... IN (...))` enum is NOT expressible at all, because a CHECK is frozen into the table at creation time and `ALTER TABLE` cannot amend one. Neither failure is visible to a test that creates its database from scratch: `CREATE TABLE` does all the work there, and the migration path is never taken. These tests therefore build their fixtures by *removing* schema from a live database rather than by hand-writing an old one -- a hand-written copy of an old schema drifts from the real one and starts agreeing with whatever migration it was written alongside, which is precisely how this class of defect survives review. */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -33,9 +16,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  // Deliberately not retried. This delete failing is a signal, not noise: it was how `openStorage`'s
-  // leaked handle first surfaced, since a store this file could not delete was a store still held
-  // open by a failed open. Swallowing that with retries would have hidden the defect.
+  // Deliberately not retried. This delete failing is a signal, not noise: it was how `openStorage`'s leaked handle first surfaced, since a store this file could not delete was a store still held open by a failed open. Swallowing that with retries would have hidden the defect.
   rmSync(workDir, { recursive: true, force: true });
 });
 
@@ -59,19 +40,7 @@ function userTables(db: Db): string[] {
   ).map((row) => row.name);
 }
 
-/**
- * Every column with no `applyIdempotentAlter` behind it, so a database whose table predates the
- * column would never receive it. Derived by measurement, not from reading the schema.
- *
- * All of these are safe today for one of two reasons, and a name joining the list is only safe if
- * one of them still applies:
- *
- *  - the column has existed since the first published release, so no database in the wild lacks it; or
- *  - its whole table is younger than the column, and `CREATE TABLE IF NOT EXISTS` creates a *missing*
- *    table complete. (`fact_terms` arrived in 3ad56d0, after v0.1.0, and is created whole.)
- *
- * A column added to a table that already shipped satisfies neither, and needs an ALTER.
- */
+/** Every column with no `applyIdempotentAlter` behind it, so a database whose table predates the column would never receive it. Derived by measurement, not from reading the schema. All of these are safe today for one of two reasons, and a name joining the list is only safe if one of them still applies: - the column has existed since the first published release, so no database in the wild lacks it; or - its whole table is younger than the column, and `CREATE TABLE IF NOT EXISTS` creates a *missing* table complete. (`fact_terms` arrived in 3ad56d0, after v0.1.0, and is created whole.) A column added to a table that already shipped satisfies neither, and needs an ALTER. */
 const COLUMNS_WITHOUT_A_MIGRATION: readonly string[] = [
   "anchor_cache.verdict",
   "anchor_cache.verified_at",
@@ -108,28 +77,11 @@ const COLUMNS_WITHOUT_A_MIGRATION: readonly string[] = [
   "sources.stored_at",
 ];
 
-/**
- * Drops `table.column` from a throwaway store, reopens it through the real open path, and reports
- * whether the column came back.
- *
- * Dropping a column is the faithful way to manufacture "a database from before this column existed":
- * it leaves every other artefact of a real store intact -- other tables, indexes, constraints, the
- * seeded epoch row -- where a hand-written fixture would have to reproduce all of them correctly.
- *
- * `null` means SQLite refused the drop (primary key, or backing an index), so the column cannot be
- * tested this way. Callers assert on which columns those are rather than ignoring them.
- *
- * A reopen that throws counts as `false`, and is the worse half of this failure class rather than a
- * separate one: `openDb` writes to `meta.value` unconditionally, so a database missing a column the
- * open path itself touches does not merely answer queries wrong, it cannot be opened at all.
- */
+/** Drops `table.column` from a throwaway store, reopens it through the real open path, and reports whether the column came back. Dropping a column is the faithful way to manufacture "a database from before this column existed": it leaves every other artefact of a real store intact -- other tables, indexes, constraints, the seeded epoch row -- where a hand-written fixture would have to reproduce all of them correctly. `null` means SQLite refused the drop (primary key, or backing an index), so the column cannot be tested this way. Callers assert on which columns those are rather than ignoring them. A reopen that throws counts as `false`, and is the worse half of this failure class rather than a separate one: `openDb` writes to `meta.value` unconditionally, so a database missing a column the open path itself touches does not merely answer queries wrong, it cannot be opened at all. */
 function survivesReopenWithoutColumn(table: string, column: string): boolean | null {
   const { db, path } = freshStore();
   try {
-    // SQLite refuses to drop an indexed column, which would leave most of the schema untestable.
-    // Dropping the table's indexes first is faithful rather than a dodge: `CREATE INDEX IF NOT
-    // EXISTS` runs on every open, so a real database is where indexes come from in the first place,
-    // and rebuilding one over a missing column fails exactly the way the missing column should.
+    // SQLite refuses to drop an indexed column, which would leave most of the schema untestable. Dropping the table's indexes first is faithful rather than a dodge: `CREATE INDEX IF NOT EXISTS` runs on every open, so a real database is where indexes come from in the first place, and rebuilding one over a missing column fails exactly the way the missing column should.
     for (const { name } of db
       .prepare<[string], { name: string }>(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL"
@@ -138,12 +90,7 @@ function survivesReopenWithoutColumn(table: string, column: string): boolean | n
       db.exec(`DROP INDEX ${name}`);
     }
     db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
-    // `freshStore()` already ran every migration, so `user_version` sits at the latest version and
-    // migrations.ts's `runMigrations` would otherwise see nothing pending on reopen and skip every
-    // step -- including the one that would restore `column`. Resetting it to `0` here is what makes
-    // this fixture a faithful "database that predates this column" rather than "a database with a
-    // column missing that nothing will ever look at again": every real pre-phase-1 database reads
-    // `user_version = 0` too, since nothing set it before this phase existed.
+    // `freshStore()` already ran every migration, so `user_version` sits at the latest version and migrations.ts's `runMigrations` would otherwise see nothing pending on reopen and skip every step -- including the one that would restore `column`. Resetting it to `0` here is what makes this fixture a faithful "database that predates this column" rather than "a database with a column missing that nothing will ever look at again": every real pre-phase-1 database reads `user_version = 0` too, since nothing set it before this phase existed.
     db.pragma("user_version = 0");
   } catch {
     return null;
@@ -173,8 +120,7 @@ describe("opening a database that predates a schema change", () => {
     );
     db.close();
 
-    // One measurement, two assertions: the partition is a single fact about the schema, and
-    // re-deriving it per assertion would double 30-odd database builds for nothing.
+    // One measurement, two assertions: the partition is a single fact about the schema, and re-deriving it per assertion would double 30-odd database builds for nothing.
     const outcomes = plan.map((entry) => ({ ...entry, kept: survivesReopenWithoutColumn(entry.table, entry.column) }));
     const pick = (kept: boolean | null): string[] =>
       outcomes
@@ -182,13 +128,9 @@ describe("opening a database that predates a schema change", () => {
         .map((entry) => entry.name)
         .sort();
 
-    // Every name here is a column an existing user's store never receives. Adding a column to a
-    // CREATE TABLE that already shipped puts it in this list and breaks that store: give it a
-    // migration step in `migrations.ts` instead of widening the constant, which is pinned so it
-    // cannot be used to wave a real gap through.
+    // Every name here is a column an existing user's store never receives. Adding a column to a CREATE TABLE that already shipped puts it in this list and breaks that store: give it a migration step in `migrations.ts` instead of widening the constant, which is pinned so it cannot be used to wave a real gap through.
     expect(pick(false)).toEqual([...COLUMNS_WITHOUT_A_MIGRATION]);
-    // The fixture's blind spot, kept empty on purpose: SQLite refuses DROP COLUMN on a PRIMARY KEY
-    // or UNIQUE column, and a column that lands here is silently unguarded by the assertion above.
+    // The fixture's blind spot, kept empty on purpose: SQLite refuses DROP COLUMN on a PRIMARY KEY or UNIQUE column, and a column that lands here is silently unguarded by the assertion above.
     expect(pick(null)).toEqual([]);
   });
 
@@ -196,17 +138,14 @@ describe("opening a database that predates a schema change", () => {
     const { db, path } = freshStore();
     db.exec("DROP TABLE fact_terms");
     db.exec("DELETE FROM meta");
-    // See the comment in `survivesReopenWithoutColumn`: without this, `user_version` still reads
-    // the latest version from `freshStore()`'s own migration run, and `runMigrations` would see
-    // nothing pending on reopen -- masking exactly the loss this test manufactures.
+    // See the comment in `survivesReopenWithoutColumn`: without this, `user_version` still reads the latest version from `freshStore()`'s own migration run, and `runMigrations` would see nothing pending on reopen -- masking exactly the loss this test manufactures.
     db.pragma("user_version = 0");
     db.close();
 
     const reopened = openStorage(path);
     try {
       expect(userTables(reopened)).toContain("fact_terms");
-      // `openDb` seeds the epoch and `ensureStorageSchema` re-seeds it; a store that lost the row
-      // must not come back with a NULL epoch that every `epoch > n` comparison then mis-answers.
+      // `openDb` seeds the epoch and `ensureStorageSchema` re-seeds it; a store that lost the row must not come back with a NULL epoch that every `epoch > n` comparison then mis-answers.
       expect(reopened.prepare("SELECT value FROM meta WHERE key = 'epoch'").get()).toEqual({ value: "0" });
     } finally {
       reopened.close();
@@ -214,9 +153,7 @@ describe("opening a database that predates a schema change", () => {
   });
 
   it("opens and inserts/reads facts.capture_root on a store that predates the column", () => {
-    // A store built before `capture_root TEXT` existed on `facts` -- the generic column-by-column
-    // check above already proves this survives reopen; this test additionally proves the reopened
-    // store can actually insert and read a fact through it, not just carry the column.
+    // A store built before `capture_root TEXT` existed on `facts` -- the generic column-by-column check above already proves this survives reopen; this test additionally proves the reopened store can actually insert and read a fact through it, not just carry the column.
     const { db, path } = freshStore();
     db.exec("ALTER TABLE facts DROP COLUMN capture_root");
     // See the comment in `survivesReopenWithoutColumn`.
@@ -242,14 +179,7 @@ describe("opening a database that predates a schema change", () => {
   });
 });
 
-/**
- * The enum values frozen into every database ever created by mem.
- *
- * `ALTER TABLE` cannot amend a CHECK constraint, so widening any of these in the schema reaches new
- * databases only; existing ones keep rejecting the new value with `CHECK constraint failed`. Adding
- * a value therefore requires a table rebuild (create, copy, drop, rename) in `ensureStorageSchema`,
- * and this list moves only once that rebuild exists.
- */
+/** The enum values frozen into every database ever created by mem. `ALTER TABLE` cannot amend a CHECK constraint, so widening any of these in the schema reaches new databases only; existing ones keep rejecting the new value with `CHECK constraint failed`. Adding a value therefore requires a table rebuild (create, copy, drop, rename) in `ensureStorageSchema`, and this list moves only once that rebuild exists. */
 const FROZEN_ENUMS: Readonly<Record<string, readonly string[]>> = {
   kind: ["preference", "decision", "fact", "correction"],
   scope: ["global", "project", "path"],
@@ -273,8 +203,7 @@ describe("CHECK constraints are frozen once a database exists", () => {
   it("still declares exactly the enum values every existing database was built with", () => {
     const { db } = freshStore();
     try {
-      // Fails the moment someone widens an enum in FACTS_SCHEMA. That edit is not wrong in itself --
-      // it is wrong *without* a rebuild migration, which is what this failure is here to demand.
+      // Fails the moment someone widens an enum in FACTS_SCHEMA. That edit is not wrong in itself -- it is wrong *without* a rebuild migration, which is what this failure is here to demand.
       expect(enumsOf(db)).toEqual(FROZEN_ENUMS);
     } finally {
       db.close();
@@ -283,8 +212,7 @@ describe("CHECK constraints are frozen once a database exists", () => {
 
   it("rejects a value the constraint predates, proving the freeze is real", () => {
     const { db, path } = freshStore();
-    // A store built when `status` allowed one fewer value: the honest way to show that reopening it
-    // does not, and cannot, widen the constraint.
+    // A store built when `status` allowed one fewer value: the honest way to show that reopening it does not, and cannot, widen the constraint.
     db.exec(`
       DROP TABLE facts;
       CREATE TABLE facts (

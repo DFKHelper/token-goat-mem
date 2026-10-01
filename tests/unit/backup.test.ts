@@ -1,11 +1,4 @@
-/**
- * The automatic snapshot every connection open takes of an existing store (src/backup.ts, called
- * from src/db.ts's `openDb`): where snapshots land, when one is taken or skipped, what is kept, and
- * that a failure to take one never costs the caller its database.
- *
- * Snapshot age is read from the file name, not the file's mtime, so a test ages a snapshot by
- * renaming it rather than by waiting a day.
- */
+/** The automatic snapshot every connection open takes of an existing store (src/backup.ts, called from src/db.ts's `openDb`): where snapshots land, when one is taken or skipped, what is kept, and that a failure to take one never costs the caller its database. Snapshot age is read from the file name, not the file's mtime, so a test ages a snapshot by renaming it rather than by waiting a day. */
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -276,8 +269,7 @@ describe("snapshot hygiene", () => {
     writeFacts(2);
     const db = openStorage(dbPath, { autoSnapshot: false });
     try {
-      // A temp table shadows main's `meta` for an unqualified read but is never copied by VACUUM INTO:
-      // the same disagreement a write landing between the read and the copy would cause.
+      // A temp table shadows main's `meta` for an unqualified read but is never copied by VACUUM INTO: the same disagreement a write landing between the read and the copy would cause.
       db.exec("CREATE TEMP TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
       db.prepare("INSERT INTO temp.meta (key, value) VALUES ('epoch', '999')").run();
       const snapshot = takeSnapshot(db, backupDir, "manual");

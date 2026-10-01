@@ -1,45 +1,4 @@
-/**
- * The token-goat integration seam (design plan Section 4).
- *
- * A one-directional, pull-based, pure-CLI contract. This module never
- * imports token-goat and never reads its state -- it only *shapes CLI
- * output* for a caller like token-goat to consume via `mem recall
- * --hint-format`. Context flows in only through the explicit function
- * arguments a caller chooses to pass (`root`, `contextFiles`), never by
- * reaching into another tool's files.
- *
- * The correctness gate itself (freshness re-validation, contradiction
- * re-check, two-gate trust classification, self-caveating display strings)
- * is owned by retrieval.ts (`retrieve()`) -- this module does not
- * re-implement it. What this module owns, specific to the hint-format
- * contract, is:
- *   - resolving which facts are in scope for the caller's `root` /
- *     `contextFiles` (retrieval.ts's `scope` filter is a single exact-match
- *     value; it has no notion of "which project/path does this root bind
- *     to", so pre-filtering the candidate pool by that binding before
- *     handing it to `retrieve()` happens here);
- *   - per-kind recall caps (design plan P6: preferences/corrections
- *     recalled aggressively, decisions/facts precision-biased) -- a
- *     seam-specific output-shaping policy, not a retrieval-ranking concern;
- *   - the versioned `TGMEM/<n>` wire format;
- *   - the self-imposed soft time budget and truncate-on-overrun behavior.
- *
- * Pre-filtering by root/contextFiles before calling `retrieve()` also keeps
- * contradiction detection correctly scoped: `FactScope` is a 3-value enum
- * ("global"/"project"/"path"), not root-aware by itself, so two facts with
- * the same `subject` + `scope="project"` but bound to *different* project
- * roots would otherwise look like the same contradiction bucket. Since this
- * module only ever passes `retrieve()` the facts already bound to the
- * caller's root/context-files, a same-subject fact from an unrelated
- * project is never in the candidate pool at all.
- *
- * Every public entry point here is safe to call with zero setup and MUST
- * NOT throw: any internal failure (missing DB, corrupt row, retrieval
- * exception, malformed home directory, etc.) resolves to an empty,
- * well-formed result so a caller's fail-open path never has to special-case
- * a thrown exception (design plan review S2/S3; CLAUDE.md "Fail-open if
- * binary missing, timeout, or parse error").
- */
+/** The token-goat integration seam (design plan Section 4). A one-directional, pull-based, pure-CLI contract. This module never imports token-goat and never reads its state -- it only *shapes CLI output* for a caller like token-goat to consume via `mem recall --hint-format`. Context flows in only through the explicit function arguments a caller chooses to pass (`root`, `contextFiles`), never by reaching into another tool's files. The correctness gate itself (freshness re-validation, contradiction re-check, two-gate trust classification, self-caveating display strings) is owned by retrieval.ts (`retrieve()`) -- this module does not re-implement it. What this module owns, specific to the hint-format contract, is: - resolving which facts are in scope for the caller's `root` / `contextFiles` (retrieval.ts's `scope` filter is a single exact-match value; it has no notion of "which project/path does this root bind to", so pre-filtering the candidate pool by that binding before handing it to `retrieve()` happens here); - per-kind recall caps (design plan P6: preferences/corrections recalled aggressively, decisions/facts precision-biased) -- a seam-specific output-shaping policy, not a retrieval-ranking concern; - the versioned `TGMEM/<n>` wire format; - the self-imposed soft time budget and truncate-on-overrun behavior. Pre-filtering by root/contextFiles before calling `retrieve()` also keeps contradiction detection correctly scoped: `FactScope` is a 3-value enum ("global"/"project"/"path"), not root-aware by itself, so two facts with the same `subject` + `scope="project"` but bound to *different* project roots would otherwise look like the same contradiction bucket. Since this module only ever passes `retrieve()` the facts already bound to the caller's root/context-files, a same-subject fact from an unrelated project is never in the candidate pool at all. Every public entry point here is safe to call with zero setup and MUST NOT throw: any internal failure (missing DB, corrupt row, retrieval exception, malformed home directory, etc.) resolves to an empty, well-formed result so a caller's fail-open path never has to special-case a thrown exception (design plan review S2/S3; CLAUDE.md "Fail-open if binary missing, timeout, or parse error"). */
 
 import { resolve as resolvePath, sep } from "node:path";
 import type Database from "better-sqlite3";
@@ -67,85 +26,7 @@ import { identityMatches } from "./projectIdentity.js";
 import { anchorRootsFor, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
 
-/**
- * TGMEM wire-format grammar (normative for this producer; design plan Section 4).
- *
- * A `mem recall --hint-format` response is a UTF-8 text stream of LF-terminated
- * lines (ABNF, RFC 5234 core rules):
- *
- *   response      = header LF *( fact-line LF ) [ footer-line LF ]   ; footer-line is TGMEM/2+ only
- *   header        = "TGMEM/" version [ SEP delta-flag ]   ; version = 1*DIGIT
- *   delta-flag    = "delta=1"               ; present only on a response the caller
- *                                           ; explicitly requested with `--delta`
- *   fact-line     = tag SEP fresh-field SEP id-field SEP display-field
- *   tag           = "pref" / "dec" / "fact" / "corr"
- *   SEP           = 2%x20                   ; exactly two ASCII spaces
- *   fresh-field   = "fresh=" verdict
- *   verdict       = "affirmed" / "unverified" / "contradicted"
- *   id-field      = "id=" 1*VCHAR           ; the fact id (a UUID); never contains whitespace
- *   display-field = "display=" json-string  ; an RFC 8259 string literal produced by
- *                                           ; JSON.stringify: double-quoted, with all inner
- *                                           ; quotes/backslashes/control characters escaped,
- *                                           ; so it can never contain a raw LF or a bare `"`
- *
- * Consumer parsing rules (token-goat or any other consumer):
- * - An unknown/greater header version, missing binary, timeout, or total parse
- *   failure is treated as "no hints" -- fail-open to no-memory (Section 4).
- * - An individual line not matching the grammar is dropped (and may be
- *   logged), never guessed at.
- * - Field order is fixed. A consumer MAY parse a fact-line with the regex
- *   `^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$`
- *   and `JSON.parse` the final capture group to recover `display`.
- * - The decoded `display` string MUST be surfaced verbatim: the trust caveat is
- *   part of the payload, not something the consumer reconstructs (review S3).
- * - `delta=1` on the header marks a response that deliberately omits facts the
- *   same session id was already sent *and* that do not match the current query
- *   (a fact matching the query is re-sent regardless). It appears only when the caller passed
- *   `--delta` with a session id: a consumer that did not ask for a delta never
- *   receives one, because a partial block is otherwise byte-indistinguishable
- *   from a complete one. Consumers parsing the header MAY match it with
- *   `^TGMEM\/(\d+)(?: {2}delta=1)?$`.
- *
- * Version policy: any change to line shape, field order, the separator, or the
- * escaping of `display` -- and any addition to the closed `tag`/`verdict` sets,
- * since consumers validate against them -- bumps the integer version. Consumers
- * treat versions they don't know as "no hints".
- *
- * `footer-text` is the one part explicitly outside that set, along with the
- * condition under which a footer-line appears at all. It is prose for a reader,
- * a consumer is told not to parse it, and bumping the version to reword a
- * sentence would cost every consumer *all* hints -- unknown version means no
- * hints -- to protect a line nobody is allowed to depend on.
- *
- * TGMEM/1 (superseded default, still fully supported -- see `protocolVersion`
- * below): every fact-line's `display` carries its own trailing
- * `" — <follow-up command>"` CTA (e.g. `— mem show <id>`, `— verify; mem show
- * <id>`, `— resolve via mem review`). No footer-line.
- *
- * TGMEM/2 (current default): this bumped because of two additive-but-
- * grammar-changing facts -- `display` no longer carries a per-line CTA
- * (bare caveated fact text only), and a response now ends with at most one
- * `footer-line` summarizing the available follow-up commands once, instead of
- * repeating one on every line:
- *
- *   footer-line   = "footer" SEP footer-text
- *   footer-text   = clause *("; " clause)
- *
- * A footer-line is emitted when the response has anything to follow up on:
- * at least one fact-line, results the caps did not send, or results withheld
- * from ground truth. An empty response over an empty review queue emits none.
- * `footer-text` is prose assembled from those counts -- informational text,
- * not something to `JSON.parse`, and deliberately outside the version-bump
- * set above: its wording and the condition under which it appears are both
- * free to change, because no consumer can parse it without violating that
- * contract. What is pinned is that a footer-line, when present, is last.
- *
- * The counts are there because their absence is unfalsifiable from the wire.
- * A capped payload is byte-indistinguishable from a complete one, and a
- * response with no fact-lines is byte-indistinguishable from a project with
- * no memory -- even when a review queue is filling every session behind it.
- * See `footerLineFor` for the two measured cases.
- */
+/** TGMEM wire-format grammar (normative for this producer; design plan Section 4). A `mem recall --hint-format` response is a UTF-8 text stream of LF-terminated lines (ABNF, RFC 5234 core rules): response      = header LF *( fact-line LF ) [ footer-line LF ]   ; footer-line is TGMEM/2+ only header        = "TGMEM/" version [ SEP delta-flag ]   ; version = 1*DIGIT delta-flag    = "delta=1"               ; present only on a response the caller ; explicitly requested with `--delta` fact-line     = tag SEP fresh-field SEP id-field SEP display-field tag           = "pref" / "dec" / "fact" / "corr" SEP           = 2%x20                   ; exactly two ASCII spaces fresh-field   = "fresh=" verdict verdict       = "affirmed" / "unverified" / "contradicted" id-field      = "id=" 1*VCHAR           ; the fact id (a UUID); never contains whitespace display-field = "display=" json-string  ; an RFC 8259 string literal produced by ; JSON.stringify: double-quoted, with all inner ; quotes/backslashes/control characters escaped, ; so it can never contain a raw LF or a bare `"` Consumer parsing rules (token-goat or any other consumer): - An unknown/greater header version, missing binary, timeout, or total parse failure is treated as "no hints" -- fail-open to no-memory (Section 4). - An individual line not matching the grammar is dropped (and may be logged), never guessed at. - Field order is fixed. A consumer MAY parse a fact-line with the regex `^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$` and `JSON.parse` the final capture group to recover `display`. - The decoded `display` string MUST be surfaced verbatim: the trust caveat is part of the payload, not something the consumer reconstructs (review S3). - `delta=1` on the header marks a response that deliberately omits facts the same session id was already sent *and* that do not match the current query (a fact matching the query is re-sent regardless). It appears only when the caller passed `--delta` with a session id: a consumer that did not ask for a delta never receives one, because a partial block is otherwise byte-indistinguishable from a complete one. Consumers parsing the header MAY match it with `^TGMEM\/(\d+)(?: {2}delta=1)?$`. Version policy: any change to line shape, field order, the separator, or the escaping of `display` -- and any addition to the closed `tag`/`verdict` sets, since consumers validate against them -- bumps the integer version. Consumers treat versions they don't know as "no hints". `footer-text` is the one part explicitly outside that set, along with the condition under which a footer-line appears at all. It is prose for a reader, a consumer is told not to parse it, and bumping the version to reword a sentence would cost every consumer *all* hints -- unknown version means no hints -- to protect a line nobody is allowed to depend on. TGMEM/1 (superseded default, still fully supported -- see `protocolVersion` below): every fact-line's `display` carries its own trailing `" — <follow-up command>"` CTA (e.g. `— mem show <id>`, `— verify; mem show <id>`, `— resolve via mem review`). No footer-line. TGMEM/2 (current default): this bumped because of two additive-but- grammar-changing facts -- `display` no longer carries a per-line CTA (bare caveated fact text only), and a response now ends with at most one `footer-line` summarizing the available follow-up commands once, instead of repeating one on every line: footer-line   = "footer" SEP footer-text footer-text   = clause *("; " clause) A footer-line is emitted when the response has anything to follow up on: at least one fact-line, results the caps did not send, or results withheld from ground truth. An empty response over an empty review queue emits none. `footer-text` is prose assembled from those counts -- informational text, not something to `JSON.parse`, and deliberately outside the version-bump set above: its wording and the condition under which it appears are both free to change, because no consumer can parse it without violating that contract. What is pinned is that a footer-line, when present, is last. The counts are there because their absence is unfalsifiable from the wire. A capped payload is byte-indistinguishable from a complete one, and a response with no fact-lines is byte-indistinguishable from a project with no memory -- even when a review queue is filling every session behind it. See `footerLineFor` for the two measured cases. */
 export const TGMEM_PROTOCOL_VERSION = 2;
 
 /** Header line every hint-format response starts with, for the default protocol version. */
@@ -154,65 +35,23 @@ export const TGMEM_HEADER = `TGMEM/${TGMEM_PROTOCOL_VERSION}`;
 /** Literal prefix of every footer-line, including its `SEP`. */
 const FOOTER_PREFIX = "footer  ";
 
-/**
- * The clause naming how to inspect a fact-line. Exported because plain recall prints the same
- * sentence (src/cli.ts) and the two surfaces were separately-maintained copies of one string.
- */
+/** The clause naming how to inspect a fact-line. Exported because plain recall prints the same sentence (src/cli.ts) and the two surfaces were separately-maintained copies of one string. */
 export const FOLLOW_UP_SHOW_DETAIL = "mem show <id> for detail";
 
 /** The clause naming how to resolve facts held back from ground truth. Shared with plain recall for the same reason. */
 export const FOLLOW_UP_REVIEW = "mem review to resolve contested/pending";
 
-/**
- * The footer-line for a response that has fact-lines and nothing else to disclose.
- *
- * Equal to `footerLineFor({ facts: 1, cut: 0, withheld: 0 })` -- pinned by a test so the constant and
- * the composer cannot drift.
- */
+/** The footer-line for a response that has fact-lines and nothing else to disclose. Equal to `footerLineFor({ facts: 1, cut: 0, withheld: 0 })` -- pinned by a test so the constant and the composer cannot drift. */
 export const TGMEM_FOOTER_LINE = `${FOOTER_PREFIX}${FOLLOW_UP_SHOW_DETAIL}`;
 
-/**
- * Composes the footer-line, or `undefined` when the response has nothing to say.
- *
- * Two failures this replaces, both measured against the built bundle:
- *
- *  1. **The review CTA was unconditional.** Every response carrying a fact-line advertised
- *     `mem review to resolve contested/pending`, including the overwhelmingly common case of a store
- *     with neither. A permanent CTA is not a signal -- a consumer that sees it on every call learns
- *     to ignore it, so it was loudest exactly where it meant nothing and indistinguishable from
- *     itself where it mattered.
- *  2. **What was held back was never disclosed.** Six matching decisions emitted four lines and this
- *     footer, with nothing saying two were cut; a store with three pending and nothing active
- *     emitted a bare `TGMEM/2` -- byte-identical to a project with no memory at all. That second
- *     shape is the steady state wherever `mem init` wired the `Stop` hook, since the hook fills the
- *     review queue every session and this is the only surface that runs unprompted.
- *
- * So the counts travel with the payload, and the footer now appears whenever there is something to
- * report -- including with zero fact-lines, which is the only way case 2 can be told from silence.
- * An empty response with an empty queue still emits no footer: nothing withheld, nothing to follow up.
- */
+/** Composes the footer-line, or `undefined` when the response has nothing to say. Two failures this replaces, both measured against the built bundle: 1. **The review CTA was unconditional.** Every response carrying a fact-line advertised `mem review to resolve contested/pending`, including the overwhelmingly common case of a store with neither. A permanent CTA is not a signal -- a consumer that sees it on every call learns to ignore it, so it was loudest exactly where it meant nothing and indistinguishable from itself where it mattered. 2. **What was held back was never disclosed.** Six matching decisions emitted four lines and this footer, with nothing saying two were cut; a store with three pending and nothing active emitted a bare `TGMEM/2` -- byte-identical to a project with no memory at all. That second shape is the steady state wherever `mem init` wired the `Stop` hook, since the hook fills the review queue every session and this is the only surface that runs unprompted. So the counts travel with the payload, and the footer now appears whenever there is something to report -- including with zero fact-lines, which is the only way case 2 can be told from silence. An empty response with an empty queue still emits no footer: nothing withheld, nothing to follow up. */
 function footerLineFor(counts: {
   readonly facts: number;
   readonly cut: number;
   readonly withheld: number;
-  /**
-   * Ready-to-run `mem used ...` invocation, when this response is logged under a session id and
-   * actually emitted at least one fact-line -- see `usefulnessInvocation`. Threaded through as a
-   * pre-built clause, not a session id and a fact list, because the caller (`buildHintFormatUnsafe`)
-   * already knows whether `recordSurfaced` will write a row and this function has no business
-   * re-deriving that.
-   */
+  /** Ready-to-run `mem used ...` invocation, when this response is logged under a session id and actually emitted at least one fact-line -- see `usefulnessInvocation`. Threaded through as a pre-built clause, not a session id and a fact list, because the caller (`buildHintFormatUnsafe`) already knows whether `recordSurfaced` will write a row and this function has no business re-deriving that. */
   readonly usefulness?: string;
-  /**
-   * True when this response carries a non-empty query that matched nothing -- no lexical hit, no
-   * embedding or usefulness signal either -- so every fact-line it does carry is filler the caps
-   * swept in by recency, not an answer to the query. Deliberately not derived from `matchedQuery`
-   * at this layer: that field is read off the pre-fusion BM25 map alone (`retrieve`, src/
-   * retrieval.ts), so it reads `false` on every result of a query genuinely answered by embedding
-   * signal, and asserting "nothing matched" there would be false. `retrieve`'s own `zeroSignal` --
-   * threaded out as `RetrieveOutcome.zeroSignal` -- is the only field that actually says "there was
-   * no signal to match against at all", which is what this clause needs to stay true.
-   */
+  /** True when this response carries a non-empty query that matched nothing -- no lexical hit, no embedding or usefulness signal either -- so every fact-line it does carry is filler the caps swept in by recency, not an answer to the query. Deliberately not derived from `matchedQuery` at this layer: that field is read off the pre-fusion BM25 map alone (`retrieve`, src/ retrieval.ts), so it reads `false` on every result of a query genuinely answered by embedding signal, and asserting "nothing matched" there would be false. `retrieve`'s own `zeroSignal` -- threaded out as `RetrieveOutcome.zeroSignal` -- is the only field that actually says "there was no signal to match against at all", which is what this clause needs to stay true. */
   readonly noQuerySignal?: boolean;
 }): string | undefined {
   const clauses: string[] = [];
@@ -234,16 +73,7 @@ function footerLineFor(counts: {
   return clauses.length > 0 ? `${FOOTER_PREFIX}${clauses.join("; ")}` : undefined;
 }
 
-/**
- * Builds the `mem used ...` clause naming the session this response logs under and the fact ids it
- * actually emitted, so the agent has something to copy rather than an id it was never shown a
- * session for.
- *
- * `footer-text` is documented free prose outside the version-bump set (see the wire-grammar doc
- * comment above `TGMEM_PROTOCOL_VERSION`) precisely so a clause like this can be added without
- * bumping the version and orphaning every consumer that hasn't upgraded -- an unknown header
- * version fails open to no hints at all, which would cost every fact-line to add one footer clause.
- */
+/** Builds the `mem used ...` clause naming the session this response logs under and the fact ids it actually emitted, so the agent has something to copy rather than an id it was never shown a session for. `footer-text` is documented free prose outside the version-bump set (see the wire-grammar doc comment above `TGMEM_PROTOCOL_VERSION`) precisely so a clause like this can be added without bumping the version and orphaning every consumer that hasn't upgraded -- an unknown header version fails open to no hints at all, which would cost every fact-line to add one footer clause. */
 function usefulnessInvocation(sessionId: string, factIds: readonly string[]): string {
   return `mem used ${factIds.join(" ")} --session-id ${sessionId} to mark what helped`;
 }
@@ -252,86 +82,28 @@ function tgmemHeaderFor(protocolVersion: number, delta = false): string {
   return delta ? `TGMEM/${protocolVersion}  delta=1` : `TGMEM/${protocolVersion}`;
 }
 
-/**
- * Self-imposed soft time budget (ms) for a hint-format retrieval (design
- * plan Section 4: the token-goat side applies its own ~150ms hard timeout
- * around the whole subprocess call; this is mem's internal budget for the
- * work it does, so it degrades gracefully well before that outer timeout
- * would fire). Once exceeded, this module returns an empty hint set rather
- * than trusting an unbounded result set — "do not hang".
- *
- * It returns *empty* rather than a smaller slice because there is nowhere in
- * TGMEM/2 to say "this is partial". The grammar below is closed: an off-grammar
- * line is dropped by a conforming consumer, and adding one bumps the version,
- * at which point consumers that have not upgraded fail open to no hints at all.
- * So a reduced slice is indistinguishable on the wire from a complete one, and
- * a consumer told to surface `display` verbatim would present 2 of 12 facts as
- * though they were all of them -- the exact opposite of the self-caveating
- * guarantee this seam is documented to provide. An empty set is already this
- * module's shape for "I could not deliver" (see the catch in `buildHintFormat`),
- * and the consumer's documented fail-open path already handles it correctly.
- */
+/** Self-imposed soft time budget (ms) for a hint-format retrieval (design plan Section 4: the token-goat side applies its own ~150ms hard timeout around the whole subprocess call; this is mem's internal budget for the work it does, so it degrades gracefully well before that outer timeout would fire). Once exceeded, this module returns an empty hint set rather than trusting an unbounded result set — "do not hang". It returns *empty* rather than a smaller slice because there is nowhere in TGMEM/2 to say "this is partial". The grammar below is closed: an off-grammar line is dropped by a conforming consumer, and adding one bumps the version, at which point consumers that have not upgraded fail open to no hints at all. So a reduced slice is indistinguishable on the wire from a complete one, and a consumer told to surface `display` verbatim would present 2 of 12 facts as though they were all of them -- the exact opposite of the self-caveating guarantee this seam is documented to provide. An empty set is already this module's shape for "I could not deliver" (see the catch in `buildHintFormat`), and the consumer's documented fail-open path already handles it correctly. */
 const RETRIEVAL_BUDGET_MS = 150;
 
 /** Minimum budget handed to `retrieve()`'s own anchor-evaluation deadline, even if most of the soft budget is already spent. */
 const MIN_ANCHOR_BUDGET_MS = 20;
 
-/**
- * Fraction of the *remaining* soft budget an embedding round trip may spend, and the floor below
- * which it is not attempted at all.
- *
- * The soft budget is a promise to token-goat, and blowing it returns an empty hint set -- so a slow
- * endpoint must degrade this path to BM25 well before it costs the whole response, not after. A
- * share of what is left (rather than the flat `DEFAULT_EMBEDDING_TIMEOUT_MS` the CLI uses) is what
- * makes that automatic: the later in the budget the request would start, the less of it the request
- * is allowed to take, and under `MIN_EMBEDDING_BUDGET_MS` there is no longer enough time for a round
- * trip to be worth attempting. Anchors, gating, and formatting all still have to happen afterwards.
- */
+/** Fraction of the *remaining* soft budget an embedding round trip may spend, and the floor below which it is not attempted at all. The soft budget is a promise to token-goat, and blowing it returns an empty hint set -- so a slow endpoint must degrade this path to BM25 well before it costs the whole response, not after. A share of what is left (rather than the flat `DEFAULT_EMBEDDING_TIMEOUT_MS` the CLI uses) is what makes that automatic: the later in the budget the request would start, the less of it the request is allowed to take, and under `MIN_EMBEDDING_BUDGET_MS` there is no longer enough time for a round trip to be worth attempting. Anchors, gating, and formatting all still have to happen afterwards. */
 const EMBEDDING_BUDGET_SHARE = 0.4;
 const MIN_EMBEDDING_BUDGET_MS = 20;
 
-/**
- * Kinds recalled aggressively (design plan P6): a miss lets the agent
- * silently fall back to a wrong invented default (e.g. "uses npm" three
- * months after a switch to pnpm), so these get a larger cap than
- * historical, precision-biased kinds.
- */
+/** Kinds recalled aggressively (design plan P6): a miss lets the agent silently fall back to a wrong invented default (e.g. "uses npm" three months after a switch to pnpm), so these get a larger cap than historical, precision-biased kinds. */
 const AGGRESSIVE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["preference", "correction"]);
 const AGGRESSIVE_CAP = 8;
 const PRECISION_CAP = 4;
 
-/**
- * Minimum number of ranked results before the elbow (see {@link applyElbowCutoff}) is allowed to
- * fire at all. Below this, a "largest drop" is not a signal -- with two or three results there is
- * always exactly one biggest gap, and letting the elbow act on it would truncate almost every short
- * list to its first entry, which is the "fires on noise" failure mode the elbow exists to avoid.
- */
+/** Minimum number of ranked results before the elbow (see {@link applyElbowCutoff}) is allowed to fire at all. Below this, a "largest drop" is not a signal -- with two or three results there is always exactly one biggest gap, and letting the elbow act on it would truncate almost every short list to its first entry, which is the "fires on noise" failure mode the elbow exists to avoid. */
 const ELBOW_MIN_RESULTS = 4;
 
-/**
- * Minimum *relative* drop between two consecutive ranked scores for the elbow to treat it as the
- * signal boundary rather than ordinary score noise. Relative, not absolute: the list this runs over
- * is sorted on `retrieve()`'s fused score, whose scale has no fixed unit (raw BM25 alone, or an RRF
- * value once an embedding/usefulness list joins it) -- a fixed absolute threshold tuned for one
- * scale would misfire on the other. 0.4 was picked so a flat or near-flat distribution (the common
- * case: a query whose terms appear identically across near-duplicate facts) never crosses it, while
- * a fact that clearly stops matching still does.
- */
+/** Minimum *relative* drop between two consecutive ranked scores for the elbow to treat it as the signal boundary rather than ordinary score noise. Relative, not absolute: the list this runs over is sorted on `retrieve()`'s fused score, whose scale has no fixed unit (raw BM25 alone, or an RRF value once an embedding/usefulness list joins it) -- a fixed absolute threshold tuned for one scale would misfire on the other. 0.4 was picked so a flat or near-flat distribution (the common case: a query whose terms appear identically across near-duplicate facts) never crosses it, while a fact that clearly stops matching still does. */
 const ELBOW_MIN_RELATIVE_DROP = 0.4;
 
-/**
- * Cuts an already score-descending, already cap-limited list at its sharpest relative score drop,
- * so a hint block ends where the ranked signal does rather than always filling every slot the caps
- * allow.
- *
- * Reduction only: the caller already applied the authoritative per-kind cap before calling this, so
- * the result can never exceed what the caller passed in, and {@link HINT_LINE_CEILING} stays the
- * true upper bound regardless of whether the elbow fires. A flat or too-short distribution is left
- * untouched -- see {@link ELBOW_MIN_RESULTS} and {@link ELBOW_MIN_RELATIVE_DROP} -- mirroring
- * retrieval.ts's own discipline that an all-zero/no-signal ranking is excluded rather than trusted,
- * since a cutoff that fires on noise would silently discard good context with no way for the agent
- * reading the block to notice what it lost.
- */
+/** Cuts an already score-descending, already cap-limited list at its sharpest relative score drop, so a hint block ends where the ranked signal does rather than always filling every slot the caps allow. Reduction only: the caller already applied the authoritative per-kind cap before calling this, so the result can never exceed what the caller passed in, and {@link HINT_LINE_CEILING} stays the true upper bound regardless of whether the elbow fires. A flat or too-short distribution is left untouched -- see {@link ELBOW_MIN_RESULTS} and {@link ELBOW_MIN_RELATIVE_DROP} -- mirroring retrieval.ts's own discipline that an all-zero/no-signal ranking is excluded rather than trusted, since a cutoff that fires on noise would silently discard good context with no way for the agent reading the block to notice what it lost. */
 function applyElbowCutoff(results: readonly RetrievedFact[]): readonly RetrievedFact[] {
   if (results.length < ELBOW_MIN_RESULTS) {
     return results;
@@ -340,9 +112,7 @@ function applyElbowCutoff(results: readonly RetrievedFact[]): readonly Retrieved
   let maxRelativeDrop = 0;
   for (let i = 0; i < results.length - 1; i += 1) {
     const current = results[i]?.score ?? 0;
-    // A zero (or negative, defensively) score has no meaningful relative drop to the next entry --
-    // dividing by it would either throw away the comparison or manufacture a 100% "drop" out of two
-    // ties, so these positions are simply not elbow candidates.
+    // A zero (or negative, defensively) score has no meaningful relative drop to the next entry -- dividing by it would either throw away the comparison or manufacture a 100% "drop" out of two ties, so these positions are simply not elbow candidates.
     if (current <= 0) {
       continue;
     }
@@ -358,60 +128,16 @@ function applyElbowCutoff(results: readonly RetrievedFact[]): readonly Retrieved
   return results.slice(0, cutIndex + 1);
 }
 
-/**
- * Wire slots held for `status="pinned"` facts, taken off the top before the kind caps below see the
- * ranked list at all.
- *
- * A pin is the one status whose whole meaning is "do not lose this", and until this reserve existed
- * it bought a fact nothing on the surface that runs unprompted. `retrieve()` sorts pinned facts
- * first *only in the zero-signal case* (src/retrieval.ts, and deliberately so -- letting a pin
- * outrank a lexical match would make `mem pin` a ranking cheat code). The moment a query carries
- * any signal, a pin is worth exactly zero: a hard user constraint that happens to share no terms
- * with the current prompt ranks below twelve facts that do, and falls off the payload entirely.
- * That is the failure this closes -- not a ranking preference, a floor. Pinned facts are what the
- * user said must always be in context, so a fixed number of them always are.
- *
- * Two, not more: the reserve is subtracted from nothing, so every slot here widens the payload
- * (2 + 8 + 4 = 14 lines at worst, against 12 before). Held to the smallest count that can carry a
- * pin on its own terms, because the cost lands on every prompt of every session and the caps above
- * were sized against a budget this sits on top of. A store with more pins than the reserve still
- * ranks the rest normally through the caps; nothing is hidden, and the footer discloses the
- * shortfall like any other cap.
- */
+/** Wire slots held for `status="pinned"` facts, taken off the top before the kind caps below see the ranked list at all. A pin is the one status whose whole meaning is "do not lose this", and until this reserve existed it bought a fact nothing on the surface that runs unprompted. `retrieve()` sorts pinned facts first *only in the zero-signal case* (src/retrieval.ts, and deliberately so -- letting a pin outrank a lexical match would make `mem pin` a ranking cheat code). The moment a query carries any signal, a pin is worth exactly zero: a hard user constraint that happens to share no terms with the current prompt ranks below twelve facts that do, and falls off the payload entirely. That is the failure this closes -- not a ranking preference, a floor. Pinned facts are what the user said must always be in context, so a fixed number of them always are. Two, not more: the reserve is subtracted from nothing, so every slot here widens the payload (2 + 8 + 4 = 14 lines at worst, against 12 before). Held to the smallest count that can carry a pin on its own terms, because the cost lands on every prompt of every session and the caps above were sized against a budget this sits on top of. A store with more pins than the reserve still ranks the rest normally through the caps; nothing is hidden, and the footer discloses the shortfall like any other cap. */
 const PINNED_RESERVE = 2;
 
-/**
- * The most fact lines one `--hint-format` block can carry: the reserve plus both kind caps, since
- * the three sets are disjoint by construction (`reserved`, then `contested` split by kind).
- *
- * Exported for `mem doctor`, which is the only place a user can find out that a store holding
- * hundreds of active facts still sends at most this many per recall. That ceiling is invisible
- * otherwise -- `mem list` shows everything, so a store whose useful facts sit outside the cap looks
- * healthy right up to the point someone wonders why a fact they can see is never in context.
- * Exporting the sum rather than the three parts keeps the arithmetic in one place: a doctor line
- * that re-added the caps itself would silently drift the day one of them changes.
- */
+/** The most fact lines one `--hint-format` block can carry: the reserve plus both kind caps, since the three sets are disjoint by construction (`reserved`, then `contested` split by kind). Exported for `mem doctor`, which is the only place a user can find out that a store holding hundreds of active facts still sends at most this many per recall. That ceiling is invisible otherwise -- `mem list` shows everything, so a store whose useful facts sit outside the cap looks healthy right up to the point someone wonders why a fact they can see is never in context. Exporting the sum rather than the three parts keeps the arithmetic in one place: a doctor line that re-added the caps itself would silently drift the day one of them changes. */
 export const HINT_LINE_CEILING = PINNED_RESERVE + AGGRESSIVE_CAP + PRECISION_CAP;
 
 /** Wire slots held for pinned facts, exported for the `mem doctor` line that compares a store's pin count against it. */
 export const HINT_PINNED_RESERVE = PINNED_RESERVE;
 
-/**
- * The recall limit this module passes to `retrieve()`, deliberately unbounded.
- *
- * `retrieve()` defaults to `DEFAULT_RECALL_LIMIT` (20) and applies it as a post-ranking slice of
- * the non-withheld set (src/retrieval.ts). That slice lands *before* the kind-split below, so the
- * split sees a top-20 rather than the full ranked list -- and a store whose top 20 all share one
- * kind starves the other cap completely. Measured: 300 preferences + 200 decisions emitted 8
- * preference lines and zero decision lines, in a payload byte-indistinguishable from one saying
- * this project has no decisions at all.
- *
- * The default limit could never bound this module's output anyway -- PINNED_RESERVE plus
- * AGGRESSIVE_CAP plus PRECISION_CAP is 14, already under 20 -- so it only ever distorted
- * composition. The caps above are what bounds the wire; the recall limit must not silently pre-empt
- * them. Costs nothing: the limit is a slice applied after scoring and anchor evaluation have
- * already run over every scoped fact.
- */
+/** The recall limit this module passes to `retrieve()`, deliberately unbounded. `retrieve()` defaults to `DEFAULT_RECALL_LIMIT` (20) and applies it as a post-ranking slice of the non-withheld set (src/retrieval.ts). That slice lands *before* the kind-split below, so the split sees a top-20 rather than the full ranked list -- and a store whose top 20 all share one kind starves the other cap completely. Measured: 300 preferences + 200 decisions emitted 8 preference lines and zero decision lines, in a payload byte-indistinguishable from one saying this project has no decisions at all. The default limit could never bound this module's output anyway -- PINNED_RESERVE plus AGGRESSIVE_CAP plus PRECISION_CAP is 14, already under 20 -- so it only ever distorted composition. The caps above are what bounds the wire; the recall limit must not silently pre-empt them. Costs nothing: the limit is a slice applied after scoring and anchor evaluation have already run over every scoped fact. */
 const HINT_FORMAT_RECALL_LIMIT = Number.MAX_SAFE_INTEGER;
 
 /** Short wire-protocol tag for the leading column of a TGMEM line (distinct from the prose label embedded inside `display`, which retrieval.ts owns). */
@@ -425,12 +151,7 @@ const PROTOCOL_KIND_TAG: Record<FactKind, string> = {
 export interface HintFormatOptions {
   /** Explicit project root anchors are evaluated against (design plan Section 3: never ambient cwd). */
   readonly root: string;
-  /**
-   * Free-text query threaded straight through to `retrieve()`'s `RetrievalOptions.query`. An
-   * absent or empty query preserves the original recency-only behaviour exactly (all candidates
-   * tie at BM25 score 0, so the final sort falls through to `captured_at` descending) -- this is
-   * the path `SessionStart` uses and it must not change.
-   */
+  /** Free-text query threaded straight through to `retrieve()`'s `RetrievalOptions.query`. An absent or empty query preserves the original recency-only behaviour exactly (all candidates tie at BM25 score 0, so the final sort falls through to `captured_at` descending) -- this is the path `SessionStart` uses and it must not change. */
   readonly query?: string | undefined;
   /** File paths (absolute, or relative to `root`) the caller is currently working with; matches `scope="path"` facts. */
   readonly contextFiles?: readonly string[] | undefined;
@@ -438,54 +159,17 @@ export interface HintFormatOptions {
   readonly dbPath?: string | undefined;
   /** Test override for "now", used for freshness/decay evaluation. */
   readonly now?: Date | undefined;
-  /**
-   * Which TGMEM wire-format version to emit. Defaults to `TGMEM_PROTOCOL_VERSION` (2). `1` is fully
-   * supported for backward-compatible consumers (per-line CTA, no footer-line). Any value other than
-   * exactly `1` is treated as the default version -- this function never throws on a bad value.
-   */
+  /** Which TGMEM wire-format version to emit. Defaults to `TGMEM_PROTOCOL_VERSION` (2). `1` is fully supported for backward-compatible consumers (per-line CTA, no footer-line). Any value other than exactly `1` is treated as the default version -- this function never throws on a bad value. */
   readonly protocolVersion?: 1 | 2 | undefined;
-  /**
-   * When `true`, sorts the emitted fact-lines by fact id (ascending) instead of the default
-   * relevance/recency order -- a deterministic, reproducible ordering for callers (tests, snapshot
-   * diffing) that need stable output across runs. Strictly additive: only changes ordering, never
-   * which facts are included or how caps are applied.
-   */
+  /** When `true`, sorts the emitted fact-lines by fact id (ascending) instead of the default relevance/recency order -- a deterministic, reproducible ordering for callers (tests, snapshot diffing) that need stable output across runs. Strictly additive: only changes ordering, never which facts are included or how caps are applied. */
   readonly stable?: boolean | undefined;
   /** Threaded straight through to `retrieve()`'s `RetrievalOptions.hintStyle` -- see retrieval.ts's doc comment. Defaults to `"full"`. */
   readonly hintStyle?: "full" | "terse" | undefined;
-  /**
-   * Identifier of the consumer session this response is for (a hook's `session_id`). When set, the
-   * ids of the facts actually emitted are recorded in `recall_log` best-effort -- a failure to log
-   * never fails the recall -- so a later `delta` call for the same session can leave them out.
-   * `stable` has no bearing on this: it only reorders output. `facts.last_surfaced_at` is stamped
-   * for the emitted ids regardless of whether `sessionId` is set (only `recall_log` cares): a fact
-   * does not need a session id or a `recall_log` row to count as having been surfaced. Nothing is stamped
-   * when the budget blew (an empty response surfaced nothing).
-   */
+  /** Identifier of the consumer session this response is for (a hook's `session_id`). When set, the ids of the facts actually emitted are recorded in `recall_log` best-effort -- a failure to log never fails the recall -- so a later `delta` call for the same session can leave them out. `stable` has no bearing on this: it only reorders output. `facts.last_surfaced_at` is stamped for the emitted ids regardless of whether `sessionId` is set (only `recall_log` cares): a fact does not need a session id or a `recall_log` row to count as having been surfaced. Nothing is stamped when the budget blew (an empty response surfaced nothing). */
   readonly sessionId?: string | undefined;
-  /**
-   * When `true`, omits every fact already logged as surfaced to `sessionId` *that does not match the
-   * current query* (retrieval score of exactly zero), and marks the header `delta=1`. A fact that
-   * scores non-zero is always sent, however many times this session has seen it: the host may have
-   * compacted it out of context since, and a genuine hit belongs in context every time it is asked
-   * for. A `status="pinned"` fact is never suppressed at all, whatever it scores -- see
-   * `PINNED_RESERVE`. Requires `sessionId`; the CLI enforces that pairing, and this function treats `delta`
-   * without a session id as a plain full response (it cannot know what was already sent). Applied
-   * before the per-kind caps, so a session drains the next-best unseen facts rather than receiving
-   * an empty block as soon as the top-ranked ones have all been sent once. The recall log itself
-   * still records every emitted fact: it is an audit of what was sent, and the decision to re-send
-   * lives here, not there.
-   */
+  /** When `true`, omits every fact already logged as surfaced to `sessionId` *that does not match the current query* (retrieval score of exactly zero), and marks the header `delta=1`. A fact that scores non-zero is always sent, however many times this session has seen it: the host may have compacted it out of context since, and a genuine hit belongs in context every time it is asked for. A `status="pinned"` fact is never suppressed at all, whatever it scores -- see `PINNED_RESERVE`. Requires `sessionId`; the CLI enforces that pairing, and this function treats `delta` without a session id as a plain full response (it cannot know what was already sent). Applied before the per-kind caps, so a session drains the next-best unseen facts rather than receiving an empty block as soon as the top-ranked ones have all been sent once. The recall log itself still records every emitted fact: it is an audit of what was sent, and the decision to re-send lives here, not there. */
   readonly delta?: boolean | undefined;
-  /**
-   * Test override for the soft time budget in {@link RETRIEVAL_BUDGET_MS}, in milliseconds.
-   *
-   * Budget exhaustion is wall-clock-driven, which makes it the one behaviour here a test cannot
-   * pin without control of the clock: a machine slow enough to blow the budget returns an empty
-   * hint set, so an assertion about *which* facts came back becomes an assertion about how busy
-   * the runner was. Passing a large value takes it out of the picture; passing 0 forces it, so
-   * the exhausted path can be tested on purpose rather than only by accident on a slow machine.
-   */
+  /** Test override for the soft time budget in {@link RETRIEVAL_BUDGET_MS}, in milliseconds. Budget exhaustion is wall-clock-driven, which makes it the one behaviour here a test cannot pin without control of the clock: a machine slow enough to blow the budget returns an empty hint set, so an assertion about *which* facts came back becomes an assertion about how busy the runner was. Passing a large value takes it out of the picture; passing 0 forces it, so the exhausted path can be tested on purpose rather than only by accident on a slow machine. */
   readonly retrievalBudgetMs?: number | undefined;
 }
 
@@ -494,15 +178,7 @@ export interface HintFormatResult {
   readonly header: string;
   /** Fully formatted, ready-to-print lines, one per surfaced fact. */
   readonly lines: readonly string[];
-  /**
-   * True if the soft time budget was exceeded, in which case `lines` is empty.
-   *
-   * The name is historical: this once selected a smaller set of caps, which put a partial
-   * response on a wire that cannot express partialness. It now means "this response carries
-   * nothing because the budget blew", and it exists for callers inside this process (the CLI
-   * logs against it); on the wire the condition is expressed by the absence of fact-lines,
-   * which the consumer's fail-open path already reads correctly.
-   */
+  /** True if the soft time budget was exceeded, in which case `lines` is empty. The name is historical: this once selected a smaller set of caps, which put a partial response on a wire that cannot express partialness. It now means "this response carries nothing because the budget blew", and it exists for callers inside this process (the CLI logs against it); on the wire the condition is expressed by the absence of fact-lines, which the consumer's fail-open path already reads correctly. */
   readonly truncated: boolean;
   /** True when this response was filtered against the session's recall log (header carries `delta=1`). */
   readonly delta: boolean;
@@ -513,13 +189,7 @@ function resolveProtocolVersion(requested: 1 | 2 | undefined): 1 | 2 {
   return requested === 1 ? 1 : TGMEM_PROTOCOL_VERSION;
 }
 
-/**
- * Raised when `openStorage` itself fails inside `buildHintFormatUnsafe` -- a permissions error, a
- * WAL lock, a schema mismatch on a store an older or newer `mem` left behind. Kept distinct from
- * every other throw in that function so `buildHintFormat`'s outer catch can tell "the store could
- * not even be opened" apart from a downstream retrieval bug: the two need different footer text,
- * and reporting a query bug as an unreadable store would send a caller chasing the wrong fault.
- */
+/** Raised when `openStorage` itself fails inside `buildHintFormatUnsafe` -- a permissions error, a WAL lock, a schema mismatch on a store an older or newer `mem` left behind. Kept distinct from every other throw in that function so `buildHintFormat`'s outer catch can tell "the store could not even be opened" apart from a downstream retrieval bug: the two need different footer text, and reporting a query bug as an unreadable store would send a caller chasing the wrong fault. */
 class StorageUnreadableError extends Error {
   constructor(message: string) {
     super(message);
@@ -527,57 +197,25 @@ class StorageUnreadableError extends Error {
   }
 }
 
-/**
- * The footer clause for a response whose store could not be opened at all. Points at `mem doctor`
- * specifically because it runs the identical `openStorage` call this failed on, so it will fail too
- * -- but unlike this seam, which must fail open onto a well-formed empty wire payload, `doctor`
- * answers to a human on stderr and prints the real error instead of swallowing it. It is deliberately
- * not `mem review` or any command that resolves something: none of them can act on a store nothing
- * can open, and pointing at one that will only refuse is the failure this clause exists to not repeat.
- */
+/** The footer clause for a response whose store could not be opened at all. Points at `mem doctor` specifically because it runs the identical `openStorage` call this failed on, so it will fail too -- but unlike this seam, which must fail open onto a well-formed empty wire payload, `doctor` answers to a human on stderr and prints the real error instead of swallowing it. It is deliberately not `mem review` or any command that resolves something: none of them can act on a store nothing can open, and pointing at one that will only refuse is the failure this clause exists to not repeat. */
 const STORE_UNREADABLE_CLAUSE = "store could not be read; mem doctor shows the underlying error";
 
-/**
- * The complete footer-line for a response whose store could not be opened. Exported, like
- * `TGMEM_FOOTER_LINE`, so a test pins it against the composer instead of duplicating its bytes.
- */
+/** The complete footer-line for a response whose store could not be opened. Exported, like `TGMEM_FOOTER_LINE`, so a test pins it against the composer instead of duplicating its bytes. */
 export const STORE_UNREADABLE_FOOTER_LINE = `${FOOTER_PREFIX}${STORE_UNREADABLE_CLAUSE}`;
 
-/**
- * The footer clause for a response cut short by the retrieval time budget. Does not promise a
- * partial result -- see the comment above `const truncated` in `buildHintFormatUnsafe`, which is
- * why the payload is empty rather than a slice: a partial response is byte-indistinguishable from
- * a complete one in TGMEM/2, so this clause only explains the emptiness, it does not offer one.
- * `mem recall` runs with no budget at all, so it is the command that can actually show what this
- * call ran out of time to send.
- */
+/** The footer clause for a response cut short by the retrieval time budget. Does not promise a partial result -- see the comment above `const truncated` in `buildHintFormatUnsafe`, which is why the payload is empty rather than a slice: a partial response is byte-indistinguishable from a complete one in TGMEM/2, so this clause only explains the emptiness, it does not offer one. `mem recall` runs with no budget at all, so it is the command that can actually show what this call ran out of time to send. */
 const BUDGET_EXHAUSTED_CLAUSE = "hint set empty; retrieval ran out of its time budget, not out of facts -- mem recall shows them";
 
-/**
- * The complete footer-line for a budget-exhausted response. Exported for the same reason as
- * `STORE_UNREADABLE_FOOTER_LINE`.
- */
+/** The complete footer-line for a budget-exhausted response. Exported for the same reason as `STORE_UNREADABLE_FOOTER_LINE`. */
 export const BUDGET_EXHAUSTED_FOOTER_LINE = `${FOOTER_PREFIX}${BUDGET_EXHAUSTED_CLAUSE}`;
 
-/**
- * The footer clause for a response whose store opened fine but some other step in retrieval threw.
- * Unlike `STORE_UNREADABLE_CLAUSE`, `mem doctor` here is not re-running the call that failed -- it
- * is a broader read-only health check (schema, embedding coverage, hint-budget projection) that can
- * still surface a wrong count or a broken invariant even when `openStorage` itself succeeded.
- */
+/** The footer clause for a response whose store opened fine but some other step in retrieval threw. Unlike `STORE_UNREADABLE_CLAUSE`, `mem doctor` here is not re-running the call that failed -- it is a broader read-only health check (schema, embedding coverage, hint-budget projection) that can still surface a wrong count or a broken invariant even when `openStorage` itself succeeded. */
 const INTERNAL_ERROR_CLAUSE = "hints unavailable; an internal error stopped retrieval -- mem doctor shows the store state";
 
-/**
- * The complete footer-line for an internal-failure response. Exported for the same reason as
- * `STORE_UNREADABLE_FOOTER_LINE`.
- */
+/** The complete footer-line for an internal-failure response. Exported for the same reason as `STORE_UNREADABLE_FOOTER_LINE`. */
 export const INTERNAL_ERROR_FOOTER_LINE = `${FOOTER_PREFIX}${INTERNAL_ERROR_CLAUSE}`;
 
-/**
- * Builds the `--hint-format` payload for `mem recall --hint-format`. Never
- * throws: any internal failure resolves to an empty result so the caller's
- * fail-open path has nothing to special-case.
- */
+/** Builds the `--hint-format` payload for `mem recall --hint-format`. Never throws: any internal failure resolves to an empty result so the caller's fail-open path has nothing to special-case. */
 export async function buildHintFormat(options: HintFormatOptions): Promise<HintFormatResult> {
   const protocolVersion = resolveProtocolVersion(options.protocolVersion);
   const delta = options.delta === true && typeof options.sessionId === "string" && options.sessionId.length > 0;
@@ -587,25 +225,18 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
   } catch (error) {
     if (error instanceof StorageUnreadableError) {
       logWarning(`hint-format could not open the store, returning an unreadable-store footer: ${error.message}`);
-      // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an
-      // unreadable store on that version is silently identical to an empty one -- the same
-      // limitation the internal-failure branch below already accepts for the same reason.
+      // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an unreadable store on that version is silently identical to an empty one -- the same limitation the internal-failure branch below already accepts for the same reason.
       return { header, lines: protocolVersion === 2 ? [STORE_UNREADABLE_FOOTER_LINE] : [], truncated: false, delta };
     }
     logWarning(`hint-format failed internally, returning an internal-error footer: ${errorMessage(error)}`);
-    // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an
-    // internal failure on that version is silently identical to an empty one -- the same
-    // limitation the unreadable-store branch above already accepts for the same reason.
+    // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an internal failure on that version is silently identical to an empty one -- the same limitation the unreadable-store branch above already accepts for the same reason.
     return { header, lines: protocolVersion === 2 ? [INTERNAL_ERROR_FOOTER_LINE] : [], truncated: false, delta };
   }
 }
 
 async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFormatResult> {
   const start = Date.now();
-  // Anchor verdicts are memoized for the lifetime of the process, which is exactly one query for the
-  // `mem` CLI but unbounded for an embedder holding this module across calls -- there, a first-ever
-  // verdict would be served forever no matter what changed on disk. One logical hint-format query is
-  // the correct cache lifetime, so each call starts from a clean slate.
+  // Anchor verdicts are memoized for the lifetime of the process, which is exactly one query for the `mem` CLI but unbounded for an embedder holding this module across calls -- there, a first-ever verdict would be served forever no matter what changed on disk. One logical hint-format query is the correct cache lifetime, so each call starts from a clean slate.
   clearAnchorCaches();
   const root = resolvePath(options.root);
   const contextFiles = (options.contextFiles ?? []).map((file) => resolvePath(root, file));
@@ -615,21 +246,13 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const sessionId = typeof options.sessionId === "string" && options.sessionId.length > 0 ? options.sessionId : undefined;
   const delta = options.delta === true && sessionId !== undefined;
 
-  // `openStorage`, not the bare `openDb`: this is a library seam an embedder can call against a
-  // database mem's CLI has never opened, and `openDb` alone does not guarantee the storage-owned
-  // columns (`epoch`, `status_changed_at`, `prior_status`) or the `sources`/`meta` tables exist.
-  // Reading a fact through a connection that skipped `ensureStorageSchema` worked only by accident
-  // of which columns this path happens to select today.
+  // `openStorage`, not the bare `openDb`: this is a library seam an embedder can call against a database mem's CLI has never opened, and `openDb` alone does not guarantee the storage-owned columns (`epoch`, `status_changed_at`, `prior_status`) or the `sources`/`meta` tables exist. Reading a fact through a connection that skipped `ensureStorageSchema` worked only by accident of which columns this path happens to select today.
   const budgetMs = options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS;
   let db: Database.Database;
   try {
     db = openStorage(options.dbPath ?? resolveDbPath());
   } catch (error) {
-    // Distinguished from every other throw site below: a store that cannot even be opened
-    // (permissions, a WAL lock, a schema mismatch) is a different fact for `buildHintFormat`'s
-    // outer catch to report than a bug in the retrieval logic that follows. Reporting the wrong one
-    // here would tell a caller their store is fine when it is not open at all, or that it is
-    // unreadable when the real fault is downstream and `mem doctor` would show nothing wrong.
+    // Distinguished from every other throw site below: a store that cannot even be opened (permissions, a WAL lock, a schema mismatch) is a different fact for `buildHintFormat`'s outer catch to report than a bug in the retrieval logic that follows. Reporting the wrong one here would tell a caller their store is fine when it is not open at all, or that it is unreadable when the real fault is downstream and `mem doctor` would show nothing wrong.
     throw new StorageUnreadableError(errorMessage(error));
   }
   let allFacts: Fact[];
@@ -638,23 +261,11 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   let entityOverlap: ReadonlyMap<string, number>;
   let graphScores: ReadonlyMap<string, number>;
   let anchorCacheSnapshot: ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }>;
-  // Decided before the fact query, not after, because it decides the query's row shape: an
-  // embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget
-  // for a signal that is switched off on every install without a configured endpoint is exactly the
-  // kind of cost that turns a healthy response into a truncated one. The share-of-remaining-budget
-  // rule is EMBEDDING_BUDGET_SHARE's; below MIN_EMBEDDING_BUDGET_MS there is no longer enough time
-  // for a round trip and the backend is not wired at all.
+  // Decided before the fact query, not after, because it decides the query's row shape: an embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget for a signal that is switched off on every install without a configured endpoint is exactly the kind of cost that turns a healthy response into a truncated one. The share-of-remaining-budget rule is EMBEDDING_BUDGET_SHARE's; below MIN_EMBEDDING_BUDGET_MS there is no longer enough time for a round trip and the backend is not wired at all.
   const embeddingBudgetMs = Math.min(DEFAULT_EMBEDDING_TIMEOUT_MS, Math.floor((budgetMs - (Date.now() - start)) * EMBEDDING_BUDGET_SHARE));
   let embeddingBackend: EmbeddingBackend | null;
   try {
-    // Silent either way: a stale-model store or an unreachable endpoint is a ranking-quality
-    // matter, and this seam's contract is to fail open rather than editorialize on a wire protocol.
-    // The unrecorded-vector check is passed here too, not skipped for budget: `mem recall` and this
-    // path must reach the same ranking decision about the same store, and this seam's hand-maintained
-    // divergences from the rest of the CLI are exactly how three columns went missing from its SELECT.
-    // The cost is one `SELECT COUNT(*)` on the connection already open, and only when no model is
-    // recorded at all -- cheaper than `getUsefulnessCounts` a few lines below, which this budget
-    // already affords.
+    // Silent either way: a stale-model store or an unreachable endpoint is a ranking-quality matter, and this seam's contract is to fail open rather than editorialize on a wire protocol. The unrecorded-vector check is passed here too, not skipped for budget: `mem recall` and this path must reach the same ranking decision about the same store, and this seam's hand-maintained divergences from the rest of the CLI are exactly how three columns went missing from its SELECT. The cost is one `SELECT COUNT(*)` on the connection already open, and only when no model is recorded at all -- cheaper than `getUsefulnessCounts` a few lines below, which this budget already affords.
     const recordedMeta = getEmbeddingMeta(db) ?? null;
     embeddingBackend =
       embeddingBudgetMs >= MIN_EMBEDDING_BUDGET_MS
@@ -662,29 +273,16 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
             .backend
         : null;
     allFacts = queryAllFacts(db, embeddingBackend !== null);
-    // One grouped query on the connection already open, not a second `openStorage`: this path runs
-    // inside a ~150ms hard budget and a second WAL open plus schema migration is the kind of cost
-    // that turns a healthy response into a truncated one.
+    // One grouped query on the connection already open, not a second `openStorage`: this path runs inside a ~150ms hard budget and a second WAL open plus schema migration is the kind of cost that turns a healthy response into a truncated one.
     usefulness = getUsefulnessCounts(db);
-    // On the same open connection, for the same budget reason. One indexed lookup per identifier in
-    // the query and none at all when it has none, so the ~150ms budget is safe: this is the path
-    // where the ranking matters most, since an agent gets one shot at the context it is handed and
-    // never sees the facts that ranked below the cap.
+    // On the same open connection, for the same budget reason. One indexed lookup per identifier in the query and none at all when it has none, so the ~150ms budget is safe: this is the path where the ranking matters most, since an agent gets one shot at the context it is handed and never sees the facts that ranked below the cap.
     entityOverlap = getEntityOverlapForQuery(db, options.query ?? "");
-    // Bounded by `entityOverlap` itself: `getGraphScoresForQuery` returns empty immediately for a
-    // query naming no entity (the common case, since `entityOverlap` above already paid for that
-    // check), and a query that *does* name something walks at most two hops of grouped, indexed
-    // queries -- no per-fact loop, on the connection already open, within this same ~150ms budget.
+    // Bounded by `entityOverlap` itself: `getGraphScoresForQuery` returns empty immediately for a query naming no entity (the common case, since `entityOverlap` above already paid for that check), and a query that *does* name something walks at most two hops of grouped, indexed queries -- no per-fact loop, on the connection already open, within this same ~150ms budget.
     graphScores = entityOverlap.size > 0 ? getGraphScoresForQuery(db, options.query ?? "", {}, entityOverlap) : new Map();
     if (delta) {
       alreadySurfaced = listSurfacedFactIds(db, sessionId);
     }
-    // One indexed lookup per evaluation root (`root` is a primary-key prefix) on the connection
-    // already open, for the same reason as every other read in this block: `retrieve()` below must
-    // not hold a DB handle across its embedding round trip, so whatever `anchor_cache` already
-    // knows has to be read now or not at all. Keyed on `anchorRootsFor` rather than `root` alone --
-    // this is the hook path, so the monorepo case it covers (a `path` fact reached from the
-    // repository root, evaluated against its own `captureRoot`) is the common one here, not an edge.
+    // One indexed lookup per evaluation root (`root` is a primary-key prefix) on the connection already open, for the same reason as every other read in this block: `retrieve()` below must not hold a DB handle across its embedding round trip, so whatever `anchor_cache` already knows has to be read now or not at all. Keyed on `anchorRootsFor` rather than `root` alone -- this is the hook path, so the monorepo case it covers (a `path` fact reached from the repository root, evaluated against its own `captureRoot`) is the common one here, not an edge.
     anchorCacheSnapshot = prefetchAnchorCache(db, anchorRootsFor(allFacts, root));
   } finally {
     db.close();
@@ -692,10 +290,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
 
   const scoped = allFacts.filter((fact) => isInScope(fact, root, contextFiles));
 
-  // Disconnected from storage by construction (see {@link BufferedAnchorCacheStore}): `retrieve()`
-  // below can read and write anchor verdicts through it without ever touching SQLite, so the
-  // connection this block already closed does not need to stay open for anchor evaluation to get
-  // the persistent-cache benefit.
+  // Disconnected from storage by construction (see {@link BufferedAnchorCacheStore}): `retrieve()` below can read and write anchor verdicts through it without ever touching SQLite, so the connection this block already closed does not need to stay open for anchor evaluation to get the persistent-cache benefit.
   const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
@@ -706,53 +301,29 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     hintFormat: true,
     limit: HINT_FORMAT_RECALL_LIMIT,
     anchorCacheStore,
-    // The `UserPromptSubmit` hook path (`mem recall --hint-format --hook-stdin`) sends every user
-    // prompt through here as `query` -- the same screen-before-send invariant `retrieve()` applies
-    // to that query has to see this project's own `.mem/allowlist`, not an empty one.
+    // The `UserPromptSubmit` hook path (`mem recall --hint-format --hook-stdin`) sends every user prompt through here as `query` -- the same screen-before-send invariant `retrieve()` applies to that query has to see this project's own `.mem/allowlist`, not an empty one.
     secretAllowlist: loadAllowlist(root),
     now,
     anchorTimeBudgetMs,
-    // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc
-    // comment above); TGMEM/1 keeps its original per-line CTA verbatim.
+    // TGMEM/2 drops the per-line CTA in favor of one shared footer line (see the grammar doc comment above); TGMEM/1 keeps its original per-line CTA verbatim.
     includeDisplayCta: protocolVersion === 1,
-    // Past `mem used` confirmations, fused as a third RRF rank list. Note this changes the meaning of
-    // a zero score for the `--delta` filter below only in the direction that filter already tolerates
-    // from the embedding list: once any auxiliary list is non-empty, fusion runs and no ranked fact
-    // scores exactly 0, so a store with usefulness data suppresses less rather than suppressing
-    // something it should have re-sent. On a store nobody has run `mem used` against -- every install
-    // until someone does -- the list is empty and the scores are unchanged.
+    // Past `mem used` confirmations, fused as a third RRF rank list. Note this changes the meaning of a zero score for the `--delta` filter below only in the direction that filter already tolerates from the embedding list: once any auxiliary list is non-empty, fusion runs and no ranked fact scores exactly 0, so a store with usefulness data suppresses less rather than suppressing something it should have re-sent. On a store nobody has run `mem used` against -- every install until someone does -- the list is empty and the scores are unchanged.
     usefulness,
-    // The signal BM25 structurally cannot carry: stemming reduces `src/retrieval.ts` to
-    // `src`/`retriev`/`ts`, so a fact naming that file scored no higher than one merely using those
-    // three words. Empty whenever the query names no identifier, so it cannot vote on a query it has
-    // no signal for.
+    // The signal BM25 structurally cannot carry: stemming reduces `src/retrieval.ts` to `src`/`retriev`/`ts`, so a fact naming that file scored no higher than one merely using those three words. Empty whenever the query names no identifier, so it cannot vote on a query it has no signal for.
     ...(entityOverlap.size > 0 ? { entityOverlap } : {}),
-    // Fourth RRF rank list, fused only when non-empty (see `RetrievalOptions.graphScores`):
-    // absent on every query that names no entity, which keeps ranking byte-identical to today for
-    // the common case this budget exists to protect.
+    // Fourth RRF rank list, fused only when non-empty (see `RetrievalOptions.graphScores`): absent on every query that names no entity, which keeps ranking byte-identical to today for the common case this budget exists to protect.
     ...(graphScores.size > 0 ? { graphScores } : {}),
     ...(embeddingBackend !== null ? { embeddingBackend, embeddingTimeoutMs: embeddingBudgetMs } : {}),
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
   const elapsed = Date.now() - start;
-  // `>=`, not `>`: a budget of N milliseconds is the time available, so having consumed all of it
-  // is already an overrun. The strict `>` made a zero budget mean "no budget, unless the work
-  // happened to finish inside a single millisecond" -- on a fast machine a 10-fact anchor-free
-  // retrieval does exactly that, `elapsed` reads 0, and `0 > 0` reported a healthy response from a
-  // caller that had allotted no time at all. That is not a rounding detail: it made the one
-  // deterministic handle callers have on this path (pass 0, get the exhausted contract) depend on
-  // the runner's clock, which is how it surfaced -- as an intermittent Linux-only CI failure of the
-  // very test written to pin the degradation contract "rather than inferred from a flake".
+  // `>=`, not `>`: a budget of N milliseconds is the time available, so having consumed all of it is already an overrun. The strict `>` made a zero budget mean "no budget, unless the work happened to finish inside a single millisecond" -- on a fast machine a 10-fact anchor-free retrieval does exactly that, `elapsed` reads 0, and `0 > 0` reported a healthy response from a caller that had allotted no time at all. That is not a rounding detail: it made the one deterministic handle callers have on this path (pass 0, get the exhausted contract) depend on the runner's clock, which is how it surfaced -- as an intermittent Linux-only CI failure of the very test written to pin the degradation contract "rather than inferred from a flake".
   const truncated = elapsed >= budgetMs;
   if (truncated) {
-    // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is
-    // byte-indistinguishable from a complete one in TGMEM/2, so emitting one would
-    // hand the consumer a subset while its own contract says it received everything.
+    // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is byte-indistinguishable from a complete one in TGMEM/2, so emitting one would hand the consumer a subset while its own contract says it received everything.
     logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning a budget-exhausted footer`);
-    // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget
-    // exhaustion on that version is silently identical to an empty one -- the same limitation the
-    // other two failure branches in this file already accept for the same reason.
+    // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget exhaustion on that version is silently identical to an empty one -- the same limitation the other two failure branches in this file already accept for the same reason.
     return {
       header: tgmemHeaderFor(protocolVersion, delta),
       lines: protocolVersion === 2 ? [BUDGET_EXHAUSTED_FOOTER_LINE] : [],
@@ -761,45 +332,16 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     };
   }
 
-  // Delta filtering happens before the caps (see `HintFormatOptions.delta`): the caps then select
-  // from what the session has not seen, so a repeat call surfaces the next-best facts instead of
-  // an empty block as soon as the top-ranked ones have all been sent once.
-  //
-  // "Already sent" suppresses a fact only while it does not match the current query. "Sent" and
-  // "still in the agent's context" part ways over a long session -- the host compacts, and a fact
-  // surfaced as filler on prompt 1 (swept in by the caps because nothing matched) and evicted since
-  // would otherwise never be re-sent when it becomes the exact answer on prompt 9. A genuine hit
-  // therefore always re-sends, however often it was sent before; filler -- exactly the set that
-  // matched nothing -- stays suppressed, and a query-less call (the SessionStart recency dump)
-  // matches nothing at all, so it remains fully suppressible.
-  //
-  // `queryEvidence` (any signal the query produced for the fact: lexical, entity, graph, or a top
-  // embedding hit) rather than the lexical-only `matchedQuery`, so a fact reached only by embedding
-  // or entity overlap is re-sent too. And not `score !== 0`: the two agree only while BM25 is the sole rank list.
-  // Turning on usefulness feedback or an embedding backend makes retrieval fuse via RRF, which
-  // floors every ranked fact above zero -- so the old predicate would have quietly declared every
-  // filler fact a match and disabled delta suppression store-wide, with no test failing to say so.
-  //
-  // A pinned fact is exempt from suppression outright, for the reason stated one paragraph up and
-  // with more force: the compaction argument that re-sends a genuine hit applies to a standing
-  // constraint every time, since a pin is precisely the fact whose absence from context the user
-  // said they will not accept. Suppressing it after one send would make PINNED_RESERVE a
-  // first-prompt-only guarantee, which is not a guarantee.
+  // Delta filtering happens before the caps (see `HintFormatOptions.delta`): the caps then select from what the session has not seen, so a repeat call surfaces the next-best facts instead of an empty block as soon as the top-ranked ones have all been sent once. "Already sent" suppresses a fact only while it does not match the current query. "Sent" and "still in the agent's context" part ways over a long session -- the host compacts, and a fact surfaced as filler on prompt 1 (swept in by the caps because nothing matched) and evicted since would otherwise never be re-sent when it becomes the exact answer on prompt 9. A genuine hit therefore always re-sends, however often it was sent before; filler -- exactly the set that matched nothing -- stays suppressed, and a query-less call (the SessionStart recency dump) matches nothing at all, so it remains fully suppressible. `queryEvidence` (any signal the query produced for the fact: lexical, entity, graph, or a top embedding hit) rather than the lexical-only `matchedQuery`, so a fact reached only by embedding or entity overlap is re-sent too. And not `score !== 0`: the two agree only while BM25 is the sole rank list. Turning on usefulness feedback or an embedding backend makes retrieval fuse via RRF, which floors every ranked fact above zero -- so the old predicate would have quietly declared every filler fact a match and disabled delta suppression store-wide, with no test failing to say so. A pinned fact is exempt from suppression outright, for the reason stated one paragraph up and with more force: the compaction argument that re-sends a genuine hit applies to a standing constraint every time, since a pin is precisely the fact whose absence from context the user said they will not accept. Suppressing it after one send would make PINNED_RESERVE a first-prompt-only guarantee, which is not a guarantee.
   const unseen = delta
     ? results.filter((result) => isPinned(result) || result.queryEvidence || !alreadySurfaced.has(result.fact.id))
     : results;
 
-  // The reserve is taken before the kind caps see the list, and the reserved facts are then removed
-  // from what the caps rank -- otherwise a pinned preference would consume one of its own eight
-  // aggressive slots and the reserve would guarantee nothing it did not already have.
+  // The reserve is taken before the kind caps see the list, and the reserved facts are then removed from what the caps rank -- otherwise a pinned preference would consume one of its own eight aggressive slots and the reserve would guarantee nothing it did not already have.
   const reserved = unseen.filter(isPinned).slice(0, PINNED_RESERVE);
   const reservedIds = new Set(reserved.map((result) => result.fact.id));
   const contested = unseen.filter((result) => !reservedIds.has(result.fact.id));
-  // The elbow runs after the cap slice, not before: it can only shrink what the cap already
-  // authorized, never widen the pool it is choosing from. Applied per kind group, not to the two
-  // concatenated, because `aggressive` and `precision` are independently ranked pools (the caps
-  // exist precisely so one pool's scores don't compete with the other's) -- merging them first would
-  // let a legitimate precision-kind score gap get compared against an unrelated aggressive-kind one.
+  // The elbow runs after the cap slice, not before: it can only shrink what the cap already authorized, never widen the pool it is choosing from. Applied per kind group, not to the two concatenated, because `aggressive` and `precision` are independently ranked pools (the caps exist precisely so one pool's scores don't compete with the other's) -- merging them first would let a legitimate precision-kind score gap get compared against an unrelated aggressive-kind one.
   const aggressive = applyElbowCutoff(contested.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP));
   const precision = applyElbowCutoff(contested.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP));
 
@@ -818,23 +360,12 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
 
   const lines = emittable.map(formatLine);
   const emittedIds = emittable.map((result) => result.fact.id);
-  // Only when a `recall_log` row will actually exist to mark: `recordSurfaced` below is a no-op on
-  // an empty id list even when `sessionId` is set, and printing an invocation for a row that was
-  // never written would earn the exact "was never surfaced in session ... -- nothing to mark" reply
-  // this fix exists to stop producing.
+  // Only when a `recall_log` row will actually exist to mark: `recordSurfaced` below is a no-op on an empty id list even when `sessionId` is set, and printing an invocation for a row that was never written would earn the exact "was never surfaced in session ... -- nothing to mark" reply this fix exists to stop producing.
   const usefulnessClause = sessionId !== undefined && emittedIds.length > 0 ? usefulnessInvocation(sessionId, emittedIds) : undefined;
-  // A non-empty query, zero signal to rank it against, not one result actually matched it
-  // lexically, and at least one fact-line actually going out: the claim this clause makes is "the
-  // facts below are filler, not a match", which is false to assert over an empty payload -- a
-  // delta call that suppressed every filler fact as already-sent, or a query matching only
-  // withheld (pending/contested) facts, has nothing for "showing recent facts instead" to describe.
-  // `results`, not `unseen`, for the zero-signal/matchedQuery checks: that claim is about what
-  // `retrieve` found or didn't, not about what the delta filter went on to keep.
+  // A non-empty query, zero signal to rank it against, not one result actually matched it lexically, and at least one fact-line actually going out: the claim this clause makes is "the facts below are filler, not a match", which is false to assert over an empty payload -- a delta call that suppressed every filler fact as already-sent, or a query matching only withheld (pending/contested) facts, has nothing for "showing recent facts instead" to describe. `results`, not `unseen`, for the zero-signal/matchedQuery checks: that claim is about what `retrieve` found or didn't, not about what the delta filter went on to keep.
   const noQuerySignal =
     (options.query ?? "").length > 0 && zeroSignal && !results.some((result) => result.matchedQuery) && emittable.length > 0;
-  // `unseen`, not `results`: a fact the caps dropped was withheld from this payload, but one the
-  // delta filter dropped was already sent and the consumer still has it. Counting the latter as
-  // "not sent" would report a shortfall that does not exist on a `--delta` call.
+  // `unseen`, not `results`: a fact the caps dropped was withheld from this payload, but one the delta filter dropped was already sent and the consumer still has it. Counting the latter as "not sent" would report a shortfall that does not exist on a `--delta` call.
   const footer =
     protocolVersion === 2
       ? footerLineFor({
@@ -850,28 +381,17 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   }
 
   if (sessionId !== undefined) {
-    // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction.
-    // `stable` is deliberately not consulted here: it is an output-ordering override, and a fact
-    // emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the
-    // consumer already holds and make `mem used` report them as never surfaced.
+    // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction. `stable` is deliberately not consulted here: it is an output-ordering override, and a fact emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the consumer already holds and make `mem used` report them as never surfaced.
     recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittedIds, now, anchorCacheStore.buffer);
   } else {
-    // No session id to log a `recall_log` row against: still stamp the durable mark so
-    // stale-supersede never treats an emitted fact as never-surfaced.
+    // No session id to log a `recall_log` row against: still stamp the durable mark so stale-supersede never treats an emitted fact as never-surfaced.
     markSurfaced(options.dbPath ?? resolveDbPath(), emittedIds, now, anchorCacheStore.buffer);
   }
 
   return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta };
 }
 
-/**
- * Best-effort write of the emitted fact ids to `recall_log`, plus a flush of any anchor verdicts
- * `retrieve()` computed this query (`anchorVerdicts`, drained from the disconnected store built
- * above) -- on the same connection, not a second `openStorage`, for the same reason the pre-retrieve
- * reads share one. Any failure -- a read-only store, a locked database, a schema this build does not
- * expect -- is logged to stderr and otherwise ignored: the recall already succeeded, and a
- * bookkeeping failure must not turn it into a failure.
- */
+/** Best-effort write of the emitted fact ids to `recall_log`, plus a flush of any anchor verdicts `retrieve()` computed this query (`anchorVerdicts`, drained from the disconnected store built above) -- on the same connection, not a second `openStorage`, for the same reason the pre-retrieve reads share one. Any failure -- a read-only store, a locked database, a schema this build does not expect -- is logged to stderr and otherwise ignored: the recall already succeeded, and a bookkeeping failure must not turn it into a failure. */
 function recordSurfaced(
   dbPath: string,
   sessionId: string,
@@ -895,12 +415,7 @@ function recordSurfaced(
   }
 }
 
-/**
- * Best-effort stamp of `facts.last_surfaced_at` for the emitted fact ids, plus the same anchor
- * verdict flush as `recordSurfaced` -- used when there is no session id to log against. Same
- * fail-open contract as `recordSurfaced`: a bookkeeping failure must not turn a successful recall
- * into one.
- */
+/** Best-effort stamp of `facts.last_surfaced_at` for the emitted fact ids, plus the same anchor verdict flush as `recordSurfaced` -- used when there is no session id to log against. Same fail-open contract as `recordSurfaced`: a bookkeeping failure must not turn a successful recall into one. */
 function markSurfaced(
   dbPath: string,
   factIds: readonly string[],
@@ -944,32 +459,14 @@ interface RawFactRow {
   readonly embedding?: Buffer | null;
 }
 
-/**
- * Every fact in the store, as `Fact`s.
- *
- * `withEmbeddings` is off unless an embedding backend was actually resolved: the BLOB column is
- * kilobytes per row and this path reads the whole table under a ~150ms budget, so it is selected
- * only when something is going to compare it. With it off, every fact carries `embedding: null` and
- * retrieval's embedding list stays empty -- which is the behaviour that shipped before a backend
- * existed at all.
- */
+/** Every fact in the store, as `Fact`s. `withEmbeddings` is off unless an embedding backend was actually resolved: the BLOB column is kilobytes per row and this path reads the whole table under a ~150ms budget, so it is selected only when something is going to compare it. With it off, every fact carries `embedding: null` and retrieval's embedding list stays empty -- which is the behaviour that shipped before a backend existed at all. */
 function queryAllFacts(db: ReturnType<typeof openStorage>, withEmbeddings = false): Fact[] {
   const rows = db
     .prepare<
       [],
       RawFactRow
     >(
-      // `prior_status` is not decoration here: `resolveContradictions` reinstates a fact whose rival
-      // is gone and restores `prior_status` when that fact was `pinned` before it was contested.
-      // Selecting without the column made every reinstatement in the hint path land on `active`,
-      // quietly stripping a pinned fact of its decay exemption on the one surface another tool
-      // consumes programmatically. `scope_repo` had the same defect once already fixed here: omitting
-      // it left every project fact invisible to a second clone or worktree of the same repository,
-      // because `isInScope` falls back to `identityMatches(undefined, root)`, which is always false.
-      // General rule: any `facts` column that a reader downstream of this function depends on --
-      // directly or through a helper like `isInScope` or `resolveContradictions` -- must be added to
-      // this SELECT, or it silently reads as absent on this path only, with the CLI's own SELECT
-      // (storage.ts) unaffected.
+      // `prior_status` is not decoration here: `resolveContradictions` reinstates a fact whose rival is gone and restores `prior_status` when that fact was `pinned` before it was contested. Selecting without the column made every reinstatement in the hint path land on `active`, quietly stripping a pinned fact of its decay exemption on the one surface another tool consumes programmatically. `scope_repo` had the same defect once already fixed here: omitting it left every project fact invisible to a second clone or worktree of the same repository, because `isInScope` falls back to `identityMatches(undefined, root)`, which is always false. General rule: any `facts` column that a reader downstream of this function depends on -- directly or through a helper like `isInScope` or `resolveContradictions` -- must be added to this SELECT, or it silently reads as absent on this path only, with the CLI's own SELECT (storage.ts) unaffected.
       `SELECT id, text, kind, subject, value, scope, scope_root as scopeRoot, scope_repo as scopeRepo,
               capture_root as captureRoot, source_type, source_ref, why, captured_at, anchor, status, confidence,
               prior_status${withEmbeddings ? ", embedding" : ""}
@@ -1008,13 +505,7 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
   }
   const scopeRootRaw = fact.scopeRoot ?? null;
   if (scopeRootRaw === null || scopeRootRaw.trim().length === 0) {
-    // A project/path-scoped fact with no binding can never be resolved
-    // against a caller's root -- exclude rather than guess (fails toward
-    // under-recall, the safe direction). An empty/whitespace-only string is
-    // treated the same as null here to match isBoundToRoot's rule
-    // (retrieval.ts) -- otherwise resolvePath("") resolves to process.cwd(),
-    // which put a scope="project" fact with scopeRoot: "" in scope for every
-    // project whose --root happened to equal the caller's cwd.
+    // A project/path-scoped fact with no binding can never be resolved against a caller's root -- exclude rather than guess (fails toward under-recall, the safe direction). An empty/whitespace-only string is treated the same as null here to match isBoundToRoot's rule (retrieval.ts) -- otherwise resolvePath("") resolves to process.cwd(), which put a scope="project" fact with scopeRoot: "" in scope for every project whose --root happened to equal the caller's cwd.
     return false;
   }
   const scopeRoot = normalizePath(resolvePath(scopeRootRaw));
@@ -1026,12 +517,7 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
 
   // scope === "path"
   if (contextFiles.length === 0) {
-    // No caller has ever supplied context files here: every hook/command `mem init` installs calls
-    // `mem recall --hint-format --root <dir>` with no `--context-files`, so this branch was the only
-    // one ever exercised and it always excluded path-scoped facts -- structurally undeliverable to
-    // the one consumer that exists. Fall back to isBoundToRoot's rule (projectIdentity.ts): in scope when
-    // the fact's file sits at or under the caller's root. A caller that *does* pass context files
-    // keeps the narrower, more precise match below -- it told mem what it is looking at.
+    // No caller has ever supplied context files here: every hook/command `mem init` installs calls `mem recall --hint-format --root <dir>` with no `--context-files`, so this branch was the only one ever exercised and it always excluded path-scoped facts -- structurally undeliverable to the one consumer that exists. Fall back to isBoundToRoot's rule (projectIdentity.ts): in scope when the fact's file sits at or under the caller's root. A caller that *does* pass context files keeps the narrower, more precise match below -- it told mem what it is looking at.
     return scopeRoot === normalizePath(root) || scopeRoot.startsWith(normalizePath(root) + sep);
   }
   return contextFiles.some((file) => {
@@ -1044,21 +530,7 @@ function normalizePath(path: string): string {
   return process.platform === "win32" ? path.toLowerCase() : path;
 }
 
-/**
- * Whether `id` can occupy the unquoted `id=` field without being able to forge a line.
- *
- * `display` is JSON-encoded, so a newline or quote inside it cannot break the consumer's parse.
- * `id` cannot be given the same treatment: the consumer reads it back out as a bare token to hand to
- * `mem show`, so quoting it would be a breaking change to the published TGMEM wire contract. The
- * emitter guarantees the property structurally instead -- one run of characters containing no
- * whitespace and no control character, which is exactly what "cannot forge a second line" means here.
- *
- * Every id mem itself writes is a `randomUUID`, and `import --from-json` validates imported ids
- * against `ID_PREFIX_PATTERN`, so no supported path can produce an unsafe id. This is the emitter
- * declining to trust a database it did not write: one from a pre-0.2.2 version, or edited by hand.
- * Deliberately weaker than `ID_PREFIX_PATTERN`: addressability is storage's and import's boundary to
- * enforce, and an id that is merely unusual should still surface rather than vanish silently.
- */
+/** Whether `id` can occupy the unquoted `id=` field without being able to forge a line. `display` is JSON-encoded, so a newline or quote inside it cannot break the consumer's parse. `id` cannot be given the same treatment: the consumer reads it back out as a bare token to hand to `mem show`, so quoting it would be a breaking change to the published TGMEM wire contract. The emitter guarantees the property structurally instead -- one run of characters containing no whitespace and no control character, which is exactly what "cannot forge a second line" means here. Every id mem itself writes is a `randomUUID`, and `import --from-json` validates imported ids against `ID_PREFIX_PATTERN`, so no supported path can produce an unsafe id. This is the emitter declining to trust a database it did not write: one from a pre-0.2.2 version, or edited by hand. Deliberately weaker than `ID_PREFIX_PATTERN`: addressability is storage's and import's boundary to enforce, and an id that is merely unusual should still surface rather than vanish silently. */
 function isWireSafeId(id: string): boolean {
   if (id.length === 0 || /\s/u.test(id)) {
     return false;
@@ -1072,22 +544,14 @@ function isWireSafeId(id: string): boolean {
   return true;
 }
 
-/**
- * Whether a result holds a user pin, the predicate both `PINNED_RESERVE` and the delta exemption
- * key on. One function rather than two inline `=== "pinned"` comparisons so the two can never
- * disagree about what a pin is -- a reserve that admitted a status the delta filter still
- * suppressed would hand out a slot and then drop the fact that was meant to fill it.
- */
+/** Whether a result holds a user pin, the predicate both `PINNED_RESERVE` and the delta exemption key on. One function rather than two inline `=== "pinned"` comparisons so the two can never disagree about what a pin is -- a reserve that admitted a status the delta filter still suppressed would hand out a slot and then drop the fact that was meant to fill it. */
 function isPinned(result: RetrievedFact): boolean {
   return result.fact.status === "pinned";
 }
 
 function formatLine(result: RetrievedFact): string {
   const tag = PROTOCOL_KIND_TAG[result.fact.kind];
-  // JSON.stringify both quotes and escapes the display string, guaranteeing
-  // the emitted line is machine-parseable (design plan Section 4: "A
-  // malformed individual line is dropped and logged" on the consumer side --
-  // this producer never hands out a line that could become malformed).
+  // JSON.stringify both quotes and escapes the display string, guaranteeing the emitted line is machine-parseable (design plan Section 4: "A malformed individual line is dropped and logged" on the consumer side -- this producer never hands out a line that could become malformed).
   return `${tag}  fresh=${verdictLabel(result.freshness)}  id=${result.fact.id}  display=${JSON.stringify(result.display)}`;
 }
 

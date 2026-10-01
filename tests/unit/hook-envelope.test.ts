@@ -29,8 +29,7 @@ describe("parseHookEnvelope", () => {
   });
 
   it("reads stop_hook_active from a Stop envelope only when it is a real boolean", () => {
-    // Claude Code sets it once the agent is already continuing because a Stop hook blocked; a
-    // hook that blocks again on it loops forever, so a stringly "true" must not read as set.
+    // Claude Code sets it once the agent is already continuing because a Stop hook blocked; a hook that blocks again on it loops forever, so a stringly "true" must not read as set.
     expect(parseHookEnvelope(JSON.stringify({ session_id: "s", stop_hook_active: true }))).toEqual({ sessionId: "s", stopHookActive: true });
     expect(parseHookEnvelope(JSON.stringify({ session_id: "s", stop_hook_active: false }))).toEqual({ sessionId: "s", stopHookActive: false });
     expect(parseHookEnvelope(JSON.stringify({ session_id: "s", stop_hook_active: "true" }))).toEqual({ sessionId: "s" });

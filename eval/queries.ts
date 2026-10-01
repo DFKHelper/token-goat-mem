@@ -1,22 +1,4 @@
-/**
- * Deterministic scenario-query generation for the eval harness (item 3).
- *
- * Each scenario is a (query, root) pair plus a labelled "relevant" set of fact ids -- the facts a
- * good ranker should surface for that query in that project's scope. Three scenario families:
- *
- *   - "exact" -- the query is a value already present verbatim in the corpus (e.g. "pnpm"); the
- *     relevant set is every scope-eligible fact sharing that subject+value, which also exercises
- *     duplicate detection (an exact duplicate shares subject+value+scope+root by construction).
- *   - "stem" -- hand-picked, verified word pairs (see the module-level comment on which inflected
- *     forms Porter's algorithm actually collapses together -- not every inflection does) where the
- *     query is an inflected form that does not appear verbatim in any fact's text, but stems to the
- *     same root as a word that does. This is the scenario family item 2 exists to move the needle
- *     on; relevant is every scope-eligible fact of that subject template, regardless of value,
- *     since the shared word lives in the sentence template rather than the value.
- *   - "no-match" -- a query sharing no term (stemmed or not) with any fact's text. There is no
- *     "relevant" set to score precision/nDCG against; these exist to assert the harness's own
- *     invariant (a query ranks, it does not filter) rather than to measure ranking quality.
- */
+/** Deterministic scenario-query generation for the eval harness (item 3). Each scenario is a (query, root) pair plus a labelled "relevant" set of fact ids -- the facts a good ranker should surface for that query in that project's scope. Three scenario families: - "exact" -- the query is a value already present verbatim in the corpus (e.g. "pnpm"); the relevant set is every scope-eligible fact sharing that subject+value, which also exercises duplicate detection (an exact duplicate shares subject+value+scope+root by construction). - "stem" -- hand-picked, verified word pairs (see the module-level comment on which inflected forms Porter's algorithm actually collapses together -- not every inflection does) where the query is an inflected form that does not appear verbatim in any fact's text, but stems to the same root as a word that does. This is the scenario family item 2 exists to move the needle on; relevant is every scope-eligible fact of that subject template, regardless of value, since the shared word lives in the sentence template rather than the value. - "no-match" -- a query sharing no term (stemmed or not) with any fact's text. There is no "relevant" set to score precision/nDCG against; these exist to assert the harness's own invariant (a query ranks, it does not filter) rather than to measure ranking quality. */
 
 import { mulberry32, pickN } from "./prng.js";
 import { EVAL_SEED, type EvalFact } from "./fixtures.js";
@@ -41,14 +23,7 @@ function relevantIdsForSubject(facts: readonly EvalFact[], subject: string, root
   return new Set(facts.filter((f) => f.subject === subject && (f.scope === "global" || f.scopeRoot === root)).map((f) => f.id));
 }
 
-/**
- * Verified against `_stemForTests` during development (see the phase-1 report): each pair's query
- * word and the template's own vocabulary reduce to the same Porter stem, but the query word never
- * appears verbatim in any generated fact's text -- so a pre-stemming BM25 scores every candidate 0
- * (a genuine no-match), while a stemming-aware BM25 correctly ranks the subject's facts above the
- * rest of the corpus. Not every inflection stems together (e.g. "runner"/"running" do not, nor do
- * "architect"/"architecture") -- these are the pairs that were checked and do.
- */
+/** Verified against `_stemForTests` during development (see the phase-1 report): each pair's query word and the template's own vocabulary reduce to the same Porter stem, but the query word never appears verbatim in any generated fact's text -- so a pre-stemming BM25 scores every candidate 0 (a genuine no-match), while a stemming-aware BM25 correctly ranks the subject's facts above the rest of the corpus. Not every inflection stems together (e.g. "runner"/"running" do not, nor do "architect"/"architecture") -- these are the pairs that were checked and do. */
 const STEM_SCENARIOS: ReadonlyArray<{ query: string; subject: string }> = [
   { query: "run", subject: "test_runner" },
   { query: "runs", subject: "test_runner" },
@@ -68,8 +43,7 @@ export function generateScenarios(facts: readonly EvalFact[], seed: number = EVA
   const rng = mulberry32(seed);
   let counter = 0;
 
-  // Every distinct (subject, value, root) combo actually present as a project/path-scoped fact --
-  // duplicates collapse into the same combo by construction, so relevance already includes them.
+  // Every distinct (subject, value, root) combo actually present as a project/path-scoped fact -- duplicates collapse into the same combo by construction, so relevance already includes them.
   const combos = new Map<string, { subject: string; value: string; root: string }>();
   for (const fact of facts) {
     if ((fact.scope === "project" || fact.scope === "path") && fact.scopeRoot !== null && fact.scopeRoot !== undefined && fact.subject !== null && fact.value !== null) {

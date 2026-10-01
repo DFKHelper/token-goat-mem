@@ -118,8 +118,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("is unverified when b is missing even though a exists -- cannot compare against a nonexistent file", () => {
-      // The concrete failure this prevents: "generated.ts is current with schema.prisma" must stop
-      // being ground truth the moment schema.prisma is deleted or moved, not stay affirmed forever.
+      // The concrete failure this prevents: "generated.ts is current with schema.prisma" must stop being ground truth the moment schema.prisma is deleted or moved, not stay affirmed forever.
       writeFileSync(join(root, "a.txt"), "a");
       expect(evaluateAnchor("file-newer-than a.txt missing-b.txt", root)).toBe("unverified");
     });
@@ -163,10 +162,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("contradicts a stale lockfile left behind after a package-manager switch", () => {
-      // This is exactly the S1 bug a proxy anchor ("package-lock.json exists") cannot catch: the
-      // project switched to pnpm, but an old package-lock.json is still sitting on disk. A proposition
-      // anchor must contradict "uses npm" (via "newest-of package-lock.json ...") because pnpm-lock.yaml
-      // is now the newer, actively-maintained file.
+      // This is exactly the S1 bug a proxy anchor ("package-lock.json exists") cannot catch: the project switched to pnpm, but an old package-lock.json is still sitting on disk. A proposition anchor must contradict "uses npm" (via "newest-of package-lock.json ...") because pnpm-lock.yaml is now the newer, actively-maintained file.
       writeFileSync(join(root, "package-lock.json"), "stale npm lock, left behind after switching to pnpm");
       writeFileSync(join(root, "pnpm-lock.yaml"), "current pnpm lock");
       touch(join(root, "package-lock.json"), "2022-03-01");
@@ -232,10 +228,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("does not let .git/node_modules alone satisfy a trailing ** pattern, and is unverified rather than contradicted (Fix 2)", () => {
-      // The only entries under `src` are `.git` and `node_modules`, both skipped by the ** wildcard
-      // walk -- the walk never actually looked inside either, so it cannot positively deny a match
-      // exists there. `contradicted` would fabricate "no such file" for files that are plainly
-      // present, just unreached.
+      // The only entries under `src` are `.git` and `node_modules`, both skipped by the ** wildcard walk -- the walk never actually looked inside either, so it cannot positively deny a match exists there. `contradicted` would fabricate "no such file" for files that are plainly present, just unreached.
       mkdirSync(join(root, "src", "node_modules", "pkg"), { recursive: true });
       writeFileSync(join(root, "src", "node_modules", "pkg", "index.js"), "x");
       mkdirSync(join(root, "src", ".git"), { recursive: true });
@@ -296,9 +289,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("affirms a directory anchor when every file under it is tracked (Item 1: a directory is never itself an index entry)", () => {
-      // Before the fix, `paths.has(relPath)` looked `src` up exactly against the index's *file*
-      // entries -- a directory is never itself an entry, so this fell straight through to
-      // `contradicted` even though `src/auth.ts` was the fixture's only file and was fully tracked.
+      // Before the fix, `paths.has(relPath)` looked `src` up exactly against the index's *file* entries -- a directory is never itself an entry, so this fell straight through to `contradicted` even though `src/auth.ts` was the fixture's only file and was fully tracked.
       mkdirSync(join(root, "src"), { recursive: true });
       writeFileSync(join(root, "src", "auth.ts"), "x");
       runGit(["init", "-q"], root);
@@ -353,10 +344,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("is unverified for a compound range, not a leftmost-major-prefix contradiction", () => {
-      // Regression: the major-prefix regex used to match only the *leading term* of a compound
-      // range (e.g. "1." out of "1.0.0 - 2.0.0"), silently discarding the rest of the range and
-      // asserting a mismatch this comparison never actually resolved. Neither range genuinely
-      // contradicts major 2 -- both include 2.0.0 -- so this must fall through to unverified.
+      // Regression: the major-prefix regex used to match only the *leading term* of a compound range (e.g. "1." out of "1.0.0 - 2.0.0"), silently discarding the rest of the range and asserting a mismatch this comparison never actually resolved. Neither range genuinely contradicts major 2 -- both include 2.0.0 -- so this must fall through to unverified.
       writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { foo: "1.0.0 - 2.0.0" } }));
       expect(evaluateAnchor("package-version package.json foo@2", root)).toBe("unverified");
 
@@ -412,11 +400,7 @@ describe("evaluateAnchor", () => {
   });
 
   describe("a symlink inside root pointing outside root is refused, not followed", () => {
-    // Root-containment (resolveWithinRoot) only guarantees the *resolved* path stays inside root --
-    // it says nothing about a symlink *inside* root whose target lives outside it. Without an
-    // additional check, following that symlink would turn these predicates into an existence/content
-    // oracle for arbitrary filesystem locations (e.g. via an attacker-influenceable anchor string
-    // from `mem import --from-json` or a derived/suggested fact).
+    // Root-containment (resolveWithinRoot) only guarantees the *resolved* path stays inside root -- it says nothing about a symlink *inside* root whose target lives outside it. Without an additional check, following that symlink would turn these predicates into an existence/content oracle for arbitrary filesystem locations (e.g. via an attacker-influenceable anchor string from `mem import --from-json` or a derived/suggested fact).
     let outside: string;
 
     beforeEach(() => {
@@ -431,8 +415,7 @@ describe("evaluateAnchor", () => {
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
-      // The symlink target is refused rather than followed, so the predicate cannot confirm presence
-      // through it -- "contradicted" would wrongly assert the file definitely does not exist.
+      // The symlink target is refused rather than followed, so the predicate cannot confirm presence through it -- "contradicted" would wrongly assert the file definitely does not exist.
       expect(evaluateAnchor("file-exists link.txt", root)).toBe("unverified");
     });
 
@@ -440,19 +423,12 @@ describe("evaluateAnchor", () => {
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
-      // The symlink itself exists, but its target is refused rather than followed, so the predicate
-      // cannot safely assert absence either -- "affirmed" here would fabricate ground truth (this was
-      // the actual bug: it let a genuinely-present file, reached only through a symlink, be certified
-      // as removed).
+      // The symlink itself exists, but its target is refused rather than followed, so the predicate cannot safely assert absence either -- "affirmed" here would fabricate ground truth (this was the actual bug: it let a genuinely-present file, reached only through a symlink, be certified as removed).
       expect(evaluateAnchor("file-absent link.txt", root)).toBe("unverified");
     });
 
     it("file-contains is unverified (does not read through) a symlink to a file outside root", () => {
-      // Regression: this used to assert `contradicted`, but `file-contains`/`file-not-contains` is
-      // an asserts-presence/asserts-absence pair exactly like `file-exists`/`file-absent` (this
-      // file's own precedent below) -- mem refuses to read through the symlink, so it can confirm
-      // neither the substring's presence nor its absence. `contradicted` here would assert the
-      // substring is absent with no basis for that claim.
+      // Regression: this used to assert `contradicted`, but `file-contains`/`file-not-contains` is an asserts-presence/asserts-absence pair exactly like `file-exists`/`file-absent` (this file's own precedent below) -- mem refuses to read through the symlink, so it can confirm neither the substring's presence nor its absence. `contradicted` here would assert the substring is absent with no basis for that claim.
       const target = join(outside, "secret.txt");
       writeFileSync(target, "super-secret-value");
       symlinkSync(target, join(root, "link.txt"), "file");
@@ -460,8 +436,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("file-not-contains is unverified (does not read through) a symlink to a file outside root", () => {
-      // The negated form of the above: `contradicted` here would assert the substring IS present --
-      // a claim mem has no basis for either, since it never read the file.
+      // The negated form of the above: `contradicted` here would assert the substring IS present -- a claim mem has no basis for either, since it never read the file.
       const target = join(outside, "secret.txt");
       writeFileSync(target, "super-secret-value");
       symlinkSync(target, join(root, "link.txt"), "file");
@@ -469,9 +444,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("package-version is unverified (does not read through) a symlink to a package.json outside root", () => {
-      // Fix 3: `contradicted` here would assert "the manifest does not declare that version", a
-      // comparison mem never actually performed once it refused to follow the symlink -- uniform
-      // with the file-exists/file-absent/file-contains policy above (module header comment).
+      // Fix 3: `contradicted` here would assert "the manifest does not declare that version", a comparison mem never actually performed once it refused to follow the symlink -- uniform with the file-exists/file-absent/file-contains policy above (module header comment).
       const target = join(outside, "package.json");
       writeFileSync(target, JSON.stringify({ dependencies: { react: "18.2.0" } }));
       symlinkSync(target, join(root, "package.json"), "file");
@@ -493,10 +466,7 @@ describe("evaluateAnchor", () => {
       mkdirSync(junctionTarget, { recursive: true });
       writeFileSync(join(junctionTarget, "package.json"), '{"name":"foo"}');
       symlinkSync(junctionTarget, junctionSource, "junction");
-      // This is the pnpm shape: node_modules/foo -> node_modules/.pnpm/foo, both inside root, with the
-      // real package.json reachable only through the symlink. Refusing to resolve through it must
-      // yield "unverified" for file-absent -- not "affirmed", which would certify a present dependency
-      // as removed.
+      // This is the pnpm shape: node_modules/foo -> node_modules/.pnpm/foo, both inside root, with the real package.json reachable only through the symlink. Refusing to resolve through it must yield "unverified" for file-absent -- not "affirmed", which would certify a present dependency as removed.
       expect(evaluateAnchor("file-absent node_modules/foo", root)).toBe("unverified");
       expect(evaluateAnchor("file-absent node_modules/foo/package.json", root)).toBe("unverified");
       // A genuinely-missing sibling, with no symlink involved, is still honestly affirmed.
@@ -504,9 +474,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("file-newer-than is unverified (does not follow) when the first path is a symlink to a file outside root", () => {
-      // Fix 3: `contradicted` here would assert "a is not newer than b", a comparison mem never
-      // actually performed once it refused to follow the symlink -- uniform symlink policy across
-      // every path-based predicate (module header comment).
+      // Fix 3: `contradicted` here would assert "a is not newer than b", a comparison mem never actually performed once it refused to follow the symlink -- uniform symlink policy across every path-based predicate (module header comment).
       const target = join(outside, "secret.txt");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "link.txt"), "file");
@@ -532,8 +500,7 @@ describe("evaluateAnchor", () => {
     });
 
     it("newest-of is unverified (does not follow) when the expected candidate is a symlink to a file outside root", () => {
-      // Fix 3: `contradicted` here would assert "the expected file is not the newest", a comparison
-      // mem never actually performed once it refused to follow the symlink.
+      // Fix 3: `contradicted` here would assert "the expected file is not the newest", a comparison mem never actually performed once it refused to follow the symlink.
       const target = join(outside, "pnpm-lock.yaml");
       writeFileSync(target, "outside content");
       symlinkSync(target, join(root, "pnpm-lock.yaml"), "file");
@@ -580,24 +547,17 @@ describe("evaluateAnchor", () => {
 
     it("does not memoize a budget-limited unverified verdict, so a later unbudgeted call re-evaluates for real", () => {
       writeFileSync(join(root, "a.txt"), "a");
-      // An already-expired deadline forces the "ran out of time" bailout path, never reaching the
-      // real file-exists check — this "unverified" is a budget artifact, not a genuine predicate
-      // outcome for this anchor+root.
+      // An already-expired deadline forces the "ran out of time" bailout path, never reaching the real file-exists check — this "unverified" is a budget artifact, not a genuine predicate outcome for this anchor+root.
       const expiredDeadline = Date.now() - 1;
       expect(evaluateAnchor("file-exists a.txt", root, expiredDeadline)).toBe("unverified");
-      // Same anchor + same root, no deadline this time: if the budget-limited verdict had been
-      // memoized under the `root + anchor` key, this would incorrectly return the stale
-      // "unverified" instead of actually evaluating the predicate.
+      // Same anchor + same root, no deadline this time: if the budget-limited verdict had been memoized under the `root + anchor` key, this would incorrectly return the stale "unverified" instead of actually evaluating the predicate.
       expect(evaluateAnchor("file-exists a.txt", root)).toBe("affirmed");
     });
 
     it("still memoizes a genuine (non-budget) unverified verdict", () => {
       // Malformed anchor: unverified for a real reason (wrong arity), independent of any budget.
       expect(evaluateAnchor("file-exists", root)).toBe("unverified");
-      // A second call with a generous (unexpired) deadline still passes through the top-of-function
-      // budget check and reaches the memo lookup — if the fix had disabled memoization wholesale
-      // instead of narrowly targeting budget-exhaustion bailouts, this would still pass, but it
-      // confirms genuine unverified verdicts are cached and returned the same way as before.
+      // A second call with a generous (unexpired) deadline still passes through the top-of-function budget check and reaches the memo lookup — if the fix had disabled memoization wholesale instead of narrowly targeting budget-exhaustion bailouts, this would still pass, but it confirms genuine unverified verdicts are cached and returned the same way as before.
       expect(evaluateAnchor("file-exists", root, Date.now() + 100_000)).toBe("unverified");
     });
   });
@@ -610,10 +570,7 @@ describe("evaluateAnchor", () => {
       const recorded = store.get(root, "file-contains config.json pnpm");
       expect(recorded).toBeDefined();
 
-      // Overwrite with a deliberately wrong verdict under the *same* witness, then clear only the
-      // in-process memo (simulating a new process, which starts with an empty memo but the same
-      // persistent store). If the wrong verdict comes back, the persisted one was reused rather
-      // than the predicate being re-evaluated for real.
+      // Overwrite with a deliberately wrong verdict under the *same* witness, then clear only the in-process memo (simulating a new process, which starts with an empty memo but the same persistent store). If the wrong verdict comes back, the persisted one was reused rather than the predicate being re-evaluated for real.
       store.set(root, "file-contains config.json pnpm", "contradicted", recorded?.witness ?? null);
       _clearAnchorMemoForTests();
       expect(evaluateAnchor("file-contains config.json pnpm", root, undefined, undefined, store)).toBe("contradicted");
@@ -705,11 +662,7 @@ describe("anchorPathWithinRoot", () => {
 });
 
 describe("mentionsAnchorableTarget", () => {
-  /**
-   * The nomination predicate behind `mem review --section unanchored`. Its whole value depends on
-   * not firing on ordinary prose, so the negative cases below are the load-bearing ones: a bucket
-   * that flags "we standardised on Node.js" is a bucket nobody reads.
-   */
+  /** The nomination predicate behind `mem review --section unanchored`. Its whole value depends on not firing on ordinary prose, so the negative cases below are the load-bearing ones: a bucket that flags "we standardised on Node.js" is a bucket nobody reads. */
   it.each([
     ["a relative path with an extension", "the entry point is src/main.ts"],
     ["a home-rooted path", "live-tested against the real ~/.claude/settings.json"],

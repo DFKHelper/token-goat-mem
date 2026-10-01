@@ -1,23 +1,4 @@
-/**
- * Deterministic synthetic fixture corpus for the retrieval eval harness (item 3).
- *
- * Generated from a seeded PRNG (`eval/prng.ts`) rather than hand-written, so re-running
- * `npm run eval` with the same `EVAL_SEED` reproduces the exact same corpus and scenario set --
- * no giant JSON blob to keep in sync with this file, and no run-to-run noise in the reported
- * precision/nDCG numbers.
- *
- * The corpus spans:
- *   - ~5 fake project roots ("scope=project" facts bind to one of them; "scope=path" facts bind to
- *     a file under one; "scope=global" facts bind to none).
- *   - all four `FactKind`s (`preference`, `decision`, `fact`, `correction`).
- *   - realistic developer-domain text: package managers, test runners, CI systems, formatters,
- *     linters, architecture decisions, deploy cadence, database choice, branch strategy, commit
- *     convention, code review policy.
- *   - deliberate exact duplicates (same subject/value/scope/root, different id and capture time).
- *   - deliberate contradictory pairs (same subject+scope+root, different value -- what
- *     `src/contradiction.ts` would key on).
- *   - a mix of anchored (non-null `anchor` string) and unanchored (`anchor: null`) variants.
- */
+/** Deterministic synthetic fixture corpus for the retrieval eval harness (item 3). Generated from a seeded PRNG (`eval/prng.ts`) rather than hand-written, so re-running `npm run eval` with the same `EVAL_SEED` reproduces the exact same corpus and scenario set -- no giant JSON blob to keep in sync with this file, and no run-to-run noise in the reported precision/nDCG numbers. The corpus spans: - ~5 fake project roots ("scope=project" facts bind to one of them; "scope=path" facts bind to a file under one; "scope=global" facts bind to none). - all four `FactKind`s (`preference`, `decision`, `fact`, `correction`). - realistic developer-domain text: package managers, test runners, CI systems, formatters, linters, architecture decisions, deploy cadence, database choice, branch strategy, commit convention, code review policy. - deliberate exact duplicates (same subject/value/scope/root, different id and capture time). - deliberate contradictory pairs (same subject+scope+root, different value -- what `src/contradiction.ts` would key on). - a mix of anchored (non-null `anchor` string) and unanchored (`anchor: null`) variants. */
 
 import { chance, mulberry32, pick, pickN } from "./prng.js";
 import type { Fact, FactKind, FactScope } from "../src/types.js";
@@ -131,15 +112,11 @@ const TEMPLATES: readonly Template[] = [
   },
 ];
 
-// Space-separated, because that is the only syntax `anchors.ts` parses: `tokenize` splits on
-// whitespace, so a colon-glued `"file-exists:package.json"` is one token, matches no case in
-// `evaluateTokens`, and falls to `default: "unverified"`. These read as real anchors now, which is
-// what makes the `"pipeline"` config's filesystem fixture load-bearing rather than decorative.
+// Space-separated, because that is the only syntax `anchors.ts` parses: `tokenize` splits on whitespace, so a colon-glued `"file-exists:package.json"` is one token, matches no case in `evaluateTokens`, and falls to `default: "unverified"`. These read as real anchors now, which is what makes the `"pipeline"` config's filesystem fixture load-bearing rather than decorative.
 export const ANCHOR_TEMPLATES = ["file-exists package.json", "git-tracked src/index.ts", "glob-exists *.config.*", "file-exists .eslintrc"] as const;
 
 export interface EvalFact extends Fact {
-  /** Not part of the real `Fact` shape -- eval-only bookkeeping so `queries.ts` can compute a
-   * scenario's labelled-relevant set from the same generation pass, instead of hand-picking ids. */
+  /** Not part of the real `Fact` shape -- eval-only bookkeeping so `queries.ts` can compute a scenario's labelled-relevant set from the same generation pass, instead of hand-picking ids. */
   readonly _template: string;
   readonly _value: string;
   readonly _isDuplicate: boolean;
@@ -155,8 +132,7 @@ export function generateCorpus(seed: number = EVAL_SEED, count = 400): readonly 
 
   const baseDate = Date.UTC(2025, 0, 1);
   const nextCapturedAt = (): string => {
-    // Spread capture times over roughly a year, monotonically increasing with generation order so
-    // "most recently captured" has a well-defined, reproducible meaning for the recency baseline.
+    // Spread capture times over roughly a year, monotonically increasing with generation order so "most recently captured" has a well-defined, reproducible meaning for the recency baseline.
     const dayOffset = facts.length * 7 + Math.floor(rng() * 5);
     return new Date(baseDate + dayOffset * 86_400_000).toISOString();
   };
@@ -184,9 +160,7 @@ export function generateCorpus(seed: number = EVAL_SEED, count = 400): readonly 
       value,
       scope,
       scopeRoot,
-      // `capture.ts` records this for every scope, and `anchorRootFor` returns `null` -- i.e. an
-      // unconditional `unverified` -- for a `path` fact without it. Omitting it made every
-      // path-scoped anchor in the corpus unevaluable no matter what the filesystem said.
+      // `capture.ts` records this for every scope, and `anchorRootFor` returns `null` -- i.e. an unconditional `unverified` -- for a `path` fact without it. Omitting it made every path-scoped anchor in the corpus unevaluable no matter what the filesystem said.
       captureRoot: scopeRoot,
       source_type: chance(rng, 0.85) ? "user" : "derived",
       source_ref: null,
@@ -211,8 +185,7 @@ export function generateCorpus(seed: number = EVAL_SEED, count = 400): readonly 
     const fact = makeFact(template, value, kind);
     facts.push(fact);
 
-    // Deliberate exact duplicate: same subject/value/scope/root, different id and capture time --
-    // ~12% of generated facts get one.
+    // Deliberate exact duplicate: same subject/value/scope/root, different id and capture time -- ~12% of generated facts get one.
     if (chance(rng, 0.12)) {
       facts.push({
         ...makeFact(template, value, kind, { scope: fact.scope, scopeRoot: fact.scopeRoot ?? null }),
@@ -220,8 +193,7 @@ export function generateCorpus(seed: number = EVAL_SEED, count = 400): readonly 
       });
     }
 
-    // Deliberate contradiction: same subject+scope+root, a *different* value from the same
-    // template -- ~10% of generated facts get a rival.
+    // Deliberate contradiction: same subject+scope+root, a *different* value from the same template -- ~10% of generated facts get a rival.
     if (chance(rng, 0.1) && template.values.length > 1) {
       const rivalValues = template.values.filter((v) => v !== value);
       const rivalValue = pick(rng, rivalValues);

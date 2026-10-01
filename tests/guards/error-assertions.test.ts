@@ -1,31 +1,4 @@
-/**
- * Source-level guard that a test asserting on an error class also says *which* failure it expected,
- * whenever the class alone cannot say it.
- *
- * `expect(...).toThrow(SomeError)` passes for any instance of that class, from any code path. When
- * one class covers a single failure that is exactly the right assertion. When it covers several, the
- * assertion silently weakens into "something went wrong", and a test can pass on a failure that has
- * nothing to do with what it is named for.
- *
- * That is not theoretical here. `tests/exportImport.test.ts` had a test called "an oversized import
- * file throws JsonImportError before attempting to parse" that asserted only the class. A 50MB file
- * of filler is not valid JSON either, so the parse failure raised the same class and satisfied the
- * assertion -- the test passed with the size limit raised tenfold, meaning the guard it was named
- * for had never been covered at all. The test was passing *on the parse* it existed to rule out.
- *
- * ── The ambiguity model ─────────────────────────────────────────────────────────────────────────
- *
- * A class is "ambiguous" when `src/` can raise it carrying more than one distinct message. Counting
- * `new X(` alone undercounts: `readFileWithErrorMapping` (src/fileUtils.ts) constructs *the caller's*
- * class, so a class handed to it picks up every message branch that helper has -- which is how
- * `JsonImportError` reaches nine possible messages from five direct `throw` sites.
- *
- * A class with exactly one message is left alone: `toThrow(SecretDetectedError)` is unambiguous by
- * construction, and demanding a message there would be ceremony, not coverage. A class defined
- * inside the test file itself is also exempt -- `tests/unit/fileUtils.test.ts` passes `TestError` and
- * `OtherError` *in* to prove the mapper returns the class it was given, so there the class is the
- * assertion rather than a proxy for one.
- */
+/** Source-level guard that a test asserting on an error class also says *which* failure it expected, whenever the class alone cannot say it. `expect(...).toThrow(SomeError)` passes for any instance of that class, from any code path. When one class covers a single failure that is exactly the right assertion. When it covers several, the assertion silently weakens into "something went wrong", and a test can pass on a failure that has nothing to do with what it is named for. That is not theoretical here. `tests/exportImport.test.ts` had a test called "an oversized import file throws JsonImportError before attempting to parse" that asserted only the class. A 50MB file of filler is not valid JSON either, so the parse failure raised the same class and satisfied the assertion -- the test passed with the size limit raised tenfold, meaning the guard it was named for had never been covered at all. The test was passing *on the parse* it existed to rule out. ── The ambiguity model ───────────────────────────────────────────────────────────────────────── A class is "ambiguous" when `src/` can raise it carrying more than one distinct message. Counting `new X(` alone undercounts: `readFileWithErrorMapping` (src/fileUtils.ts) constructs *the caller's* class, so a class handed to it picks up every message branch that helper has -- which is how `JsonImportError` reaches nine possible messages from five direct `throw` sites. A class with exactly one message is left alone: `toThrow(SecretDetectedError)` is unambiguous by construction, and demanding a message there would be ceremony, not coverage. A class defined inside the test file itself is also exempt -- `tests/unit/fileUtils.test.ts` passes `TestError` and `OtherError` *in* to prove the mapper returns the class it was given, so there the class is the assertion rather than a proxy for one. */
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -112,8 +85,7 @@ describe("error-class assertions", () => {
   });
 
   it("is actually watching something -- the ambiguity model finds real multi-message classes", () => {
-    // Without this, a rename of an error class or of the mapper would drop every class to a count of
-    // 0 or 1, making the guard above vacuously true and silent about it forever.
+    // Without this, a rename of an error class or of the mapper would drop every class to a count of 0 or 1, making the guard above vacuously true and silent about it forever.
     expect(MAPPER_MESSAGE_BRANCHES).toBeGreaterThan(1);
     expect(distinctMessageCount("WiringConflictError")).toBeGreaterThan(1);
     expect(distinctMessageCount("JsonImportError")).toBeGreaterThan(1);

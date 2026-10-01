@@ -19,15 +19,7 @@ import {
 import type { Fact } from "../../src/types.js";
 import type { HintFormatOptions, HintFormatResult } from "../../src/integration-seam.js";
 
-/**
- * A deterministic handle on the "some other step in retrieval threw" branch of `buildHintFormat`,
- * distinct from the "store could not even be opened" branch already covered by the broken-db-file
- * test below. `getUsefulnessCounts` runs on the connection `openStorage` already opened
- * successfully, so overriding it reaches the generic catch without touching `StorageUnreadableError`
- * at all. Mirrors the `node:fs` override pattern in tests/anchors-branches.test.ts: the ESM module
- * namespace is not configurable, so `vi.spyOn` cannot patch a named export directly, and this slot
- * defaults to passing through to the real implementation for every test that does not set it.
- */
+/** A deterministic handle on the "some other step in retrieval threw" branch of `buildHintFormat`, distinct from the "store could not even be opened" branch already covered by the broken-db-file test below. `getUsefulnessCounts` runs on the connection `openStorage` already opened successfully, so overriding it reaches the generic catch without touching `StorageUnreadableError` at all. Mirrors the `node:fs` override pattern in tests/anchors-branches.test.ts: the ESM module namespace is not configurable, so `vi.spyOn` cannot patch a named export directly, and this slot defaults to passing through to the real implementation for every test that does not set it. */
 type StorageOverride = ((real: (...args: unknown[]) => unknown, ...args: unknown[]) => unknown) | null;
 const storageOverrides = vi.hoisted(() => ({
   getUsefulnessCounts: null as StorageOverride,
@@ -47,34 +39,12 @@ vi.mock("../../src/storage.js", async (importOriginal) => {
 /** A soft budget no test machine can exceed. */
 const NO_TRUNCATION_BUDGET_MS = 3_600_000;
 
-/**
- * `buildHintFormat` with truncation taken out of the picture, and the only entry point this file
- * should use.
- *
- * The seam returns an *empty* hint set when retrieval overruns its 150ms soft budget, because
- * TGMEM/2 has no way to say "this is partial" and a reduced response is byte-indistinguishable
- * from a complete one. That is correct, deliberate behaviour -- but it means every assertion about
- * *which* facts come back is silently also an assertion about how fast the runner is. On the first
- * two CI runs that turned three selection tests red on Windows and green on Linux, for no reason
- * connected to what they test.
- *
- * Pinning per-test only fixes the tests that happened to go red, so the next slow runner finds the
- * next one. Defaulting it here means a new test cannot acquire the flake by omission; the spread
- * puts `options` last so the tests that *are* about exhaustion can still force the budget to 0.
- */
+/** `buildHintFormat` with truncation taken out of the picture, and the only entry point this file should use. The seam returns an *empty* hint set when retrieval overruns its 150ms soft budget, because TGMEM/2 has no way to say "this is partial" and a reduced response is byte-indistinguishable from a complete one. That is correct, deliberate behaviour -- but it means every assertion about *which* facts come back is silently also an assertion about how fast the runner is. On the first two CI runs that turned three selection tests red on Windows and green on Linux, for no reason connected to what they test. Pinning per-test only fixes the tests that happened to go red, so the next slow runner finds the next one. Defaulting it here means a new test cannot acquire the flake by omission; the spread puts `options` last so the tests that *are* about exhaustion can still force the budget to 0. */
 async function buildHint(options: HintFormatOptions): Promise<HintFormatResult> {
   return buildHintFormat({ retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS, ...options });
 }
 
-/**
- * TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the
- * fact caps/ordering that predate the footer line.
- *
- * Matches on the `footer` tag rather than on `TGMEM_FOOTER_LINE`'s exact bytes: the footer carries
- * counts now, so an equality filter silently stops stripping the moment a test's store has anything
- * withheld or capped, and every caps/ordering assertion downstream would then be counting a footer
- * as a fact.
- */
+/** TGMEM/2's fact-lines, with the trailing footer-line (if any) stripped -- for assertions about the fact caps/ordering that predate the footer line. Matches on the `footer` tag rather than on `TGMEM_FOOTER_LINE`'s exact bytes: the footer carries counts now, so an equality filter silently stops stripping the moment a test's store has anything withheld or capped, and every caps/ordering assertion downstream would then be counting a footer as a fact. */
 function factLines(result: HintFormatResult): readonly string[] {
   return result.lines.filter((line) => !line.startsWith("footer  "));
 }
@@ -100,12 +70,7 @@ function seedFacts(dbPath: string, seeds: readonly FactSeed[]): void {
     `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)
      VALUES (@id, @text, @kind, @subject, @value, @scope, @scopeRoot, @source_type, @source_ref, @captured_at, @anchor, @status, @confidence)`
   );
-  // One transaction, not one implicit transaction per row. An unwrapped insert commits on its
-  // own, so seeding 500 facts costs 500 durability syncs -- 73ms on a local NVMe and over the
-  // 5s vitest default on a cold windows-latest runner, which is what turned
-  // `emits exactly the cap-limited set` red on the v0.4.0 release. Retrieval itself was never
-  // the cost: a query-less buildHintFormat over 500 facts returns inside the 150ms budget.
-  // `.immediate()` follows the convention tests/guards/transactions.test.ts pins for src.
+  // One transaction, not one implicit transaction per row. An unwrapped insert commits on its own, so seeding 500 facts costs 500 durability syncs -- 73ms on a local NVMe and over the 5s vitest default on a cold windows-latest runner, which is what turned `emits exactly the cap-limited set` red on the v0.4.0 release. Retrieval itself was never the cost: a query-less buildHintFormat over 500 facts returns inside the 150ms budget. `.immediate()` follows the convention tests/guards/transactions.test.ts pins for src.
   const insertAll = db.transaction((rows: readonly FactSeed[]) => {
     for (const seed of rows) {
       insert.run({
@@ -145,8 +110,7 @@ describe("buildHintFormat", () => {
   });
 
   afterEach(async () => {
-    // Record/set/restore rather than delete, matching tests/setup/isolate-home.ts: an embedding
-    // variable left set here would silently turn ranking on for every later test in this worker.
+    // Record/set/restore rather than delete, matching tests/setup/isolate-home.ts: an embedding variable left set here would silently turn ranking on for every later test in this worker.
     for (const key of [EMBED_URL_ENV, EMBED_MODEL_ENV] as const) {
       const prior = priorEmbedEnv[key];
       if (prior === undefined) {
@@ -162,17 +126,7 @@ describe("buildHintFormat", () => {
     rmSync(workDir, { recursive: true, force: true });
   });
 
-  // ── Scale invariant ──────────────────────────────────────────────────────────────────────────
-  //
-  // The seam has exactly two legal shapes on the wire, and the gap between them is the whole point
-  // of returning empty rather than a smaller slice when the budget blows (see RETRIEVAL_BUDGET_MS
-  // in src/integration-seam.ts). Nothing in the suite exercised that at a store size where the caps
-  // actually bind, which is why a silent 40,000-fact degradation to 2 lines was found by hand-run
-  // benchmarking rather than by CI.
-  //
-  // Deliberately an invariant guard, not a latency budget: recall is linear in store size, and a
-  // wall-clock assertion on a shared CI runner is precisely the flake this file already carries a
-  // wrapper to prevent. The assertions below hold whether the runner is fast or slow.
+  // ── Scale invariant ────────────────────────────────────────────────────────────────────────── The seam has exactly two legal shapes on the wire, and the gap between them is the whole point of returning empty rather than a smaller slice when the budget blows (see RETRIEVAL_BUDGET_MS in src/integration-seam.ts). Nothing in the suite exercised that at a store size where the caps actually bind, which is why a silent 40,000-fact degradation to 2 lines was found by hand-run benchmarking rather than by CI. Deliberately an invariant guard, not a latency budget: recall is linear in store size, and a wall-clock assertion on a shared CI runner is precisely the flake this file already carries a wrapper to prevent. The assertions below hold whether the runner is fast or slow.
   describe("at a store size where the emission caps bind", () => {
     const AGGRESSIVE_CAP = 8;
     const PRECISION_CAP = 4;
@@ -211,8 +165,7 @@ describe("buildHintFormat", () => {
       const result = await buildHint({ root, dbPath });
       const lines = factLines(result);
       expect(result.truncated).toBe(false);
-      // 500 eligible facts, 12 emitted. The caps are the *designed* bound on a hint set and are not
-      // the defect -- withholding *below* them without saying so was.
+      // 500 eligible facts, 12 emitted. The caps are the *designed* bound on a hint set and are not the defect -- withholding *below* them without saying so was.
       expect(lines).toHaveLength(FULL_EMISSION);
       expect(lines.filter((line) => line.startsWith("pref"))).toHaveLength(AGGRESSIVE_CAP);
       expect(lines.filter((line) => line.startsWith("dec"))).toHaveLength(PRECISION_CAP);
@@ -222,31 +175,24 @@ describe("buildHintFormat", () => {
       seedAtScale(300, 200);
       const result = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
       expect(result.truncated).toBe(true);
-      // The regression this pins: the deleted TRUNCATED_AGGRESSIVE_CAP/TRUNCATED_PRECISION_CAP pair
-      // returned 2 + 1 = 3 lines here, in a payload a consumer could not tell from a complete one.
-      // Any reintroduction of a reduced-cap path makes this a non-zero count.
+      // The regression this pins: the deleted TRUNCATED_AGGRESSIVE_CAP/TRUNCATED_PRECISION_CAP pair returned 2 + 1 = 3 lines here, in a payload a consumer could not tell from a complete one. Any reintroduction of a reduced-cap path makes this a non-zero count.
       expect(factLines(result)).toEqual([]);
       expect(result.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
     });
 
     it("never emits a third size: at scale the fact-line count is the full cap set or zero", async () => {
       seedAtScale(300, 200);
-      // The real invariant, run against the *default* 150ms budget at a scale where blowing it is
-      // plausible on a loaded runner. Whichever way it lands is legal; landing between them is not.
-      // This is the one assertion here that would catch a future third emission path, whatever
-      // mechanism introduced it.
+      // The real invariant, run against the *default* 150ms budget at a scale where blowing it is plausible on a loaded runner. Whichever way it lands is legal; landing between them is not. This is the one assertion here that would catch a future third emission path, whatever mechanism introduced it.
       const result = await buildHintFormat({ root, dbPath });
       const count = factLines(result).length;
       expect([0, FULL_EMISSION]).toContain(count);
-      // ...and the two shapes stay distinguishable on the wire: a complete set carries the footer,
-      // an empty one carries nothing at all.
+      // ...and the two shapes stay distinguishable on the wire: a complete set carries the footer, an empty one carries nothing at all.
       expect(result.lines).toHaveLength(count === 0 ? 0 : count + 1);
     });
   });
 
   it("returns just the header with no lines when the store is empty", async () => {
-    // Budget pinned high: `truncated` is wall-clock-driven, and a cold CI runner can spend more than
-    // the 150ms default just opening the database -- which reported truncation on an empty store.
+    // Budget pinned high: `truncated` is wall-clock-driven, and a cold CI runner can spend more than the 150ms default just opening the database -- which reported truncation on an empty store.
     const result = await buildHint({ root, dbPath });
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([]);
@@ -260,18 +206,13 @@ describe("buildHintFormat", () => {
     const emptyStore = await buildHint({ root, dbPath });
 
     expect(result.header).toBe(TGMEM_HEADER);
-    // An unreadable store still carries no fact-lines -- there is nothing to read them from -- but
-    // it must not be byte-identical to a project with genuinely no memory yet (see the empty-store
-    // assertion just above): that collision is exactly the gap this footer line closes.
+    // An unreadable store still carries no fact-lines -- there is nothing to read them from -- but it must not be byte-identical to a project with genuinely no memory yet (see the empty-store assertion just above): that collision is exactly the gap this footer line closes.
     expect(result.lines).toEqual([STORE_UNREADABLE_FOOTER_LINE]);
     expect(result.lines).not.toEqual(emptyStore.lines);
   });
 
   it("TGMEM/1: an unreadable store carries no footer at all, same as an empty one", async () => {
-    // TGMEM/1 has no footer-line grammar at all (see the wire-format doc comment in
-    // src/integration-seam.ts), so this collision is an accepted limitation of that version, not a
-    // gap this fix closes -- the fix is scoped to TGMEM/2, which is the only version with a footer
-    // to distinguish with.
+    // TGMEM/1 has no footer-line grammar at all (see the wire-format doc comment in src/integration-seam.ts), so this collision is an accepted limitation of that version, not a gap this fix closes -- the fix is scoped to TGMEM/2, which is the only version with a footer to distinguish with.
     const brokenDbPath = join(workDir, "not-a-sqlite-file-v1");
     mkdirSync(brokenDbPath);
     const result = await buildHint({ root, dbPath: brokenDbPath, protocolVersion: 1 });
@@ -280,9 +221,7 @@ describe("buildHintFormat", () => {
   });
 
   it("fails open (never throws) on an internal retrieval error, but says so instead of looking like an empty store", async () => {
-    // Distinguished from the broken-db-file test above: the store opens fine here, and something
-    // downstream of that throws instead -- the branch `buildHintFormat`'s catch reaches when the
-    // error is not a `StorageUnreadableError`.
+    // Distinguished from the broken-db-file test above: the store opens fine here, and something downstream of that throws instead -- the branch `buildHintFormat`'s catch reaches when the error is not a `StorageUnreadableError`.
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     storageOverrides.getUsefulnessCounts = () => {
       throw new Error("simulated internal failure downstream of a successful store open");
@@ -372,9 +311,7 @@ describe("buildHintFormat", () => {
     ]);
 
     const result = await buildHint({ root, dbPath });
-    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while
-    // the footer says something is being held back. Both halves matter -- a silent exclusion is
-    // byte-indistinguishable from a project with no memory at all.
+    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while the footer says something is being held back. Both halves matter -- a silent exclusion is byte-indistinguishable from a project with no memory at all.
     expect(factLines(result)).toEqual([]);
     expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
   });
@@ -392,9 +329,7 @@ describe("buildHintFormat", () => {
       },
     ]);
     const result = await buildHint({ root, dbPath });
-    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while
-    // the footer says something is being held back. Both halves matter -- a silent exclusion is
-    // byte-indistinguishable from a project with no memory at all.
+    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while the footer says something is being held back. Both halves matter -- a silent exclusion is byte-indistinguishable from a project with no memory at all.
     expect(factLines(result)).toEqual([]);
     expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
   });
@@ -427,9 +362,7 @@ describe("buildHintFormat", () => {
       },
     ]);
     const result = await buildHint({ root, dbPath });
-    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while
-    // the footer says something is being held back. Both halves matter -- a silent exclusion is
-    // byte-indistinguishable from a project with no memory at all.
+    // Excluded from the payload, and now *disclosed* as excluded: the fact-lines stay empty, while the footer says something is being held back. Both halves matter -- a silent exclusion is byte-indistinguishable from a project with no memory at all.
     expect(factLines(result)).toEqual([]);
     expect(result.lines).toEqual([expect.stringContaining("withheld; mem review")]);
   });
@@ -458,10 +391,7 @@ describe("buildHintFormat", () => {
   });
 
   it("excludes a project-scoped fact with an empty-string scopeRoot from every root, including one equal to cwd", async () => {
-    // Regression: isInScope only excluded `null`, so `scopeRoot: ""` fell through to
-    // resolvePath(""), which resolves to process.cwd() -- putting an unbound project fact in scope
-    // for any caller whose --root happens to equal the cwd, which is the normal case. Must exclude
-    // it the same way isBoundToRoot (retrieval.ts) already does.
+    // Regression: isInScope only excluded `null`, so `scopeRoot: ""` fell through to resolvePath(""), which resolves to process.cwd() -- putting an unbound project fact in scope for any caller whose --root happens to equal the cwd, which is the normal case. Must exclude it the same way isBoundToRoot (retrieval.ts) already does.
     seedFacts(dbPath, [
       {
         id: "proj-empty-scoperoot",
@@ -494,15 +424,11 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    // No caller has ever passed --context-files here: every hook/command `mem init` installs calls
-    // `mem recall --hint-format --root <dir>` alone, so a path fact excluded in this branch was
-    // structurally undeliverable to the one consumer that exists. Falls back to isBoundToRoot's rule
-    // (retrieval.ts): in scope when the fact's file sits at or under the caller's root.
+    // No caller has ever passed --context-files here: every hook/command `mem init` installs calls `mem recall --hint-format --root <dir>` alone, so a path fact excluded in this branch was structurally undeliverable to the one consumer that exists. Falls back to isBoundToRoot's rule (retrieval.ts): in scope when the fact's file sits at or under the caller's root.
     const withoutContext = await buildHint({ root, dbPath });
     expect(factLines(withoutContext)).toHaveLength(1);
 
-    // A caller that does pass context files gets the narrower, more precise match: it told mem what
-    // it is looking at, so an unrelated file in the same project must not pull the fact in.
+    // A caller that does pass context files gets the narrower, more precise match: it told mem what it is looking at, so an unrelated file in the same project must not pull the fact in.
     const withNonMatchingContext = await buildHint({ root, dbPath, contextFiles: ["src/other.ts"] });
     expect(withNonMatchingContext.lines).toEqual([]);
 
@@ -548,15 +474,7 @@ describe("buildHintFormat", () => {
     expect(factLines(result)).toHaveLength(4);
   });
 
-  // ── The pinned reserve ─────────────────────────────────────────
-  //
-  // `PINNED_RESERVE` exists for one shape: a pinned fact that shares no terms with the current
-  // prompt, behind a full cap's worth of facts that do. Before the reserve, `mem pin` bought
-  // nothing on this surface once a query carried any signal at all -- retrieval sorts pins first
-  // only in the zero-signal case, deliberately, so with a real query a pin ranked on relevance like
-  // anything else and a standing constraint fell off the payload. Every test below is keyed on the
-  // *aggressive* kinds, because that is the only pool where the failure reproduces: a pinned
-  // decision would land inside the precision cap's spare room on its own.
+  // ── The pinned reserve ───────────────────────────────────────── `PINNED_RESERVE` exists for one shape: a pinned fact that shares no terms with the current prompt, behind a full cap's worth of facts that do. Before the reserve, `mem pin` bought nothing on this surface once a query carried any signal at all -- retrieval sorts pins first only in the zero-signal case, deliberately, so with a real query a pin ranked on relevance like anything else and a standing constraint fell off the payload. Every test below is keyed on the *aggressive* kinds, because that is the only pool where the failure reproduces: a pinned decision would land inside the precision cap's spare room on its own.
   it("emits a pinned fact that matches nothing, behind a full cap of facts that match the query", async () => {
     const seeds: FactSeed[] = [];
     for (let i = 0; i < 12; i += 1) {
@@ -589,8 +507,7 @@ describe("buildHintFormat", () => {
   });
 
   it("non-firing: the same store without the pin emits only the capped set, so the reserve is what added the line", async () => {
-    // The control for the test above. Without it, a store that emitted 9 lines for an unrelated
-    // reason would read as the reserve working.
+    // The control for the test above. Without it, a store that emitted 9 lines for an unrelated reason would read as the reserve working.
     const seeds: FactSeed[] = [];
     for (let i = 0; i < 12; i += 1) {
       seeds.push({
@@ -648,16 +565,13 @@ describe("buildHintFormat", () => {
 
     const result = await buildHint({ root, dbPath, query: "pnpm install build step" });
     const pinnedLines = factLines(result).filter((line) => line.includes("id=pinned-unrelated-"));
-    // Five pins, two reserved slots. The other three are not hidden -- they rank against the
-    // matching preferences and lose, which is the caps working, not the reserve failing.
+    // Five pins, two reserved slots. The other three are not hidden -- they rank against the matching preferences and lose, which is the caps working, not the reserve failing.
     expect(pinnedLines).toHaveLength(2);
     expect(factLines(result)).toHaveLength(10);
   });
 
   it("does not spend an aggressive slot on a reserved fact: a store of pinned preferences emits 2 + 8, not 8", async () => {
-    // This is what "reserved" has to mean. If the reserve merely re-ordered the aggressive pool,
-    // a pinned preference would consume one of its own eight slots and the guarantee would be
-    // indistinguishable from the pre-reserve behaviour at this store shape.
+    // This is what "reserved" has to mean. If the reserve merely re-ordered the aggressive pool, a pinned preference would consume one of its own eight slots and the guarantee would be indistinguishable from the pre-reserve behaviour at this store shape.
     const seeds: FactSeed[] = [];
     for (let i = 0; i < 12; i += 1) {
       seeds.push({
@@ -763,9 +677,7 @@ describe("buildHintFormat", () => {
     expect(result.header).toBe("TGMEM/1");
     expect(result.lines).toHaveLength(4);
 
-    // The exact consumer-side regex the grammar doc comment publishes. Every produced line must
-    // match it, and the final capture must JSON.parse to a non-empty display string -- if this
-    // test breaks, either fix the producer or bump TGMEM_PROTOCOL_VERSION and the grammar together.
+    // The exact consumer-side regex the grammar doc comment publishes. Every produced line must match it, and the final capture must JSON.parse to a non-empty display string -- if this test breaks, either fix the producer or bump TGMEM_PROTOCOL_VERSION and the grammar together.
     const grammar = /^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$/u;
     for (const line of result.lines) {
       const match = grammar.exec(line);
@@ -800,8 +712,7 @@ describe("buildHintFormat", () => {
   });
 
   it("TGMEM/2: omits the footer line when there is nothing at all to follow up on", async () => {
-    // Titled for the empty *store*, not for "no fact-lines": those stopped being the same thing
-    // once a withheld fact started producing a footer with no fact-line to attach it to.
+    // Titled for the empty *store*, not for "no fact-lines": those stopped being the same thing once a withheld fact started producing a footer with no fact-line to attach it to.
     const result = await buildHint({ root, dbPath });
     expect(result.header).toBe("TGMEM/2");
     expect(result.lines).toEqual([]);
@@ -859,8 +770,7 @@ describe("buildHintFormat", () => {
       },
     ]);
 
-    // Budget pinned high: this asserts an *ordering*, and blowing the soft budget drops the caps to
-    // 2/1, which turns the assertion into a question of how busy the machine was.
+    // Budget pinned high: this asserts an *ordering*, and blowing the soft budget drops the caps to 2/1, which turns the assertion into a question of how busy the machine was.
     const defaultOrder = await buildHint({ root, dbPath });
     expect(factLines(defaultOrder).map((line) => line.split("  ")[2])).toEqual(["id=z-newest", "id=m-middle", "id=a-oldest"]);
 
@@ -955,12 +865,7 @@ describe("buildHintFormat", () => {
     expect([...factLines(noMatch)].sort()).toEqual([...factLines(noQuery)].sort());
   });
 
-  /**
-   * The truncated path had no deterministic coverage at all: it was only ever reached by a machine
-   * slow enough to blow the 150ms soft budget, which is how it turned up -- as two unrelated tests
-   * failing on the first Windows CI run this project ever did. Forcing the budget to 0 exercises it
-   * on purpose, so the degradation contract is pinned rather than inferred from a flake.
-   */
+  /** The truncated path had no deterministic coverage at all: it was only ever reached by a machine slow enough to blow the 150ms soft budget, which is how it turned up -- as two unrelated tests failing on the first Windows CI run this project ever did. Forcing the budget to 0 exercises it on purpose, so the degradation contract is pinned rather than inferred from a flake. */
   it("returns an empty hint set, not a smaller one, when the soft budget is exceeded", async () => {
     seedFacts(dbPath, [
       ...Array.from({ length: 6 }, (_, i) => ({
@@ -991,16 +896,7 @@ describe("buildHintFormat", () => {
     const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
     expect(exhausted.truncated).toBe(true);
 
-    // The invariant, and the whole point of the fix: a budget-exhausted response must not be a
-    // *subset* of a healthy one. It used to emit 3 of 12 facts (caps dropped to 2 aggressive + 1
-    // precision) in a payload byte-indistinguishable from a complete response -- same TGMEM/2
-    // header, same line grammar, same footer -- so a consumer surfacing `display` verbatim
-    // presented a quarter of what was found as though it were all of it. TGMEM/2's grammar is
-    // closed, so there is no in-band way to say "partial"; the only honest options are complete
-    // or empty. Asserting emptiness rather than `< full` is deliberate: `< full` would pass again
-    // the moment someone reintroduces a reduced cap, which is the bug. The lone footer below is
-    // not a fact-line, so it does not reopen that gap -- it is what tells an agent the emptiness is
-    // a budget cutoff, not a project with nothing to say.
+    // The invariant, and the whole point of the fix: a budget-exhausted response must not be a *subset* of a healthy one. It used to emit 3 of 12 facts (caps dropped to 2 aggressive + 1 precision) in a payload byte-indistinguishable from a complete response -- same TGMEM/2 header, same line grammar, same footer -- so a consumer surfacing `display` verbatim presented a quarter of what was found as though it were all of it. TGMEM/2's grammar is closed, so there is no in-band way to say "partial"; the only honest options are complete or empty. Asserting emptiness rather than `< full` is deliberate: `< full` would pass again the moment someone reintroduces a reduced cap, which is the bug. The lone footer below is not a fact-line, so it does not reopen that gap -- it is what tells an agent the emptiness is a budget cutoff, not a project with nothing to say.
     expect(exhausted.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
     expect(factLines(exhausted)).toEqual([]);
   });
@@ -1015,18 +911,7 @@ describe("buildHintFormat", () => {
     expect(exhausted.lines).toEqual([]);
   });
 
-  /**
-   * The test above forces exhaustion by passing a zero budget, and that only worked by accident:
-   * `truncated` was `elapsed > budgetMs`, so a zero budget reported *not* exhausted whenever the
-   * whole retrieval landed inside one millisecond. A 10-fact anchor-free store on a fast runner
-   * does exactly that, which made the assertion a coin flip decided by the clock -- it passed on
-   * Windows, failed on ubuntu-latest, then passed again on the next commit with the test code
-   * untouched.
-   *
-   * Freezing `Date.now` pins `elapsed` to exactly 0 on every platform, so this is the boundary
-   * case itself rather than a race that happens to land on it: with a zero budget, consuming zero
-   * time must still count as exhausted, because zero time is all there was.
-   */
+  /** The test above forces exhaustion by passing a zero budget, and that only worked by accident: `truncated` was `elapsed > budgetMs`, so a zero budget reported *not* exhausted whenever the whole retrieval landed inside one millisecond. A 10-fact anchor-free store on a fast runner does exactly that, which made the assertion a coin flip decided by the clock -- it passed on Windows, failed on ubuntu-latest, then passed again on the next commit with the test code untouched. Freezing `Date.now` pins `elapsed` to exactly 0 on every platform, so this is the boundary case itself rather than a race that happens to land on it: with a zero budget, consuming zero time must still count as exhausted, because zero time is all there was. */
   it("treats a fully-consumed budget as exhausted, not as headroom", async () => {
     seedFacts(dbPath, [
       {
@@ -1052,18 +937,7 @@ describe("buildHintFormat", () => {
     }
   });
 
-  /**
-   * The wire-level half of the assertion above, at the boundary the consumer actually sees.
-   *
-   * `buildHintFormat`'s return value is in-process; what token-goat parses is stdout. A response
-   * that withholds facts has to be distinguishable *there* -- and the distinguishing signal is a
-   * lone footer carrying no fact-lines, not a flag, because `HintFormatResult.truncated` never
-   * reaches the wire and cannot be made to without a version bump that fails un-upgraded consumers
-   * open to nothing. A lone footer is not off-grammar: `STORE_UNREADABLE_FOOTER_LINE` already ships
-   * that exact shape on TGMEM/2 today, so this response reuses the same shape rather than inventing
-   * one. Without it, a healthy but empty store and a budget cutoff on a full store both produce the
-   * bare header, and the caller cannot tell "nothing to say" from "ran out of time to say it".
-   */
+  /** The wire-level half of the assertion above, at the boundary the consumer actually sees. `buildHintFormat`'s return value is in-process; what token-goat parses is stdout. A response that withholds facts has to be distinguishable *there* -- and the distinguishing signal is a lone footer carrying no fact-lines, not a flag, because `HintFormatResult.truncated` never reaches the wire and cannot be made to without a version bump that fails un-upgraded consumers open to nothing. A lone footer is not off-grammar: `STORE_UNREADABLE_FOOTER_LINE` already ships that exact shape on TGMEM/2 today, so this response reuses the same shape rather than inventing one. Without it, a healthy but empty store and a budget cutoff on a full store both produce the bare header, and the caller cannot tell "nothing to say" from "ran out of time to say it". */
   it("emits no fact-lines but a distinguishing footer on the wire when the budget is exhausted", async () => {
     seedFacts(dbPath, [
       {
@@ -1081,16 +955,13 @@ describe("buildHintFormat", () => {
     expect(healthy.lines).toContain(TGMEM_FOOTER_LINE);
 
     const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
-    // A different footer than the healthy response's, not the same TGMEM_FOOTER_LINE: this footer
-    // must not claim there is nothing to follow up on, and must not be confusable with the healthy
-    // count-based footer either.
+    // A different footer than the healthy response's, not the same TGMEM_FOOTER_LINE: this footer must not claim there is nothing to follow up on, and must not be confusable with the healthy count-based footer either.
     expect(exhausted.lines).not.toContain(TGMEM_FOOTER_LINE);
     expect(exhausted.header).toBe(TGMEM_HEADER);
     expect(exhausted.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
 
     const emptyStore = await buildHint({ root, dbPath: join(workDir, "empty.db") });
-    // The exact collision this fix closes: an empty store and a budget cutoff must not both
-    // resolve to the bare header with no lines at all.
+    // The exact collision this fix closes: an empty store and a budget cutoff must not both resolve to the bare header with no lines at all.
     expect(emptyStore.lines).toEqual([]);
     expect(emptyStore.lines).not.toEqual(exhausted.lines);
   });
@@ -1152,8 +1023,7 @@ describe("buildHintFormat", () => {
     expect(second.delta).toBe(true);
     expect(second.header).toBe(`${TGMEM_HEADER}  delta=1`);
     expect(emittedIds(second)).toEqual(["fact-d"]);
-    // Not TGMEM_FOOTER_LINE verbatim: this call is logged under a session, so the footer also
-    // carries the `mem used` invocation naming it and the one fact this call emitted.
+    // Not TGMEM_FOOTER_LINE verbatim: this call is logged under a session, so the footer also carries the `mem used` invocation naming it and the one fact this call emitted.
     expect(second.lines[second.lines.length - 1]).toBe("footer  mem show <id> for detail; mem used fact-d --session-id sess-1 to mark what helped");
 
     // The delta itself is logged, so a third delta call has nothing left: header only, no footer.
@@ -1172,8 +1042,7 @@ describe("buildHintFormat", () => {
     expect(fullAgain.lines.length).toBeGreaterThan(0);
     expect(fullAgain.delta).toBe(false);
     expect(fullAgain.header).toBe(TGMEM_HEADER);
-    // Fact-lines are byte-identical; the footer's `mem used` clause is not, and should not be --
-    // it names the session this call is logging under, and the two calls logged under different ones.
+    // Fact-lines are byte-identical; the footer's `mem used` clause is not, and should not be -- it names the session this call is logging under, and the two calls logged under different ones.
     expect(factLines(fullAgain)).toEqual(factLines(freshSession));
     expect(fullAgain.lines[fullAgain.lines.length - 1]).toContain("--session-id sess-1");
     expect(freshSession.lines[freshSession.lines.length - 1]).toContain("--session-id sess-2");
@@ -1231,11 +1100,7 @@ describe("buildHintFormat", () => {
   });
 
   it("regression: --delta still suppresses non-matching facts once a usefulness signal turns fusion on (the predicate must not be 'score !== 0')", async () => {
-    // The bug this pins: delta suppression asked "did this fact match?" by testing `score !== 0`.
-    // That is only true while BM25 is the sole rank list. The moment a second list joins -- a
-    // usefulness signal here, an embedding backend later -- retrieval fuses via RRF, which floors
-    // every ranked fact above zero. Every filler fact then looked like a match, so nothing was ever
-    // suppressed and `--delta` silently became a no-op store-wide, with no existing test failing.
+    // The bug this pins: delta suppression asked "did this fact match?" by testing `score !== 0`. That is only true while BM25 is the sole rank list. The moment a second list joins -- a usefulness signal here, an embedding backend later -- retrieval fuses via RRF, which floors every ranked fact above zero. Every filler fact then looked like a match, so nothing was ever suppressed and `--delta` silently became a no-op store-wide, with no existing test failing.
     threeGlobalFacts();
     const baseline = await buildHint({ root, dbPath, sessionId: "sess-1", query: "what is the lint setup" });
     expect(emittedIds(baseline)).toEqual(["fact-a", "fact-b", "fact-c"]);
@@ -1248,8 +1113,7 @@ describe("buildHintFormat", () => {
       db.close();
     }
 
-    // Same non-matching query, so the correct answer is unchanged: everything was already sent and
-    // nothing matches, therefore header only. Before the fix this returned all three facts again.
+    // Same non-matching query, so the correct answer is unchanged: everything was already sent and nothing matches, therefore header only. Before the fix this returned all three facts again.
     const repeat = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
     expect(repeat.header).toBe(`${TGMEM_HEADER}  delta=1`);
     expect(repeat.lines).toEqual([]);
@@ -1260,15 +1124,12 @@ describe("buildHintFormat", () => {
   });
 
   it("--delta re-sends a fact only the embedding backend matched, while a fact with no evidence stays suppressed", async () => {
-    // The embedding half of the `matchedQuery` regression above, and the reason `--delta` keys off
-    // `queryEvidence` rather than the lexical-only `matchedQuery`: a fact the query reached purely by
-    // embedding was never re-sent once surfaced, however exactly it answered the new prompt.
+    // The embedding half of the `matchedQuery` regression above, and the reason `--delta` keys off `queryEvidence` rather than the lexical-only `matchedQuery`: a fact the query reached purely by embedding was never re-sent once surfaced, however exactly it answered the new prompt.
     threeGlobalFacts();
     const baseline = await buildHint({ root, dbPath, sessionId: "sess-1", query: "what is the lint setup" });
     expect(emittedIds(baseline)).toEqual(["fact-a", "fact-b", "fact-c"]);
 
-    // A stored vector plus a recorded model is what makes a fact embeddable; the stub endpoint
-    // supplies the query vector. `fact-c` gets no vector, so the query has no evidence for it at all.
+    // A stored vector plus a recorded model is what makes a fact embeddable; the stub endpoint supplies the query vector. `fact-c` gets no vector, so the query has no evidence for it at all.
     const server = await startStubEmbeddingServer();
     openServers.push(server);
     const db = openStorage(dbPath);
@@ -1285,12 +1146,10 @@ describe("buildHintFormat", () => {
 
     const repeat = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
     expect(emittedIds(repeat)).toEqual(["fact-a", "fact-b"]);
-    // The endpoint really was consulted -- otherwise this would be the BM25-only path and would
-    // pass for the wrong reason.
+    // The endpoint really was consulted -- otherwise this would be the BM25-only path and would pass for the wrong reason.
     expect(server.requests.length).toBeGreaterThan(0);
 
-    // And a genuine lexical hit still re-sends under fusion; `fact-b` rides along on its embedding
-    // evidence, `fact-c` (no vector, no lexical hit) stays suppressed.
+    // And a genuine lexical hit still re-sends under fusion; `fact-b` rides along on its embedding evidence, `fact-c` (no vector, no lexical hit) stays suppressed.
     const hit = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "alpha" });
     expect(emittedIds(hit)).toEqual(["fact-a", "fact-b"]);
   });
@@ -1312,9 +1171,7 @@ describe("buildHintFormat", () => {
   });
 
   it("a pinned fact is re-sent by --delta after it was already surfaced, while an unpinned one beside it stays suppressed", async () => {
-    // Suppressing a pin after one send would make PINNED_RESERVE a first-prompt-only guarantee.
-    // The unpinned fact in the same call is the control: it proves delta suppression is still on,
-    // so the pin's re-send is an exemption rather than the filter having stopped working.
+    // Suppressing a pin after one send would make PINNED_RESERVE a first-prompt-only guarantee. The unpinned fact in the same call is the control: it proves delta suppression is still on, so the pin's re-send is an exemption rather than the filter having stopped working.
     seedFacts(dbPath, [
       {
         id: "pinned-standing",
@@ -1414,8 +1271,7 @@ describe("buildHintFormat", () => {
     expect(emittedIds(opener).sort()).toEqual(["deploy-key", "lint", "lunch", "pnpm", "secrets", "sqlite"]);
     expect(loggedIds("sess-1")).toHaveLength(6);
 
-    // Before stopwords: "what is the plan for today" re-sent 5/6 and "add a test for the parser" 5/6
-    // on `the`/`is`/`for`/`a` alone.
+    // Before stopwords: "what is the plan for today" re-sent 5/6 and "add a test for the parser" 5/6 on `the`/`is`/`for`/`a` alone.
     for (const prompt of UNRELATED_PROMPTS) {
       const delta = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: prompt });
       expect(delta.header, prompt).toBe(`${TGMEM_HEADER}  delta=1`);
@@ -1490,8 +1346,7 @@ describe("buildHintFormat", () => {
     threeGlobalFacts();
     const stable = await buildHint({ root, dbPath, sessionId: "sess-1", stable: true });
     const surfaced = factLines(stable);
-    // Non-firing guard: the ordering override did not suppress the facts themselves, so the
-    // logging assertion below is about bookkeeping and not about an empty response.
+    // Non-firing guard: the ordering override did not suppress the facts themselves, so the logging assertion below is about bookkeeping and not about an empty response.
     expect(surfaced.length).toBeGreaterThan(0);
     expect(surfaced).toHaveLength(3);
     expect(loggedIds("sess-1").slice().sort()).toEqual(["fact-a", "fact-b", "fact-c"]);
@@ -1512,8 +1367,7 @@ describe("buildHintFormat", () => {
 
   it("a failure to write recall_log never fails the recall: the facts are still emitted and a warning goes to stderr", async () => {
     threeGlobalFacts();
-    // Make every insert into recall_log abort at the SQLite level, the closest stand-in for a
-    // locked or read-only store that does not also break the read path.
+    // Make every insert into recall_log abort at the SQLite level, the closest stand-in for a locked or read-only store that does not also break the read path.
     const db = openStorage(dbPath);
     db.exec("CREATE TRIGGER block_recall_log BEFORE INSERT ON recall_log BEGIN SELECT RAISE(ABORT, 'recall_log is read-only in this test'); END;");
     db.close();
@@ -1537,19 +1391,7 @@ describe("buildHintFormat", () => {
   });
 });
 
-/**
- * What the payload does not contain, said out loud.
- *
- * TGMEM/2 has no way to mark a response partial -- that is why an over-budget retrieval returns
- * empty rather than a slice. The same indistinguishability applies to the two shapes below, and
- * both were measured against the built bundle before this block existed: six matching decisions
- * emitted four lines with nothing saying two were cut, and a store holding three pending facts and
- * nothing active emitted a bare `TGMEM/2` -- byte-identical to a project with no memory at all.
- *
- * The second is the one that costs a user something. `mem init claude-code` installs `scan-session`
- * as a `Stop` hook, so the review queue fills every session, while `recall --hint-format` is the
- * only surface that runs unprompted -- and it was the one surface that never mentioned the queue.
- */
+/** What the payload does not contain, said out loud. TGMEM/2 has no way to mark a response partial -- that is why an over-budget retrieval returns empty rather than a slice. The same indistinguishability applies to the two shapes below, and both were measured against the built bundle before this block existed: six matching decisions emitted four lines with nothing saying two were cut, and a store holding three pending facts and nothing active emitted a bare `TGMEM/2` -- byte-identical to a project with no memory at all. The second is the one that costs a user something. `mem init claude-code` installs `scan-session` as a `Stop` hook, so the review queue fills every session, while `recall --hint-format` is the only surface that runs unprompted -- and it was the one surface that never mentioned the queue. */
 describe("the footer discloses what the payload withheld", () => {
   let workDir: string;
   let root: string;
@@ -1587,8 +1429,7 @@ describe("the footer discloses what the payload withheld", () => {
   }
 
   it("says how many matching facts the caps did not send", async () => {
-    // PRECISION_CAP is 4, so two of six are dropped. Without the count, a consumer holding four
-    // decisions cannot tell that from a project that only ever made four.
+    // PRECISION_CAP is 4, so two of six are dropped. Without the count, a consumer holding four decisions cannot tell that from a project that only ever made four.
     seedDecisions(6);
     const result = await buildHint({ root, dbPath, query: "deploy" });
     expect(factLines(result)).toHaveLength(4);
@@ -1596,9 +1437,7 @@ describe("the footer discloses what the payload withheld", () => {
   });
 
   it("does not claim a dropped fact 'matched' when the query matched nothing at all", async () => {
-    // `retrieve()` ranks every scoped fact; it does not filter by the query. A query with no lexical
-    // overlap at all still ranks (and caps) the full set, so the footer's cut-count names facts that
-    // were merely in scope and unsent -- never facts the query actually matched.
+    // `retrieve()` ranks every scoped fact; it does not filter by the query. A query with no lexical overlap at all still ranks (and caps) the full set, so the footer's cut-count names facts that were merely in scope and unsent -- never facts the query actually matched.
     seedDecisions(6);
     const result = await buildHint({ root, dbPath, query: "zzzznomatchwhatsoever" });
     expect(footerOf(result)).toContain("more in scope, not sent");
@@ -1650,9 +1489,7 @@ describe("the footer discloses what the payload withheld", () => {
   });
 
   it("reports the queue for a query that matches none of it, because the queue is not a search result", async () => {
-    // A query ranks the candidate pool; it never filters it (src/retrieval.ts). If the disclosure
-    // were query-scoped instead, the one call that runs unprompted -- SessionStart's, which passes
-    // no query at all -- would be the call least likely to mention the queue.
+    // A query ranks the candidate pool; it never filters it (src/retrieval.ts). If the disclosure were query-scoped instead, the one call that runs unprompted -- SessionStart's, which passes no query at all -- would be the call least likely to mention the queue.
     seedFacts(dbPath, [
       { id: "pend-3", text: "always run the linter before pushing", kind: "preference", scope: "global", source_type: "user", captured_at: "2026-07-01T00:00:00.000Z", status: "pending" },
     ]);
@@ -1661,9 +1498,7 @@ describe("the footer discloses what the payload withheld", () => {
   });
 
   it("drops the review call-to-action when nothing needs reviewing", async () => {
-    // It used to print on every response carrying a fact-line, including the overwhelmingly common
-    // case of a clean store. Advice that is always on is not a signal: a consumer that sees it
-    // every call learns to skip it, so it was loudest where it meant nothing.
+    // It used to print on every response carrying a fact-line, including the overwhelmingly common case of a clean store. Advice that is always on is not a signal: a consumer that sees it every call learns to skip it, so it was loudest where it meant nothing.
     seedDecisions(1);
     const result = await buildHint({ root, dbPath, query: "deploy" });
     expect(footerOf(result)).toBe(TGMEM_FOOTER_LINE);
@@ -1671,24 +1506,14 @@ describe("the footer discloses what the payload withheld", () => {
   });
 
   it("stays silent when there is genuinely nothing to say", async () => {
-    // The one shape that must not gain a footer: no facts, no queue, nothing held back. Otherwise
-    // the disclosure becomes the same always-on noise it replaced.
+    // The one shape that must not gain a footer: no facts, no queue, nothing held back. Otherwise the disclosure becomes the same always-on noise it replaced.
     seedFacts(dbPath, []);
     const result = await buildHint({ root, dbPath, query: "anything" });
     expect(result.lines).toEqual([]);
   });
 });
 
-// ── The elbow cutoff (further trims an already-capped ranked list) ─────────────────────────────
-//
-// `retrieve()`'s BM25 scoring rewards a fact that matches every query term over one that matches
-// only some of them, and rewards it enough that the gap between "matched all three terms" and
-// "matched one of three" is large and reproducible with plain text, no mocking of `score` required.
-// Every test below leans on that: a "hi" group repeats the full query ("alpha bravo charlie"), a
-// "lo" group repeats only its first term ("alpha"), and the two groups tie within themselves (same
-// terms, same term frequency), which is what makes them a reliable elbow fixture rather than a
-// fragile one -- the gap is about which terms matched, not a score value pinned to this BM25
-// implementation's exact constants.
+// ── The elbow cutoff (further trims an already-capped ranked list) ───────────────────────────── `retrieve()`'s BM25 scoring rewards a fact that matches every query term over one that matches only some of them, and rewards it enough that the gap between "matched all three terms" and "matched one of three" is large and reproducible with plain text, no mocking of `score` required. Every test below leans on that: a "hi" group repeats the full query ("alpha bravo charlie"), a "lo" group repeats only its first term ("alpha"), and the two groups tie within themselves (same terms, same term frequency), which is what makes them a reliable elbow fixture rather than a fragile one -- the gap is about which terms matched, not a score value pinned to this BM25 implementation's exact constants.
 describe("the elbow cutoff", () => {
   let workDir: string;
   let root: string;
@@ -1734,9 +1559,7 @@ describe("the elbow cutoff", () => {
   }
 
   it("truncates at a clear score drop", async () => {
-    // 3 facts matching all three query terms, 1 matching only the first: fills PRECISION_CAP (4)
-    // exactly, so without the elbow all 4 would ship. The elbow should cut the trailing lo-group
-    // fact the cap alone would have let through.
+    // 3 facts matching all three query terms, 1 matching only the first: fills PRECISION_CAP (4) exactly, so without the elbow all 4 would ship. The elbow should cut the trailing lo-group fact the cap alone would have let through.
     seedFacts(dbPath, [...seedHiGroup("decision", 3), ...seedLoGroup("decision", 1)]);
     const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
     const lines = factLines(result);
@@ -1745,9 +1568,7 @@ describe("the elbow cutoff", () => {
   });
 
   it("a confirmed-useful fact unrelated to the query neither displaces the real matches nor triggers the elbow", async () => {
-    // Before usefulness was gated on query evidence, the unrelated-but-useful fact fused above every
-    // real match, so the elbow saw [useful, hi...] with a sharp drop after the first entry and cut
-    // the genuine matches away.
+    // Before usefulness was gated on query evidence, the unrelated-but-useful fact fused above every real match, so the elbow saw [useful, hi...] with a sharp drop after the first entry and cut the genuine matches away.
     seedFacts(dbPath, [
       ...seedHiGroup("decision", 3),
       ...seedLoGroup("decision", 1),
@@ -1768,16 +1589,14 @@ describe("the elbow cutoff", () => {
   });
 
   it("emits exactly today's output on a flat distribution", async () => {
-    // Every fact matches the query identically, so every score ties -- there is no drop to cut at,
-    // and the pre-elbow cap behavior (4 of 6) must be unchanged.
+    // Every fact matches the query identically, so every score ties -- there is no drop to cut at, and the pre-elbow cap behavior (4 of 6) must be unchanged.
     seedFacts(dbPath, seedLoGroup("decision", 6));
     const result = await buildHint({ root, dbPath, query: "alpha" });
     expect(factLines(result)).toHaveLength(4);
   });
 
   it("never emits more fact-lines than HINT_LINE_CEILING", async () => {
-    // A sharp elbow in both the aggressive and precision pools, on top of the pinned reserve --
-    // the worst case for accidentally exceeding the ceiling is exercising all three at once.
+    // A sharp elbow in both the aggressive and precision pools, on top of the pinned reserve -- the worst case for accidentally exceeding the ceiling is exercising all three at once.
     seedFacts(dbPath, [
       {
         id: "pinned-a",
@@ -1823,8 +1642,7 @@ describe("the elbow cutoff", () => {
     const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
     const lines = factLines(result);
     expect(lines.some((line) => line.includes("id=pinned-unrelated"))).toBe(true);
-    // The elbow cuts the lo-group preferences (index 3 onward); the pin plus the 3 hi-group
-    // preferences is what should remain.
+    // The elbow cuts the lo-group preferences (index 3 onward); the pin plus the 3 hi-group preferences is what should remain.
     expect(lines).toHaveLength(4);
     expect(lines.some((line) => line.includes("id=lo-"))).toBe(false);
   });
@@ -1839,14 +1657,12 @@ describe("the elbow cutoff", () => {
     const withElbow = await buildHint({ root, dbPath, query: ELBOW_QUERY });
     expect(factLines(withElbow)).toHaveLength(3);
     const footer = withElbow.lines.find((line) => line.startsWith("footer  "));
-    // Both pending facts are withheld regardless of what the elbow trims from the ranked,
-    // non-withheld pool -- `withheldCount` is never touched by `applyElbowCutoff`.
+    // Both pending facts are withheld regardless of what the elbow trims from the ranked, non-withheld pool -- `withheldCount` is never touched by `applyElbowCutoff`.
     expect(footer).toContain("2 withheld; mem review to resolve contested/pending");
   });
 
   it("does not fire with too few ranked results", async () => {
-    // 2 hi-group facts and 1 lo-group fact: the same sharp per-fact score drop as the truncation
-    // test above, but only 3 results -- below ELBOW_MIN_RESULTS, so all 3 must survive.
+    // 2 hi-group facts and 1 lo-group fact: the same sharp per-fact score drop as the truncation test above, but only 3 results -- below ELBOW_MIN_RESULTS, so all 3 must survive.
     seedFacts(dbPath, [...seedHiGroup("decision", 2), ...seedLoGroup("decision", 1)]);
     const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
     expect(factLines(result)).toHaveLength(3);

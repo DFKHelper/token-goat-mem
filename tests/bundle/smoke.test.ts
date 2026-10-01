@@ -1,13 +1,4 @@
-/**
- * A remember/recall/forget round trip and a `doctor` run, executed as a real subprocess against the
- * built `dist/token-goat-mem.mjs`.
- *
- * This tier guards the bundling layer specifically -- everything the in-process `run()` tests cannot
- * see, because they never load the artifact users execute: the esbuild `external` list resolving at
- * runtime, the `__MEM_VERSION__` define, ESM/CJS interop for `better-sqlite3` / `commander` /
- * `jsonc-parser`, native-module loading, process exit codes, and what actually lands on stdout vs
- * stderr. A build can be broken in every one of those ways with all 550-odd in-process tests green.
- */
+/** A remember/recall/forget round trip and a `doctor` run, executed as a real subprocess against the built `dist/token-goat-mem.mjs`. This tier guards the bundling layer specifically -- everything the in-process `run()` tests cannot see, because they never load the artifact users execute: the esbuild `external` list resolving at runtime, the `__MEM_VERSION__` define, ESM/CJS interop for `better-sqlite3` / `commander` / `jsonc-parser`, native-module loading, process exit codes, and what actually lands on stdout vs stderr. A build can be broken in every one of those ways with all 550-odd in-process tests green. */
 
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -45,8 +36,7 @@ describe("the shipped bundle runs end to end", () => {
     expect(match?.[1]).toBeDefined();
     const id = match?.[1] ?? "";
 
-    // The database file is created by the bundle's own better-sqlite3 load -- a native module that
-    // is `external` to the build and resolved from node_modules at runtime.
+    // The database file is created by the bundle's own better-sqlite3 load -- a native module that is `external` to the build and resolved from node_modules at runtime.
     expect(existsSync(join(memHome, "mem.db"))).toBe(true);
 
     const recalled = runBundle(["recall", "pnpm", "--root", root]);
@@ -88,15 +78,7 @@ describe("the shipped bundle runs end to end", () => {
     expect(result.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/u);
   });
 
-  /**
-   * Regression: `mem recall | head -1` and `mem recall | grep -q pnpm` close the pipe as soon as the
-   * reader is satisfied. Without an EPIPE handler the next write becomes an unhandled `error` event,
-   * so a pipeline that did exactly what the user asked dies with a stack trace and exit code 1.
-   *
-   * Only reachable from this tier: the handler is installed in `main.ts`, which the in-process
-   * `run()` tests never load, and it mutates process-global state so it could not be installed
-   * anywhere they would see it.
-   */
+  /** Regression: `mem recall | head -1` and `mem recall | grep -q pnpm` close the pipe as soon as the reader is satisfied. Without an EPIPE handler the next write becomes an unhandled `error` event, so a pipeline that did exactly what the user asked dies with a stack trace and exit code 1. Only reachable from this tier: the handler is installed in `main.ts`, which the in-process `run()` tests never load, and it mutates process-global state so it could not be installed anywhere they would see it. */
   it("exits quietly when the reader of its stdout closes the pipe early", async () => {
     for (let i = 0; i < 5; i += 1) {
       runBundle(["remember", `piped fact number ${i}`, "--kind", "fact", "--scope", "global"]);

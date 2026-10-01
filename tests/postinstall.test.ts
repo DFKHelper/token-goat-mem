@@ -1,11 +1,4 @@
-/**
- * End-to-end tests for `scripts/postinstall.mjs`, the npm lifecycle script that wires Claude Code's
- * user-level hooks on every global install and upgrade (`npm i -g token-goat-mem`), so recall runs
- * in every project without a separate `mem init claude-code --user` step.
- *
- * Driven as npm drives it: a child `node` process with npm's own environment variables, against a
- * throwaway home directory and a fake `mem` on PATH for the pre-flight hook-health check.
- */
+/** End-to-end tests for `scripts/postinstall.mjs`, the npm lifecycle script that wires Claude Code's user-level hooks on every global install and upgrade (`npm i -g token-goat-mem`), so recall runs in every project without a separate `mem init claude-code --user` step. Driven as npm drives it: a child `node` process with npm's own environment variables, against a throwaway home directory and a fake `mem` on PATH for the pre-flight hook-health check. */
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

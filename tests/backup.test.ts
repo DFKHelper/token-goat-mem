@@ -1,10 +1,4 @@
-/**
- * End-to-end tests for `mem backup` and `mem restore`, and the `backups:` line in `mem doctor`.
- *
- * The backup directory is deliberately outside the mem home -- a sibling of it by default -- so a
- * store survives the deletion of `~/.mem` (or of `~/.claude`, which never held it). Driven through
- * the real `run()` against a real database.
- */
+/** End-to-end tests for `mem backup` and `mem restore`, and the `backups:` line in `mem doctor`. The backup directory is deliberately outside the mem home -- a sibling of it by default -- so a store survives the deletion of `~/.mem` (or of `~/.claude`, which never held it). Driven through the real `run()` against a real database. */
 import Database from "better-sqlite3";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,8 +190,7 @@ describe("mem restore", () => {
       for (let i = 0; i < AUTO_SNAPSHOTS_KEPT; i += 1) {
         takeSnapshot(db, backupDir, "auto", new Date(Date.now() - (i + 2) * MS_PER_DAY));
       }
-      // Written through the same handle, so no open snapshots it: the store has now changed since a
-      // newest snapshot two days old, and the next ordinary open would take one and prune the oldest.
+      // Written through the same handle, so no open snapshots it: the store has now changed since a newest snapshot two days old, and the next ordinary open would take one and prune the oldest.
       insertFact(db, { text: "written after the snapshots", kind: "fact", scope: "global", source_type: "user" });
     } finally {
       db.close();

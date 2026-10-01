@@ -1,16 +1,4 @@
-/**
- * A stub OpenAI-compatible embeddings endpoint, served by `node:http` on an ephemeral loopback
- * port.
- *
- * Shared by tests/unit/embeddings.test.ts and tests/embeddings-cli.test.ts rather than duplicated,
- * and a plain module rather than a `.test.ts` one so importing it does not re-register the
- * importing file's tests.
- *
- * A real socket rather than a mocked `fetch`: src/embeddings.ts exists to talk to a network
- * endpoint, so a mock would exercise the mock's idea of the wire format instead of the parser's
- * handling of a real one -- and the ordering, status, and timeout behaviours these tests care about
- * are precisely the ones a mock cannot reproduce. Loopback only; nothing here leaves the machine.
- */
+/** A stub OpenAI-compatible embeddings endpoint, served by `node:http` on an ephemeral loopback port. Shared by tests/unit/embeddings.test.ts and tests/embeddings-cli.test.ts rather than duplicated, and a plain module rather than a `.test.ts` one so importing it does not re-register the importing file's tests. A real socket rather than a mocked `fetch`: src/embeddings.ts exists to talk to a network endpoint, so a mock would exercise the mock's idea of the wire format instead of the parser's handling of a real one -- and the ordering, status, and timeout behaviours these tests care about are precisely the ones a mock cannot reproduce. Loopback only; nothing here leaves the machine. */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -73,9 +61,7 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
           return;
         }
         if ((options.status ?? 200) !== 200) {
-          // The error body deliberately echoes the Authorization header back: real gateways do, and
-          // that is exactly how an api key ends up in a user-visible error if the client forwards
-          // a failing response's body.
+          // The error body deliberately echoes the Authorization header back: real gateways do, and that is exactly how an api key ends up in a user-visible error if the client forwards a failing response's body.
           res.writeHead(options.status ?? 200, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: { message: "nope", seen_authorization: req.headers.authorization } }));
           return;
@@ -105,8 +91,7 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
     requests,
     close: () =>
       new Promise<void>((resolve) => {
-        // Without this a client socket left open by an aborted request keeps `close()` pending, and
-        // the afterEach hook hangs instead of failing.
+        // Without this a client socket left open by an aborted request keeps `close()` pending, and the afterEach hook hangs instead of failing.
         server.closeAllConnections();
         server.close(() => resolve());
       }),

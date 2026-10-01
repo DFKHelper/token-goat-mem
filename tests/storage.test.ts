@@ -96,15 +96,7 @@ describe("openStorage / ensureStorageSchema", () => {
 
 describe("facts.epoch migration (ensureStorageSchema, pre-migration database)", () => {
   it("backfills epoch=0 on pre-existing rows without touching their other columns, and is a no-op re-applied", () => {
-    // Simulate a database written by a pre-migration build: open via db.ts's bare openDb() (which
-    // now runs every migration itself, `epoch` included, since db.ts owns the whole-database
-    // `PRAGMA user_version` counter) and then undo exactly what this test needs absent -- drop the
-    // `epoch` column and reset `user_version` to `0`, the same technique
-    // tests/unit/schema-migration.test.ts uses to manufacture "a database that predates this
-    // column" without hand-writing a stale schema. Insert directly with raw SQL that matches that
-    // old shape exactly, bypassing storage.ts's insertFact entirely (insertFact now requires the
-    // epoch column and would fail against this schema, which is the point). Uses its own file,
-    // separate from the `db`/`root` opened in `beforeEach`.
+    // Simulate a database written by a pre-migration build: open via db.ts's bare openDb() (which now runs every migration itself, `epoch` included, since db.ts owns the whole-database `PRAGMA user_version` counter) and then undo exactly what this test needs absent -- drop the `epoch` column and reset `user_version` to `0`, the same technique tests/unit/schema-migration.test.ts uses to manufacture "a database that predates this column" without hand-writing a stale schema. Insert directly with raw SQL that matches that old shape exactly, bypassing storage.ts's insertFact entirely (insertFact now requires the epoch column and would fail against this schema, which is the point). Uses its own file, separate from the `db`/`root` opened in `beforeEach`.
     const preMigrationPath = join(root, "pre-migration.db");
     const preMigrationDb = openDb(preMigrationPath);
     preMigrationDb.exec("ALTER TABLE facts DROP COLUMN epoch");
@@ -136,8 +128,7 @@ describe("facts.epoch migration (ensureStorageSchema, pre-migration database)", 
       });
     preMigrationDb.close();
 
-    // Re-open through storage.ts's real entry point -- this is what runs the migration in production
-    // (cli.ts's withDb -> openStorage -> ensureStorageSchema).
+    // Re-open through storage.ts's real entry point -- this is what runs the migration in production (cli.ts's withDb -> openStorage -> ensureStorageSchema).
     const migrated = openStorage(preMigrationPath);
     try {
       const columnsAfter = migrated.prepare("PRAGMA table_info(facts)").all() as { name: string }[];
@@ -151,14 +142,11 @@ describe("facts.epoch migration (ensureStorageSchema, pre-migration database)", 
       expect(preExisting?.captured_at).toBe("2025-01-01T00:00:00.000Z");
       expect(preExisting?.epoch).toBe(0); // pre-migration sentinel, never a real write's epoch
 
-      // Idempotent: re-running the migration against an already-migrated database is a no-op, not a
-      // "duplicate column" crash, and does not disturb the backfilled row.
+      // Idempotent: re-running the migration against an already-migrated database is a no-op, not a "duplicate column" crash, and does not disturb the backfilled row.
       expect(() => ensureStorageSchema(migrated)).not.toThrow();
       expect(getFactById(migrated, "pre-migration-fact")?.epoch).toBe(0);
 
-      // A real write against the migrated database stamps a genuine (non-zero) epoch, always
-      // strictly greater than the pre-migration sentinel -- so `--since-epoch 0` can distinguish
-      // "written before the epoch column existed" from "written since".
+      // A real write against the migrated database stamps a genuine (non-zero) epoch, always strictly greater than the pre-migration sentinel -- so `--since-epoch 0` can distinguish "written before the epoch column existed" from "written since".
       const fresh = insertFact(migrated, baseFact({ text: "fresh fact after migration" }));
       expect(fresh.epoch).toBeGreaterThan(0);
       expect(listFacts(migrated, { epochAfter: 0 }).map((f) => f.id)).toEqual([fresh.id]);
@@ -229,10 +217,7 @@ describe("factsByTextHash", () => {
   });
 
   it("finds a pre-existing row backfilled by the v4 migration -- the regression test for the silent-miss trap", () => {
-    // Simulates a row written before facts.text_hash existed: inserted with the column NULL,
-    // exactly what the v4 backfill (migrations.test.ts) exists to fix. A hash-keyed lookup against
-    // an un-backfilled row silently misses it and reports "no duplicate" with total confidence --
-    // this pins that `factsByTextHash` only works once the row is actually backfilled.
+    // Simulates a row written before facts.text_hash existed: inserted with the column NULL, exactly what the v4 backfill (migrations.test.ts) exists to fix. A hash-keyed lookup against an un-backfilled row silently misses it and reports "no duplicate" with total confidence -- this pins that `factsByTextHash` only works once the row is actually backfilled.
     db.prepare(
       `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence)
        VALUES ('pre-hash-fact', 'uses pnpm not npm', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1)`
@@ -260,10 +245,7 @@ describe("factsByTextHash", () => {
   });
 
   it("does not merge two distinct texts even if they shared a hash (equality, not just the hash, decides)", () => {
-    // Not a real collision (sha256 is not going to collide in a test) -- this instead pins that the
-    // lookup filters by normalizeFactText equality on the hash-narrowed candidate set, rather than
-    // trusting the index match alone, by planting a row whose stored hash matches a text it does
-    // not actually normalize to.
+    // Not a real collision (sha256 is not going to collide in a test) -- this instead pins that the lookup filters by normalizeFactText equality on the hash-narrowed candidate set, rather than trusting the index match alone, by planting a row whose stored hash matches a text it does not actually normalize to.
     db.prepare(
       `INSERT INTO facts (id, text, kind, scope, source_type, captured_at, status, confidence, text_hash)
        VALUES ('fake-collision', 'an unrelated statement', 'preference', 'global', 'user', '2025-01-01T00:00:00.000Z', 'active', 1, ?)`
@@ -601,9 +583,7 @@ describe("status bookkeeping (status_changed_at / prior_status)", () => {
     setFactStatus(db, id, "pinned");
     setFactStatus(db, id, "pinned");
 
-    // Re-pinning is how a user clears the re-confirmation nudge. Overwriting prior_status here
-    // would erase the fact that it used to be `active`, which is the value a later contradiction
-    // reinstatement needs to avoid inventing a pin the user never made.
+    // Re-pinning is how a user clears the re-confirmation nudge. Overwriting prior_status here would erase the fact that it used to be `active`, which is the value a later contradiction reinstatement needs to avoid inventing a pin the user never made.
     expect(getFactById(db, id)?.prior_status).toBe("active");
   });
 
@@ -655,10 +635,7 @@ describe("regression: updateFact trims the same fields insertFact trims", () => 
     const fact = insertFact(db, baseFact({ subject: "package manager", value: "pnpm" }));
     const updated = updateFact(db, fact.id, { text: "   uses yarn now   ", value: "  yarn  " });
 
-    // `insertFact` normalizes on the way in and `updateFact` did not, so the same content arrived
-    // trimmed or untrimmed depending on which door it came through. That is not cosmetic: `value`
-    // is half the contradiction key, so " yarn " and "yarn" are two different values to the
-    // detector, and an edit that should have superseded a rival silently failed to match it.
+    // `insertFact` normalizes on the way in and `updateFact` did not, so the same content arrived trimmed or untrimmed depending on which door it came through. That is not cosmetic: `value` is half the contradiction key, so " yarn " and "yarn" are two different values to the detector, and an edit that should have superseded a rival silently failed to match it.
     expect(updated?.text).toBe("uses yarn now");
     expect(updated?.value).toBe("yarn");
   });
@@ -666,13 +643,7 @@ describe("regression: updateFact trims the same fields insertFact trims", () => 
 
 describe("recall_log.used_at migration (ensureStorageSchema, pre-column database)", () => {
   it("adds used_at to a recall_log written before the column existed, without disturbing its rows", () => {
-    // Simulate a database written by a build that had `recall_log` but not `used_at`. `openDb` now
-    // creates `recall_log` complete (it runs every baseline migration step itself), so build the
-    // old shape by dropping that table and recreating it without `used_at`, then resetting
-    // `user_version` to `0` -- the same technique tests/unit/schema-migration.test.ts uses to
-    // manufacture "a database that predates this column". `CREATE TABLE IF NOT EXISTS` is a no-op
-    // against a table that already exists, so the ALTER inside `runMigrations`' baseline step is
-    // the only thing that can migrate this database -- which is exactly what this pins.
+    // Simulate a database written by a build that had `recall_log` but not `used_at`. `openDb` now creates `recall_log` complete (it runs every baseline migration step itself), so build the old shape by dropping that table and recreating it without `used_at`, then resetting `user_version` to `0` -- the same technique tests/unit/schema-migration.test.ts uses to manufacture "a database that predates this column". `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists, so the ALTER inside `runMigrations`' baseline step is the only thing that can migrate this database -- which is exactly what this pins.
     const preColumnPath = join(root, "pre-used-at.db");
     const preColumnDb = openDb(preColumnPath);
     preColumnDb.exec("DROP TABLE recall_log");
@@ -699,8 +670,7 @@ describe("recall_log.used_at migration (ensureStorageSchema, pre-column database
       const columns = (migrated.prepare("PRAGMA table_info(recall_log)").all() as { name: string }[]).map((c) => c.name);
       expect(columns).toContain("used_at");
 
-      // The pre-existing row survives intact, with NULL -- "nobody ever said", not a backfilled claim
-      // that an unreviewed recall was useful.
+      // The pre-existing row survives intact, with NULL -- "nobody ever said", not a backfilled claim that an unreviewed recall was useful.
       const row = migrated
         .prepare<[], { fact_id: string; surfaced_at: string; used_at: string | null }>("SELECT fact_id, surfaced_at, used_at FROM recall_log")
         .get();
@@ -727,8 +697,7 @@ describe("markRecallUsed / getUsefulnessCounts", () => {
     expect(markRecallUsed(db, [fact.id], "session-1", "2026-01-03T00:00:00.000Z")).toBe(1);
     expect(getUsefulnessCounts(db).get(fact.id)).toEqual({ surfaced: 2, used: 1 });
 
-    // Second call updates nothing: `used_at IS NULL` guards it. Without that guard the used count
-    // would climb past the surfaced count and rank this fact above one genuinely used every time.
+    // Second call updates nothing: `used_at IS NULL` guards it. Without that guard the used count would climb past the surfaced count and rank this fact above one genuinely used every time.
     expect(markRecallUsed(db, [fact.id], "session-1", "2026-01-04T00:00:00.000Z")).toBe(0);
     expect(getUsefulnessCounts(db).get(fact.id)).toEqual({ surfaced: 2, used: 1 });
 
@@ -764,8 +733,7 @@ describe("markRecallUsed / getUsefulnessCounts", () => {
     const counts = getUsefulnessCounts(db);
     expect(counts.get(used.id)).toEqual({ surfaced: 3, used: 2 });
     expect(counts.get(surfacedOnly.id)).toEqual({ surfaced: 2, used: 0 });
-    // Absent, not `{ surfaced: 0, used: 0 }` -- "never shown to anyone" and "shown and never
-    // confirmed" are different claims, and only the second belongs in a usefulness ranking.
+    // Absent, not `{ surfaced: 0, used: 0 }` -- "never shown to anyone" and "shown and never confirmed" are different claims, and only the second belongs in a usefulness ranking.
     expect(counts.has(neverSurfaced.id)).toBe(false);
   });
 
@@ -781,8 +749,7 @@ describe("markRecallUsed / getUsefulnessCounts", () => {
     expect(markRecallUsed(db, [fact.id], "session-1", "2026-01-03T00:00:00.000Z")).toBe(1);
     expect(getEpoch(db)).toBeGreaterThan(epochBefore);
 
-    // Non-firing guard: a call that stamps nothing must not move the epoch either -- the bump
-    // tracks an actual change, it is not an unconditional side effect of calling the function.
+    // Non-firing guard: a call that stamps nothing must not move the epoch either -- the bump tracks an actual change, it is not an unconditional side effect of calling the function.
     const epochAfterFirst = getEpoch(db);
     const noOpCalls: readonly (readonly [readonly string[], string])[] = [
       [[fact.id], "session-1"], // already stamped
@@ -805,8 +772,7 @@ describe("replaceFactTerms epoch accounting", () => {
     replaceFactTerms(db, fact.id, { entities: ["pnpm"], topics: ["packaging"] });
     expect(getEpoch(db)).toBeGreaterThan(epochBefore);
 
-    // Non-firing guard: the write itself still landed, so the epoch assertion above is about a
-    // real term replacement and not an empty transaction.
+    // Non-firing guard: the write itself still landed, so the epoch assertion above is about a real term replacement and not an empty transaction.
     const terms = db.prepare<[string], { term: string }>("SELECT term FROM fact_terms WHERE fact_id = ?").all(fact.id);
     expect(terms.length).toBeGreaterThan(0);
     for (const row of terms) {
@@ -869,12 +835,7 @@ describe("prefetchAnchorCache / createBufferedAnchorCacheStore / persistAnchorVe
   });
 
   it("prefetches every evaluation root, not just the query root -- the monorepo path-scope case", () => {
-    // Regression guard. `anchorRootFor` evaluates a `path` fact against its own `captureRoot`
-    // whenever the query root is an ancestor of it, and leaves a `project` fact bound elsewhere on
-    // its `scopeRoot` on any recall that is not `restrictToRoot`. Prefetching on the query root
-    // alone meant those facts missed the cache on every single recall and wrote their verdict back
-    // under a key the next prefetch would never load -- invisibly, because the recomputed verdict
-    // is still correct. Only the wasted filesystem work gave it away, and nothing measured that.
+    // Regression guard. `anchorRootFor` evaluates a `path` fact against its own `captureRoot` whenever the query root is an ancestor of it, and leaves a `project` fact bound elsewhere on its `scopeRoot` on any recall that is not `restrictToRoot`. Prefetching on the query root alone meant those facts missed the cache on every single recall and wrote their verdict back under a key the next prefetch would never load -- invisibly, because the recomputed verdict is still correct. Only the wasted filesystem work gave it away, and nothing measured that.
     const store = createAnchorCacheStore(db);
     store.set("/repo/packages/api", "file-exists a.txt", "affirmed", "f:1:1");
     store.set("/elsewhere", "file-exists a.txt", "contradicted", "f:2:2");

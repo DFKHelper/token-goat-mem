@@ -1,10 +1,4 @@
-/**
- * End-to-end tests for `mem log`: the store-wide audit timeline.
- *
- * `mem show <id>` already reads one fact's history back; `mem log` is the same trail across the
- * whole store, newest first, so "what did the agent change in my memory this week?" has an answer
- * without knowing a fact id first. Driven through the real `run()` against a real database.
- */
+/** End-to-end tests for `mem log`: the store-wide audit timeline. `mem show <id>` already reads one fact's history back; `mem log` is the same trail across the whole store, newest first, so "what did the agent change in my memory this week?" has an answer without knowing a fact id first. Driven through the real `run()` against a real database. */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

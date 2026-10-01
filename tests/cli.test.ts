@@ -1,12 +1,4 @@
-/**
- * End-to-end tests for src/cli.ts, driven through `run()` (the same entry point src/main.ts calls)
- * rather than by calling the underlying domain modules directly -- these tests exercise the actual
- * argv parsing, CLI-boundary validation, output formatting, and DB lifecycle wiring `cli.ts` owns.
- *
- * Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), matching the isolation
- * discipline tests/setup/isolate-home.ts already establishes at the file level, but re-applied
- * per-test here so facts written by one test can never leak into another within this file.
- */
+/** End-to-end tests for src/cli.ts, driven through `run()` (the same entry point src/main.ts calls) rather than by calling the underlying domain modules directly -- these tests exercise the actual argv parsing, CLI-boundary validation, output formatting, and DB lifecycle wiring `cli.ts` owns. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), matching the isolation discipline tests/setup/isolate-home.ts already establishes at the file level, but re-applied per-test here so facts written by one test can never leak into another within this file. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
@@ -68,25 +60,19 @@ describe("mem CLI happy path", () => {
     expect(shown.stdout).toContain(`id: ${id}`);
     expect(shown.stdout).toContain("status: active");
     expect(shown.stdout).toContain("source_type: user");
-    // No anchor was set, so freshness can neither confirm nor deny -- always unverified, never a
-    // fabricated affirmed/contradicted verdict for a fact with no predicate to evaluate (P3).
+    // No anchor was set, so freshness can neither confirm nor deny -- always unverified, never a fabricated affirmed/contradicted verdict for a fact with no predicate to evaluate (P3).
     expect(shown.stdout).toContain("freshness=unverified");
 
     const recalled = await runCli(["recall", "pnpm"]);
     expect(recalled.exitCode).toBe(0);
     expect(recalled.stdout).toContain("uses pnpm not npm");
-    // Preferences always carry a caveat regardless of trust level (P6) -- never a bald assertion. No
-    // anchor was set, so freshness is "unverified" (not "affirmed"), which buildDisplay renders as an
-    // "(unverified, <month>)" tag. Default output no longer carries a per-line CTA (footer-ized).
+    // Preferences always carry a caveat regardless of trust level (P6) -- never a bald assertion. No anchor was set, so freshness is "unverified" (not "affirmed"), which buildDisplay renders as an "(unverified, <month>)" tag. Default output no longer carries a per-line CTA (footer-ized).
     expect(recalled.stdout).toContain("stored pref (unverified,");
-    // Only the clause that applies: this store has nothing pending or contested, so the review CTA
-    // stays off. It used to print here unconditionally.
+    // Only the clause that applies: this store has nothing pending or contested, so the review CTA stays off. It used to print here unconditionally.
     expect(recalled.stdout).toContain("mem show <id> for detail");
     expect(recalled.stdout).not.toContain("mem review");
 
-    // `remember` always stores `source_type=user`, and Defect 2's guard requires `--force` to edit
-    // one -- see "mem edit refuses to change a source_type=user fact without --force" below for the
-    // guard itself; this round-trip just needs to get past it to keep exercising pin/forget.
+    // `remember` always stores `source_type=user`, and Defect 2's guard requires `--force` to edit one -- see "mem edit refuses to change a source_type=user fact without --force" below for the guard itself; this round-trip just needs to get past it to keep exercising pin/forget.
     const edited = await runCli(["edit", id, "--text", "uses pnpm exclusively", "--force"]);
     expect(edited.exitCode).toBe(0);
     expect(edited.stdout).toBe(`edited ${id}\n`);
@@ -123,11 +109,7 @@ describe("mem CLI happy path", () => {
   });
 
   it("mem edit still rejects a file-contains anchor with a multi-word substring (CLI arity check is unchanged)", async () => {
-    // The CLI-facing anchor-syntax arity check (capture.ts's validateAnchorSyntax) whitespace-splits
-    // the anchor string, so a multi-word file-contains/file-not-contains substring is genuinely
-    // ambiguous to parse from flat CLI input and must still be rejected here -- json-import's
-    // exemption from this check (see exportImport.test.ts) does not extend to mem edit/mem remember,
-    // which take the same kind of CLI-string input.
+    // The CLI-facing anchor-syntax arity check (capture.ts's validateAnchorSyntax) whitespace-splits the anchor string, so a multi-word file-contains/file-not-contains substring is genuinely ambiguous to parse from flat CLI input and must still be rejected here -- json-import's exemption from this check (see exportImport.test.ts) does not extend to mem edit/mem remember, which take the same kind of CLI-string input.
     const created = await runCli(["remember", "uses pnpm not npm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
     const id = extractRememberedId(created);
 
@@ -301,10 +283,7 @@ describe("contradiction handling surfaced through the CLI (contradiction.ts, P4)
     ]);
     const idB = extractRememberedId(second);
 
-    // Both facts came from explicit `remember` (source_type=user, tied provenance). Force their
-    // captured_at to be byte-identical so precedence is genuinely tied (P4's "same recency/provenance"
-    // contested case) rather than depending on which of two rapid-fire CLI calls happened to land in
-    // an earlier millisecond -- that would make the test's outcome nondeterministic.
+    // Both facts came from explicit `remember` (source_type=user, tied provenance). Force their captured_at to be byte-identical so precedence is genuinely tied (P4's "same recency/provenance" contested case) rather than depending on which of two rapid-fire CLI calls happened to land in an earlier millisecond -- that would make the test's outcome nondeterministic.
     const db = openDb(resolveDbPath());
     const tiedTimestamp = "2026-01-01T00:00:00.000Z";
     db.prepare("UPDATE facts SET captured_at = ? WHERE id IN (?, ?)").run(tiedTimestamp, idA, idB);
@@ -316,20 +295,16 @@ describe("contradiction handling surfaced through the CLI (contradiction.ts, P4)
     expect(review.stdout).toContain(idA);
     expect(review.stdout).toContain(idB);
 
-    // Contradiction resolution is re-derived live at read time -- `mem review` surfaces the conflict
-    // without mutating either fact's persisted status; a human must resolve it explicitly.
+    // Contradiction resolution is re-derived live at read time -- `mem review` surfaces the conflict without mutating either fact's persisted status; a human must resolve it explicitly.
     const activeList = await runCli(["list", "--status", "active"]);
     expect(activeList.stdout).toContain(idA);
     expect(activeList.stdout).toContain(idB);
 
-    // Plain `mem recall` (no --hint-format) still surfaces the contested pair, but caveated as
-    // excluded rather than presented as ground truth -- a human using `mem recall` interactively can
-    // see the ambiguity; an automated consumer must not.
+    // Plain `mem recall` (no --hint-format) still surfaces the contested pair, but caveated as excluded rather than presented as ground truth -- a human using `mem recall` interactively can see the ambiguity; an automated consumer must not.
     const recalled = await runCli(["recall", "package manager"]);
     expect(recalled.stdout).toContain("(contested, excluded)");
 
-    // --hint-format is precision-max: contested facts are excluded entirely, never handed to the
-    // agent as an unresolved either/or it would have to gamble on (Section 4).
+    // --hint-format is precision-max: contested facts are excluded entirely, never handed to the agent as an unresolved either/or it would have to gamble on (Section 4).
     const hintFormat = await runCli(["recall", "--hint-format", "--root", home]);
     expect(hintFormat.exitCode).toBe(0);
     expect(hintFormat.stdout.startsWith("TGMEM/2\n")).toBe(true);
@@ -347,8 +322,7 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
       text: "internal service X owns migrations",
       kind: "fact",
       root: home,
-      // sourceType intentionally omitted -- captureSuggested defaults to the more heavily
-      // quarantined "derived" when the caller doesn't say otherwise (Section 3).
+      // sourceType intentionally omitted -- captureSuggested defaults to the more heavily quarantined "derived" when the caller doesn't say otherwise (Section 3).
     });
     db.close();
     expect(fact.status).toBe("pending");
@@ -368,19 +342,16 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
     const recalled = await runCli(["recall", "migrations"]);
     expect(recalled.stdout).toContain("(pending, unconfirmed)");
 
-    // --hint-format excludes pending/derived candidates entirely -- an automated consumer never sees
-    // an unconfirmed suggestion presented as memory.
+    // --hint-format excludes pending/derived candidates entirely -- an automated consumer never sees an unconfirmed suggestion presented as memory.
     const hintFormat = await runCli(["recall", "--hint-format", "--root", home]);
     expect(hintFormat.stdout).not.toContain("internal service X owns migrations");
 
-    // Promotion requires an explicit human action; there is no code path that reaches "active" for a
-    // pending fact other than this one.
+    // Promotion requires an explicit human action; there is no code path that reaches "active" for a pending fact other than this one.
     const promoted = await runCli(["review", "--promote", fact.id]);
     expect(promoted.exitCode).toBe(0);
     const [promotedLine, caveatLine] = promoted.stdout.trimEnd().split("\n");
     expect(promotedLine).toBe(`promoted ${fact.id}`);
-    // A derived candidate carries no subject, so nothing can ever supersede it once active. The
-    // promotion is the only moment the user can act on that, so it is the moment that says so.
+    // A derived candidate carries no subject, so nothing can ever supersede it once active. The promotion is the only moment the user can act on that, so it is the moment that says so.
     expect(caveatLine).toContain("has no subject/value");
 
     const activeAfterPromote = await runCli(["list", "--status", "active"]);
@@ -406,8 +377,7 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
 
     const promoted = await runCli(["review", "--promote", id]);
     expect(promoted.exitCode).toBe(0);
-    // A keyed fact can be superseded by a later contradicting one, so there is nothing to warn
-    // about -- a caveat printed here would be noise on the common path.
+    // A keyed fact can be superseded by a later contradicting one, so there is nothing to warn about -- a caveat printed here would be noise on the common path.
     expect(promoted.stdout).toBe(`promoted ${id}\n`);
   });
 
@@ -450,8 +420,7 @@ describe("suggested/derived facts never auto-promote (capture.ts S9, surfaced vi
 
 describe("exit-code and stderr/stdout contract (cli.ts module doc)", () => {
   it("maps an internal failure (unopenable DB) to exit code 2 with a single `mem: ...` stderr line and no stdout", async () => {
-    // TOKEN_GOAT_MEM_HOME points at a *file*, so mkdir/open of mem.db inside it fails -- an
-    // environment failure, not a usage error, and must be distinguishable from one (exit 2, not 1).
+    // TOKEN_GOAT_MEM_HOME points at a *file*, so mkdir/open of mem.db inside it fails -- an environment failure, not a usage error, and must be distinguishable from one (exit 2, not 1).
     const brokenHome = join(mkdtempSync(join(tmpdir(), "mem-cli-internal-")), "not-a-directory");
     writeFileSync(brokenHome, "this is a file, not a mem home directory");
     process.env["TOKEN_GOAT_MEM_HOME"] = brokenHome;
@@ -493,17 +462,11 @@ describe("exit-code and stderr/stdout contract (cli.ts module doc)", () => {
   });
 
   it("warns in --subject help that a subject holds one value, on every command that accepts it", async () => {
-    // The invariant is real but silent otherwise: a second --value against the same subject
-    // supersedes the first instead of joining it, and the user finds out by losing the first one.
-    // Asserted on both commands because a reader consults the help of whichever they are running,
-    // and asserted on the behaviour word ("supersedes") rather than the whole sentence so rewording
-    // stays free while deleting the warning does not.
+    // The invariant is real but silent otherwise: a second --value against the same subject supersedes the first instead of joining it, and the user finds out by losing the first one. Asserted on both commands because a reader consults the help of whichever they are running, and asserted on the behaviour word ("supersedes") rather than the whole sentence so rewording stays free while deleting the warning does not.
     for (const command of ["remember", "suggest"]) {
       const help = await runCli([command, "--help"]);
       expect(help.exitCode).toBe(0);
-      // Commander hard-wraps option descriptions to the terminal width, so the phrase arrives split
-      // across lines and padded. Collapse whitespace before matching -- asserting on the raw string
-      // would pin the wrap column, which is an artifact of the reader's terminal, not of mem.
+      // Commander hard-wraps option descriptions to the terminal width, so the phrase arrives split across lines and padded. Collapse whitespace before matching -- asserting on the raw string would pin the wrap column, which is an artifact of the reader's terminal, not of mem.
       const flowed = help.stdout.replace(/\s+/g, " ");
       expect(flowed).toMatch(/holds one value at a time/i);
       expect(flowed).toMatch(/supersedes/i);
@@ -663,8 +626,7 @@ describe("mem doctor (read-only health check)", () => {
   });
 
   it("reports the hint budget, so a store that has outgrown one recall block says so", async () => {
-    // 15 recallable facts against a 14-line ceiling: the first store size at which a fact the user
-    // can see in `mem list` may never reach a session, and nothing else in doctor would say it.
+    // 15 recallable facts against a 14-line ceiling: the first store size at which a fact the user can see in `mem list` may never reach a session, and nothing else in doctor would say it.
     for (let index = 0; index < 15; index += 1) {
       await runCli(["remember", `budget fact number ${index}`, "--kind", "fact"]);
     }
@@ -719,11 +681,7 @@ describe("mem doctor (read-only health check)", () => {
 
 describe("--hint-format fails open on internal error (integration-seam.ts, review S2/S3)", () => {
   it("returns a well-formed TGMEM payload naming the unreadable store, and exit code 0, instead of throwing when the DB cannot be opened", async () => {
-    // Point TOKEN_GOAT_MEM_HOME at a path that is a *file*, not a directory. `mem.db` would need to
-    // live inside it, so opening the store fails internally -- exactly the class of failure
-    // buildHintFormat's outer try/catch exists to absorb (never throws; caller's fail-open path never
-    // has to special-case a thrown exception). The response still says the store could not be read,
-    // rather than looking byte-identical to a project with genuinely no memory yet.
+    // Point TOKEN_GOAT_MEM_HOME at a path that is a *file*, not a directory. `mem.db` would need to live inside it, so opening the store fails internally -- exactly the class of failure buildHintFormat's outer try/catch exists to absorb (never throws; caller's fail-open path never has to special-case a thrown exception). The response still says the store could not be read, rather than looking byte-identical to a project with genuinely no memory yet.
     const brokenHome = join(mkdtempSync(join(tmpdir(), "mem-cli-broken-")), "not-a-directory");
     writeFileSync(brokenHome, "this is a file, not a mem home directory");
     process.env["TOKEN_GOAT_MEM_HOME"] = brokenHome;
@@ -779,18 +737,11 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     expect(withSinceEpoch.exitCode).toBe(1);
     expect(withSinceEpoch.stderr).toContain("--hint-format cannot be combined with --since-epoch");
 
-    // --hint-format alone (or with allowed options like --context-files, --stable, --hint-style) should still work
-    // We already test the basic case above, and the next test should cover this working case.
+    // --hint-format alone (or with allowed options like --context-files, --stable, --hint-style) should still work We already test the basic case above, and the next test should cover this working case.
   });
 
   it("--hint-format honors a positional query, reordering the emitted lines by relevance instead of pure recency", async () => {
-    // Explicit captured_at timestamps (not two back-to-back `remember` calls) so the recency
-    // ordering this test pins is deterministic rather than a race against millisecond clock
-    // resolution. Older fact mentions "giraffe" nowhere; newer fact is the only one containing
-    // "oranges". Bare (query-less) --hint-format has no ranking signal and falls through to
-    // recency, so the newer "oranges" fact already leads -- to prove the query is what reorders
-    // (not recency doing it by coincidence), query for a term only the *older* fact contains, and
-    // assert the older fact now leads despite being less recent.
+    // Explicit captured_at timestamps (not two back-to-back `remember` calls) so the recency ordering this test pins is deterministic rather than a race against millisecond clock resolution. Older fact mentions "giraffe" nowhere; newer fact is the only one containing "oranges". Bare (query-less) --hint-format has no ranking signal and falls through to recency, so the newer "oranges" fact already leads -- to prove the query is what reorders (not recency doing it by coincidence), query for a term only the *older* fact contains, and assert the older fact now leads despite being less recent.
     const db = openStorage(resolveDbPath());
     insertFact(db, {
       text: "older fact about a distinctive giraffe topic",
@@ -852,16 +803,13 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
     const factLines = (stdout: string): string[] => stdout.split("\n").filter((line) => line.startsWith("fact  "));
     // Same set of fact-lines either way -- a query that matches nothing reorders, it never removes.
     expect([...factLines(noMatch.stdout)].sort()).toEqual([...factLines(bare.stdout)].sort());
-    // The footer is where the two now diverge: a query with genuinely nothing to match against
-    // says so, rather than handing back the same recency dump a no-query call would with no way to
-    // tell the two apart.
+    // The footer is where the two now diverge: a query with genuinely nothing to match against says so, rather than handing back the same recency dump a no-query call would with no way to tell the two apart.
     expect(noMatch.stdout).toContain("no match for this query -- showing recent facts instead");
     expect(bare.stdout).not.toContain("no match for this query");
   });
 
   it("--hint-format with allowed options (--context-files, --stable, --hint-style) still works", async () => {
-    // This should not fail; we're testing that the allowed options don't trigger the incompatibility error
-    // In this test home is already set from the outer describe block, and the DB is populated from prior tests
+    // This should not fail; we're testing that the allowed options don't trigger the incompatibility error In this test home is already set from the outer describe block, and the DB is populated from prior tests
     const withStable = await runCli(["recall", "--hint-format", "--root", home, "--stable"]);
     expect(withStable.exitCode).toBe(0);
     expect(withStable.stdout).toMatch(/^TGMEM\/2\n/);
@@ -886,9 +834,7 @@ describe("--hint-format fails open on internal error (integration-seam.ts, revie
 
 describe("recall --stable (deterministic id-sorted ordering, strictly additive)", () => {
   it("sorts plain `mem recall` output by fact id ascending instead of recency", async () => {
-    // Default (full) recall output no longer embeds an id in a per-line CTA (footer-ized, Section 4),
-    // so ids are captured from `remember`'s own success line and matched back to each fact's line by
-    // its distinguishing text, rather than regex-extracted from recall's display text.
+    // Default (full) recall output no longer embeds an id in a per-line CTA (footer-ized, Section 4), so ids are captured from `remember`'s own success line and matched back to each fact's line by its distinguishing text, rather than regex-extracted from recall's display text.
     const idEarlier = extractRememberedId(await runCli(["remember", "captured earlier", "--kind", "fact"]));
     const idLater = extractRememberedId(await runCli(["remember", "captured later", "--kind", "fact"]));
 
@@ -911,10 +857,7 @@ describe("recall --stable (deterministic id-sorted ordering, strictly additive)"
   });
 
   it("does not print an anchor-budget note for an ordinary small-store `mem recall`", async () => {
-    // The message text itself (and the count) is covered directly against `retrieve()`'s
-    // `anchorBudgetHits` in tests/unit/retrieval.test.ts, since there is no CLI flag to force the
-    // anchor deadline low enough to reproduce a real budget hit here. This only pins the negative:
-    // a normal store small enough to finish every anchor within the default budget stays silent.
+    // The message text itself (and the count) is covered directly against `retrieve()`'s `anchorBudgetHits` in tests/unit/retrieval.test.ts, since there is no CLI flag to force the anchor deadline low enough to reproduce a real budget hit here. This only pins the negative: a normal store small enough to finish every anchor within the default budget stays silent.
     await runCli(["remember", "captured just now", "--kind", "fact"]);
     const result = await runCli(["recall"]);
     expect(result.stdout).not.toContain("anchor budget exhausted");
@@ -1118,9 +1061,7 @@ describe("review unanchored bucket prints a paste-ready `mem edit --anchor` sugg
       const predicate = "file-exists src/main.ts";
       expect(listing.stdout).toContain(`mem edit ${fact.id} --anchor "${predicate}"`);
 
-      // The round trip is the point: paste the exact suggested command's argv (the quoted anchor is
-      // one shell word; commander sees it as one `--anchor` value either way) and confirm it
-      // actually resolves the fact to ground truth, not just that a plausible-looking line was printed.
+      // The round trip is the point: paste the exact suggested command's argv (the quoted anchor is one shell word; commander sees it as one `--anchor` value either way) and confirm it actually resolves the fact to ground truth, not just that a plausible-looking line was printed.
       const edited = await runCli(["edit", fact.id, "--anchor", predicate, "--root", repo]);
       expect(edited.stderr, edited.stderr).toBe("");
       expect(edited.exitCode).toBe(0);
@@ -1150,9 +1091,7 @@ describe("review unanchored bucket prints a paste-ready `mem edit --anchor` sugg
       const id = /remembered fact (\S+)/u.exec(remembered.stdout)?.[1] ?? "";
       expect(id).not.toBe("");
 
-      // Most of a real store is user-stated, and `mem edit` refuses those without --force. A
-      // suggestion that answers with a refusal on the common path is worse than none: it teaches
-      // the user the feature is broken.
+      // Most of a real store is user-stated, and `mem edit` refuses those without --force. A suggestion that answers with a refusal on the common path is worse than none: it teaches the user the feature is broken.
       const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
       expect(listing.stdout).toContain(`mem edit ${id} --anchor "file-exists src/main.ts" --force`);
 
@@ -1215,8 +1154,7 @@ describe("review unanchored bucket prints a paste-ready `mem edit --anchor` sugg
 
       const listing = await runCli(["review", "--section", "unanchored", "--root", repo]);
       expect(listing.exitCode).toBe(0);
-      // Exact reconstruction of pre-feature output: one section header, one fact-summary line, no
-      // suggestion line -- `src/main.ts` genuinely does not exist under this fresh, empty root.
+      // Exact reconstruction of pre-feature output: one section header, one fact-summary line, no suggestion line -- `src/main.ts` genuinely does not exist under this fresh, empty root.
       const expected =
         "-- unanchored but checkable (names a path/URL/config file; consider `mem edit <id> --anchor`) (1) --\n" +
         `${fact.id}  [fact/active]  ${text}\n`;
@@ -1245,8 +1183,7 @@ describe("review shows a pending fact's newest source excerpt", () => {
     const review = await runCli(["review", "--section", "pending"]);
     expect(review.exitCode).toBe(0);
     expect(review.stdout).toContain("Always run the linter before pushing.");
-    // The excerpt carries the whole turn, which is the reviewer's evidence for judging the claim --
-    // context the derived sentence alone doesn't carry.
+    // The excerpt carries the whole turn, which is the reviewer's evidence for judging the claim -- context the derived sentence alone doesn't carry.
     expect(review.stdout).toContain("source:");
     expect(review.stdout).toContain("Unrelated chatter first.");
   });
@@ -1360,9 +1297,7 @@ describe("review flags what a pending correction/subject fact may contradict", (
     const rivalId = extractRememberedId(rival);
 
     const db = openStorage(resolveDbPath());
-    // kind=correction alone is eligible, with no --subject/--value supplied -- the gap this
-    // feature closes is exactly the case where a correction has nothing but its text linking it
-    // to what it corrects.
+    // kind=correction alone is eligible, with no --subject/--value supplied -- the gap this feature closes is exactly the case where a correction has nothing but its text linking it to what it corrects.
     const { fact: correction } = captureSuggested(db, {
       text: "the release plan actually pins the build to v9.9.9 and a hotfix",
       kind: "correction",
@@ -1374,8 +1309,7 @@ describe("review flags what a pending correction/subject fact may contradict", (
     expect(review.exitCode).toBe(0);
     expect(review.stdout).toContain(correction.id);
     expect(review.stdout).toContain(`may contradict ${rivalId} "the release plan pins the build to v9.9.9 while docs get updated"`);
-    // Paste-ready resolution for the user who agrees the pending fact wins: it names the rival to
-    // retire and the pending fact as its successor.
+    // Paste-ready resolution for the user who agrees the pending fact wins: it names the rival to retire and the pending fact as its successor.
     expect(review.stdout).toContain(`mem forget ${rivalId} --by ${correction.id}`);
   });
 
@@ -1620,9 +1554,7 @@ describe("default limits on mem list / mem recall (never hiding pending/conteste
   });
 
   it("never hides a pending fact behind the default recall limit, even with 20+ higher-ranked active facts ahead of it", async () => {
-    // The pending fact is captured first (oldest, so it would rank dead last in default
-    // newest-first ordering) -- if the default cap applied uniformly instead of exempting withheld
-    // results, it would never appear in the default (uncapped-for-pending) output.
+    // The pending fact is captured first (oldest, so it would rank dead last in default newest-first ordering) -- if the default cap applied uniformly instead of exempting withheld results, it would never appear in the default (uncapped-for-pending) output.
     const db = openStorage(resolveDbPath());
     insertFact(db, {
       text: "a pending candidate fact",
@@ -1639,8 +1571,7 @@ describe("default limits on mem list / mem recall (never hiding pending/conteste
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("a pending candidate fact");
     expect(result.stdout).toContain("(pending, unconfirmed)");
-    // 22 non-withheld facts matched; only 20 are shown by default -- the trailer reflects that,
-    // and it excludes the pending fact from both totals (it is never subject to the cap at all).
+    // 22 non-withheld facts matched; only 20 are shown by default -- the trailer reflects that, and it excludes the pending fact from both totals (it is never subject to the cap at all).
     expect(result.stdout).toContain("showing 20 of 22 -- use --limit to see more");
   });
 
@@ -1782,8 +1713,7 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     expect(result.stdout).toContain("would import 1 of 1 candidate fact(s)");
     expect(result.stdout).toContain("nothing written");
 
-    // Regression: --dry-run previously routed through openDb (mkdir + schema init) even though it
-    // never wrote a fact, so it silently created mem.db despite claiming not to write anything.
+    // Regression: --dry-run previously routed through openDb (mkdir + schema init) even though it never wrote a fact, so it silently created mem.db despite claiming not to write anything.
     expect(existsSync(join(home, "mem.db"))).toBe(false);
 
     const listed = await runCli(["list"]);
@@ -1838,8 +1768,7 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     const promoted = await runCli(["review", "--promote", id]);
     expect(promoted.exitCode).toBe(0);
     expect(promoted.stdout.trimEnd().split("\n")[0]).toBe(`promoted ${id}`);
-    // An imported bullet is text, not a keyed claim, so promotion names the gap and the one command
-    // that closes it rather than leaving the fact quietly unsupersedable.
+    // An imported bullet is text, not a keyed claim, so promotion names the gap and the one command that closes it rather than leaving the fact quietly unsupersedable.
     expect(promoted.stdout).toContain(`mem edit ${id} --subject <key> --value <value>`);
 
     const shown = await runCli(["show", id]);
@@ -1889,8 +1818,7 @@ describe("import --from-md (advisory CLAUDE.md -> mem migration, S9 trust path)"
     const shown = await runCli(["show", id, "--json"]);
     const envelope = JSON.parse(shown.stdout) as { sources: { excerpt: string }[] };
     expect(envelope.sources).toHaveLength(1);
-    // `<path relative to root>:<line>: <raw bullet line>` -- the resolved absolute path never
-    // appears, and the marker/whitespace the candidate's own `text` field has stripped is intact.
+    // `<path relative to root>:<line>: <raw bullet line>` -- the resolved absolute path never appears, and the marker/whitespace the candidate's own `text` field has stripped is intact.
     expect(envelope.sources[0]?.excerpt).toBe("CLAUDE.md:2: - Always use pnpm, never npm.");
   });
 });
@@ -1930,8 +1858,7 @@ describe("mem suggest (suggested/candidate capture, S9 trust path)", () => {
     expect(second.stdout).toContain("recorded another sighting");
 
     const pendingList = await runCli(["list", "--status", "pending"]);
-    // One row, not two -- `mem list` printing the id once pins the no-duplicate-row guarantee at
-    // the CLI surface, matching what tests/capture.test.ts already pins at the function level.
+    // One row, not two -- `mem list` printing the id once pins the no-duplicate-row guarantee at the CLI surface, matching what tests/capture.test.ts already pins at the function level.
     expect(pendingList.stdout.split(id as string)).toHaveLength(2);
   });
 
@@ -2054,9 +1981,7 @@ describe("mem export --format md", () => {
     const explicit = await runCli(["export", "--format", "json"]);
     expect(bare.exitCode).toBe(0);
     expect(explicit.exitCode).toBe(0);
-    // exportedAt is `new Date().toISOString()` at call time -- the one field guaranteed to differ
-    // between two invocations. Blank it out in both before comparing so the rest of the envelope
-    // (including key order, from JSON.stringify(..., null, 2)) is asserted byte-for-byte.
+    // exportedAt is `new Date().toISOString()` at call time -- the one field guaranteed to differ between two invocations. Blank it out in both before comparing so the rest of the envelope (including key order, from JSON.stringify(..., null, 2)) is asserted byte-for-byte.
     const normalize = (stdout: string): string => stdout.replace(/"exportedAt": ".*"/u, '"exportedAt": "<normalized>"');
     expect(normalize(explicit.stdout)).toBe(normalize(bare.stdout));
   });
@@ -2094,8 +2019,7 @@ describe("mem export --format md", () => {
 
     const exported = await runCli(["export", "--format", "md"]);
     expect(exported.exitCode).toBe(0);
-    // The whole fact must appear on a single "- " line -- two separate lines would mean the second
-    // half (BULLET_RE is single-line) is either lost or reads back as unrelated non-bullet content.
+    // The whole fact must appear on a single "- " line -- two separate lines would mean the second half (BULLET_RE is single-line) is either lost or reads back as unrelated non-bullet content.
     expect(exported.stdout).toContain("- line one line two");
 
     const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-nl-"));
@@ -2129,8 +2053,7 @@ describe("mem export --format md", () => {
     process.env["TOKEN_GOAT_MEM_HOME"] = targetHome;
     try {
       const imported = await runCli(["import", "--from-md", mdPath]);
-      // Both bullets must import: if the fence had opened a real code block, extractMarkdownBullets
-      // would have swallowed everything after it, including "uses pnpm not npm".
+      // Both bullets must import: if the fence had opened a real code block, extractMarkdownBullets would have swallowed everything after it, including "uses pnpm not npm".
       expect(imported.stdout).toContain("imported 2 of 2 candidate fact(s)");
       const listed = await runCli(["list", "--status", "pending"]);
       expect(listed.stdout).toContain("uses pnpm not npm");
@@ -2142,9 +2065,7 @@ describe("mem export --format md", () => {
   });
 
   it("a fact whose text starts with `-` imports back with its leading character intact", async () => {
-    // Seeded directly via insertFact rather than `mem remember`: commander parses a leading-dash
-    // argv element as an unknown option, which is a CLI arg-parsing quirk unrelated to the
-    // round-trip behavior this test targets.
+    // Seeded directly via insertFact rather than `mem remember`: commander parses a leading-dash argv element as an unknown option, which is a CLI arg-parsing quirk unrelated to the round-trip behavior this test targets.
     const seedDb = openStorage(resolveDbPath());
     insertFact(seedDb, { text: "-1 is the sentinel for 'no result'", kind: "fact", scope: "global", source_type: "user" });
     seedDb.close();
@@ -2282,8 +2203,7 @@ describe("mem show --json", () => {
   });
 
   it("resolves the superseding fact instead of leaving its id buried in audit prose", async () => {
-    // The whole point of the feature: the loser's own `mem show` answers "what replaced this?"
-    // without the reader parsing a sentence out of the audit log or running a second lookup.
+    // The whole point of the feature: the loser's own `mem show` answers "what replaced this?" without the reader parsing a sentence out of the audit log or running a second lookup.
     const first = await runCli([
       "remember",
       "node 18 is the floor",
@@ -2307,9 +2227,7 @@ describe("mem show --json", () => {
     ]);
     const winnerId = extractRememberedId(second);
 
-    // Contradictions are recomputed at recall and persisted only by the retention pass, so the
-    // loser is still `active` until the retention pass runs. Driving `epoch --gc` here rather than
-    // asserting on an unreconciled store keeps the test honest about when the edge actually exists.
+    // Contradictions are recomputed at recall and persisted only by the retention pass, so the loser is still `active` until the retention pass runs. Driving `epoch --gc` here rather than asserting on an unreconciled store keeps the test honest about when the edge actually exists.
     expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
 
     const shown = await runCli(["show", loserId]);
@@ -2329,10 +2247,7 @@ describe("mem show --json", () => {
   });
 
   it("still resolves the superseding fact after a later audit row (`mem used`) is appended", async () => {
-    // `findSupersedingFactId` used to read the *last* audit row for a fact and assume it named the
-    // successor. `mem used` appends its own audit row after supersession, so once a superseded fact
-    // is later marked used, the last row is a "used" row, not a "superseded by" row -- and the
-    // lookup must not fall back to treating that as "no successor".
+    // `findSupersedingFactId` used to read the *last* audit row for a fact and assume it named the successor. `mem used` appends its own audit row after supersession, so once a superseded fact is later marked used, the last row is a "used" row, not a "superseded by" row -- and the lookup must not fall back to treating that as "no successor".
     const first = await runCli([
       "remember",
       "node 18 is the floor",
@@ -2371,12 +2286,7 @@ describe("mem show --json", () => {
   });
 
   it("says so plainly, without asserting a specific cause, when a superseded fact has no recorded edge", async () => {
-    // `forget` retires a fact without a winner, and so do `review --reject` and consolidate's stale
-    // pass -- but so does a fact superseded before an export/import round trip, whose winner may
-    // still be sitting right there in the store (audit_log, which is where the edge lives, is not
-    // part of the export envelope). Silence here would be indistinguishable from the feature not
-    // existing, so the absence is stated, but the wording must not name a cause it cannot actually
-    // rule out any of the others in favor of.
+    // `forget` retires a fact without a winner, and so do `review --reject` and consolidate's stale pass -- but so does a fact superseded before an export/import round trip, whose winner may still be sitting right there in the store (audit_log, which is where the edge lives, is not part of the export envelope). Silence here would be indistinguishable from the feature not existing, so the absence is stated, but the wording must not name a cause it cannot actually rule out any of the others in favor of.
     const remembered = await runCli(["remember", "retired outright", "--kind", "fact"]);
     const id = extractRememberedId(remembered);
     expect((await runCli(["forget", id])).exitCode).toBe(0);
@@ -2413,9 +2323,7 @@ describe("mem show --json", () => {
 
 describe("mem show --related", () => {
   it("ranks a shared-entity neighbour above a shared-topic-only neighbour", async () => {
-    // Chosen so plain (unweighted) shared-topic counts alone would rank topicNeighbour first (4
-    // shared topics vs. entityNeighbour's 2) -- only entity-weighting the one shared entity flips
-    // the order, so this actually exercises RELATED_ENTITY_WEIGHT rather than passing by accident.
+    // Chosen so plain (unweighted) shared-topic counts alone would rank topicNeighbour first (4 shared topics vs. entityNeighbour's 2) -- only entity-weighting the one shared entity flips the order, so this actually exercises RELATED_ENTITY_WEIGHT rather than passing by accident.
     const target = await runCli(["remember", "the release plan pins the build to v9.9.9 while docs get updated", "--kind", "fact"]);
     const targetId = extractRememberedId(target);
     const entityNeighbour = await runCli(["remember", "the changelog also references v9.9.9 explicitly", "--kind", "fact"]);
@@ -2437,8 +2345,7 @@ describe("mem show --related", () => {
 
     const shown = await runCli(["show", id, "--related"]);
     expect(shown.exitCode).toBe(0);
-    // The only fact carrying this entity is itself, so the honest answer is "none" -- not a related
-    // section that quietly includes the very fact being shown.
+    // The only fact carrying this entity is itself, so the honest answer is "none" -- not a related section that quietly includes the very fact being shown.
     expect(shown.stdout).toContain("related: none");
     expect(shown.stdout).not.toContain(`  - ${id}`);
   });
@@ -2594,8 +2501,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
     const winnerId = extractRememberedId(second);
     await runCli(["epoch", "--gc"]);
 
-    // Confirm the edge is known pre-round-trip, so the assertion below is actually exercising a
-    // regression rather than a store that never knew the cause to begin with.
+    // Confirm the edge is known pre-round-trip, so the assertion below is actually exercising a regression rather than a store that never knew the cause to begin with.
     const before = await runCli(["show", loserId]);
     expect(before.stdout).toContain(`superseded_by: ${winnerId}`);
 
@@ -2618,8 +2524,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
       const shown = await runCli(["show", loserId]);
       expect(shown.exitCode).toBe(0);
       expect(shown.stdout).toContain("status: superseded");
-      // The winner is right there in the imported store, and the exported edge named it, so the
-      // "unknown" fallback must not fire -- `mem show` now names the winner directly.
+      // The winner is right there in the imported store, and the exported edge named it, so the "unknown" fallback must not fire -- `mem show` now names the winner directly.
       expect(shown.stdout).not.toContain("superseded_by: unknown");
       expect(shown.stdout).toContain(`superseded_by: ${winnerId}`);
     } finally {
@@ -2635,8 +2540,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
 
     const surfacedAt = "2026-01-15T00:00:00.000Z";
     const db = openStorage(resolveDbPath());
-    // A genuine status transition so `prior_status` moves off its default NULL, then a stamp so
-    // `last_surfaced_at` is non-null too -- both are the signals listStaleUnsurfacedFacts reads.
+    // A genuine status transition so `prior_status` moves off its default NULL, then a stamp so `last_surfaced_at` is non-null too -- both are the signals listStaleUnsurfacedFacts reads.
     setFactStatus(db, id, "pinned");
     setFactStatus(db, id, "active");
     markFactsSurfaced(db, [id], surfacedAt);
@@ -2794,8 +2698,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
       const secretLine = lines.find((line) => line.includes("AKIAIOSFODNN7EXAMPLE"));
       const ordinaryLine = lines.find((line) => line.includes('"ordinary fact one"'));
 
-      // Non-firing guard: a valid candidate is still reported as importable, so the screening above
-      // is not just refusing everything.
+      // Non-firing guard: a valid candidate is still reported as importable, so the screening above is not just refusing everything.
       expect(ordinaryLine).toBeDefined();
       expect(ordinaryLine).toContain("would-import");
 
@@ -2851,8 +2754,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
 
     try {
       const result = await runCli(["import", "--from-json", jsonPath]);
-      // Per-fact skip, not a hard command failure: the command still reports success overall
-      // (imported 0 of 1), same as a duplicate or a structurally invalid fact.
+      // Per-fact skip, not a hard command failure: the command still reports success overall (imported 0 of 1), same as a duplicate or a structurally invalid fact.
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("imported 0 of 1 candidate fact(s)");
       expect(result.stdout).toContain("secret");
@@ -2893,20 +2795,12 @@ describe("mem init/uninstall", () => {
   let originalPath: string | undefined;
 
   beforeEach(() => {
-    // Separate fixture dirs from `home` (mem's own TOKEN_GOAT_MEM_HOME data dir) -- these are the
-    // fake "other tool" config root and home the wiring commands read/write, and must never
-    // resolve to the real ~/.claude, real VS Code config, or real project files.
+    // Separate fixture dirs from `home` (mem's own TOKEN_GOAT_MEM_HOME data dir) -- these are the fake "other tool" config root and home the wiring commands read/write, and must never resolve to the real ~/.claude, real VS Code config, or real project files.
     toolRoot = mkdtempSync(join(tmpdir(), "mem-cli-wiring-root-"));
     toolHome = mkdtempSync(join(tmpdir(), "mem-cli-wiring-home-"));
     process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
 
-    // `mem init claude-code`'s pre-flight resolves whatever `mem` binary is actually on PATH and
-    // checks it against the hooks it's about to write (see wiring.ts's `checkClaudeHookHealth`).
-    // These tests are about the config-writing behavior, not that check, so a fake shim that always
-    // reports every flag as supported is put ahead of the real PATH -- real end-to-end coverage of
-    // the check itself (a shim that *doesn't* support a flag) lives in its own describe block below.
-    // Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in
-    // this file's PATH-independent init tests still need) resolvable.
+    // `mem init claude-code`'s pre-flight resolves whatever `mem` binary is actually on PATH and checks it against the hooks it's about to write (see wiring.ts's `checkClaudeHookHealth`). These tests are about the config-writing behavior, not that check, so a fake shim that always reports every flag as supported is put ahead of the real PATH -- real end-to-end coverage of the check itself (a shim that *doesn't* support a flag) lives in its own describe block below. Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in this file's PATH-independent init tests still need) resolvable.
     fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-"));
     writeFakeMem(fakeMemDir, CAPABLE_MEM_SHIM);
     originalPath = process.env["PATH"];
@@ -2970,9 +2864,7 @@ describe("mem init/uninstall", () => {
     const uninstalled = await runCli(["uninstall", "claude-code", "--root", toolRoot]);
     expect(uninstalled.exitCode).toBe(0);
 
-    // Neither file existed before this init created them, so "the pre-install state" is absence --
-    // an empty `.claude/settings.json` or `CLAUDE.md` husk left behind would not be that state, and
-    // is exactly what a coding tool picks up as a real (if empty) instruction file.
+    // Neither file existed before this init created them, so "the pre-install state" is absence -- an empty `.claude/settings.json` or `CLAUDE.md` husk left behind would not be that state, and is exactly what a coding tool picks up as a real (if empty) instruction file.
     expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
     expect(existsSync(`${join(toolRoot, ".claude", "settings.json")}.token-goat-mem.bak`)).toBe(false);
     expect(existsSync(join(toolRoot, "CLAUDE.md"))).toBe(false);
@@ -2986,15 +2878,7 @@ describe("mem init/uninstall", () => {
   });
 
   it("a full install/uninstall round trip on a fresh root leaves the directory listing exactly as it started, one tool at a time", async () => {
-    // `.claude` and `.vscode` are directories mem creates that this fix deliberately leaves in place
-    // (only files are unlinked, never directories), so they are excluded from the comparison.
-    //
-    // Each tool is installed and uninstalled to completion before the next one starts, rather than
-    // installing all four and then uninstalling all four: codex/copilot-cli/copilot-vscode share
-    // AGENTS.md, and a *second* tool installing into a file a *different* tool's install already
-    // created legitimately takes a `.bak` of that (now mem-authored) content -- a real, unrelated
-    // feature of install, not the residue this fix removes. One tool at a time isolates the case this
-    // test exists to cover: a file no tool has touched yet, created and then fully uninstalled.
+    // `.claude` and `.vscode` are directories mem creates that this fix deliberately leaves in place (only files are unlinked, never directories), so they are excluded from the comparison. Each tool is installed and uninstalled to completion before the next one starts, rather than installing all four and then uninstalling all four: codex/copilot-cli/copilot-vscode share AGENTS.md, and a *second* tool installing into a file a *different* tool's install already created legitimately takes a `.bak` of that (now mem-authored) content -- a real, unrelated feature of install, not the residue this fix removes. One tool at a time isolates the case this test exists to cover: a file no tool has touched yet, created and then fully uninstalled.
     const before = readdirSync(toolRoot).filter((name) => name !== ".claude" && name !== ".vscode");
 
     for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
@@ -3014,16 +2898,12 @@ describe("mem init/uninstall", () => {
     expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(true);
 
     await runCli(["uninstall", "claude-code", "--root", toolRoot, "--user"]);
-    // settings.json never existed before this init created it under toolHome, so uninstall removes
-    // the file rather than leaving an empty `{}` behind.
+    // settings.json never existed before this init created it under toolHome, so uninstall removes the file rather than leaving an empty `{}` behind.
     expect(existsSync(join(toolHome, ".claude", "settings.json"))).toBe(false);
   });
 
   it("uninstall --user only targets the user-level config, leaving project-level wiring untouched -- and its help text says so", async () => {
-    // Regression: uninstall's `--user` help text read "Also target the tool's user-level config",
-    // implying it widens uninstall to both levels at once. The code has always targeted the
-    // user-level file *instead of* the project one (matching `init --user`, whose help already says
-    // "instead of"), so the wording was the bug, not the behavior -- fixed to match what actually runs.
+    // Regression: uninstall's `--user` help text read "Also target the tool's user-level config", implying it widens uninstall to both levels at once. The code has always targeted the user-level file *instead of* the project one (matching `init --user`, whose help already says "instead of"), so the wording was the bug, not the behavior -- fixed to match what actually runs.
     await runCli(["init", "claude-code", "--root", toolRoot]);
     await runCli(["init", "claude-code", "--root", toolRoot, "--user"]);
 
@@ -3052,16 +2932,12 @@ describe("mem init/uninstall", () => {
     for (const tool of ["claude-code", "codex", "copilot-cli", "copilot-vscode"]) {
       expect(result.stdout).toContain(`${tool}:`);
     }
-    // AGENTS.md never existed before the first of codex/copilot-cli/copilot-vscode's init created it,
-    // so once the last of the three is uninstalled the shared block empties and the file is removed.
+    // AGENTS.md never existed before the first of codex/copilot-cli/copilot-vscode's init created it, so once the last of the three is uninstalled the shared block empties and the file is removed.
     expect(existsSync(join(toolRoot, "AGENTS.md"))).toBe(false);
   });
 
   it("uninstall --all reports a per-tool failure and keeps going, exiting 1, instead of hiding tools that already finished", async () => {
-    // Before this fix, `uninstall --all` buffered every tool's output into one array and only wrote
-    // it to stdout after the whole loop finished, so a thrown error from one tool's file (a JSON
-    // parse failure here) discarded the output for every tool already uninstalled before it -- the
-    // opposite of what codex's successful uninstall, which ran first, deserves to have reported.
+    // Before this fix, `uninstall --all` buffered every tool's output into one array and only wrote it to stdout after the whole loop finished, so a thrown error from one tool's file (a JSON parse failure here) discarded the output for every tool already uninstalled before it -- the opposite of what codex's successful uninstall, which ran first, deserves to have reported.
     const codexResult = await runCli(["init", "codex", "--root", toolRoot]);
     expect(codexResult.exitCode).toBe(0);
     const copilotVscodeResult = await runCli(["init", "copilot-vscode", "--root", toolRoot]);
@@ -3147,8 +3023,7 @@ describe("mem init/uninstall", () => {
 
     const uninstallCodex = await runCli(["uninstall", "codex", "--root", toolRoot]);
     expect(uninstallCodex.exitCode).toBe(0);
-    // AGENTS.md never existed before codex's own init created it, so once the last tool tracked in
-    // the shared block is uninstalled, the file is removed rather than left empty.
+    // AGENTS.md never existed before codex's own init created it, so once the last tool tracked in the shared block is uninstalled, the file is removed rather than left empty.
     expect(existsSync(agentsMdPath)).toBe(false);
   });
 
@@ -3230,12 +3105,7 @@ describe("mem init/uninstall", () => {
   });
 
   describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", () => {
-    // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session`
-    // hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older
-    // build that rejects those flags -- every hook then fails, silently, because nothing compared
-    // the write against the binary that would actually run it. These tests replace the always-
-    // capable fake `mem` this describe block's `beforeEach` puts on PATH with a deliberately
-    // incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
+    // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session` hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older build that rejects those flags -- every hook then fails, silently, because nothing compared the write against the binary that would actually run it. These tests replace the always- capable fake `mem` this describe block's `beforeEach` puts on PATH with a deliberately incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
 
     function installOldMemShim(dir: string): void {
       // The exact shape of the real incident: an install that predates `--hook-stdin`/`--delta` and `scan-session`.
@@ -3281,11 +3151,7 @@ describe("mem init/uninstall", () => {
     it("reports mem missing from PATH distinctly from mem present but incapable", async () => {
       rmSync(fakeMemDir, { recursive: true, force: true });
       fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-empty-"));
-      // No `mem`/`mem.cmd` written, and PATH is restricted to just this empty dir (plus node's own
-      // directory, so a child process could still resolve `node` if one were spawned) -- appending
-      // the real inherited PATH here would let this test's result depend on whether *this* machine
-      // happens to have a real `mem` installed globally, which is exactly the non-hermeticity this
-      // fix's own PATH-resolution logic must not have.
+      // No `mem`/`mem.cmd` written, and PATH is restricted to just this empty dir (plus node's own directory, so a child process could still resolve `node` if one were spawned) -- appending the real inherited PATH here would let this test's result depend on whether *this* machine happens to have a real `mem` installed globally, which is exactly the non-hermeticity this fix's own PATH-resolution logic must not have.
       process.env["PATH"] = `${fakeMemDir}${delimiter}${dirname(process.execPath)}`;
 
       const result = await runCli(["init", "claude-code", "--root", toolRoot]);
@@ -3294,12 +3160,7 @@ describe("mem init/uninstall", () => {
       expect(result.stdout).not.toContain("0.2.5");
     });
 
-    /**
-     * Installs the hooks with the capable shim the outer beforeEach already put on PATH, then swaps
-     * in the incapable one and runs `fn` from the project root -- `doctor` checks whatever
-     * settings.json already has, not what this build would write, so this is the "already
-     * installed, binary downgraded since" case.
-     */
+    /** Installs the hooks with the capable shim the outer beforeEach already put on PATH, then swaps in the incapable one and runs `fn` from the project root -- `doctor` checks whatever settings.json already has, not what this build would write, so this is the "already installed, binary downgraded since" case. */
     async function withDowngradedBinary(fn: () => Promise<void>): Promise<void> {
       const installed = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(installed.exitCode).toBe(0);
@@ -3371,17 +3232,14 @@ describe("capture confirmations never print a doubled noun (regression: `remembe
   });
 
   it("still yields an extractable id for a `fact`-kind capture", async () => {
-    // The shortened line must not break id extraction: the helper's own pattern required a kind
-    // token between "remembered" and "fact", which this collapse removes for exactly this kind.
+    // The shortened line must not break id extraction: the helper's own pattern required a kind token between "remembered" and "fact", which this collapse removes for exactly this kind.
     const result = await runCli(["remember", "id must still parse", "--kind", "fact"]);
 
     expect(extractRememberedId(result)).toMatch(/^[0-9a-f-]{36}$/u);
   });
 
   it("applies the same collapse to the audit trail every capture path writes", async () => {
-    // The audit details were built from their own `${kind} fact` templates in capture.ts, so the
-    // confirmation fix above never reached them: `mem log` still read "stored active fact fact".
-    // Covers the explicit, reaffirmed, pending, and reaffirmed-while-pending captures.
+    // The audit details were built from their own `${kind} fact` templates in capture.ts, so the confirmation fix above never reached them: `mem log` still read "stored active fact fact". Covers the explicit, reaffirmed, pending, and reaffirmed-while-pending captures.
     expect((await runCli(["remember", "a plain fact", "--kind", "fact"])).exitCode).toBe(0);
     expect((await runCli(["remember", "a plain fact", "--kind", "fact"])).exitCode).toBe(0);
     expect((await runCli(["suggest", "a plain candidate", "--kind", "fact"])).exitCode).toBe(0);
@@ -3402,10 +3260,7 @@ describe("capture confirmations never print a doubled noun (regression: `remembe
 
 describe("mem --version (regression: the shipped bundle reports package.json's version)", () => {
   it("reports exactly package.json's version, executed from the built dist bundle", () => {
-    // Asserts against the real artifact (built by tests/setup/build-bundle.ts), not the in-process
-    // `run()` the rest of this file drives, because the defect this guards was a hand-maintained
-    // literal in cli.ts that shipped 0.2.0 while package.json said 0.2.1 -- only the bundle proves
-    // the esbuild `define` that now supplies the version actually reached what users execute.
+    // Asserts against the real artifact (built by tests/setup/build-bundle.ts), not the in-process `run()` the rest of this file drives, because the defect this guards was a hand-maintained literal in cli.ts that shipped 0.2.0 while package.json said 0.2.1 -- only the bundle proves the esbuild `define` that now supplies the version actually reached what users execute.
     const pkg = JSON.parse(readFileSync(fileURLToPath(new URL("../package.json", import.meta.url)), "utf8")) as { version: string };
     const bundle = fileURLToPath(new URL("../dist/token-goat-mem.mjs", import.meta.url));
     const reported = execFileSync(process.execPath, [bundle, "--version"], { encoding: "utf8" }).trim();
@@ -3467,11 +3322,7 @@ describe("mem import summary wording (regression: must describe what was actuall
 // ─────────────────────────────────────────────────────────────────────────── regression: withheld statuses are a trapdoor, not a one-way door ───────────────────────────────────────────────────────────────────────────
 
 describe("regression: `contested` is escapable (it used to be excluded from the only pass that could clear it)", () => {
-  /**
-   * Seeds two facts that genuinely tie on precedence (same subject+scope, different value, identical
-   * `captured_at`, identical provenance), which is the exact shape P4 resolves to `contested` rather
-   * than picking a winner. Returns their ids in insertion order.
-   */
+  /** Seeds two facts that genuinely tie on precedence (same subject+scope, different value, identical `captured_at`, identical provenance), which is the exact shape P4 resolves to `contested` rather than picking a winner. Returns their ids in insertion order. */
   async function seedTiedPair(): Promise<readonly [string, string]> {
     const first = await runCli(["remember", "uses pnpm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
     const idA = extractRememberedId(first);
@@ -3487,9 +3338,7 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
   it("reinstates a stranded contested fact on the next gc once its rival is forgotten", async () => {
     const [idA, idB] = await seedTiedPair();
 
-    // Persist the contested status. Before the fix this was the trapdoor: detection queried only
-    // active/pinned, so nothing that ran afterwards could ever see -- let alone clear -- the status
-    // this very pass had just written.
+    // Persist the contested status. Before the fix this was the trapdoor: detection queried only active/pinned, so nothing that ran afterwards could ever see -- let alone clear -- the status this very pass had just written.
     await runCli(["epoch", "--gc"]);
     const contestedList = await runCli(["list", "--status", "contested"]);
     expect(contestedList.stdout).toContain(idA);
@@ -3522,8 +3371,7 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     expect(promoted.exitCode).toBe(0);
 
     expect((await runCli(["show", idA])).stdout).toContain("status: active");
-    // Without superseding the rival, the very next detection pass would find the same tie and
-    // re-contest the pair -- making the promotion silently self-undoing.
+    // Without superseding the rival, the very next detection pass would find the same tie and re-contest the pair -- making the promotion silently self-undoing.
     expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
     await runCli(["epoch", "--gc"]);
     expect((await runCli(["show", idA])).stdout).toContain("status: active");
@@ -3558,9 +3406,7 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     const forgotten = await runCli(["forget", idB]);
     expect(forgotten.exitCode).toBe(0);
     expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
-    // Without reconciling, idA is stranded `contested` forever: `mem list --status active` omits
-    // it, `mem pin` refuses it, yet `mem recall` (which resolves contradictions in memory on every
-    // call) surfaces it with no caveat at all -- commands disagreeing about the same fact.
+    // Without reconciling, idA is stranded `contested` forever: `mem list --status active` omits it, `mem pin` refuses it, yet `mem recall` (which resolves contradictions in memory on every call) surfaces it with no caveat at all -- commands disagreeing about the same fact.
     expect((await runCli(["show", idA])).stdout).toContain("status: active");
   });
 
@@ -3574,19 +3420,14 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     const undone = await runCli(["review", "--undo", idB]);
     expect(undone.exitCode).toBe(0);
     expect((await runCli(["show", idB])).stdout).toContain("status: contested");
-    // Without reconciling on the way back in, idA is left `active` alongside idB's restored
-    // `contested` -- two winners for one contradiction bucket.
+    // Without reconciling on the way back in, idA is left `active` alongside idB's restored `contested` -- two winners for one contradiction bucket.
     expect((await runCli(["show", idA])).stdout).toContain("status: contested");
   });
 
   it("`review --promote` resolves a tied pair `mem review` already shows as contested, before any `epoch --gc` persists the status", async () => {
     const [idA, idB] = await seedTiedPair();
 
-    // Deliberately no `epoch --gc` here: both facts are still persisted `active`. `mem review`
-    // derives its contested bucket live and already lists this pair -- confirmed by the sibling
-    // test above ("...report contested contradiction... withheld from ground truth") -- so
-    // `--promote` must accept the same fact `mem review` just told the user to resolve, not refuse
-    // it as "status=active".
+    // Deliberately no `epoch --gc` here: both facts are still persisted `active`. `mem review` derives its contested bucket live and already lists this pair -- confirmed by the sibling test above ("...report contested contradiction... withheld from ground truth") -- so `--promote` must accept the same fact `mem review` just told the user to resolve, not refuse it as "status=active".
     expect((await runCli(["show", idA])).stdout).toContain("status: active");
     expect((await runCli(["show", idB])).stdout).toContain("status: active");
 
@@ -3602,8 +3443,7 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     const rejected = await runCli(["review", "--reject", idB]);
     expect(rejected.exitCode).toBe(0);
     expect((await runCli(["show", idB])).stdout).toContain("status: superseded");
-    // The rival was never persisted `contested` either, so it needs no reinstatement -- it should
-    // simply remain the surviving active fact.
+    // The rival was never persisted `contested` either, so it needs no reinstatement -- it should simply remain the surviving active fact.
     expect((await runCli(["show", idA])).stdout).toContain("status: active");
   });
 });
@@ -3662,8 +3502,7 @@ describe("regression: gc and the pin nudge measure age from `status_changed_at`,
     const gc = await runCli(["epoch", "--gc"]);
     expect(gc.exitCode).toBe(0);
 
-    // The 90-day window exists to preserve the audit trail of a *recent* soft delete. Keyed on
-    // `captured_at` this fact was deleted on the very first pass after being forgotten.
+    // The 90-day window exists to preserve the audit trail of a *recent* soft delete. Keyed on `captured_at` this fact was deleted on the very first pass after being forgotten.
     const shown = await runCli(["show", id]);
     expect(shown.exitCode).toBe(0);
     expect(shown.stdout).toContain("status: superseded");
@@ -3693,8 +3532,7 @@ describe("regression: gc and the pin nudge measure age from `status_changed_at`,
 
     expect((await runCli(["review"])).stdout).toContain(id);
 
-    // Re-pinning is the act of re-confirming. Keyed on `captured_at` the nudge was unclearable:
-    // nothing a user can do changes when a fact was captured, so it nagged forever.
+    // Re-pinning is the act of re-confirming. Keyed on `captured_at` the nudge was unclearable: nothing a user can do changes when a fact was captured, so it nagged forever.
     await runCli(["pin", id]);
     const after = await runCli(["review"]);
     expect(after.stdout).not.toContain("pins due for re-confirmation");
@@ -3720,21 +3558,16 @@ describe("regression: review and show resolve anchor roots the way recall does",
       });
       db.close();
 
-      // projB has no package.json. Evaluated against the caller's root, the predicate denies a fact
-      // that is perfectly valid in its own project, and files it under the one review heading whose
-      // whole purpose is to invite the user to forget what it lists.
+      // projB has no package.json. Evaluated against the caller's root, the predicate denies a fact that is perfectly valid in its own project, and files it under the one review heading whose whole purpose is to invite the user to forget what it lists.
       const review = await runCli(["review", "--root", projB]);
       expect(review.exitCode).toBe(0);
       expect(review.stdout).not.toContain("this project has a package json manifest");
 
-      // ...and recall, from that same foreign root, no longer surfaces it either -- it is bound to
-      // projA. Two surfaces disagreeing about one fact was the original defect here; they agree by
-      // omission now, where they used to agree only if recall affirmed a fact review had hidden.
+      // ...and recall, from that same foreign root, no longer surfaces it either -- it is bound to projA. Two surfaces disagreeing about one fact was the original defect here; they agree by omission now, where they used to agree only if recall affirmed a fact review had hidden.
       const fromForeign = await runCli(["recall", "package json manifest", "--root", projB]);
       expect(fromForeign.stdout).not.toContain("this project has a package json manifest");
 
-      // From its own project the fact is present and affirmed -- excluded above by its binding, not
-      // by a contradicted anchor.
+      // From its own project the fact is present and affirmed -- excluded above by its binding, not by a contradicted anchor.
       const fromOwn = await runCli(["recall", "package json manifest", "--root", projA]);
       expect(fromOwn.stdout).toContain("this project has a package json manifest");
       expect(fromOwn.stdout).not.toContain("contradicted");
@@ -3760,10 +3593,7 @@ describe("regression: review and show resolve anchor roots the way recall does",
       });
       db.close();
 
-      // With no --root, the old `?? fact.scopeRoot` fallback took over, and for scope="path"
-      // scopeRoot is a *file*. Resolving a predicate beneath a file path can only fail, so show
-      // reported a confident contradiction that no other surface agreed with. The repo root this
-      // suite runs from does have a package.json, so the correct verdict here is affirmed.
+      // With no --root, the old `?? fact.scopeRoot` fallback took over, and for scope="path" scopeRoot is a *file*. Resolving a predicate beneath a file path can only fail, so show reported a confident contradiction that no other surface agreed with. The repo root this suite runs from does have a package.json, so the correct verdict here is affirmed.
       const shown = await runCli(["show", inserted.id]);
       expect(shown.exitCode).toBe(0);
       expect(shown.stdout).not.toContain("freshness=contradicted");
@@ -3773,12 +3603,7 @@ describe("regression: review and show resolve anchor roots the way recall does",
   });
 
   it("does not list a valid path-scoped fact as anchor-contradicted when review runs from an unrelated root", async () => {
-    // Unlike the project-scope case above, `anchorRootFor` has no special case for `path` scope at
-    // all -- it always hands the bare caller root to `evaluateAnchor` for anything that is not
-    // `project` scope. So `mem review --root <anywhere>` evaluated a path-scoped fact's anchor
-    // against wherever the reviewer happened to be standing, found the anchored file predictably
-    // missing there, and filed a perfectly valid fact under "anchor-contradicted (suppressed from
-    // ground truth)" -- the one heading that invites the user to forget it.
+    // Unlike the project-scope case above, `anchorRootFor` has no special case for `path` scope at all -- it always hands the bare caller root to `evaluateAnchor` for anything that is not `project` scope. So `mem review --root <anywhere>` evaluated a path-scoped fact's anchor against wherever the reviewer happened to be standing, found the anchored file predictably missing there, and filed a perfectly valid fact under "anchor-contradicted (suppressed from ground truth)" -- the one heading that invites the user to forget it.
     const rootA = mkdtempSync(join(tmpdir(), "mem-path-review-a-"));
     const rootB = mkdtempSync(join(tmpdir(), "mem-path-review-b-"));
     const target = join(rootA, "target.txt");
@@ -3795,8 +3620,7 @@ describe("regression: review and show resolve anchor roots the way recall does",
       });
       db.close();
 
-      // rootB is unrelated and empty: not an ancestor of rootA, so the fact is not bound to it at
-      // all -- the review should say nothing about it, positive or negative.
+      // rootB is unrelated and empty: not an ancestor of rootA, so the fact is not bound to it at all -- the review should say nothing about it, positive or negative.
       const review = await runCli(["review", "--root", rootB]);
       expect(review.exitCode).toBe(0);
       expect(review.stdout).not.toContain("a path-scoped fact bound to target.txt");
@@ -3811,10 +3635,7 @@ describe("mem recall persists and reuses anchor verdicts across CLI invocations"
   function seedContentAnchoredFact(root: string): string {
     const db = openStorage(resolveDbPath());
     const inserted = insertFact(db, {
-      // `kind: "fact"` deliberately, not "preference": a preference's display always carries a
-      // "(verify)" caveat regardless of freshness (P6), which would make the affirmed/contradicted
-      // assertions below true for the wrong reason. A plain fact's display shows the freshness
-      // verdict itself.
+      // `kind: "fact"` deliberately, not "preference": a preference's display always carries a "(verify)" caveat regardless of freshness (P6), which would make the affirmed/contradicted assertions below true for the wrong reason. A plain fact's display shows the freshness verdict itself.
       text: "uses pnpm not npm",
       kind: "fact",
       scope: "project",
@@ -3857,10 +3678,7 @@ describe("mem recall persists and reuses anchor verdicts across CLI invocations"
       // One real call to learn the witness a genuine evaluation computes for this untouched file.
       await runCli(["recall", "pnpm", "--root", root]);
 
-      // Overwrite the persisted verdict to one a fresh evaluation could never produce, keeping the
-      // same witness. If the prefetch's key form does not match what the flush wrote it under,
-      // `mem recall` misses the cache, re-evaluates for real, and this assertion fails even though
-      // every other behavior looks correct -- the exact silent-miss this test exists to catch.
+      // Overwrite the persisted verdict to one a fresh evaluation could never produce, keeping the same witness. If the prefetch's key form does not match what the flush wrote it under, `mem recall` misses the cache, re-evaluates for real, and this assertion fails even though every other behavior looks correct -- the exact silent-miss this test exists to catch.
       const db = openDb(resolveDbPath());
       db.prepare("UPDATE anchor_cache SET verdict = 'contradicted' WHERE root = ? AND anchor = ?").run(
         resolve(root),
@@ -3868,12 +3686,7 @@ describe("mem recall persists and reuses anchor verdicts across CLI invocations"
       );
       db.close();
 
-      // A real second `mem recall` is a fresh OS process, so anchors.ts's in-process memo (module
-      // state `evaluateAnchor` checks before ever consulting the persistent store) starts empty.
-      // This test drives both calls through one long-lived `run()`, so it has to clear that memo
-      // itself to simulate the same starting condition -- without this, the first call's real
-      // "affirmed" verdict would still be sitting in the in-process memo and mask the persistent
-      // cache read this test exists to prove.
+      // A real second `mem recall` is a fresh OS process, so anchors.ts's in-process memo (module state `evaluateAnchor` checks before ever consulting the persistent store) starts empty. This test drives both calls through one long-lived `run()`, so it has to clear that memo itself to simulate the same starting condition -- without this, the first call's real "affirmed" verdict would still be sitting in the in-process memo and mask the persistent cache read this test exists to prove.
       _clearAnchorMemoForTests();
 
       const second = await runCli(["recall", "pnpm", "--root", root]);
@@ -3915,15 +3728,7 @@ describe("mem recall persists and reuses anchor verdicts across CLI invocations"
       writeFileSync(join(root, "config.json"), "pnpm");
       seedContentAnchoredFact(root);
 
-      // No warm-up call: `anchor_cache` starts empty, so this recall's evaluation is genuinely
-      // fresh and `persistAnchorVerdicts` has something to flush -- a reused, cache-hit verdict
-      // would leave the buffer empty and the trigger below would never fire.
-      //
-      // A trigger that fails every INSERT into `anchor_cache`, not a whole-database lock: locking
-      // the file also blocks the read phase's own `openStorage` (schema/pragma setup needs a brief
-      // write-capable open even for a read), which would fail the read this test needs to succeed
-      // and fail for the wrong reason. This isolates the failure to the write `persistAnchorVerdicts`
-      // makes, mirroring the doc comment's own "a read-only store" failure mode.
+      // No warm-up call: `anchor_cache` starts empty, so this recall's evaluation is genuinely fresh and `persistAnchorVerdicts` has something to flush -- a reused, cache-hit verdict would leave the buffer empty and the trigger below would never fire. A trigger that fails every INSERT into `anchor_cache`, not a whole-database lock: locking the file also blocks the read phase's own `openStorage` (schema/pragma setup needs a brief write-capable open even for a read), which would fail the read this test needs to succeed and fail for the wrong reason. This isolates the failure to the write `persistAnchorVerdicts` makes, mirroring the doc comment's own "a read-only store" failure mode.
       const trigDb = openStorage(resolveDbPath());
       trigDb.exec(
         "CREATE TRIGGER block_anchor_cache_insert BEFORE INSERT ON anchor_cache BEGIN SELECT RAISE(ABORT, 'simulated flush failure'); END;"
@@ -3948,17 +3753,7 @@ describe("mem recall persists and reuses anchor verdicts across CLI invocations"
 // --- regression: a path-scoped fact's anchor is evaluated against its persisted capture root ---
 
 describe("regression: the hook path and the CLI path agree about the same fact", () => {
-  // `src/integration-seam.ts` builds its own SELECT by hand rather than reusing storage.ts's, and
-  // that list has now silently dropped a needed column three times in three separate releases:
-  // `prior_status`, then `scope_repo` (which made every project fact invisible from a worktree), then
-  // `capture_root` (which caveated a fact the CLI affirmed). Each time the omission failed open --
-  // no error, no crash, just a different answer on the path that runs unprompted on every session
-  // start and every prompt. The file's own comment already states the rule; a comment has now failed
-  // three times, so this asserts it instead.
-  //
-  // Comparing the two paths' *rendered* answers, rather than the SELECT's text, is what makes this
-  // catch the next omission too: any column that changes what a user is told will diverge here
-  // regardless of which column it is.
+  // `src/integration-seam.ts` builds its own SELECT by hand rather than reusing storage.ts's, and that list has now silently dropped a needed column three times in three separate releases: `prior_status`, then `scope_repo` (which made every project fact invisible from a worktree), then `capture_root` (which caveated a fact the CLI affirmed). Each time the omission failed open -- no error, no crash, just a different answer on the path that runs unprompted on every session start and every prompt. The file's own comment already states the rule; a comment has now failed three times, so this asserts it instead. Comparing the two paths' *rendered* answers, rather than the SELECT's text, is what makes this catch the next omission too: any column that changes what a user is told will diverge here regardless of which column it is.
   let home: string;
   let repo: string;
 
@@ -3980,15 +3775,12 @@ describe("regression: the hook path and the CLI path agree about the same fact",
       "--path", "pkg.txt", "--root", repo, "--anchor", "file-exists pkg.txt",
     ]);
 
-    // Plain recall affirms it: the anchored file is right there. Rendered ground truth carries no
-    // freshness caveat at all, which is what "affirmed" looks like on this path.
+    // Plain recall affirms it: the anchored file is right there. Rendered ground truth carries no freshness caveat at all, which is what "affirmed" looks like on this path.
     const plain = await runCli(["recall", "--root", repo]);
     expect(plain.stdout).toContain("the package ships a manifest");
     expect(plain.stdout).not.toContain("unverified");
 
-    // The hook path must reach the same verdict. Pre-fix it emitted `fresh=unverified` here, because
-    // its SELECT omitted `capture_root` and `anchorRootFor` cannot judge a path-scoped anchor
-    // without one.
+    // The hook path must reach the same verdict. Pre-fix it emitted `fresh=unverified` here, because its SELECT omitted `capture_root` and `anchorRootFor` cannot judge a path-scoped anchor without one.
     const hint = await runCli([
       "recall", "--hint-format", "--root", repo, "--context-files", join(repo, "pkg.txt"),
     ]);
@@ -4024,19 +3816,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       const absentId = extractRememberedId(absent);
       writeFileSync(join(pkg, "yarn.lock"), "x\n", "utf8");
 
-      // Query from `repo` -- an ancestor of `pkg`, not `pkg` itself. This is the monorepo shape the
-      // capture-root column exists for: a hook runs recall at the repository root while the facts
-      // belong to a package inside it. Pre-fix, `anchorRootFor` handed both anchors the bare
-      // `--root repo` regardless of where the facts were captured, so `file-exists pkg.txt` resolved
-      // against `repo` (no `pkg.txt` directly under `repo`, wrongly `contradicted`) and
-      // `file-absent yarn.lock` resolved against `repo` (no `yarn.lock` directly under `repo`
-      // either, even though one now exists under `pkg`, wrongly a plain affirmed ground-truth fact)
-      // -- confidently wrong in both directions on the same query.
-      //
-      // The two expectations below are the exact inverse of those two wrong verdicts, which is what
-      // makes this a regression test rather than a restatement: the anchors now resolve against
-      // `pkg`, where `pkg.txt` does exist and `yarn.lock` now does too. If the caller's root ever
-      // comes back, both flip.
+      // Query from `repo` -- an ancestor of `pkg`, not `pkg` itself. This is the monorepo shape the capture-root column exists for: a hook runs recall at the repository root while the facts belong to a package inside it. Pre-fix, `anchorRootFor` handed both anchors the bare `--root repo` regardless of where the facts were captured, so `file-exists pkg.txt` resolved against `repo` (no `pkg.txt` directly under `repo`, wrongly `contradicted`) and `file-absent yarn.lock` resolved against `repo` (no `yarn.lock` directly under `repo` either, even though one now exists under `pkg`, wrongly a plain affirmed ground-truth fact) -- confidently wrong in both directions on the same query. The two expectations below are the exact inverse of those two wrong verdicts, which is what makes this a regression test rather than a restatement: the anchors now resolve against `pkg`, where `pkg.txt` does exist and `yarn.lock` now does too. If the caller's root ever comes back, both flip.
       const shownExists = JSON.parse((await runCli(["show", existsId, "--root", repo, "--json"])).stdout) as {
         freshness: string;
       };
@@ -4046,9 +3826,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       expect(shownExists.freshness).toBe("affirmed");
       expect(shownAbsent.freshness).toBe("contradicted");
 
-      // The same inversion, seen through the command that acts on it: pre-fix this listed the fact
-      // whose file was present under the heading inviting the user to forget it, and omitted the one
-      // whose predicate had genuinely been broken.
+      // The same inversion, seen through the command that acts on it: pre-fix this listed the fact whose file was present under the heading inviting the user to forget it, and omitted the one whose predicate had genuinely been broken.
       const review = await runCli(["review", "--root", repo, "--section", "contradicted"]);
       expect(review.stdout).not.toContain("pkg.txt exists here");
       expect(review.stdout).toContain("pkg has no yarn.lock");
@@ -4058,11 +3836,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
   });
 
   it("restores the capture root along with the anchor, so an undone edit is judged where it was", async () => {
-    // `mem edit --anchor` re-points the capture root to the root it validated the new anchor
-    // against. Undo restored the anchor and left the root, so the original anchor came back pointed
-    // at the tree the *replacement* was written for: the fact reported `contradicted` from the
-    // repository root and `unverified` from its own package, and could never be affirmed anywhere
-    // again -- after a command whose help promises to restore "the fields it touched".
+    // `mem edit --anchor` re-points the capture root to the root it validated the new anchor against. Undo restored the anchor and left the root, so the original anchor came back pointed at the tree the *replacement* was written for: the fact reported `contradicted` from the repository root and `unverified` from its own package, and could never be affirmed anywhere again -- after a command whose help promises to restore "the fields it touched".
     const proj = mkdtempSync(join(tmpdir(), "mem-undo-root-"));
     try {
       const pkg = join(proj, "pkg");
@@ -4071,8 +3845,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       writeFileSync(join(proj, "yarn.lock"), "x", "utf8");
       writeFileSync(join(proj, "top.txt"), "x", "utf8");
 
-      // True of `pkg`, which has no yarn.lock of its own -- `proj` does, which is what makes the
-      // wrong root observable rather than merely theoretical.
+      // True of `pkg`, which has no yarn.lock of its own -- `proj` does, which is what makes the wrong root observable rather than merely theoretical.
       const captured = await runCli([
         "remember", "pkg has no yarn.lock", "--kind", "fact", "--scope", "path",
         "--path", "foo.txt", "--root", pkg, "--anchor", "file-absent yarn.lock",
@@ -4097,11 +3870,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
   });
 
   it("cannot affirm or contradict a filesystem anchor when the root it names is gone", async () => {
-    // A predicate asks a question about a tree. Against a tree that is not there, `file-absent`
-    // affirmed (nothing is absent from a directory that does not exist) and `file-exists`
-    // contradicted, both read off nothing at all -- while `git-tracked` already said `unverified`,
-    // so the predicates disagreed with each other about the same absence. This is reachable by
-    // moving a project, importing a fact from another machine, or handing the hook a stale --root.
+    // A predicate asks a question about a tree. Against a tree that is not there, `file-absent` affirmed (nothing is absent from a directory that does not exist) and `file-exists` contradicted, both read off nothing at all -- while `git-tracked` already said `unverified`, so the predicates disagreed with each other about the same absence. This is reachable by moving a project, importing a fact from another machine, or handing the hook a stale --root.
     const gone = mkdtempSync(join(tmpdir(), "mem-missing-root-"));
     const live = mkdtempSync(join(tmpdir(), "mem-missing-root-live-"));
     try {
@@ -4129,8 +3898,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       expect(await freshnessOf(absent)).toBe("unverified");
       expect(await freshnessOf(exists)).toBe("unverified");
 
-      // The date-only predicate is deliberately unaffected: it reads no path, so a missing root
-      // tells it nothing it needed.
+      // The date-only predicate is deliberately unaffected: it reads no path, so a missing root tells it nothing it needed.
       const dated = extractRememberedId(
         await runCli([
           "remember", "ships this decade", "--kind", "fact", "--scope", "global",
@@ -4148,9 +3916,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
   });
 
   it("re-points the capture root when `mem edit` writes a new anchor, so the new anchor is judged where it was validated", async () => {
-    // `mem edit --anchor` validates the new anchor's path against its own `--root`. If the stored
-    // capture root stayed at the original, the anchor would be written against one tree and read
-    // against another -- the same split this column exists to close, arriving by a different door.
+    // `mem edit --anchor` validates the new anchor's path against its own `--root`. If the stored capture root stayed at the original, the anchor would be written against one tree and read against another -- the same split this column exists to close, arriving by a different door.
     const first = mkdtempSync(join(tmpdir(), "mem-capture-root-a-"));
     const second = mkdtempSync(join(tmpdir(), "mem-capture-root-b-"));
     try {
@@ -4161,8 +3927,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       ]);
       const id = extractRememberedId(captured);
 
-      // `marker.txt` exists only under `second`, so an anchor naming it can only be affirmed when it
-      // is evaluated there -- which is exactly where `mem edit` validated it.
+      // `marker.txt` exists only under `second`, so an anchor naming it can only be affirmed when it is evaluated there -- which is exactly where `mem edit` validated it.
       writeFileSync(join(second, "marker.txt"), "x", "utf8");
       const edited = await runCli(["edit", id, "--anchor", "file-exists marker.txt", "--root", second, "--force"]);
       expect(edited.exitCode ?? 0).toBe(0);
@@ -4228,9 +3993,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
   });
 
   it("yields unverified, never a decisive verdict, for a fact with a null capture_root regardless of query root", async () => {
-    // Simulates a pre-migration row: written directly through `insertFact` the way an older mem
-    // version would have, with no `captureRoot` at all -- exactly the shape `capture_root TEXT`
-    // (nullable, no backfill) leaves on disk for every fact captured before this column existed.
+    // Simulates a pre-migration row: written directly through `insertFact` the way an older mem version would have, with no `captureRoot` at all -- exactly the shape `capture_root TEXT` (nullable, no backfill) leaves on disk for every fact captured before this column existed.
     const dir = mkdtempSync(join(tmpdir(), "mem-null-capture-root-"));
     const target = join(dir, "target.txt");
     writeFileSync(target, "x\n", "utf8");
@@ -4247,10 +4010,7 @@ describe("regression: a path-scoped fact's anchor evaluates against its recorded
       db.close();
       expect(inserted.captureRoot ?? null).toBeNull();
 
-      // Queried from the very directory the anchor's target actually lives in -- the one root a
-      // decisive verdict could conceivably be justified from -- and it is still `unverified`, per
-      // the "null capture_root -> never decisive" rule: mem has no recorded root to trust here, even
-      // though this particular query happens to line up with where the file is.
+      // Queried from the very directory the anchor's target actually lives in -- the one root a decisive verdict could conceivably be justified from -- and it is still `unverified`, per the "null capture_root -> never decisive" rule: mem has no recorded root to trust here, even though this particular query happens to line up with where the file is.
       const shown = JSON.parse((await runCli(["show", inserted.id, "--root", dir, "--json"])).stdout) as {
         freshness: string;
       };
@@ -4285,17 +4045,11 @@ describe("regression: --since-epoch cannot defeat the contested gate", () => {
   it("keeps recall's contested annotation when the rival falls outside the epoch window", async () => {
     await seedTiedPair();
 
-    // A tie is surfaced with a `(contested, ...)` annotation instead of a guessed winner. Assert on
-    // that annotation, not on the bare word "contested": recall's footer prints "mem review to
-    // resolve contested/pending" on every call, so the looser assertion passes vacuously and the
-    // first draft of this test did exactly that -- it passed against the unfixed code.
+    // A tie is surfaced with a `(contested, ...)` annotation instead of a guessed winner. Assert on that annotation, not on the bare word "contested": recall's footer prints "mem review to resolve contested/pending" on every call, so the looser assertion passes vacuously and the first draft of this test did exactly that -- it passed against the unfixed code.
     const plain = await runCli(["recall", "package manager"]);
     expect(plain.stdout).toContain("(contested,");
 
-    // Filtering the pool in SQL left the survivor alone, and resolveContradictions' reinstatement
-    // pass reads "no rival present" as "nothing is left to contest this" and un-contests it -- so
-    // the epoch window silently promoted a withheld fact to ground truth. The filter now runs after
-    // contradiction resolution, over the whole store, like every other filter.
+    // Filtering the pool in SQL left the survivor alone, and resolveContradictions' reinstatement pass reads "no rival present" as "nothing is left to contest this" and un-contests it -- so the epoch window silently promoted a withheld fact to ground truth. The filter now runs after contradiction resolution, over the whole store, like every other filter.
     const filtered = await runCli(["recall", "package manager", "--since-epoch", "1"]);
     expect(filtered.exitCode).toBe(0);
     expect(filtered.stdout).toContain("(contested,");
@@ -4307,9 +4061,7 @@ describe("regression: --since-epoch cannot defeat the contested gate", () => {
     const plain = await runCli(["review", "--summary"]);
     expect(plain.stdout).toContain("contested: 2");
 
-    // Same defect one function over: `formatReview` fed `detectContradictions` an epoch-filtered
-    // pool, so the surviving half of a tie was reported clean by the exact command whose job is to
-    // surface it -- while `mem recall` went on withholding it.
+    // Same defect one function over: `formatReview` fed `detectContradictions` an epoch-filtered pool, so the surviving half of a tie was reported clean by the exact command whose job is to surface it -- while `mem recall` went on withholding it.
     const filtered = await runCli(["review", "--summary", "--since-epoch", "1"]);
     expect(filtered.exitCode).toBe(0);
     expect(filtered.stdout).toContain("contested: 1");
@@ -4326,9 +4078,7 @@ describe("regression: recall prints a usable fact id", () => {
     expect(recalled.stdout).toContain("mem show <id> for detail");
 
     const shortId = (recalled.stdout.split("\n")[0] ?? "").split(/\s+/u)[0] ?? "";
-    // A git-style prefix: the exact shape `resolveFactIdOrPrefix` accepts, so the footer's own
-    // instruction is followable by copying what is on screen rather than by first running `mem list`
-    // to find an id the command that told you to use one declined to print.
+    // A git-style prefix: the exact shape `resolveFactIdOrPrefix` accepts, so the footer's own instruction is followable by copying what is on screen rather than by first running `mem list` to find an id the command that told you to use one declined to print.
     expect(shortId).toMatch(/^[0-9a-f]{8}$/u);
 
     const shown = await runCli(["show", shortId]);
@@ -4375,11 +4125,7 @@ describe("regression: import --from-json does not restore facts that are already
       expect((await runCli(["import", "--from-json", envelopePath])).exitCode).toBe(0);
       expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
 
-      // The 90-day superseded retention window is measured from `status_changed_at`, and the export
-      // envelope carries no status timestamp to restore. Starting that clock at the envelope's
-      // backdated `captured_at` meant every restored superseded fact arrived with its window already
-      // elapsed and was destroyed by the first gc after the restore: silent data loss on the one
-      // path the docs recommend for backups.
+      // The 90-day superseded retention window is measured from `status_changed_at`, and the export envelope carries no status timestamp to restore. Starting that clock at the envelope's backdated `captured_at` meant every restored superseded fact arrived with its window already elapsed and was destroyed by the first gc after the restore: silent data loss on the one path the docs recommend for backups.
       const shown = await runCli(["show", id]);
       expect(shown.exitCode).toBe(0);
       expect(shown.stdout).toContain("an old fact superseded long before this backup was taken");
@@ -4420,8 +4166,7 @@ describe("regression: recall does not surface another project's facts", () => {
       });
       db.close();
 
-      // `--root` used to reach only anchor evaluation, so the store was searched whole and a user
-      // standing in projB was told projA's release schedule.
+      // `--root` used to reach only anchor evaluation, so the store was searched whole and a user standing in projB was told projA's release schedule.
       const fromB = await runCli(["recall", "deploys", "--root", projB]);
       expect(fromB.exitCode).toBe(0);
       expect(fromB.stdout).toContain("deploys go out on Thursdays");
@@ -4430,8 +4175,7 @@ describe("regression: recall does not surface another project's facts", () => {
       // Global facts are bound to no project and stay visible from either one.
       expect(fromB.stdout).toContain("deploys always need a changelog entry");
 
-      // `--scope project` filtered on the scope *label*, so it narrowed to "scoped to some project"
-      // and still returned the wrong project's fact -- the exact shape of README's own example.
+      // `--scope project` filtered on the scope *label*, so it narrowed to "scoped to some project" and still returned the wrong project's fact -- the exact shape of README's own example.
       const scoped = await runCli(["recall", "deploys", "--root", projB, "--scope", "project"]);
       expect(scoped.exitCode).toBe(0);
       expect(scoped.stdout).toContain("deploys go out on Thursdays");
@@ -4472,13 +4216,7 @@ describe("regression: recall does not surface another project's facts", () => {
       const jsonPath = join(exportDir, "export.json");
       writeFileSync(jsonPath, JSON.stringify(envelope), "utf8");
 
-      // `--root projA` here, not the default cwd: `importFromJson` rejects a non-global fact whose
-      // recorded `scopeRoot` falls outside `--root`, unless the fact's `scopeRepo` identifies the
-      // same repository `--root` is a checkout of, in which case it is accepted and rebound to
-      // `--root` (the cross-machine-restore case, since the original `scopeRoot` path does not
-      // exist there). This fact has no `scopeRepo`, so the path binding is the only one available,
-      // and a full-fidelity restore must be run with `--root` set to (an ancestor of) its own
-      // recorded `scopeRoot` -- exactly how a real restore-into-the-same-project would be invoked.
+      // `--root projA` here, not the default cwd: `importFromJson` rejects a non-global fact whose recorded `scopeRoot` falls outside `--root`, unless the fact's `scopeRepo` identifies the same repository `--root` is a checkout of, in which case it is accepted and rebound to `--root` (the cross-machine-restore case, since the original `scopeRoot` path does not exist there). This fact has no `scopeRepo`, so the path binding is the only one available, and a full-fidelity restore must be run with `--root` set to (an ancestor of) its own recorded `scopeRoot` -- exactly how a real restore-into-the-same-project would be invoked.
       const imported = await runCli(["import", "--from-json", jsonPath, "--root", projA]);
       expect(imported.exitCode).toBe(0);
       expect(imported.stdout).toContain("imported 1 of 1 candidate fact(s)");
@@ -4825,8 +4563,7 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     const id = extractRememberedId(await runCli(["remember", "a stable fact", "--kind", "fact", "--scope", "global"]));
     const result = await runCli(["recall", "--hint-format", "--session-id", "sess-1", "--stable", "--root", home]);
     expect(result.exitCode).toBe(0);
-    // Non-firing guard: the fact really was emitted, so the logging assertion below is not
-    // vacuously satisfied by an empty response.
+    // Non-firing guard: the fact really was emitted, so the logging assertion below is not vacuously satisfied by an empty response.
     expect(result.stdout).toContain("a stable fact");
     expect(recallLogRows().map(([factId, sessionId]) => [factId, sessionId])).toEqual([[id, "sess-1"]]);
 
@@ -4879,11 +4616,7 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
 
   it("migration: a store from before recall_log existed keeps working, and the table is created on first open", async () => {
     const id = extractRememberedId(await runCli(["remember", "a pre-migration fact", "--kind", "fact", "--scope", "global"]));
-    // Reproduce a v0.3.2 store: everything else in place, no recall_log table at all. `openDb` now
-    // runs every migration itself and stamps `user_version`, so resetting it to `0` here is what
-    // makes this a faithful "predates recall_log" store rather than one the migration runner
-    // considers already fully migrated and skips -- a real v0.3.2 store never had `user_version`
-    // set at all.
+    // Reproduce a v0.3.2 store: everything else in place, no recall_log table at all. `openDb` now runs every migration itself and stamps `user_version`, so resetting it to `0` here is what makes this a faithful "predates recall_log" store rather than one the migration runner considers already fully migrated and skips -- a real v0.3.2 store never had `user_version` set at all.
     const raw = openDb(resolveDbPath());
     raw.exec("DROP TABLE recall_log");
     raw.pragma("user_version = 0");
@@ -4925,8 +4658,7 @@ describe("mem used (usefulness feedback)", () => {
     const id = extractRememberedId(await runCli(["remember", "deploys happen on tuesdays", "--kind", "fact", "--scope", "global"]));
     await surfaceAll("session-alpha");
 
-    // A prefix, not the full id: `mem used` has to resolve ids exactly like every other id-accepting
-    // command, since the id a user has to hand is the truncated one `mem recall` prints.
+    // A prefix, not the full id: `mem used` has to resolve ids exactly like every other id-accepting command, since the id a user has to hand is the truncated one `mem recall` prints.
     const marked = await runCli(["used", id.slice(0, 8), "--session-id", "session-alpha"]);
 
     expect(marked.exitCode).toBe(0);
@@ -4987,10 +4719,7 @@ describe("mem used (usefulness feedback)", () => {
   });
 
   it("feeds the ranking: a confirmed-useful fact outranks one that merely ties it on BM25", async () => {
-    // Both facts contain "deploy" exactly once in the same-length text, so BM25 ties them and the
-    // default recency ordering puts the newer (`second`) first. Confirming the older one useful is
-    // the only thing that can flip that, which is what makes this a test of the wiring rather than
-    // of the ordering that was already there.
+    // Both facts contain "deploy" exactly once in the same-length text, so BM25 ties them and the default recency ordering puts the newer (`second`) first. Confirming the older one useful is the only thing that can flip that, which is what makes this a test of the wiring rather than of the ordering that was already there.
     const first = extractRememberedId(await runCli(["remember", "deploy runbook alpha", "--kind", "fact", "--scope", "global"]));
     const second = extractRememberedId(await runCli(["remember", "deploy runbook bravo", "--kind", "fact", "--scope", "global"]));
 
@@ -5020,9 +4749,7 @@ describe("scan-session", () => {
   }
 
   it("files a matched sentence as pending, never active", async () => {
-    // `pending` is the entire safety property of this command: a scan is a machine's guess about
-    // what the user meant, so it has to reach a human through `mem review` before it can be
-    // recalled as though the user had said `mem remember`.
+    // `pending` is the entire safety property of this command: a scan is a machine's guess about what the user meant, so it has to reach a human through `mem review` before it can be recalled as though the user had said `mem remember`.
     const transcript = writeTranscript(["Never commit generated files to the repository."]);
     const result = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
     expect(result.exitCode ?? 0).toBe(0);
@@ -5037,8 +4764,7 @@ describe("scan-session", () => {
   });
 
   it("does not re-file a candidate that was already rejected", async () => {
-    // A rejected fact stays in the store as `superseded`. Deduping on a session marker rather than
-    // on the text would let the next Stop hook resurrect a decision the user already made.
+    // A rejected fact stays in the store as `superseded`. Deduping on a session marker rather than on the text would let the next Stop hook resurrect a decision the user already made.
     const transcript = writeTranscript(["Never commit generated files to the repository."]);
     await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
     const review = await runCli(["list", "--status", "pending", "--json"]);
@@ -5052,9 +4778,7 @@ describe("scan-session", () => {
   });
 
   it("does not resurrect a rejected candidate even after its tombstone ages past the superseded GC window", async () => {
-    // A rejection tombstone (`superseded` with `prior_status` `pending`) is the record of a human's
-    // "no" -- pruning it on the ordinary 90-day/1000-row superseded GC would let the very next scan
-    // re-file the same sentence as `pending`, as though the human had never been asked.
+    // A rejection tombstone (`superseded` with `prior_status` `pending`) is the record of a human's "no" -- pruning it on the ordinary 90-day/1000-row superseded GC would let the very next scan re-file the same sentence as `pending`, as though the human had never been asked.
     const transcript = writeTranscript(["Never commit generated files to the repository."]);
     await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
     const review = await runCli(["list", "--status", "pending", "--json"]);
@@ -5078,9 +4802,7 @@ describe("scan-session", () => {
   });
 
   it("still prunes an ordinary superseded loser (not a rejection) past the GC window", async () => {
-    // The exemption above is narrow: a fact superseded for an ordinary reason -- here, a
-    // contradiction loser with `prior_status` `active` -- has no human "no" to protect and remains
-    // subject to the normal age-based prune.
+    // The exemption above is narrow: a fact superseded for an ordinary reason -- here, a contradiction loser with `prior_status` `active` -- has no human "no" to protect and remains subject to the normal age-based prune.
     const db = openStorage(resolveDbPath());
     insertFact(db, { text: "an ordinary contradiction loser", kind: "fact", scope: "global", source_type: "user" });
     const id = db.prepare<[], { id: string }>("SELECT id FROM facts LIMIT 1").get()?.id ?? "";
@@ -5095,8 +4817,7 @@ describe("scan-session", () => {
   });
 
   it("is idempotent across repeated scans of the same transcript", async () => {
-    // The Stop hook fires at the end of every assistant turn, so the same history is re-scanned
-    // for the life of the session. Without the dedup the review queue would fill with copies.
+    // The Stop hook fires at the end of every assistant turn, so the same history is re-scanned for the life of the session. Without the dedup the review queue would fill with copies.
     const transcript = writeTranscript(["Always run the linter before pushing."]);
     await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
     await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
@@ -5105,11 +4826,7 @@ describe("scan-session", () => {
   });
 
   it("files a project-scoped candidate for a second project even though the same text is already pending for a first", async () => {
-    // The old `factWithTextExists` matched on text alone, with no `scope_root` filter, against a
-    // store shared across every project the user works in -- so a statement filed for project A
-    // silently suppressed it from ever reaching project B's review queue, with no indication to the
-    // user that anything was lost. `isBoundToRoot` (retrieval.ts) is now the arbiter of "does an
-    // existing match apply here", the same rule recall already uses.
+    // The old `factWithTextExists` matched on text alone, with no `scope_root` filter, against a store shared across every project the user works in -- so a statement filed for project A silently suppressed it from ever reaching project B's review queue, with no indication to the user that anything was lost. `isBoundToRoot` (retrieval.ts) is now the arbiter of "does an existing match apply here", the same rule recall already uses.
     let projectA = "";
     let projectB = "";
     try {
@@ -5136,10 +4853,7 @@ describe("scan-session", () => {
   });
 
   it("dedupes a global-scoped candidate across projects, since a global fact is true everywhere", async () => {
-    // Chosen deliberately the other way from project scope: a `global` fact has no `scope_root` at
-    // all and `isBoundToRoot` treats it as in scope for every root, so re-filing the same statement
-    // from a second project would just be a duplicate of a truth the store already holds -- not a
-    // second project's own knowledge being lost the way project-scoped text was.
+    // Chosen deliberately the other way from project scope: a `global` fact has no `scope_root` at all and `isBoundToRoot` treats it as in scope for every root, so re-filing the same statement from a second project would just be a duplicate of a truth the store already holds -- not a second project's own knowledge being lost the way project-scoped text was.
     let projectA = "";
     let projectB = "";
     try {
@@ -5165,10 +4879,7 @@ describe("scan-session", () => {
   });
 
   it("does not store a differently-cased restatement as a second copy once the original scrolls out of the scan window", async () => {
-    // `factsByTextHash` (storage.ts) backs the cross-scan check. In-scan dedup collapses a
-    // differently-cased repeat within the same window via a normalized key, but once the original
-    // occurrence ages out of MAX_SCANNED_TURNS, the cross-scan check is all that stands between a
-    // later, differently-cased restatement of the same rule and a second stored copy of it.
+    // `factsByTextHash` (storage.ts) backs the cross-scan check. In-scan dedup collapses a differently-cased repeat within the same window via a normalized key, but once the original occurrence ages out of MAX_SCANNED_TURNS, the cross-scan check is all that stands between a later, differently-cased restatement of the same rule and a second stored copy of it.
     const original = "Never commit generated files to the repository.";
     const restated = "never commit generated files to the repository.";
     await runCli(["scan-session", "--transcript", writeTranscript([original]), "--root", "."]);
@@ -5183,11 +4894,7 @@ describe("scan-session", () => {
   });
 
   it("dedupes a cross-scan restatement that differs only in the case of a non-ASCII letter", async () => {
-    // SQL `LOWER()` folds ASCII only: "Émacs" (stored) and "émacs" (queried) compared unequal in
-    // the old `factWithTextExists`, even though `extractCandidates`'s own Unicode-aware in-scan key
-    // already treated them as the same sentence -- so the two dedup layers disagreed and a second
-    // pending copy was filed on the second scan. No window-aging needed to reproduce this: it is a
-    // cross-scan (two separate invocations) mismatch, not an in-scan one.
+    // SQL `LOWER()` folds ASCII only: "Émacs" (stored) and "émacs" (queried) compared unequal in the old `factWithTextExists`, even though `extractCandidates`'s own Unicode-aware in-scan key already treated them as the same sentence -- so the two dedup layers disagreed and a second pending copy was filed on the second scan. No window-aging needed to reproduce this: it is a cross-scan (two separate invocations) mismatch, not an in-scan one.
     const original = "Always use Émacs keybindings in this project.";
     const restated = "always use émacs keybindings in this project.";
     await runCli(["scan-session", "--transcript", writeTranscript([original]), "--root", "."]);
@@ -5228,8 +4935,7 @@ describe("scan-session", () => {
   });
 
   it("says nothing at all under --quiet, which is how the Stop hook runs it", async () => {
-    // A Stop hook's stdout lands in the session that just ended. A capture that narrates itself
-    // there would put mem's own output into the next transcript it scans.
+    // A Stop hook's stdout lands in the session that just ended. A capture that narrates itself there would put mem's own output into the next transcript it scans.
     const transcript = writeTranscript(["Never commit generated files to the repository."]);
     const result = await runCli(["scan-session", "--transcript", transcript, "--root", ".", "--quiet"]);
     expect(result.stdout).toBe("");
@@ -5239,12 +4945,7 @@ describe("scan-session", () => {
   });
 
   it("fails loudly rather than reporting success when an explicit --transcript cannot be read", async () => {
-    // Was "exits 0 with no candidates for a transcript that does not exist", asserting the exact
-    // defect being fixed: a typo'd --transcript path silently produced the same reassuring
-    // "no new durable statements found" as a scan that ran and genuinely found nothing. The
-    // hook-envelope path (`--hook-stdin`, no explicit --transcript) still must stay silent and
-    // fail open -- `scanTranscript` swallows that read error unconditionally, unchanged here --
-    // but a path the user typed themselves deserves to know it was never scanned.
+    // Was "exits 0 with no candidates for a transcript that does not exist", asserting the exact defect being fixed: a typo'd --transcript path silently produced the same reassuring "no new durable statements found" as a scan that ran and genuinely found nothing. The hook-envelope path (`--hook-stdin`, no explicit --transcript) still must stay silent and fail open -- `scanTranscript` swallows that read error unconditionally, unchanged here -- but a path the user typed themselves deserves to know it was never scanned.
     const result = await runCli(["scan-session", "--transcript", join(home, "nope.jsonl"), "--root", "."]);
     expect(result.exitCode).toBe(1);
     expect(result.stdout).not.toContain("no new durable statements found");
@@ -5266,15 +4967,7 @@ describe("scan-session", () => {
   });
 
   it("exits non-zero rather than reporting success when a candidate fails to store for a non-screening reason", async () => {
-    // `scan-session` must swallow exactly two rejections -- validation and secret screening, both
-    // of which mean "this candidate is not worth storing" while the scan itself is fine. Anything
-    // else (a SqliteError, a full disk, a read-only store) means the store is broken, and reporting
-    // "no new durable statements found" over the top of it tells the user their session held
-    // nothing worth keeping when in truth nothing could be kept at all.
-    //
-    // The failure is injected with a trigger rather than a filesystem permission change, because a
-    // chmod-based test silently no-ops on Windows and would assert nothing on the primary dev
-    // platform. A trigger fails the INSERT itself, inside the loop, on every platform.
+    // `scan-session` must swallow exactly two rejections -- validation and secret screening, both of which mean "this candidate is not worth storing" while the scan itself is fine. Anything else (a SqliteError, a full disk, a read-only store) means the store is broken, and reporting "no new durable statements found" over the top of it tells the user their session held nothing worth keeping when in truth nothing could be kept at all. The failure is injected with a trigger rather than a filesystem permission change, because a chmod-based test silently no-ops on Windows and would assert nothing on the primary dev platform. A trigger fails the INSERT itself, inside the loop, on every platform.
     const transcript = writeTranscript(["Always run the linter before pushing."]);
     const first = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
     expect(first.exitCode ?? 0).toBe(0);
@@ -5334,8 +5027,7 @@ describe("scan-session", () => {
   });
 
   it("captures the fact but writes no source row when the turn (not the candidate sentence) carries a secret", async () => {
-    // The extracted candidate sentence never contains the credential -- it appears elsewhere in the
-    // same turn -- so a screen limited to the candidate text would miss it entirely.
+    // The extracted candidate sentence never contains the credential -- it appears elsewhere in the same turn -- so a screen limited to the candidate text would miss it entirely.
     const transcript = writeTranscript([
       "Always run the linter before pushing. Also the deploy key is AKIAIOSFODNN7EXAMPLE for reference.",
     ]);
@@ -5355,8 +5047,7 @@ describe("scan-session", () => {
   // ─────────────────────────────────────────────────────────────────────── sightings (repeat restatement of a pending fact) ───────────────────────────────────────────────────────────────────────
 
   it("does not record a sighting when the same transcript is scanned twice", async () => {
-    // Both the pending-fact dedup and the sighting dedup key on the excerpt: a second scan of the
-    // same transcript produces the identical excerpt, so it must count as one occurrence, not two.
+    // Both the pending-fact dedup and the sighting dedup key on the excerpt: a second scan of the same transcript produces the identical excerpt, so it must count as one occurrence, not two.
     const transcript = writeTranscript(["Always run the linter before pushing."]);
     await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
     await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
@@ -5376,8 +5067,7 @@ describe("scan-session", () => {
   });
 
   it("records a sighting when a pending fact is genuinely restated in a later scan", async () => {
-    // A different turn produces a different excerpt, which is exactly what tells a genuine
-    // restatement apart from the same hook firing twice over one transcript (see `recordSighting`).
+    // A different turn produces a different excerpt, which is exactly what tells a genuine restatement apart from the same hook firing twice over one transcript (see `recordSighting`).
     const text = "Always run the linter before pushing.";
     await runCli(["scan-session", "--transcript", writeTranscript(["First mention. " + text]), "--root", "."]);
     await runCli(["scan-session", "--transcript", writeTranscript(["Second mention, said again. " + text]), "--root", "."]);
@@ -5403,8 +5093,7 @@ describe("scan-session", () => {
   it("records no sighting and no source when the restated turn's excerpt would screen positive for a secret", async () => {
     const text = "Always run the linter before pushing.";
     await runCli(["scan-session", "--transcript", writeTranscript(["First mention. " + text]), "--root", "."]);
-    // The extracted candidate sentence itself carries no secret -- only the surrounding turn does --
-    // so this exercises the excerpt screen inside `recordSighting`, not `captureSuggested`'s own.
+    // The extracted candidate sentence itself carries no secret -- only the surrounding turn does -- so this exercises the excerpt screen inside `recordSighting`, not `captureSuggested`'s own.
     await runCli([
       "scan-session",
       "--transcript",
@@ -5451,8 +5140,7 @@ describe("scan-session", () => {
   });
 
   it("windows the source excerpt around the fact text when the turn exceeds MAX_SOURCE_EXCERPT_LENGTH", async () => {
-    // A long turn whose durable statement is at the very end: the old head-truncation logic
-    // would drop the fact entirely from the excerpt. The excerpt must contain the fact text.
+    // A long turn whose durable statement is at the very end: the old head-truncation logic would drop the fact entirely from the excerpt. The excerpt must contain the fact text.
     const longPrefix = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(20); // ~1120 chars
     const factText = "Always run the linter before pushing.";
     const turn = longPrefix + factText;
@@ -5688,8 +5376,7 @@ describe("sources table (mem remember/mem suggest never feed it; mem epoch --gc 
     const db = openStorage(resolveDbPath());
     const before = listSourcesForFact(db, id);
     expect(before).toHaveLength(1);
-    // Backdate the source row past the GC retention window, the same way the recall_log gc test
-    // ages its own rows -- gc keys on `stored_at`, which a fresh capture always sets to "now".
+    // Backdate the source row past the GC retention window, the same way the recall_log gc test ages its own rows -- gc keys on `stored_at`, which a fresh capture always sets to "now".
     db.prepare("UPDATE sources SET stored_at = ? WHERE id = ?").run(
       new Date(Date.now() - 100 * 24 * 60 * 60 * 1000).toISOString(),
       before[0]?.id
@@ -5746,8 +5433,7 @@ describe("project identity (scope binding across checkouts)", () => {
   });
 
   it("surfaces a project fact in a second checkout of the same repository", async () => {
-    // The gap this closes: `scopeRoot` is an absolute path compared by equality, so cloning a repo
-    // to a second path -- or opening a worktree -- left every fact about that project invisible.
+    // The gap this closes: `scopeRoot` is an absolute path compared by equality, so cloning a repo to a second path -- or opening a worktree -- left every fact about that project invisible.
     const a = makeRepo("a");
     const b = makeRepo("b");
     await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", a]);
@@ -5757,12 +5443,7 @@ describe("project identity (scope binding across checkouts)", () => {
   });
 
   it("regression: an identity-bound fact's anchor is re-evaluated against the querying checkout, not its capture-time root", async () => {
-    // A `project` fact surfaces across checkouts that share an identity (the test just above), but
-    // `anchorRootFor` used to hand the anchor predicate the fact's *capture-time* `scopeRoot`
-    // unconditionally -- so a fact captured in checkout `a` and recalled from checkout `b` had its
-    // anchor evaluated against `a`, not `b`. A marker file present only in `b` therefore read as
-    // absent, and `mem recall --root b` reported `contradicted` for ground truth read off a tree the
-    // user was not in.
+    // A `project` fact surfaces across checkouts that share an identity (the test just above), but `anchorRootFor` used to hand the anchor predicate the fact's *capture-time* `scopeRoot` unconditionally -- so a fact captured in checkout `a` and recalled from checkout `b` had its anchor evaluated against `a`, not `b`. A marker file present only in `b` therefore read as absent, and `mem recall --root b` reported `contradicted` for ground truth read off a tree the user was not in.
     const a = makeRepo("a");
     const b = makeRepo("b");
     writeFileSync(join(b, "marker"), "x", "utf8");
@@ -5784,8 +5465,7 @@ describe("project identity (scope binding across checkouts)", () => {
   });
 
   it("does not leak between two packages of one monorepo", async () => {
-    // One remote, many project roots: identity has to carry the subpath or `packages/a`'s decisions
-    // would surface as `packages/b`'s.
+    // One remote, many project roots: identity has to carry the subpath or `packages/a`'s decisions would surface as `packages/b`'s.
     const repo = makeRepo("mono");
     const a = join(repo, "packages", "a");
     const b = join(repo, "packages", "b");
@@ -5806,8 +5486,7 @@ describe("project identity (scope binding across checkouts)", () => {
   });
 
   it("still binds by path when no identity is available", async () => {
-    // A directory that is not a repository, or a repository with no remote, behaves exactly as it
-    // did before identities existed -- the path binding is never weakened, only widened.
+    // A directory that is not a repository, or a repository with no remote, behaves exactly as it did before identities existed -- the path binding is never weakened, only widened.
     const local = makeRepo("local", null);
     const other = makeRepo("other", null);
     await runCli(["remember", "local checkout uses make", "--kind", "fact", "--scope", "project", "--root", local]);
@@ -5830,8 +5509,7 @@ describe("project identity (scope binding across checkouts)", () => {
   });
 
   it("preserves an imported fact's own identity rather than rebinding it to the importing checkout", async () => {
-    // Re-deriving on import would silently rebind every imported fact to whatever repository the
-    // importer happened to be standing in.
+    // Re-deriving on import would silently rebind every imported fact to whatever repository the importer happened to be standing in.
     const a = makeRepo("a");
     const gadget = makeRepo("gadget", "https://github.com/acme/gadget.git");
     await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", a]);
@@ -5848,10 +5526,7 @@ describe("project identity (scope binding across checkouts)", () => {
   });
 
   it("mem doctor does not call an identity-bound fact unreachable once its capture-time root is gone", async () => {
-    // `mem doctor` used to group solely by `scope_root` and report every fact whose root no longer
-    // exists as unreachable, suggesting `mem forget` -- but recall binds a project fact by
-    // `scope_root` OR repository identity, so a fact carrying `scope_repo` is still recallable from
-    // any other checkout of the same repository after this one is removed or re-cloned elsewhere.
+    // `mem doctor` used to group solely by `scope_root` and report every fact whose root no longer exists as unreachable, suggesting `mem forget` -- but recall binds a project fact by `scope_root` OR repository identity, so a fact carrying `scope_repo` is still recallable from any other checkout of the same repository after this one is removed or re-cloned elsewhere.
     const repo = makeRepo("doomed-but-identified");
     await runCli(["remember", "the widget build uses esbuild", "--kind", "fact", "--scope", "project", "--root", repo]);
     rmSync(repo, { recursive: true, force: true });
@@ -5875,8 +5550,7 @@ describe("project identity (scope binding across checkouts)", () => {
     const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: { id: string; scopeRepo: string | null }[] };
     expect(listed.facts.find((fact) => fact.id === id)?.scopeRepo).not.toBeNull();
 
-    // The identity match, not the path match, is what has to carry this: `b` never appeared in the
-    // fact's own scopeRoot.
+    // The identity match, not the path match, is what has to carry this: `b` never appeared in the fact's own scopeRoot.
     expect((await runCli(["recall", "--root", b, "--scope", "project"])).stdout).toContain("monorepo package");
   });
 
@@ -5923,8 +5597,7 @@ describe("import --from-md --captured-at", () => {
   });
 
   it("stamps imported facts with the supplied timestamp instead of now", async () => {
-    // A CLAUDE.md's rules are usually older than the store reading them. captured_at drives
-    // time-decay and contradiction precedence, so importing them as "today" states the opposite.
+    // A CLAUDE.md's rules are usually older than the store reading them. captured_at drives time-decay and contradiction precedence, so importing them as "today" states the opposite.
     const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "2023-04-05T06:07:08Z"]);
     expect(result.exitCode ?? 0).toBe(0);
 
@@ -5948,8 +5621,7 @@ describe("import --from-md --captured-at", () => {
   });
 
   it("normalizes a date-only value to the canonical ISO form captured_at is compared in", async () => {
-    // captured_at is documented as lexically comparable because of its fixed format; accepting a
-    // legal-but-differently-spelled timestamp verbatim would quietly break that ordering.
+    // captured_at is documented as lexically comparable because of its fixed format; accepting a legal-but-differently-spelled timestamp verbatim would quietly break that ordering.
     await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "2023-04-05"]);
     const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as {
       facts: { captured_at: string }[];
@@ -5958,8 +5630,7 @@ describe("import --from-md --captured-at", () => {
   });
 
   it("refuses an unparseable timestamp rather than silently falling back to now", async () => {
-    // A malformed flag is a usage error, so it must fail once with a nonzero exit -- not once per
-    // candidate with exit 0, which a script reading $? would take for a successful import.
+    // A malformed flag is a usage error, so it must fail once with a nonzero exit -- not once per candidate with exit 0, which a script reading $? would take for a successful import.
     const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "last tuesday"]);
     const listed = JSON.parse((await runCli(["list", "--status", "pending", "--json"])).stdout) as { facts: unknown[] };
     expect(listed.facts).toHaveLength(0);
@@ -5990,10 +5661,7 @@ describe("mem remember reaffirms rather than duplicating", () => {
   }
 
   it("refreshes the existing fact instead of writing a second row", async () => {
-    // A user who says the same thing twice means it more, not less. Without this the second
-    // `mem remember` wrote a second row and left the first one's decay clock running, so the facts
-    // a user cared enough to restate were the ones drifting out of ground truth -- and `mem recall`
-    // showed the same sentence twice at two different confidences.
+    // A user who says the same thing twice means it more, not less. Without this the second `mem remember` wrote a second row and left the first one's decay clock running, so the facts a user cared enough to restate were the ones drifting out of ground truth -- and `mem recall` showed the same sentence twice at two different confidences.
     const first = await runCli(["remember", "we deploy on fridays", "--kind", "decision", "--scope", "global"]);
     expect(first.stdout).toContain("remembered");
     const before = (await facts())[0];
@@ -6005,15 +5673,13 @@ describe("mem remember reaffirms rather than duplicating", () => {
     const after = await facts();
     expect(after).toHaveLength(1);
     expect(after[0]?.["id"]).toBe(before?.["id"]);
-    // captured_at is what decay measures age against and what contradiction resolution breaks ties
-    // on -- refreshing it is the whole substance of a reaffirmation.
+    // captured_at is what decay measures age against and what contradiction resolution breaks ties on -- refreshing it is the whole substance of a reaffirmation.
     expect(String(after[0]?.["captured_at"]) > String(before?.["captured_at"])).toBe(true);
     expect(after[0]?.["confidence"]).toBe(1);
   });
 
   it("reaffirms rather than duplicating when the restated --value differs only in case", async () => {
-    // Value comparison for reaffirm must be case-insensitive the same way contradiction detection
-    // is: "pnpm" restated as "Pnpm" is the same fact said again, not a second value on the subject.
+    // Value comparison for reaffirm must be case-insensitive the same way contradiction detection is: "pnpm" restated as "Pnpm" is the same fact said again, not a second value on the subject.
     const first = await runCli(["remember", "uses pnpm not npm", "--kind", "preference", "--subject", "package-manager", "--value", "pnpm"]);
     expect(first.stdout).toContain("remembered");
 
@@ -6028,10 +5694,7 @@ describe("mem remember reaffirms rather than duplicating", () => {
   });
 
   it("applies an --anchor carried by a restatement instead of discarding it", async () => {
-    // Regression: `reaffirmFact`'s UPDATE never touched `anchor`, so restating a fact with a new
-    // `--anchor` printed "reaffirmed" while `mem show` kept reporting `anchor: (none)
-    // freshness=unverified` forever -- the fact could never reach `contradicted` when the anchored
-    // file went away, which is the entire point of attaching an anchor.
+    // Regression: `reaffirmFact`'s UPDATE never touched `anchor`, so restating a fact with a new `--anchor` printed "reaffirmed" while `mem show` kept reporting `anchor: (none) freshness=unverified` forever -- the fact could never reach `contradicted` when the anchored file went away, which is the entire point of attaching an anchor.
     const root = mkdtempSync(join(tmpdir(), "mem-reaffirm-anchor-"));
     try {
       const first = await runCli(["remember", "uses pnpm", "--kind", "fact", "--scope", "project", "--root", root]);
@@ -6091,16 +5754,14 @@ describe("mem remember reaffirms rather than duplicating", () => {
   });
 
   it("does not collapse the same sentence carrying a different value", async () => {
-    // Identical text with a different value is a correction for contradiction resolution to key on,
-    // never a repeat to be swallowed.
+    // Identical text with a different value is a correction for contradiction resolution to key on, never a repeat to be swallowed.
     await runCli(["remember", "node version", "--kind", "fact", "--scope", "global", "--subject", "node", "--value", "20"]);
     await runCli(["remember", "node version", "--kind", "fact", "--scope", "global", "--subject", "node", "--value", "22"]);
     expect(await facts()).toHaveLength(2);
   });
 
   it("does not collapse the same sentence across different project roots", async () => {
-    // Same text, same kind, same scope *label* -- but two different projects. Comparing the label
-    // alone would let one repository's restatement swallow another repository's fact.
+    // Same text, same kind, same scope *label* -- but two different projects. Comparing the label alone would let one repository's restatement swallow another repository's fact.
     const a = mkdtempSync(join(tmpdir(), "mem-bindA-"));
     const b = mkdtempSync(join(tmpdir(), "mem-bindB-"));
     try {
@@ -6114,10 +5775,7 @@ describe("mem remember reaffirms rather than duplicating", () => {
   });
 
   it("reaffirms a project fact restated from a second checkout of the same repository, instead of duplicating it", async () => {
-    // AGENTS.md documents reaffirm as keying on "scope binding", not the literal scope_root path --
-    // that stricter wording is reserved there for contradiction bucketing. A project fact survives a
-    // second clone/worktree for recall (scope_root OR scope_repo); restating it from that same second
-    // checkout has to hit the same fact, not insert a duplicate `mem recall` then lists twice.
+    // AGENTS.md documents reaffirm as keying on "scope binding", not the literal scope_root path -- that stricter wording is reserved there for contradiction bucketing. A project fact survives a second clone/worktree for recall (scope_root OR scope_repo); restating it from that same second checkout has to hit the same fact, not insert a duplicate `mem recall` then lists twice.
     function git(cwd: string, ...args: string[]): void {
       execFileSync("git", args, { cwd, stdio: "pipe" });
     }
@@ -6150,17 +5808,7 @@ describe("mem remember reaffirms rather than duplicating", () => {
   });
 
   it("resolves a matching pending suggestion by promoting it, instead of leaving it queued behind a duplicate", async () => {
-    // `mem suggest` files a candidate as pending. Passive promotion (time, repetition, or a
-    // confidence number alone) must never happen -- that invariant is unchanged and is exercised
-    // separately below ("does not let a suggested candidate reaffirm a user-stated fact", which
-    // covers the opposite direction: a *suggestion* must never refresh a fact the user stated).
-    //
-    // But an explicit `mem remember` of the identical sentence is not a passive signal: it is the
-    // human directly answering the suggestion `mem review` is holding open. This test used to
-    // assert the pending row stayed queued and a duplicate active row was written alongside it --
-    // that was the defect (S9 misapplied to the wrong direction): the user's restatement answered
-    // the queue, and the queue kept asking, while `mem consolidate` went on to report the resulting
-    // pair as a 1.00 duplicate cluster.
+    // `mem suggest` files a candidate as pending. Passive promotion (time, repetition, or a confidence number alone) must never happen -- that invariant is unchanged and is exercised separately below ("does not let a suggested candidate reaffirm a user-stated fact", which covers the opposite direction: a *suggestion* must never refresh a fact the user stated). But an explicit `mem remember` of the identical sentence is not a passive signal: it is the human directly answering the suggestion `mem review` is holding open. This test used to assert the pending row stayed queued and a duplicate active row was written alongside it -- that was the defect (S9 misapplied to the wrong direction): the user's restatement answered the queue, and the queue kept asking, while `mem consolidate` went on to report the resulting pair as a 1.00 duplicate cluster.
     const suggested = await runCli(["suggest", "we cache the build", "--kind", "decision", "--scope", "global"]);
     const suggestedId = extractSuggestedId(suggested);
 
@@ -6178,16 +5826,12 @@ describe("mem remember reaffirms rather than duplicating", () => {
   });
 
   it("does not let a suggested candidate reaffirm a user-stated fact", async () => {
-    // Suggested candidates come from file and transcript content. Letting derived text refresh a
-    // user-stated fact's clock would hand a CLAUDE.md the power to keep a fact alive that the user
-    // never restated.
+    // Suggested candidates come from file and transcript content. Letting derived text refresh a user-stated fact's clock would hand a CLAUDE.md the power to keep a fact alive that the user never restated.
     await runCli(["remember", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
     const before = (await facts())[0];
     const suggest = await runCli(["suggest", "we ship on tuesdays", "--kind", "decision", "--scope", "global"]);
     const after = await facts();
-    // Not reaffirmed (the clock is untouched, which is what this test is about) and not duplicated
-    // either: a bound match of any status suppresses the insert, so the derived restatement leaves
-    // the store exactly as it found it and queues nothing for `mem review`.
+    // Not reaffirmed (the clock is untouched, which is what this test is about) and not duplicated either: a bound match of any status suppresses the insert, so the derived restatement leaves the store exactly as it found it and queues nothing for `mem review`.
     expect(after).toHaveLength(1);
     const active = after.find((fact) => fact["id"] === before?.["id"]);
     expect(active?.["captured_at"]).toBe(before?.["captured_at"]);
@@ -6200,8 +5844,7 @@ describe("mem remember reaffirms rather than duplicating", () => {
 
 describe("mem edit records what the fact said before", () => {
   it("puts the prior value in the audit detail, since the edit overwrites it in place", async () => {
-    // `mem edit` overwrites in place, so without this the prior text is unrecoverable from the store
-    // entirely: the audit log could say the text was edited but never what it used to say.
+    // `mem edit` overwrites in place, so without this the prior text is unrecoverable from the store entirely: the audit log could say the text was edited but never what it used to say.
     const remembered = await runCli(["remember", "we use yarn", "--kind", "preference", "--scope", "global"]);
     const id = remembered.stdout.trim().split(/\s+/u).pop() ?? "";
     await runCli(["edit", id, "--text", "we use pnpm", "--force"]);
@@ -6223,9 +5866,7 @@ describe("mem edit records what the fact said before", () => {
 
 describe("mem edit --undo", () => {
   it("restores an edited fact's text byte-for-byte, past the 120-character audit preview", async () => {
-    // `auditValuePreview` truncates at AUDIT_VALUE_PREVIEW_LENGTH (120), which is exactly why a
-    // reversal payload separate from the `detail` string exists: undo does not go through that
-    // truncation at all. A body shorter than 120 characters would not distinguish the two.
+    // `auditValuePreview` truncates at AUDIT_VALUE_PREVIEW_LENGTH (120), which is exactly why a reversal payload separate from the `detail` string exists: undo does not go through that truncation at all. A body shorter than 120 characters would not distinguish the two.
     const original =
       "we decided the ingestion worker must batch writes in groups of 250 rows because the upstream vendor API " +
       "throttles at 300 requests per minute and the retry budget is exhausted by the third burst, measured in staging";
@@ -6247,9 +5888,7 @@ describe("mem edit --undo", () => {
   });
 
   it("redacts a secret-bearing prior value out of the edit audit row's detail and prior_json, instead of duplicating it", async () => {
-    // Simulates a secret that slipped past capture-time screening (a heuristic, not a guarantee) --
-    // inserted directly via storage, bypassing capture.ts entirely, the same way a hand-edited row
-    // or a gap in the screener's coverage would land one.
+    // Simulates a secret that slipped past capture-time screening (a heuristic, not a guarantee) -- inserted directly via storage, bypassing capture.ts entirely, the same way a hand-edited row or a gap in the screener's coverage would land one.
     const rawKey = "AKIAIOSFODNN7EXAMPLE";
     const db = openStorage(resolveDbPath());
     const fact = insertFact(db, {
@@ -6293,18 +5932,7 @@ describe("mem edit --undo", () => {
     expect(shown.stdout).toContain("text: we cache the build output aggressively");
   });
 
-  // Every path that creates a fact writes an audit row for it -- `capture_explicit` here,
-  // `json_import` for an imported one -- so a never-edited fact does not have an *empty* history, it
-  // has a history whose last row is not an edit. The refusal names that row rather than saying
-  // something generic, which is the difference between "you have not edited this" and "this command
-  // does not know what you did".
-  // Redacting a secret-shaped prior value on its way into the audit log is the right call -- it stops
-  // `mem edit` making a second at-rest copy of a credential that slipped past capture screening. The
-  // realistic way a value gets past capture and trips later is the allowlist: it was an accepted
-  // exception when the fact was stored, and is not one by the time the fact is edited. But the audit
-  // row is also what `--undo` restores from, so a redacted prior value means the original is gone.
-  // Restoring it anyway would write the literal marker in as the fact's text and report success;
-  // refusing says what actually happened and leaves the current value alone.
+  // Every path that creates a fact writes an audit row for it -- `capture_explicit` here, `json_import` for an imported one -- so a never-edited fact does not have an *empty* history, it has a history whose last row is not an edit. The refusal names that row rather than saying something generic, which is the difference between "you have not edited this" and "this command does not know what you did". Redacting a secret-shaped prior value on its way into the audit log is the right call -- it stops `mem edit` making a second at-rest copy of a credential that slipped past capture screening. The realistic way a value gets past capture and trips later is the allowlist: it was an accepted exception when the fact was stored, and is not one by the time the fact is edited. But the audit row is also what `--undo` restores from, so a redacted prior value means the original is gone. Restoring it anyway would write the literal marker in as the fact's text and report success; refusing says what actually happened and leaves the current value alone.
   it("refuses to undo an edit whose prior value was redacted, instead of restoring the marker", async () => {
     const root = mkdtempSync(join(tmpdir(), "mem-undo-redacted-"));
     const secret = "AKIAIOSFODNN7EXAMPLE";
@@ -6328,8 +5956,7 @@ describe("mem edit --undo", () => {
 
     const shown = await runCli(["show", id]);
     expect(shown.stdout).toContain("rotate creds quarterly");
-    // The marker DOES appear further down, in the audit history -- that is where it belongs. What
-    // must not have happened is the marker being restored in as the fact's own text.
+    // The marker DOES appear further down, in the audit history -- that is where it belongs. What must not have happened is the marker being restored in as the fact's own text.
     expect(shown.stdout.split("history")[0]).not.toContain("[redacted: possible secret");
     rmSync(root, { recursive: true, force: true });
   });
@@ -6356,9 +5983,7 @@ describe("mem edit --undo", () => {
     const remembered = await runCli(["remember", "we vendor our own fork", "--kind", "decision"]);
     const id = extractRememberedId(remembered);
 
-    // Simulates a database migrated from a pre-`prior_json` release: an `edit` audit row with no
-    // reversal payload, because the column did not exist when it was written. `insertAuditLog`
-    // omitting `priorJson` writes NULL, same as a real pre-migration row would read back as.
+    // Simulates a database migrated from a pre-`prior_json` release: an `edit` audit row with no reversal payload, because the column did not exist when it was written. `insertAuditLog` omitting `priorJson` writes NULL, same as a real pre-migration row would read back as.
     const db = openStorage(resolveDbPath());
     insertAuditLog(db, { event: "edit", factId: id, detail: "edited text: (old) -> (new)" });
     db.close();
@@ -6430,9 +6055,7 @@ describe("mem review --undo", () => {
   }
 
   it("puts a rejected fact back, since --reject was otherwise irreversible", async () => {
-    // `--promote` refuses anything not pending or contested, so before this a mis-typed `--reject`
-    // could not be walked back through the CLI at all -- only by hand-editing the database. A review
-    // queue whose reject key is unrecoverable is one users are right to hesitate over.
+    // `--promote` refuses anything not pending or contested, so before this a mis-typed `--reject` could not be walked back through the CLI at all -- only by hand-editing the database. A review queue whose reject key is unrecoverable is one users are right to hesitate over.
     const id = await pendingId("we cache the build output");
     await runCli(["review", "--reject", id]);
     expect(await statusOf(id)).toBe("superseded");
@@ -6444,8 +6067,7 @@ describe("mem review --undo", () => {
   });
 
   it("refuses a fact that reached superseded some other way", async () => {
-    // Scoped to rejections on purpose: `mem forget` is a considered decision about a fact the user
-    // chose to keep, and reversing that is a different question from correcting a review slip.
+    // Scoped to rejections on purpose: `mem forget` is a considered decision about a fact the user chose to keep, and reversing that is a different question from correcting a review slip.
     const remembered = await runCli(["remember", "we deploy nightly", "--kind", "decision", "--scope", "global"]);
     const id = remembered.stdout.trim().split(/\s+/u).pop() ?? "";
     await runCli(["forget", id]);
@@ -6471,15 +6093,7 @@ describe("mem review --undo", () => {
 });
 
 describe("mem recall ranks a fact that names an identifier above one that only shares its stems", () => {
-  /**
-   * BM25 stems `src/retrieval.ts` down to `src`/`retriev`/`ts` and then cannot tell the fact that
-   * names that file from one that merely uses those three words in a sentence. The entity layer
-   * already knows the difference -- `mem facets --list-entities` extracts `src/retrieval.ts` as a
-   * single entity on exactly the fact that names it -- but until this test, recall consulted that
-   * layer only when the caller passed `--entity`, which requires already knowing the answer.
-   *
-   * Found by dogfooding against a three-fact store: the fact naming the file ranked *last*.
-   */
+  /** BM25 stems `src/retrieval.ts` down to `src`/`retriev`/`ts` and then cannot tell the fact that names that file from one that merely uses those three words in a sentence. The entity layer already knows the difference -- `mem facets --list-entities` extracts `src/retrieval.ts` as a single entity on exactly the fact that names it -- but until this test, recall consulted that layer only when the caller passed `--entity`, which requires already knowing the answer. Found by dogfooding against a three-fact store: the fact naming the file ranked *last*. */
   async function seed(): Promise<void> {
     await runCli(["remember", "the BM25 scorer lives in src/retrieval.ts and owns fusion", "--kind", "fact"]);
     await runCli(["remember", "we retriev data from various src locations using ts helpers", "--kind", "fact"]);
@@ -6495,9 +6109,7 @@ describe("mem recall ranks a fact that names an identifier above one that only s
   });
 
   it("leaves ranking alone when the query carries no identifier at all", async () => {
-    // The guard on the whole idea: this project has already been burned by a rank list that voted
-    // on queries it had no signal for (see the zero-BM25 comment in retrieval.ts). A query with no
-    // entities must produce no entity list, so ranking is byte-for-byte what it was before.
+    // The guard on the whole idea: this project has already been burned by a rank list that voted on queries it had no signal for (see the zero-BM25 comment in retrieval.ts). A query with no entities must produce no entity list, so ranking is byte-for-byte what it was before.
     await seed();
     const result = await runCli(["recall", "source files and helpers"]);
     expect(result.exitCode).toBe(0);
@@ -6505,8 +6117,7 @@ describe("mem recall ranks a fact that names an identifier above one that only s
   });
 
   it("does not let a shared identifier outrank a fact the query actually matches", async () => {
-    // The entity list is one vote among several, not an override. A fact that merely carries the
-    // identifier must not displace one that carries it *and* matches the rest of the query.
+    // The entity list is one vote among several, not an override. A fact that merely carries the identifier must not displace one that carries it *and* matches the rest of the query.
     await runCli(["remember", "src/retrieval.ts exists", "--kind", "fact"]);
     await runCli(["remember", "src/retrieval.ts owns reciprocal rank fusion scoring", "--kind", "fact"]);
     const result = await runCli(["recall", "src/retrieval.ts reciprocal rank fusion"]);
@@ -6526,12 +6137,7 @@ describe("mem dream", () => {
     delete process.env[KEY_ENV];
   });
 
-  /**
-   * A real HTTP server on loopback, so these tests go through the CLI's own `fetch` rather than the
-   * `fetchImpl` seam the unit tests inject. That seam is where the request shaping is proven; what
-   * is proven here is the wiring around it -- that the command reads its config from the
-   * environment, reaches the endpoint, and renders what comes back.
-   */
+  /** A real HTTP server on loopback, so these tests go through the CLI's own `fetch` rather than the `fetchImpl` seam the unit tests inject. That seam is where the request shaping is proven; what is proven here is the wiring around it -- that the command reads its config from the environment, reaches the endpoint, and renders what comes back. */
   async function withFakeEndpoint(
     reply: (received: unknown) => unknown,
     body: (url: string) => Promise<void>
@@ -6587,8 +6193,7 @@ describe("mem dream", () => {
   });
 
   it("tells `mem doctor` whether anything is configured to leave this machine", async () => {
-    // The config lives in environment variables, so a URL exported once in a shell profile is
-    // otherwise invisible. `doctor` is where someone checks what the tool is set up to do.
+    // The config lives in environment variables, so a URL exported once in a shell profile is otherwise invisible. `doctor` is where someone checks what the tool is set up to do.
     const off = await runCli(["doctor"]);
     expect(off.stdout).toContain("dreaming: off");
 
@@ -6607,8 +6212,7 @@ describe("mem dream", () => {
   });
 
   it("reports a broken dream config in `mem doctor` rather than crashing the health check", async () => {
-    // doctor's whole job is to run when things are wrong; a misconfiguration must be a line in the
-    // report, not an exception that suppresses every check after it.
+    // doctor's whole job is to run when things are wrong; a misconfiguration must be a line in the report, not an exception that suppresses every check after it.
     process.env[URL_ENV] = "not a url";
     process.env[MODEL_ENV] = "test-model";
     // Doctor no longer creates the store, and the term-coverage line below needs one to count.
@@ -6620,8 +6224,7 @@ describe("mem dream", () => {
   });
 
   it("does not offer a --root that would not scope anything", async () => {
-    // A flag a user reads as scoping and that quietly is not is worse than no flag: `mem recall`
-    // already carries that edge, and a new command must not add a second instance of it.
+    // A flag a user reads as scoping and that quietly is not is worse than no flag: `mem recall` already carries that edge, and a new command must not add a second instance of it.
     const help = await runCli(["dream", "--help"]);
     expect(`${help.stdout}${help.stderr}`).not.toContain("--root");
   });
@@ -6641,8 +6244,7 @@ describe("mem dream", () => {
         expect(result.stdout).toContain("test-model via 127.0.0.1");
         expect(result.stdout).toContain("deployment is entirely manual");
         expect(result.stdout).toContain("this is a report");
-        // The whole guarantee of the command: the store is byte-identical afterwards. A dry run
-        // that quietly wrote its own output back would be the one failure a user could not undo.
+        // The whole guarantee of the command: the store is byte-identical afterwards. A dry run that quietly wrote its own output back would be the one failure a user could not undo.
         const after = await runCli(["list", "--json"]);
         expect(after.stdout).toBe(before.stdout);
       }
@@ -6665,8 +6267,7 @@ describe("mem dream", () => {
   });
 
   it("sends only live facts, never ones the store has already retracted", async () => {
-    // An inference grounded in a retracted premise is worse than no inference: it carries the
-    // authority of the store behind a claim the store has already decided is wrong.
+    // An inference grounded in a retracted premise is worse than no inference: it carries the authority of the store behind a claim the store has already decided is wrong.
     let sentToModel = "";
     await withFakeEndpoint(
       (received) => {
@@ -6690,10 +6291,7 @@ describe("mem dream", () => {
   });
 
   it("withholds contested premises, same as `mem recall` -- reasoning over a live contradiction is the P3 failure one step removed", async () => {
-    // Two active facts, same subject+scope, conflicting value, tied precedence: contradiction.ts
-    // resolves this to `contested` in memory (never persisted), and `retrieve()` withholds both from
-    // ground truth for exactly that reason. Neither is `superseded`, so the old `status: ["active",
-    // "pinned"]` filter let both through to the model as premises.
+    // Two active facts, same subject+scope, conflicting value, tied precedence: contradiction.ts resolves this to `contested` in memory (never persisted), and `retrieve()` withholds both from ground truth for exactly that reason. Neither is `superseded`, so the old `status: ["active", "pinned"]` filter let both through to the model as premises.
     let sentToModel = "";
     await withFakeEndpoint(
       (received) => {
@@ -6773,10 +6371,7 @@ describe("recall's follow-up line names only the commands that apply", () => {
   it("omits the review call-to-action when no result needs resolving, and adds it when one does", async () => {
     await runCli(["remember", "the ingestion worker batches 250 rows", "--kind", "decision"]);
 
-    // It used to print unconditionally. That is not merely noise: tests/cli.test.ts's own
-    // contested-annotation test carries a comment explaining that the permanent CTA made a looser
-    // assertion pass vacuously against unfixed code -- an always-on string is indistinguishable
-    // from a real signal to a reader and to a test alike.
+    // It used to print unconditionally. That is not merely noise: tests/cli.test.ts's own contested-annotation test carries a comment explaining that the permanent CTA made a looser assertion pass vacuously against unfixed code -- an always-on string is indistinguishable from a real signal to a reader and to a test alike.
     const clean = await runCli(["recall", "ingestion"]);
     expect(clean.stdout).toContain("mem show <id> for detail");
     expect(clean.stdout).not.toContain("mem review");
@@ -6789,11 +6384,7 @@ describe("recall's follow-up line names only the commands that apply", () => {
 
 describe("mem edit keeps the value it is about to destroy", () => {
   it("records the whole prior text, not a 120-character prefix of it", async () => {
-    // AGENTS.md: "an edited fact's previous text is recorded there and nowhere else, since mem edit
-    // overwrites in place." Measured against the built bundle, editing a 223-character fact left
-    // 103 characters recorded nowhere in the store -- the log kept a prefix of the one value it
-    // exists to preserve. The new value stays previewed: it is the fact's current text, one column
-    // away in the same row, so it is never the value that goes missing.
+    // AGENTS.md: "an edited fact's previous text is recorded there and nowhere else, since mem edit overwrites in place." Measured against the built bundle, editing a 223-character fact left 103 characters recorded nowhere in the store -- the log kept a prefix of the one value it exists to preserve. The new value stays previewed: it is the fact's current text, one column away in the same row, so it is never the value that goes missing.
     const prior =
       "we decided the ingestion worker must batch writes in groups of 250 rows because the upstream vendor API " +
       "throttles at 300 requests per minute and the retry budget is exhausted by the third burst, measured in staging";

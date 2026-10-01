@@ -1,10 +1,4 @@
-/**
- * `mem doctor`'s wiring checks, kept out of doctor.ts: whether each supported tool's mem block is
- * present and current (`wiring`), and whether project- and user-level Claude Code hooks disagree
- * (`hook-divergence`). Both are read-only. "Current" is not re-derived here: it is whatever
- * `getToolWiring(tool).describe()` says `mem init <tool>` would change, so a template edit in
- * wiring.ts moves this check with it and there is no second copy to forget.
- */
+/** `mem doctor`'s wiring checks, kept out of doctor.ts: whether each supported tool's mem block is present and current (`wiring`), and whether project- and user-level Claude Code hooks disagree (`hook-divergence`). Both are read-only. "Current" is not re-derived here: it is whatever `getToolWiring(tool).describe()` says `mem init <tool>` would change, so a template edit in wiring.ts moves this check with it and there is no second copy to forget. */
 
 import { resolve, sep } from "node:path";
 
@@ -58,12 +52,7 @@ function remedyFor(tool: ToolName, scope: Scope, opts: WiringOpts): string {
   return parts.join(" ");
 }
 
-/**
- * One finding per tool and scope that has any mem content: `ok` when `mem init` would change
- * nothing, `warn` when it would (an outdated block, a hand edit inside the markers, a hook missing
- * an event, a file mem wrote half of). Tools mem is not in are one informational line: a user need
- * not wire every tool, so that is `ok`, never a warning.
- */
+/** One finding per tool and scope that has any mem content: `ok` when `mem init` would change nothing, `warn` when it would (an outdated block, a hand edit inside the markers, a hook missing an event, a file mem wrote half of). Tools mem is not in are one informational line: a user need not wire every tool, so that is `ok`, never a warning. */
 export function describeWiringDrift(opts: WiringOpts): Finding[] {
   const findings: Finding[] = [];
   const absent: ToolName[] = [];
@@ -106,10 +95,7 @@ export function describeWiringDrift(opts: WiringOpts): Finding[] {
   return findings;
 }
 
-/**
- * Claude Code runs project and user hooks both, so mem installed at both levels with different
- * invocations means duplicate or inconsistent recall. Silent when only one level has hooks.
- */
+/** Claude Code runs project and user hooks both, so mem installed at both levels with different invocations means duplicate or inconsistent recall. Silent when only one level has hooks. */
 export function describeHookDivergence(opts: WiringOpts): Finding[] {
   const project = installedClaudeHookCommands({ ...opts, user: false });
   const user = installedClaudeHookCommands({ ...opts, user: true });

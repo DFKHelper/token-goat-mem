@@ -1,9 +1,4 @@
-/**
- * End-to-end tests for `mem doctor`'s wiring checks: whether each supported tool's mem block is
- * present and current (`wiring`), and whether project- and user-level Claude Code hooks disagree
- * (`hook-divergence`). Everything goes through the real CLI against temp roots and homes; doctor
- * itself must never write a file.
- */
+/** End-to-end tests for `mem doctor`'s wiring checks: whether each supported tool's mem block is present and current (`wiring`), and whether project- and user-level Claude Code hooks disagree (`hook-divergence`). Everything goes through the real CLI against temp roots and homes; doctor itself must never write a file. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";

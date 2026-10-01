@@ -1,7 +1,4 @@
-/**
- * Guard test to ensure package.json version matches CHANGELOG.md.
- * CHANGELOG.md is the canonical source of truth per its own declaration.
- */
+/** Guard test to ensure package.json version matches CHANGELOG.md. CHANGELOG.md is the canonical source of truth per its own declaration. */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
@@ -21,8 +18,7 @@ describe("version consistency guards", () => {
     const changelogPath = join(REPO_ROOT, "CHANGELOG.md");
     const changelogContent = readFileSync(changelogPath, "utf8");
 
-    // Match the first ## [x.y.z] heading, skipping non-semver headings like "## [Unreleased]" that
-    // sit above the first real release while work is in progress.
+    // Match the first ## [x.y.z] heading, skipping non-semver headings like "## [Unreleased]" that sit above the first real release while work is in progress.
     const versionMatch = changelogContent.match(/^## \[(\d+\.\d+\.\d+[^\]]*)\]/m);
     const changelogVersion = versionMatch?.[1];
 

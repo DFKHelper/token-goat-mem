@@ -1,20 +1,4 @@
-/**
- * `npm run eval` -- prints before/after retrieval-quality numbers for four configurations. Items 1
- * and 2 are what `"recency"`, `"query-no-stem"`, and `"query-stem"` exist to move between: today's
- * recency-only baseline, query-on (BM25 without stemming), and query+stemming (today's shipped
- * BM25 state) -- all three measured by `rank.ts`'s reduced reimplementation of `retrieve()`'s
- * ranking step. `"pipeline"` (item 4) instead drives the real `retrieve()` end to end -- RRF
- * fusion, entity overlap, graph propagation, anchor re-evaluation, contradiction resolution, and
- * trust classification all run for real, against a real (temp) filesystem and SQLite store built
- * and torn down for this run only (see `eval/pipelineFixture.ts`).
- *
- * Deliberately not part of `npm test`: this generates a 400-fact corpus and 40+ scenarios and
- * ranks all of them four times over -- the `"pipeline"` pass alone does real anchor filesystem I/O
- * and a real SQLite round trip per scenario -- which is unnecessary weight for the correctness
- * gate every commit runs. `tests/unit/eval-harness.test.ts` covers the harness's own correctness
- * (precision/nDCG math, duplicate counting, the no-match-never-filters invariant) on a small fixed
- * input, fast enough to run in the normal suite, and never exercises `"pipeline"`.
- */
+/** `npm run eval` -- prints before/after retrieval-quality numbers for four configurations. Items 1 and 2 are what `"recency"`, `"query-no-stem"`, and `"query-stem"` exist to move between: today's recency-only baseline, query-on (BM25 without stemming), and query+stemming (today's shipped BM25 state) -- all three measured by `rank.ts`'s reduced reimplementation of `retrieve()`'s ranking step. `"pipeline"` (item 4) instead drives the real `retrieve()` end to end -- RRF fusion, entity overlap, graph propagation, anchor re-evaluation, contradiction resolution, and trust classification all run for real, against a real (temp) filesystem and SQLite store built and torn down for this run only (see `eval/pipelineFixture.ts`). Deliberately not part of `npm test`: this generates a 400-fact corpus and 40+ scenarios and ranks all of them four times over -- the `"pipeline"` pass alone does real anchor filesystem I/O and a real SQLite round trip per scenario -- which is unnecessary weight for the correctness gate every commit runs. `tests/unit/eval-harness.test.ts` covers the harness's own correctness (precision/nDCG math, duplicate counting, the no-match-never-filters invariant) on a small fixed input, fast enough to run in the normal suite, and never exercises `"pipeline"`. */
 
 import { join } from "node:path";
 
@@ -26,12 +10,7 @@ import type { RankConfig } from "./rank.js";
 
 const K = 8;
 
-/**
- * Fixed clock for the `"pipeline"` configuration's decay/freshness math, alongside `EVAL_SEED`
- * (`fixtures.ts`) as the other source of this run's determinism. Set after the corpus's newest
- * `captured_at` (`generateCorpus`'s dates run up to 2032-08-26 for the default seed/count) so no
- * fact is ever "captured in the future" relative to it.
- */
+/** Fixed clock for the `"pipeline"` configuration's decay/freshness math, alongside `EVAL_SEED` (`fixtures.ts`) as the other source of this run's determinism. Set after the corpus's newest `captured_at` (`generateCorpus`'s dates run up to 2032-08-26 for the default seed/count) so no fact is ever "captured in the future" relative to it. */
 const PIPELINE_NOW = new Date("2033-01-01T00:00:00.000Z");
 
 function formatRow(report: ConfigReport): string {
@@ -77,8 +56,7 @@ async function main(): Promise<void> {
     print(formatRow(await evaluateConfig(facts, scenarios, config, K)));
   }
 
-  // The real pipeline needs a resolvable filesystem (anchors) and a real SQLite store (entity/graph
-  // signals) -- both built fresh for this run and torn down in `finally`, whatever the outcome.
+  // The real pipeline needs a resolvable filesystem (anchors) and a real SQLite store (entity/graph signals) -- both built fresh for this run and torn down in `finally`, whatever the outcome.
   const fsFixture = buildFsFixture();
   try {
     const pipelineContext = buildPipelineContext(join(fsFixture.baseDir, "eval.db"), facts, fsFixture.rootMap, PIPELINE_NOW);

@@ -1,16 +1,4 @@
-/**
- * Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin.
- *
- * Claude Code delivers every hook's input as one JSON object on stdin (not env vars). `session_id`
- * is a common field present on every event; a `UserPromptSubmit` hook additionally carries the
- * submitted text in `prompt` (hooks reference, "UserPromptSubmit input"). Other tools, and the
- * plugin-authoring guide's own `$USER_PROMPT` naming, suggest `user_prompt`, so a short ordered
- * probe list is used rather than one hard-coded key.
- *
- * Everything here fails open. A hook that exits non-zero, or prints a parse error into an agent's
- * context, is worse than a hook that returns unranked facts -- so an unexpected shape, a truncated
- * pipe, or a non-string field degrades to "no query / no session", never to an error.
- */
+/** Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin. Claude Code delivers every hook's input as one JSON object on stdin (not env vars). `session_id` is a common field present on every event; a `UserPromptSubmit` hook additionally carries the submitted text in `prompt` (hooks reference, "UserPromptSubmit input"). Other tools, and the plugin-authoring guide's own `$USER_PROMPT` naming, suggest `user_prompt`, so a short ordered probe list is used rather than one hard-coded key. Everything here fails open. A hook that exits non-zero, or prints a parse error into an agent's context, is worse than a hook that returns unranked facts -- so an unexpected shape, a truncated pipe, or a non-string field degrades to "no query / no session", never to an error. */
 
 /** Keys probed, in order, for the submitted prompt text; the first non-empty string wins. */
 export const HOOK_PROMPT_KEYS: readonly string[] = ["prompt", "user_prompt", "message"];
@@ -18,20 +6,10 @@ export const HOOK_PROMPT_KEYS: readonly string[] = ["prompt", "user_prompt", "me
 /** Key carrying the hook's session identifier. */
 export const HOOK_SESSION_KEY = "session_id";
 
-/**
- * Key carrying the path to the session transcript.
- *
- * Present on Claude Code's `Stop` envelope, which carries no `prompt` -- the turn is already over.
- * The transcript is the only thing a Stop hook gets that says what was said, so it is what
- * `mem scan-session` reads.
- */
+/** Key carrying the path to the session transcript. Present on Claude Code's `Stop` envelope, which carries no `prompt` -- the turn is already over. The transcript is the only thing a Stop hook gets that says what was said, so it is what `mem scan-session` reads. */
 export const HOOK_TRANSCRIPT_KEY = "transcript_path";
 
-/**
- * Key Claude Code sets to `true` on a `Stop` envelope when the agent is already continuing because
- * a Stop hook blocked. A Stop hook that blocks again on it never lets the session end, so
- * `mem reflect` stands down whenever it is set.
- */
+/** Key Claude Code sets to `true` on a `Stop` envelope when the agent is already continuing because a Stop hook blocked. A Stop hook that blocks again on it never lets the session end, so `mem reflect` stands down whenever it is set. */
 export const HOOK_STOP_ACTIVE_KEY = "stop_hook_active";
 
 export interface HookEnvelope {
@@ -49,11 +27,7 @@ function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
 }
 
-/**
- * Extracts the session id and prompt from raw stdin text. Never throws: anything that is not a
- * JSON object with the expected string fields yields an envelope with the corresponding field
- * absent.
- */
+/** Extracts the session id and prompt from raw stdin text. Never throws: anything that is not a JSON object with the expected string fields yields an envelope with the corresponding field absent. */
 export function parseHookEnvelope(raw: string): HookEnvelope {
   let parsed: unknown;
   try {
@@ -86,12 +60,7 @@ export function parseHookEnvelope(raw: string): HookEnvelope {
 /** Upper bound on how long `--hook-stdin` waits for stdin to close before giving up on it. */
 export const HOOK_STDIN_TIMEOUT_MS = 1000;
 
-/**
- * Reads all of `stream` as UTF-8, resolving to the empty string when the stream is a TTY (nothing
- * was piped), when it errors, or when it has not ended within `timeoutMs` -- a hook host always
- * writes the envelope and closes the pipe promptly, so a stall means there is no envelope coming
- * and the recall should proceed without one rather than hang the host.
- */
+/** Reads all of `stream` as UTF-8, resolving to the empty string when the stream is a TTY (nothing was piped), when it errors, or when it has not ended within `timeoutMs` -- a hook host always writes the envelope and closes the pipe promptly, so a stall means there is no envelope coming and the recall should proceed without one rather than hang the host. */
 export function readStreamWithTimeout(
   stream: NodeJS.ReadStream,
   timeoutMs: number = HOOK_STDIN_TIMEOUT_MS
@@ -129,11 +98,7 @@ export function readStreamWithTimeout(
   });
 }
 
-/**
- * `--hook-stdin`: the hook envelope from stdin, or an empty envelope when stdin is a TTY, unreadable,
- * not JSON, or simply slow to close. Never throws -- see this module's header for why a hook that
- * errors is worse than one that returns unranked facts.
- */
+/** `--hook-stdin`: the hook envelope from stdin, or an empty envelope when stdin is a TTY, unreadable, not JSON, or simply slow to close. Never throws -- see this module's header for why a hook that errors is worse than one that returns unranked facts. */
 export async function readHookEnvelope(): Promise<HookEnvelope> {
   try {
     return parseHookEnvelope(await readStreamWithTimeout(process.stdin));

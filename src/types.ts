@@ -1,21 +1,10 @@
-/**
- * Shared domain types for token-goat-mem.
- *
- * Mirrors the `facts` table schema from the design plan (Section 3) and
- * AGENTS.md exactly, field-for-field, so DB row shapes and domain objects
- * stay in lockstep without a translation layer. Kept intentionally narrow:
- * only what current modules need. Extend here, don't duplicate elsewhere.
- */
+/** Shared domain types for token-goat-mem. Mirrors the `facts` table schema from the design plan (Section 3) and AGENTS.md exactly, field-for-field, so DB row shapes and domain objects stay in lockstep without a translation layer. Kept intentionally narrow: only what current modules need. Extend here, don't duplicate elsewhere. */
 
 /** The four fact categories the design distinguishes for recall bias (P6) and decay (Section 6). */
 export const FACT_KINDS = ["preference", "decision", "fact", "correction"] as const;
 export type FactKind = (typeof FACT_KINDS)[number];
 
-/**
- * A fact's noun phrase in user-facing text: CLI confirmations and audit details alike. Every kind
- * reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself,
- * where the template degenerates into "fact fact".
- */
+/** A fact's noun phrase in user-facing text: CLI confirmations and audit details alike. Every kind reads naturally as "<kind> fact" -- "decision fact", "correction fact" -- except `fact` itself, where the template degenerates into "fact fact". */
 export function factNounPhrase(kind: FactKind): string {
   return kind === "fact" ? "fact" : `${kind} fact`;
 }
@@ -24,31 +13,10 @@ export function factNounPhrase(kind: FactKind): string {
 export const FACT_SCOPES = ["global", "project", "path"] as const;
 export type FactScope = (typeof FACT_SCOPES)[number];
 
-/**
- * Provenance of how a fact entered the store. `derived` facts (extracted from
- * file/tool content) are quarantined hardest per P7/S9 — never surfaced as
- * ground truth without explicit human confirmation.
- */
+/** Provenance of how a fact entered the store. `derived` facts (extracted from file/tool content) are quarantined hardest per P7/S9 — never surfaced as ground truth without explicit human confirmation. */
 export type FactSourceType = "user" | "derived";
 
-/**
- * Lifecycle status of a fact.
- * - `active` — normal, eligible for ground-truth surfacing.
- * - `pending` — suggested candidate, never auto-promoted (S9).
- * - `superseded` — lost a deterministic subject+value contradiction (P4); kept for audit, not surfaced.
- * - `contested` — ambiguous subject+value contradiction; withheld from ground truth entirely (P4).
- * - `pinned` — exempt from time-decay, still eligible for ground-truth surfacing, still subject to
- *   contradiction suppression (Section 6 / S8).
- *
- * NAMING — do not conflate `contested` with `contradicted`. They are near-synonymous words for two
- * entirely different mechanisms:
- * - `contested` is a *status* (this enum): two stored facts share a `subject`+scope with different
- *   `value`s and tied precedence — deterministic fact-vs-fact dedup (P4, src/contradiction.ts).
- * - `contradicted` is a *freshness verdict* (`FreshnessVerdict`, never stored in this column): one
- *   fact's own anchor predicate, re-evaluated against the live filesystem/git, positively denied
- *   its proposition — fact-vs-world re-verification (P3, src/anchors.ts).
- * A fact can be either, both, or neither; both independently exclude it from ground truth.
- */
+/** Lifecycle status of a fact. - `active` — normal, eligible for ground-truth surfacing. - `pending` — suggested candidate, never auto-promoted (S9). - `superseded` — lost a deterministic subject+value contradiction (P4); kept for audit, not surfaced. - `contested` — ambiguous subject+value contradiction; withheld from ground truth entirely (P4). - `pinned` — exempt from time-decay, still eligible for ground-truth surfacing, still subject to contradiction suppression (Section 6 / S8). NAMING — do not conflate `contested` with `contradicted`. They are near-synonymous words for two entirely different mechanisms: - `contested` is a *status* (this enum): two stored facts share a `subject`+scope with different `value`s and tied precedence — deterministic fact-vs-fact dedup (P4, src/contradiction.ts). - `contradicted` is a *freshness verdict* (`FreshnessVerdict`, never stored in this column): one fact's own anchor predicate, re-evaluated against the live filesystem/git, positively denied its proposition — fact-vs-world re-verification (P3, src/anchors.ts). A fact can be either, both, or neither; both independently exclude it from ground truth. */
 export const FACT_STATUSES = ["active", "pending", "superseded", "contested", "pinned"] as const;
 export type FactStatus = (typeof FACT_STATUSES)[number];
 
@@ -62,39 +30,11 @@ export interface Fact {
   /** Normalized value for `subject` (e.g. "pnpm"), or null when `subject` is null. */
   readonly value: string | null;
   readonly scope: FactScope;
-  /**
-   * Narrow addition (not in the design plan's literal `facts` column list): which project/path a
-   * `scope="project"|"path"` fact is bound to. Without this, scope cannot be resolved against a
-   * caller-supplied root/context-file at query time. Optional so existing `Fact` object literals
-   * that predate this field keep typechecking; readers should treat a missing value the same as
-   * `null`. `null`/absent for `scope="global"`. An absolute project root directory for
-   * `scope="project"`. An absolute file or directory path for `scope="path"`.
-   */
+  /** Narrow addition (not in the design plan's literal `facts` column list): which project/path a `scope="project"|"path"` fact is bound to. Without this, scope cannot be resolved against a caller-supplied root/context-file at query time. Optional so existing `Fact` object literals that predate this field keep typechecking; readers should treat a missing value the same as `null`. `null`/absent for `scope="global"`. An absolute project root directory for `scope="project"`. An absolute file or directory path for `scope="path"`. */
   readonly scopeRoot?: string | null;
-  /**
-   * Repository-relative identity of the project this `scope="project"` fact was captured in
-   * (`src/projectIdentity.ts`), or null/absent when none was available -- no repository, no
-   * unambiguous remote, or identity switched off via `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path`.
-   *
-   * Widens the `scopeRoot` binding without replacing it: a project fact is in scope when the paths
-   * match (as before) *or* both sides carry the same identity, so the same repository checked out
-   * at a second path, in a worktree, or on another machine still surfaces its own facts. Never
-   * consulted for `global` (in scope everywhere) or `path` scope (bound to a file, not a project).
-   */
+  /** Repository-relative identity of the project this `scope="project"` fact was captured in (`src/projectIdentity.ts`), or null/absent when none was available -- no repository, no unambiguous remote, or identity switched off via `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path`. Widens the `scopeRoot` binding without replacing it: a project fact is in scope when the paths match (as before) *or* both sides carry the same identity, so the same repository checked out at a second path, in a worktree, or on another machine still surfaces its own facts. Never consulted for `global` (in scope everywhere) or `path` scope (bound to a file, not a project). */
   readonly scopeRepo?: string | null;
-  /**
-   * The `--root` this fact was captured under (`src/capture.ts`'s `applyOptionalFields`), or
-   * null/absent when unknown -- a row written before this column existed, or one imported from an
-   * envelope that carries none. Distinct from `scopeRoot`: for `scope="path"` the two differ (the
-   * fact is bound to a file, but its anchor -- if any -- is meant to be evaluated against the
-   * project root it was captured in, which is recorded nowhere else); for `scope="project"` the two
-   * are always equal at capture time; `scope="global"` has no `scopeRoot` at all, yet its anchor (if
-   * present) still needs a root to mean anything, which only this field supplies.
-   *
-   * `retrieval.ts`'s `anchorRootFor` is the sole reader: null here means "capture root unknown", and
-   * every caller must treat that as `unverified`, never as `affirmed` or `contradicted` -- asserting
-   * either off the wrong root is worse than admitting mem cannot check (design principle P3).
-   */
+  /** The `--root` this fact was captured under (`src/capture.ts`'s `applyOptionalFields`), or null/absent when unknown -- a row written before this column existed, or one imported from an envelope that carries none. Distinct from `scopeRoot`: for `scope="path"` the two differ (the fact is bound to a file, but its anchor -- if any -- is meant to be evaluated against the project root it was captured in, which is recorded nowhere else); for `scope="project"` the two are always equal at capture time; `scope="global"` has no `scopeRoot` at all, yet its anchor (if present) still needs a root to mean anything, which only this field supplies. `retrieval.ts`'s `anchorRootFor` is the sole reader: null here means "capture root unknown", and every caller must treat that as `unverified`, never as `affirmed` or `contradicted` -- asserting either off the wrong root is worse than admitting mem cannot check (design principle P3). */
   readonly captureRoot?: string | null;
   readonly source_type: FactSourceType;
   /** Reference to the originating conversation/message, or null if unavailable. */
@@ -103,102 +43,31 @@ export interface Fact {
   readonly captured_at: string;
   /** Read-only filesystem/git predicate string (Section 3), or null if the fact has no anchor. */
   readonly anchor: string | null;
-  /**
-   * The rationale behind the fact -- chiefly a decision's or a correction's reason -- or null when
-   * none was recorded. Surfaced beside the claim so a later session reads why it holds instead of
-   * relitigating it. Optional for the same fixture back-compat reason as `epoch` below; storage.ts's
-   * `rowToFact` always populates it from the real `facts.why` column.
-   */
+  /** The rationale behind the fact -- chiefly a decision's or a correction's reason -- or null when none was recorded. Surfaced beside the claim so a later session reads why it holds instead of relitigating it. Optional for the same fixture back-compat reason as `epoch` below; storage.ts's `rowToFact` always populates it from the real `facts.why` column. */
   readonly why?: string | null;
   readonly status: FactStatus;
   /** Confidence in [0, 1]. */
   readonly confidence: number;
   /** Embedding vector for hybrid retrieval, or null when this fact has not been embedded -- which is every fact until an embeddings endpoint is configured (src/embeddings.ts), and ranking is BM25-only. */
   readonly embedding: Float32Array | null;
-  /**
-   * The write epoch (src/storage.ts's monotonic `getEpoch`/`bumpEpoch`) this fact was last inserted
-   * or updated at -- the backing field for `mem review --since-epoch <n>`. Optional, same rationale
-   * as `scopeRoot` above: existing `Fact` object literals that predate this field (mostly test
-   * fixtures) keep typechecking without updating every one of them; readers should treat a missing
-   * value the same as `0` ("epoch unknown / predates the epoch column"). storage.ts's `rowToFact`
-   * always populates it from the real `facts.epoch` column.
-   */
+  /** The write epoch (src/storage.ts's monotonic `getEpoch`/`bumpEpoch`) this fact was last inserted or updated at -- the backing field for `mem review --since-epoch <n>`. Optional, same rationale as `scopeRoot` above: existing `Fact` object literals that predate this field (mostly test fixtures) keep typechecking without updating every one of them; readers should treat a missing value the same as `0` ("epoch unknown / predates the epoch column"). storage.ts's `rowToFact` always populates it from the real `facts.epoch` column. */
   readonly epoch?: number;
-  /**
-   * ISO 8601 timestamp of the most recent write to `status`, or null/absent for rows written
-   * before this column existed. Deliberately separate from `captured_at`, which never moves:
-   * every "how long has this fact been in *its current state*" question -- the superseded-fact GC
-   * window and the pin re-confirmation nudge (both Section 6) -- keys on this. Readers must treat
-   * an absent/null value as "unknown" and fall back to `captured_at`, which is what those clocks
-   * incorrectly used unconditionally before this column existed.
-   */
+  /** ISO 8601 timestamp of the most recent write to `status`, or null/absent for rows written before this column existed. Deliberately separate from `captured_at`, which never moves: every "how long has this fact been in *its current state*" question -- the superseded-fact GC window and the pin re-confirmation nudge (both Section 6) -- keys on this. Readers must treat an absent/null value as "unknown" and fall back to `captured_at`, which is what those clocks incorrectly used unconditionally before this column existed. */
   readonly status_changed_at?: string | null;
-  /**
-   * The `status` this fact held immediately before its current one, or null when the status has
-   * never changed. Makes a reversible status transition undoable without guessing: contradiction
-   * reinstatement (src/contradiction.ts) restores a formerly-`pinned` fact to `pinned` instead of
-   * silently demoting a deliberate user pin to `active`. Preserved, not overwritten, when a status
-   * is re-written to the value it already held (e.g. re-pinning to refresh the reconfirm clock).
-   */
+  /** The `status` this fact held immediately before its current one, or null when the status has never changed. Makes a reversible status transition undoable without guessing: contradiction reinstatement (src/contradiction.ts) restores a formerly-`pinned` fact to `pinned` instead of silently demoting a deliberate user pin to `active`. Preserved, not overwritten, when a status is re-written to the value it already held (e.g. re-pinning to refresh the reconfirm clock). */
   readonly prior_status?: FactStatus | null;
-  /**
-   * ISO 8601 timestamp of the most recent recall that surfaced this fact, or null/absent if it has
-   * never been surfaced (or predates this column). Backing field for `listStaleUnsurfacedFacts`'s
-   * stale-supersede eligibility check -- an export that dropped this made a restored, previously
-   * in-use fact look never-surfaced, so `mem consolidate --stale --apply` would supersede it on the
-   * next run. Optional for the same reason as `status_changed_at`: existing `Fact` literals that
-   * predate the column keep typechecking.
-   */
+  /** ISO 8601 timestamp of the most recent recall that surfaced this fact, or null/absent if it has never been surfaced (or predates this column). Backing field for `listStaleUnsurfacedFacts`'s stale-supersede eligibility check -- an export that dropped this made a restored, previously in-use fact look never-surfaced, so `mem consolidate --stale --apply` would supersede it on the next run. Optional for the same reason as `status_changed_at`: existing `Fact` literals that predate the column keep typechecking. */
   readonly last_surfaced_at?: string | null;
-  /**
-   * ISO 8601 timestamp of the most recent facet extraction pass over this fact, or null/absent if
-   * it predates the column. Backing field for `listFactsNeedingTerms`/`countFactsWithTerms`: a fact
-   * whose text is entirely stopwords legitimately extracts zero `fact_terms` rows, and keying
-   * "needs extraction" off row absence instead of this column would re-offer it to
-   * `mem facets --backfill` forever. Set by `replaceFactTerms` whether or not it has anything to
-   * insert -- never by the user, and untouched by `mem edit` unless the edit rewrites the text.
-   */
+  /** ISO 8601 timestamp of the most recent facet extraction pass over this fact, or null/absent if it predates the column. Backing field for `listFactsNeedingTerms`/`countFactsWithTerms`: a fact whose text is entirely stopwords legitimately extracts zero `fact_terms` rows, and keying "needs extraction" off row absence instead of this column would re-offer it to `mem facets --backfill` forever. Set by `replaceFactTerms` whether or not it has anything to insert -- never by the user, and untouched by `mem edit` unless the edit rewrites the text. */
   readonly terms_checked_at?: string | null;
-  /**
-   * Count of repeat sightings of a `pending` fact -- a candidate `mem scan-session`/`mem import
-   * --from-md` matched to text this fact already holds, restated in a later session or file pass
-   * (`src/capture.ts`'s `recordSighting`). Optional/absent for the same reason as the columns
-   * above: existing `Fact` object literals that predate the field keep typechecking; readers should
-   * treat a missing value the same as `0`. Evidence for a human reading `mem review`'s pending
-   * bucket only -- never read by `mem review --promote`, `resolveContradictions`, or any
-   * ground-truth surface, so no number of sightings can promote a `pending` fact on its own.
-   */
+  /** Count of repeat sightings of a `pending` fact -- a candidate `mem scan-session`/`mem import --from-md` matched to text this fact already holds, restated in a later session or file pass (`src/capture.ts`'s `recordSighting`). Optional/absent for the same reason as the columns above: existing `Fact` object literals that predate the field keep typechecking; readers should treat a missing value the same as `0`. Evidence for a human reading `mem review`'s pending bucket only -- never read by `mem review --promote`, `resolveContradictions`, or any ground-truth surface, so no number of sightings can promote a `pending` fact on its own. */
   readonly sightings?: number;
 }
 
-/**
- * Three-valued anchor verdict (design principle P3, review finding S1).
- * Produced by evaluating a fact's `anchor` predicate against a root
- * (see src/anchors.ts). Only `affirmed` is ground truth; `unverified` means
- * the anchor could not confirm or deny the proposition (no anchor, missing
- * file, unparseable predicate, non-git root, etc.) and the fact should
- * surface only as a hint-to-verify; `contradicted` means the anchor
- * positively denied the proposition and the fact must be suppressed from
- * ground-truth surfacing and flagged in `review`.
- *
- * NAMING — `contradicted` (this verdict, computed fresh per query, never persisted) is a different
- * mechanism from the persisted `contested` status: see the note on `FactStatus` above.
- */
+/** Three-valued anchor verdict (design principle P3, review finding S1). Produced by evaluating a fact's `anchor` predicate against a root (see src/anchors.ts). Only `affirmed` is ground truth; `unverified` means the anchor could not confirm or deny the proposition (no anchor, missing file, unparseable predicate, non-git root, etc.) and the fact should surface only as a hint-to-verify; `contradicted` means the anchor positively denied the proposition and the fact must be suppressed from ground-truth surfacing and flagged in `review`. NAMING — `contradicted` (this verdict, computed fresh per query, never persisted) is a different mechanism from the persisted `contested` status: see the note on `FactStatus` above. */
 export type FreshnessVerdict = "affirmed" | "unverified" | "contradicted";
 
-/**
- * Fields required/allowed to insert a new fact via storage.insertFact
- * (src/storage.ts). `id` is assigned by storage: a fresh `crypto.randomUUID()`
- * (matching the `facts.id TEXT PRIMARY KEY` column owned by src/db.ts) ONLY
- * when the caller omits `id`; when the caller supplies `id`, storage uses it
- * as-is. That is what lets a full-fidelity JSON re-import (src/exportImport.ts)
- * preserve a fact's original id across an export/import round trip.
- * `captured_at` defaults to `new Date().toISOString()`, `status` defaults to
- * `'active'`, and `confidence` defaults to `1.0` when omitted. Field names and
- * casing mirror `Fact` exactly (including the snake_case of `source_type`,
- * `source_ref`, and `captured_at`) so a `Fact` minus `id` is structurally a
- * `NewFact`.
- */
+/** Fields required/allowed to insert a new fact via storage.insertFact (src/storage.ts). `id` is assigned by storage: a fresh `crypto.randomUUID()` (matching the `facts.id TEXT PRIMARY KEY` column owned by src/db.ts) ONLY when the caller omits `id`; when the caller supplies `id`, storage uses it as-is. That is what lets a full-fidelity JSON re-import (src/exportImport.ts) preserve a fact's original id across an export/import round trip. `captured_at` defaults to `new Date().toISOString()`, `status` defaults to `'active'`, and `confidence` defaults to `1.0` when omitted. Field names and casing mirror `Fact` exactly (including the snake_case of `source_type`, `source_ref`, and `captured_at`) so a `Fact` minus `id` is structurally a `NewFact`. */
 export interface NewFact {
   text: string;
   kind: FactKind;
@@ -230,15 +99,7 @@ export interface NewFact {
   prior_status?: FactStatus | null;
 }
 
-/**
- * Mutable fields for storage.updateFact (src/storage.ts). Omitted fields are
- * left unchanged; an explicit `null` clears a nullable column. `kind`,
- * `source_type`, and `captured_at` are intentionally not editable here --
- * changing what a fact fundamentally *is* or when it was captured is a new
- * fact, not an edit (see design plan P4: contradiction resolution keys off
- * `captured_at` for precedence, so silently rewriting it would corrupt that
- * history).
- */
+/** Mutable fields for storage.updateFact (src/storage.ts). Omitted fields are left unchanged; an explicit `null` clears a nullable column. `kind`, `source_type`, and `captured_at` are intentionally not editable here -- changing what a fact fundamentally *is* or when it was captured is a new fact, not an edit (see design plan P4: contradiction resolution keys off `captured_at` for precedence, so silently rewriting it would corrupt that history). */
 export interface FactUpdate {
   text?: string;
   subject?: string | null;
@@ -246,12 +107,7 @@ export interface FactUpdate {
   scope?: FactScope;
   scopeRoot?: string | null;
   scopeRepo?: string | null;
-  /**
-   * The root an edited `anchor` was validated against, and the root that anchor will later be
-   * evaluated against. `mem edit` re-validates a new anchor's path against its own `--root`, so
-   * leaving the capture-time value in place would pin a freshly written anchor to the tree the fact
-   * was first captured in -- the same wrong-root evaluation `anchorRootFor` exists to prevent.
-   */
+  /** The root an edited `anchor` was validated against, and the root that anchor will later be evaluated against. `mem edit` re-validates a new anchor's path against its own `--root`, so leaving the capture-time value in place would pin a freshly written anchor to the tree the fact was first captured in -- the same wrong-root evaluation `anchorRootFor` exists to prevent. */
   captureRoot?: string | null;
   anchor?: string | null;
   why?: string | null;
@@ -275,14 +131,7 @@ export interface FactFilter {
   limit?: number;
 }
 
-/**
- * An audit-only excerpt tied to a fact, per the design plan's `sources` table
- * (Section 3): "raw excerpts referenced by fact id ... for audit/provenance
- * only -- never a primary retrieval tier." Never the full source content --
- * callers are responsible for redacting/truncating before calling
- * storage.insertSource; storage.ts does not screen or truncate content itself
- * (secret screening is a capture-pipeline concern, design plan P7).
- */
+/** An audit-only excerpt tied to a fact, per the design plan's `sources` table (Section 3): "raw excerpts referenced by fact id ... for audit/provenance only -- never a primary retrieval tier." Never the full source content -- callers are responsible for redacting/truncating before calling storage.insertSource; storage.ts does not screen or truncate content itself (secret screening is a capture-pipeline concern, design plan P7). */
 export interface Source {
   readonly id: string;
   readonly factId: string;
@@ -298,12 +147,7 @@ export interface NewSource {
   storedAt?: string;
 }
 
-/**
- * A discovered, non-destructive relation between two facts -- `mem consolidate --related`'s
- * persisted output. `factIdA`/`factIdB` are always in canonical order (`factIdA <= factIdB`
- * lexicographically), so a pair is one row regardless of which side a caller names first;
- * storage.upsertFactLink enforces the ordering, this type only documents it.
- */
+/** A discovered, non-destructive relation between two facts -- `mem consolidate --related`'s persisted output. `factIdA`/`factIdB` are always in canonical order (`factIdA <= factIdB` lexicographically), so a pair is one row regardless of which side a caller names first; storage.upsertFactLink enforces the ordering, this type only documents it. */
 export interface FactLink {
   readonly factIdA: string;
   readonly factIdB: string;

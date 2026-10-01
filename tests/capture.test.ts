@@ -19,10 +19,7 @@ let db: Database.Database;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-capture-test-"));
-  // storage.ts's insertFact (which capture.ts writes through) needs the full storage schema
-  // (facts.epoch, added by ensureStorageSchema's migration) -- openStorage() is what every real
-  // `mem` invocation actually opens with (cli.ts's withDb), so tests exercising capture.ts should
-  // too, not the narrower db.ts-only openDb().
+  // storage.ts's insertFact (which capture.ts writes through) needs the full storage schema (facts.epoch, added by ensureStorageSchema's migration) -- openStorage() is what every real `mem` invocation actually opens with (cli.ts's withDb), so tests exercising capture.ts should too, not the narrower db.ts-only openDb().
   db = openStorage(join(root, "mem.db"));
 });
 
@@ -75,9 +72,7 @@ describe("captureExplicit (happy path)", () => {
     expect(fact.subject).toBe("package manager");
     expect(fact.value).toBe("pnpm");
 
-    // Both orphans trip the same pairing guard, but CaptureValidationError covers 19 distinct
-    // messages -- without pinning one, either assertion would be satisfied by any other guard in
-    // the function, including the length cap the very next test exists to check.
+    // Both orphans trip the same pairing guard, but CaptureValidationError covers 19 distinct messages -- without pinning one, either assertion would be satisfied by any other guard in the function, including the length cap the very next test exists to check.
     expect(() => captureExplicit(db, { text: "orphan subject", kind: "fact", subject: "x", root })).toThrow(
       CaptureValidationError
     );
@@ -96,8 +91,7 @@ describe("captureExplicit (happy path)", () => {
     expect(() => captureExplicit(db, { text: "x".repeat(501), kind: "fact", root })).toThrow(
       CaptureValidationError
     );
-    // Both halves of this test raise the same class for different reasons, so the class alone lets
-    // either one pass on the other's guard. The messages are what keep them separate assertions.
+    // Both halves of this test raise the same class for different reasons, so the class alone lets either one pass on the other's guard. The messages are what keep them separate assertions.
     expect(() => captureExplicit(db, { text: "x".repeat(501), kind: "fact", root })).toThrow(/fact text exceeds \d+ characters/u);
     expect(() =>
       // @ts-expect-error -- intentionally invalid kind to exercise runtime validation
@@ -134,10 +128,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("accepts every predicate anchors.ts documents, not just the four ANCHOR_ARITY originally listed", () => {
-    // Regression test: ANCHOR_ARITY (capture.ts's syntax gate for mem remember/mem edit --anchor) had
-    // drifted out of sync with anchors.ts's actual predicate set, silently rejecting six of the ten
-    // documented predicates -- including package-version, the predicate this session just added -- as
-    // "unknown predicate" even though anchors.ts fully evaluates them. Each of these must validate.
+    // Regression test: ANCHOR_ARITY (capture.ts's syntax gate for mem remember/mem edit --anchor) had drifted out of sync with anchors.ts's actual predicate set, silently rejecting six of the ten documented predicates -- including package-version, the predicate this session just added -- as "unknown predicate" even though anchors.ts fully evaluates them. Each of these must validate.
     const wellFormedAnchors = [
       "file-contains README.md hello",
       "file-not-contains README.md nope",
@@ -171,10 +162,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long nested-path anchor argument", () => {
-    // A perfectly ordinary file-exists anchor over a deeply nested path has no secret in it, but its
-    // path argument alone is a >=32-char mixed-case/slash/dash token whose entropy clears the generic
-    // heuristic's threshold -- this must not block the capture (same false-positive mechanism, and
-    // same slash-scoped fix, as the sourceRef tests below).
+    // A perfectly ordinary file-exists anchor over a deeply nested path has no secret in it, but its path argument alone is a >=32-char mixed-case/slash/dash token whose entropy clears the generic heuristic's threshold -- this must not block the capture (same false-positive mechanism, and same slash-scoped fix, as the sourceRef tests below).
     const { fact } = captureExplicit(db, {
       text: "uses this component",
       kind: "fact",
@@ -185,9 +173,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not false-positive the generic-high-entropy-token secret heuristic on a plausible long path:line sourceRef", () => {
-    // A programmatically-constructed "<path>:<line>" provenance pointer has no secret in it, but a
-    // deeply nested path argument alone is a >=32-char mixed-case/slash/dash token whose entropy
-    // clears the generic heuristic's threshold -- this must not block the capture.
+    // A programmatically-constructed "<path>:<line>" provenance pointer has no secret in it, but a deeply nested path argument alone is a >=32-char mixed-case/slash/dash token whose entropy clears the generic heuristic's threshold -- this must not block the capture.
     const { fact } = captureExplicit(db, {
       text: "uses this component",
       kind: "fact",
@@ -198,10 +184,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not false-positive the generic heuristic on a Windows transcript sourceRef whose session UUID is high-entropy", () => {
-    // `mem scan-session` stamps `<transcript path>#turn<n>`, and Claude Code names a transcript
-    // after its session UUID. On POSIX the whole path is one slash-bearing token and is exempt; on
-    // Windows `\` is outside GENERIC_TOKEN's alphabet, so the bare UUID was scored on its own, and
-    // this one (3.875 bits) blocked every suggestion its Stop hook filed.
+    // `mem scan-session` stamps `<transcript path>#turn<n>`, and Claude Code names a transcript after its session UUID. On POSIX the whole path is one slash-bearing token and is exempt; on Windows `\` is outside GENERIC_TOKEN's alphabet, so the bare UUID was scored on its own, and this one (3.875 bits) blocked every suggestion its Stop hook filed.
     const sourceRef =
       "C:\\Users\\dev\\.claude\\projects\\C--Projects-site\\e2cc87d1-b0a9-4f05-b132-40438b48d4d6.jsonl#turn3";
     const { fact } = captureExplicit(db, { text: "uses this component", kind: "fact", sourceRef, root });
@@ -220,9 +203,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("still catches a prefix-less high-entropy secret (no named pattern, no slash) embedded in a sourceRef", () => {
-    // sourceRef must not be a blanket exemption from screening: `mem remember --source-ref <ref>`
-    // accepts an arbitrary user/agent-supplied string, not just the programmatic "<path>:<line>"
-    // pointer the import path produces, so a real unlabeled secret placed there must still be caught.
+    // sourceRef must not be a blanket exemption from screening: `mem remember --source-ref <ref>` accepts an arbitrary user/agent-supplied string, not just the programmatic "<path>:<line>" pointer the import path produces, so a real unlabeled secret placed there must still be caught.
     expect(() =>
       captureExplicit(db, {
         text: "suspicious source ref",
@@ -245,9 +226,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("still catches a prefix-less high-entropy secret (no named pattern, no slash) embedded in an anchor argument", () => {
-    // The slash-scoped entropy exemption above must not become a blanket exemption for the whole
-    // `anchor` field: a token with no path separator and no recognized SECRET_PATTERNS prefix is
-    // exactly the case the generic heuristic exists to catch, and must still be caught here.
+    // The slash-scoped entropy exemption above must not become a blanket exemption for the whole `anchor` field: a token with no path separator and no recognized SECRET_PATTERNS prefix is exactly the case the generic heuristic exists to catch, and must still be caught here.
     expect(() =>
       captureExplicit(db, {
         text: "suspicious anchor",
@@ -259,10 +238,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("stores a fact whose text quotes an ordinary lowercase file path (regression: path-shaped tokens are not high-entropy secrets)", () => {
-    // `agent-self-compaction/superman-state` is 36 chars over the 32-char GENERIC_TOKEN floor and
-    // scores 3.88 against the 3.8 entropy cutoff purely from directory-name variety -- the exact
-    // false positive the anchor/sourceRef exemption already documents, which also blocked writing
-    // a perfectly benign decision fact that cited a file path.
+    // `agent-self-compaction/superman-state` is 36 chars over the 32-char GENERIC_TOKEN floor and scores 3.88 against the 3.8 entropy cutoff purely from directory-name variety -- the exact false positive the anchor/sourceRef exemption already documents, which also blocked writing a perfectly benign decision fact that cited a file path.
     const { fact } = captureExplicit(db, {
       text: "route task scratch to agent-self-compaction/superman-state, durable facts to mem",
       kind: "decision",
@@ -272,9 +248,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("still catches an AWS secret access key in text even though it contains slashes", () => {
-    // The path exemption must be shape-based, never merely slash-based: a real AWS secret access
-    // key carries two slashes and is precisely the prefix-less credential the entropy fallback
-    // exists to catch. Its uppercase segments must defeat the exemption.
+    // The path exemption must be shape-based, never merely slash-based: a real AWS secret access key carries two slashes and is precisely the prefix-less credential the entropy fallback exists to catch. Its uppercase segments must defeat the exemption.
     expect(() =>
       captureExplicit(db, {
         text: "the key is wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
@@ -295,10 +269,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not exempt a single long lowercase run that merely carries one slash", () => {
-    // Segment count alone is not enough: `<36-char-run>/x9` does split into two segments that are
-    // each lowercase-word-shaped, so the exemption additionally caps the longest unbroken run
-    // inside a segment. Real path segments that long are words joined by `-`/`_`/`.`; an unbroken
-    // run is the shape of the lowercase random token this entropy fallback exists to catch.
+    // Segment count alone is not enough: `<36-char-run>/x9` does split into two segments that are each lowercase-word-shaped, so the exemption additionally caps the longest unbroken run inside a segment. Real path segments that long are words joined by `-`/`_`/`.`; an unbroken run is the shape of the lowercase random token this entropy fallback exists to catch.
     expect(() =>
       captureExplicit(db, {
         text: "value qwertyuiopasdfghjklzxcvbnmqwertyuiop/x9",
@@ -309,12 +280,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not false-positive the generic-high-entropy-token secret heuristic on a slash-free kebab subject/value key (regression: subagent-git-discard-prohibition)", () => {
-    // `isPathShapedToken` already exempted this exact word-shape, but only when it contains a
-    // slash -- it returns early on `!token.includes("/")`. A `mem remember --subject`/`--value`
-    // key never has a slash, so a descriptive kebab identifier of 32+ chars (this project's own
-    // CLAUDE.md tells agents to pass exactly this kind of key) fell straight through to the
-    // generic entropy fallback and was refused as a secret. Both fields are exercised because the
-    // reported failure flagged subject and value together.
+    // `isPathShapedToken` already exempted this exact word-shape, but only when it contains a slash -- it returns early on `!token.includes("/")`. A `mem remember --subject`/`--value` key never has a slash, so a descriptive kebab identifier of 32+ chars (this project's own CLAUDE.md tells agents to pass exactly this kind of key) fell straight through to the generic entropy fallback and was refused as a secret. Both fields are exercised because the reported failure flagged subject and value together.
     const { fact } = captureExplicit(db, {
       text: "never run git checkout -- to discard a subagent's uncommitted work",
       kind: "decision",
@@ -327,10 +293,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not exempt a slash-free lowercase blob whose word carries a run past MAX_UNBROKEN_SEGMENT_RUN", () => {
-    // Two hyphen-delimited words is not sufficient on its own: one word here is a 37-char unbroken
-    // lowercase run, well past a real English word's length and past the same run cap
-    // `isPathSegment` already enforces for a path segment's internal runs -- this must still be
-    // caught by the generic entropy fallback.
+    // Two hyphen-delimited words is not sufficient on its own: one word here is a 37-char unbroken lowercase run, well past a real English word's length and past the same run cap `isPathSegment` already enforces for a path segment's internal runs -- this must still be caught by the generic entropy fallback.
     expect(() =>
       captureExplicit(db, {
         text: "value qwertyuiopasdfghjklzxcvbnmqwertyuiop-ab",
@@ -341,9 +304,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not exempt a slash-free kebab-shaped token whose words carry digits", () => {
-    // The exemption requires every word to be pure lowercase letters. A prefix-less secret drawn
-    // from a base64/hex alphabet essentially always carries digits, so a digit anywhere in a word
-    // must disqualify the whole token from the exemption.
+    // The exemption requires every word to be pure lowercase letters. A prefix-less secret drawn from a base64/hex alphabet essentially always carries digits, so a digit anywhere in a word must disqualify the whole token from the exemption.
     expect(() =>
       captureExplicit(db, {
         text: "value subagent-git2-discard-prohibition9",
@@ -354,8 +315,7 @@ describe("captureExplicit (happy path)", () => {
   });
 
   it("does not exempt a slash-free kebab-shaped token with mixed case", () => {
-    // Mixed case is the other half of "essentially always" for a prefix-less secret; the exemption
-    // must reject it exactly as isPathShapedToken already does for a mixed-case path segment.
+    // Mixed case is the other half of "essentially always" for a prefix-less secret; the exemption must reject it exactly as isPathShapedToken already does for a mixed-case path segment.
     expect(() =>
       captureExplicit(db, {
         text: "value Subagent-Git-Discard-Prohibition",
@@ -396,17 +356,7 @@ describe("captureExplicit (happy path)", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── concurrent-reaffirm race ───────────────────────────────────────────────────────────────────────────
 
-/**
- * Regression: `findReaffirmableFact` used to run outside the transaction that decides whether to
- * reaffirm or insert. Two concurrent `mem remember` of the same sentence could therefore both read
- * "nothing to reaffirm" and both insert -- the exact duplicate the reaffirm path exists to prevent.
- *
- * The interleave is reproduced exactly, mirroring tests/exportImport.test.ts's
- * `dbWithRivalInsertAtLockTime`: `db` is proxied so a rival `captureExplicit` of the identical
- * sentence fires the moment `db.transaction(...)` is first called to build the write's transaction
- * wrapper -- the earliest point at which the buggy code had already finished its (unguarded) read.
- * Racing two real processes would test the same thing nondeterministically.
- */
+/** Regression: `findReaffirmableFact` used to run outside the transaction that decides whether to reaffirm or insert. Two concurrent `mem remember` of the same sentence could therefore both read "nothing to reaffirm" and both insert -- the exact duplicate the reaffirm path exists to prevent. The interleave is reproduced exactly, mirroring tests/exportImport.test.ts's `dbWithRivalInsertAtLockTime`: `db` is proxied so a rival `captureExplicit` of the identical sentence fires the moment `db.transaction(...)` is first called to build the write's transaction wrapper -- the earliest point at which the buggy code had already finished its (unguarded) read. Racing two real processes would test the same thing nondeterministically. */
 describe("regression: a reaffirmable fact inserted between the read and the write lock", () => {
   const SENTENCE = { text: "uses pnpm not npm", kind: "preference" as const };
 
@@ -421,8 +371,7 @@ describe("regression: a reaffirmable fact inserted between the read and the writ
         }
         return (fn: (...args: unknown[]) => unknown): unknown => {
           if (!fired) {
-            // Set before capturing: the rival's own captureExplicit call also calls
-            // db.transaction() and would re-enter here otherwise.
+            // Set before capturing: the rival's own captureExplicit call also calls db.transaction() and would re-enter here otherwise.
             fired = true;
             captureExplicit(target, { ...SENTENCE, root });
           }
@@ -437,8 +386,7 @@ describe("regression: a reaffirmable fact inserted between the read and the writ
 
     const { fact, reaffirmed } = captureExplicit(raced, { ...SENTENCE, root });
 
-    // Whichever side is treated as the "second" write, it must land as a reaffirm of the rival's
-    // row, never as a second row for the same sentence.
+    // Whichever side is treated as the "second" write, it must land as a reaffirm of the rival's row, never as a second row for the same sentence.
     expect(reaffirmed).toBe(true);
     const rows = db
       .prepare<[string], { id: string }>("SELECT id FROM facts WHERE text = ? AND status IN ('active', 'pinned')")
@@ -449,13 +397,7 @@ describe("regression: a reaffirmable fact inserted between the read and the writ
 });
 
 describe("regression: stating a fact explicitly resolves the pending suggestion that proposed it", () => {
-  /**
-   * `captureSuggested` files a pending suggestion; then `captureExplicit` restates the identical
-   * text/kind/scope/subject/value. Before the fix, `findReaffirmableFact` only queried
-   * `status IN ('active', 'pinned')`, so the pending row was invisible to it: the restatement wrote
-   * a second, active row and left the suggestion queued forever, waiting on a confirmation the user
-   * had already given by saying the thing outright.
-   */
+  /** `captureSuggested` files a pending suggestion; then `captureExplicit` restates the identical text/kind/scope/subject/value. Before the fix, `findReaffirmableFact` only queried `status IN ('active', 'pinned')`, so the pending row was invisible to it: the restatement wrote a second, active row and left the suggestion queued forever, waiting on a confirmation the user had already given by saying the thing outright. */
   it("promotes the matching pending suggestion to active instead of inserting a duplicate row", () => {
     const suggested = captureSuggested(db, {
       text: "always run lint before commit",
@@ -486,13 +428,7 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
   });
 
   it("resolves every matching pending duplicate, not just the first, when more than one was suggested", () => {
-    // Two identical `pending` rows for the same sentence -- seeded directly with `insertFact` rather
-    // than via two `captureSuggested` calls, since `captureSuggested` now collapses a second
-    // identical suggestion into a sighting on the first (see its own tests). A duplicate pair can
-    // still exist in a store `captureExplicit` has to cope with -- an older row predating that fix,
-    // or two rows whose text only normalizes to the same sentence through different original
-    // spellings -- so `captureExplicit`'s "supersede every matching duplicate, not just the first"
-    // behavior still needs its own coverage independent of how the duplicates got there.
+    // Two identical `pending` rows for the same sentence -- seeded directly with `insertFact` rather than via two `captureSuggested` calls, since `captureSuggested` now collapses a second identical suggestion into a sighting on the first (see its own tests). A duplicate pair can still exist in a store `captureExplicit` has to cope with -- an older row predating that fix, or two rows whose text only normalizes to the same sentence through different original spellings -- so `captureExplicit`'s "supersede every matching duplicate, not just the first" behavior still needs its own coverage independent of how the duplicates got there.
     const first = insertFact(db, {
       text: "always tag releases before publishing",
       kind: "preference",
@@ -540,10 +476,7 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
   });
 
   it("when two pending duplicates share a captured_at timestamp, promotes the earlier-inserted (earlier rowid), not the lexicographically-smaller id", () => {
-    // Nondeterminism regression: captured_at can be identical when two facts are captured in the
-    // same millisecond (e.g., `mem import --from-md` and `mem scan-session` in one process loop).
-    // The SQL ORDER BY clause must use rowid as a tiebreaker, not id (a random UUID), to ensure
-    // "the earlier-suggested row" is deterministically the one promoted to active.
+    // Nondeterminism regression: captured_at can be identical when two facts are captured in the same millisecond (e.g., `mem import --from-md` and `mem scan-session` in one process loop). The SQL ORDER BY clause must use rowid as a tiebreaker, not id (a random UUID), to ensure "the earlier-suggested row" is deterministically the one promoted to active.
     const sameTimestamp = "2026-01-01T12:00:00.000Z";
     const firstId = "zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"; // Lexicographically larger
     const secondId = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"; // Lexicographically smaller
@@ -618,8 +551,7 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
         root,
       });
 
-      // Different project binding: this must be a fresh active row, not a promotion of the other
-      // project's queued suggestion.
+      // Different project binding: this must be a fresh active row, not a promotion of the other project's queued suggestion.
       expect(result.fact.id).not.toBe(suggested.fact.id);
       expect(result.promotedFromPending).toBeUndefined();
       expect(result.reaffirmed).toBeUndefined();
@@ -660,8 +592,7 @@ describe("captureSuggested -- derived-source facts never auto-promote (design pl
       root,
     });
     expect(fact.source_type).toBe("user");
-    // The critical invariant under test: whatever sourceType is requested, captureSuggested has
-    // exactly one hardcoded status assignment and it is never "active".
+    // The critical invariant under test: whatever sourceType is requested, captureSuggested has exactly one hardcoded status assignment and it is never "active".
     expect(fact.status).toBe("pending");
 
     const row = factRow(fact.id);
@@ -691,13 +622,7 @@ describe("captureSuggested -- derived-source facts never auto-promote (design pl
   });
 });
 
-// ── captureSuggested collapses a repeat suggestion into a sighting ─────────────────────────────
-//
-// `mem scan-session`/`mem import --from-md` already record a sighting instead of a second `pending`
-// row when their own `factsByTextHash` + `isBoundToRoot` lookup matches; `captureSuggested` (the
-// function `mem suggest <text>` calls directly, with no such pre-check of its own) did not, so the
-// identical repetition counted differently depending on which command saw it. These tests pin the
-// closed gap and its boundary.
+// ── captureSuggested collapses a repeat suggestion into a sighting ───────────────────────────── `mem scan-session`/`mem import --from-md` already record a sighting instead of a second `pending` row when their own `factsByTextHash` + `isBoundToRoot` lookup matches; `captureSuggested` (the function `mem suggest <text>` calls directly, with no such pre-check of its own) did not, so the identical repetition counted differently depending on which command saw it. These tests pin the closed gap and its boundary.
 describe("captureSuggested -- a repeat suggestion sights the existing pending fact instead of duplicating it", () => {
   function sightingsOf(id: string): number {
     return (db.prepare("SELECT sightings FROM facts WHERE id = ?").get(id) as { sightings: number }).sightings;
@@ -721,9 +646,7 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     const second = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", confidence: 0.99, root });
 
     expect(second.fact.status).toBe("pending");
-    // The sighting reuses the first call's stored fact untouched -- a later call's (higher, clamped)
-    // requested confidence is not applied to it, exactly as `recordSighting`'s own doc comment
-    // requires ("never touches status", and nothing in it touches confidence either).
+    // The sighting reuses the first call's stored fact untouched -- a later call's (higher, clamped) requested confidence is not applied to it, exactly as `recordSighting`'s own doc comment requires ("never touches status", and nothing in it touches confidence either).
     expect(second.fact.confidence).toBe(first.confidence);
     const row = factRow(first.id);
     expect(row.status).toBe("pending");
@@ -749,9 +672,7 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     });
     expect(unrelated.status).toBe("pending");
 
-    // Same text, this project's root: `isBoundToRoot` (the same predicate `mem scan-session`/
-    // `mem import --from-md` filter with) excludes a project-scoped fact bound to a different root,
-    // so this must insert a new row rather than sight the unrelated one.
+    // Same text, this project's root: `isBoundToRoot` (the same predicate `mem scan-session`/ `mem import --from-md` filter with) excludes a project-scoped fact bound to a different root, so this must insert a new row rather than sight the unrelated one.
     const here = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", scope: "project", root });
     expect(here.sighted).toBeUndefined();
     expect(here.fact.id).not.toBe(unrelated.id);
@@ -763,11 +684,7 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     expect(active.status).toBe("active");
 
     const suggested = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
-    // Two separate boundaries, both taken from `src/import.ts`. No sighting, because only a
-    // `pending` row has one to record against (`active.sightings` stays untouched). And no insert
-    // either, because `import.ts` skips on *any* bound match (`skipped_known`) -- filing a pending
-    // row for a sentence already held as `active` queues a human decision that was already made,
-    // which is precisely the noise `mem review` exists to be free of.
+    // Two separate boundaries, both taken from `src/import.ts`. No sighting, because only a `pending` row has one to record against (`active.sightings` stays untouched). And no insert either, because `import.ts` skips on *any* bound match (`skipped_known`) -- filing a pending row for a sentence already held as `active` queues a human decision that was already made, which is precisely the noise `mem review` exists to be free of.
     expect(suggested.sighted).toBeUndefined();
     expect(suggested.alreadyKnown).toBe(true);
     expect(suggested.fact.id).toBe(active.id);
@@ -782,9 +699,7 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     db.prepare("UPDATE facts SET status = 'superseded' WHERE id = ?").run(first.id);
 
     const suggested = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", root });
-    // A superseded row is a decision already made and then revisited. Re-queueing the identical
-    // sentence as `pending` would silently re-litigate it through `mem review` rather than through
-    // `mem edit`/`captureExplicit`, which is where a genuine reversal belongs.
+    // A superseded row is a decision already made and then revisited. Re-queueing the identical sentence as `pending` would silently re-litigate it through `mem review` rather than through `mem edit`/`captureExplicit`, which is where a genuine reversal belongs.
     expect(suggested.alreadyKnown).toBe(true);
     expect(suggested.fact.id).toBe(first.id);
     const rows = db.prepare("SELECT id FROM facts").all() as { id: string }[];
@@ -793,16 +708,11 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
 
   it("prefers the pending match when both a pending and a non-pending bound match exist", () => {
     const text = "always run migrations before deploy";
-    // A store can hold both shapes for one sentence only from rows written before this dedup rule
-    // existed, so the pair is built directly -- and built with the *superseded* row inserted first,
-    // which is the order that actually exposes the bug: a `boundMatches[0]` check ahead of the
-    // pending lookup passes when the pending row happens to come back first, and swallows the
-    // sighting when it does not.
+    // A store can hold both shapes for one sentence only from rows written before this dedup rule existed, so the pair is built directly -- and built with the *superseded* row inserted first, which is the order that actually exposes the bug: a `boundMatches[0]` check ahead of the pending lookup passes when the pending row happens to come back first, and swallows the sighting when it does not.
     const { fact: stale } = captureExplicit(db, { text, kind: "preference", root });
     db.prepare("UPDATE facts SET status = 'superseded' WHERE id = ?").run(stale.id);
 
-    // `factsByTextHash` narrows on `text_hash`, then re-checks normalized text equality in JS, so
-    // the pending row needs both copied onto it to count as a match.
+    // `factsByTextHash` narrows on `text_hash`, then re-checks normalized text equality in JS, so the pending row needs both copied onto it to count as a match.
     const { fact: pending } = captureSuggested(db, { text: "always run linting before deploy", kind: "preference", root });
     expect(pending.status).toBe("pending");
     db.prepare("UPDATE facts SET text = ?, text_hash = (SELECT text_hash FROM facts WHERE id = ?) WHERE id = ?").run(text, stale.id, pending.id);
@@ -853,8 +763,7 @@ describe("SecretDetectedError does not retain the raw credential", () => {
     expect(match["field"]).toBe("sourceRef");
     expect(match["length"]).toBe(rawKey.length);
 
-    // The redacted message is fine to carry the credential; the structured `matches` array is the
-    // part any caller might serialize or log wholesale.
+    // The redacted message is fine to carry the credential; the structured `matches` array is the part any caller might serialize or log wholesale.
     expect(JSON.stringify(err.matches)).not.toContain(rawKey);
   });
 });
@@ -874,12 +783,7 @@ describe("loadAllowlist", () => {
 // ─────────────────────────────────────────────────────────────────────────── regression: keyword-adjacent hex secrets ───────────────────────────────────────────────────────────────────────────
 
 describe("regression: screenForSecrets catches a hex secret sitting next to its own keyword", () => {
-  /**
-   * A 40-hex-char string is exactly a git SHA-1, so the entropy fallback deliberately allows it --
-   * which meant `password: <40 hex chars>` sailed through untouched. Length alone cannot tell a
-   * commit hash from a hashed credential; the surrounding keyword can, and that is what this
-   * pattern reads.
-   */
+  /** A 40-hex-char string is exactly a git SHA-1, so the entropy fallback deliberately allows it -- which meant `password: <40 hex chars>` sailed through untouched. Length alone cannot tell a commit hash from a hashed credential; the surrounding keyword can, and that is what this pattern reads. */
   const SECRET = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
 
   it.each([
@@ -899,8 +803,7 @@ describe("regression: screenForSecrets catches a hex secret sitting next to its 
   });
 
   it("no longer waves through a non-canonical-length hex blob just because it is all hex digits", () => {
-    // 48 hex chars: not an MD5 (32), SHA-1 (40), or SHA-256 (64), so nothing about it says "hash".
-    // The hash allowlist used to be shape-only, which exempted every hex string of any length.
+    // 48 hex chars: not an MD5 (32), SHA-1 (40), or SHA-256 (64), so nothing about it says "hash". The hash allowlist used to be shape-only, which exempted every hex string of any length.
     expect(screenForSecrets({ text: "3f9a1c7e2b8d04f65a93ce17b2408df6e5c1a97b3d2f8e40" }, [])).not.toHaveLength(0);
   });
 

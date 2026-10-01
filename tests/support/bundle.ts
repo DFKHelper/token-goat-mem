@@ -1,7 +1,4 @@
-/**
- * Shared harness for tests that drive the built `dist/token-goat-mem.mjs` as a real subprocess --
- * the only way to exercise stdin, exit codes, and cross-process locking as shipped.
- */
+/** Shared harness for tests that drive the built `dist/token-goat-mem.mjs` as a real subprocess -- the only way to exercise stdin, exit codes, and cross-process locking as shipped. */
 
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";

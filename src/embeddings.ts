@@ -1,24 +1,4 @@
-/**
- * A concrete `EmbeddingBackend` (retrieval.ts) speaking the OpenAI `/v1/embeddings` wire shape,
- * plus the config plumbing that decides whether one exists at all.
- *
- * retrieval.ts deliberately owns no concrete backend: it declares a narrow interface and calls
- * whatever the caller injects, under a hard timeout. This module is the one implementation mem
- * ships, and it is off unless `TOKEN_GOAT_MEM_EMBED_URL` is set -- absent that variable every
- * exported resolver returns `null`, no socket is opened, and ranking is byte-for-byte the BM25-only
- * behaviour that shipped before it existed.
- *
- * The OpenAI shape rather than a bundled local model: it is the one embeddings protocol that
- * OpenAI, Ollama, LM Studio, and LiteLLM all already speak, so a user picks their own endpoint (a
- * localhost one keeps mem's zero-network property intact) instead of mem picking a model, a cache
- * path, and a license for them. It also costs zero dependencies -- global `fetch` and
- * `AbortSignal.timeout` are both present on Node 18, this package's `engines` floor.
- *
- * Everything here treats the endpoint as untrusted input (CLAUDE.md, "Validate at system
- * boundaries"): a non-200, a body that is not the documented shape, a vector of the wrong length,
- * or a stalled connection all surface as a thrown `EmbeddingRequestError`, never as a partially
- * populated result a caller could mistake for a complete one.
- */
+/** A concrete `EmbeddingBackend` (retrieval.ts) speaking the OpenAI `/v1/embeddings` wire shape, plus the config plumbing that decides whether one exists at all. retrieval.ts deliberately owns no concrete backend: it declares a narrow interface and calls whatever the caller injects, under a hard timeout. This module is the one implementation mem ships, and it is off unless `TOKEN_GOAT_MEM_EMBED_URL` is set -- absent that variable every exported resolver returns `null`, no socket is opened, and ranking is byte-for-byte the BM25-only behaviour that shipped before it existed. The OpenAI shape rather than a bundled local model: it is the one embeddings protocol that OpenAI, Ollama, LM Studio, and LiteLLM all already speak, so a user picks their own endpoint (a localhost one keeps mem's zero-network property intact) instead of mem picking a model, a cache path, and a license for them. It also costs zero dependencies -- global `fetch` and `AbortSignal.timeout` are both present on Node 18, this package's `engines` floor. Everything here treats the endpoint as untrusted input (CLAUDE.md, "Validate at system boundaries"): a non-200, a body that is not the documented shape, a vector of the wrong length, or a stalled connection all surface as a thrown `EmbeddingRequestError`, never as a partially populated result a caller could mistake for a complete one. */
 
 import type { EmbeddingBackend } from "./retrieval.js";
 
@@ -29,14 +9,7 @@ export const EMBED_MODEL_ENV = "TOKEN_GOAT_MEM_EMBED_MODEL";
 /** Environment variable carrying an optional bearer token. Never logged, echoed, or included in an error. */
 export const EMBED_API_KEY_ENV = "TOKEN_GOAT_MEM_EMBED_API_KEY";
 
-/**
- * Default per-request wall clock for a backend created without an explicit budget.
- *
- * Sized for the backfill path (`mem embed`), which is a foreground batch job a user is watching and
- * where a cold local model's first response can take seconds. Every latency-sensitive caller
- * (recall, the token-goat seam, capture) passes its own, much smaller budget instead -- see
- * `EmbeddingBackendOptions.timeoutMs`.
- */
+/** Default per-request wall clock for a backend created without an explicit budget. Sized for the backfill path (`mem embed`), which is a foreground batch job a user is watching and where a cold local model's first response can take seconds. Every latency-sensitive caller (recall, the token-goat seam, capture) passes its own, much smaller budget instead -- see `EmbeddingBackendOptions.timeoutMs`. */
 export const DEFAULT_EMBED_REQUEST_TIMEOUT_MS = 10_000;
 
 /** Resolved embeddings configuration. `apiKey` is present only when the user set one. */
@@ -77,15 +50,7 @@ export interface HttpEmbeddingBackend extends EmbeddingBackend {
   embedBatch(texts: readonly string[]): Promise<Float32Array[]>;
 }
 
-/**
- * Reads the embeddings configuration out of `env`.
- *
- * Returns `null` when the feature is simply off (no {@link EMBED_URL_ENV}), and throws
- * {@link EmbeddingConfigError} when it is on but broken -- a URL with no model, or a URL that is not
- * a URL. The two are different situations and only one of them is a user error worth reporting:
- * `mem embed` and `mem doctor` want the diagnosis, while recall wants to shrug and rank lexically
- * (see {@link resolveConfiguredEmbeddingBackend}, which swallows the throw for exactly that reason).
- */
+/** Reads the embeddings configuration out of `env`. Returns `null` when the feature is simply off (no {@link EMBED_URL_ENV}), and throws {@link EmbeddingConfigError} when it is on but broken -- a URL with no model, or a URL that is not a URL. The two are different situations and only one of them is a user error worth reporting: `mem embed` and `mem doctor` want the diagnosis, while recall wants to shrug and rank lexically (see {@link resolveConfiguredEmbeddingBackend}, which swallows the throw for exactly that reason). */
 export function readEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): EmbeddingConfig | null {
   const url = (env[EMBED_URL_ENV] ?? "").trim();
   if (url.length === 0) {
@@ -118,15 +83,7 @@ export function endpointLabelFor(url: string): string {
   }
 }
 
-/**
- * One `data` entry of an OpenAI-compatible embeddings response, after shape checking.
- *
- * `index` is required rather than optional. The spec defines it, every endpoint this targets emits
- * it, and it is the only thing that makes a batch response safe: pairing by array position instead
- * would attach every fact a neighbour's vector the first time a server answered out of order, and
- * that failure is silent -- no error, no crash, just permanently wrong similarity for the whole
- * store. Refusing a response that omits it is the cheap half of that trade.
- */
+/** One `data` entry of an OpenAI-compatible embeddings response, after shape checking. `index` is required rather than optional. The spec defines it, every endpoint this targets emits it, and it is the only thing that makes a batch response safe: pairing by array position instead would attach every fact a neighbour's vector the first time a server answered out of order, and that failure is silent -- no error, no crash, just permanently wrong similarity for the whole store. Refusing a response that omits it is the cheap half of that trade. */
 interface EmbeddingResponseItem {
   readonly index: number;
   readonly embedding: readonly number[];
@@ -155,16 +112,7 @@ function parseResponseItem(raw: unknown): EmbeddingResponseItem | null {
   return { index, embedding: embedding as readonly number[] };
 }
 
-/**
- * Turns a decoded response body into one vector per requested text, placed by the response's own
- * `index` field.
- *
- * Every rejection here is a case where continuing would produce a plausible-looking but wrong
- * result: a missing slot would silently leave a fact unembedded while the count said otherwise, a
- * duplicate index would overwrite a different fact's vector, and a ragged set of dimensions would
- * later be compared by `cosineSimilarity` over the shorter length and yield a confident number
- * about two incomparable vectors.
- */
+/** Turns a decoded response body into one vector per requested text, placed by the response's own `index` field. Every rejection here is a case where continuing would produce a plausible-looking but wrong result: a missing slot would silently leave a fact unembedded while the count said otherwise, a duplicate index would overwrite a different fact's vector, and a ragged set of dimensions would later be compared by `cosineSimilarity` over the shorter length and yield a confident number about two incomparable vectors. */
 function vectorsFromBody(body: unknown, expectedCount: number): Float32Array[] {
   if (!isRecord(body) || !Array.isArray(body["data"])) {
     throw new EmbeddingRequestError("embeddings response has no `data` array");
@@ -217,16 +165,11 @@ export function createHttpEmbeddingBackend(config: EmbeddingConfig, options: Emb
         method: "POST",
         headers: {
           "content-type": "application/json",
-          // Sent only when the user configured a key: an endpoint that wants no auth (the common
-          // localhost case) must not receive a header at all, and there is no placeholder value
-          // that would be honest here.
+          // Sent only when the user configured a key: an endpoint that wants no auth (the common localhost case) must not receive a header at all, and there is no placeholder value that would be honest here.
           ...(config.apiKey !== undefined ? { authorization: `Bearer ${config.apiKey}` } : {}),
         },
         body: JSON.stringify({ model: config.model, input: [...texts] }),
-        // `AbortSignal.timeout` rather than an outer race: a promise the caller stopped waiting on
-        // still holds an open socket, and an open socket keeps Node's event loop alive. Without the
-        // abort, giving up on a stalled endpoint after 200ms would still leave `mem recall` hanging
-        // until the endpoint answered.
+        // `AbortSignal.timeout` rather than an outer race: a promise the caller stopped waiting on still holds an open socket, and an open socket keeps Node's event loop alive. Without the abort, giving up on a stalled endpoint after 200ms would still leave `mem recall` hanging until the endpoint answered.
         signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
@@ -235,8 +178,7 @@ export function createHttpEmbeddingBackend(config: EmbeddingConfig, options: Emb
       throw new EmbeddingRequestError(`embeddings endpoint ${endpointLabelFor(config.url)} ${reason}`);
     }
     if (!response.ok) {
-      // Status only. A failing endpoint's body routinely echoes the request headers back, which is
-      // the one place an API key would otherwise leak into a user-visible error.
+      // Status only. A failing endpoint's body routinely echoes the request headers back, which is the one place an API key would otherwise leak into a user-visible error.
       throw new EmbeddingRequestError(`embeddings endpoint ${endpointLabelFor(config.url)} returned HTTP ${response.status}`);
     }
     let body: unknown;
@@ -255,8 +197,7 @@ export function createHttpEmbeddingBackend(config: EmbeddingConfig, options: Emb
     async embed(text: string): Promise<Float32Array> {
       const [vector] = await embedBatch([text]);
       if (vector === undefined) {
-        // Unreachable via `vectorsFromBody`, which never returns a short array; kept so the
-        // narrowing is real rather than a non-null assertion that would hide a future regression.
+        // Unreachable via `vectorsFromBody`, which never returns a short array; kept so the narrowing is real rather than a non-null assertion that would hide a future regression.
         throw new EmbeddingRequestError("embeddings response returned no vector for a single input");
       }
       return vector;
@@ -264,15 +205,7 @@ export function createHttpEmbeddingBackend(config: EmbeddingConfig, options: Emb
   };
 }
 
-/**
- * The environment-driven entry point: a ready backend, or `null` when embeddings are off.
- *
- * Never throws, for any input. Its callers are the fail-open ones -- recall, the token-goat seam,
- * and the post-capture write -- where the correct response to a broken embeddings setup is to rank
- * lexically and carry on, not to fail a command whose actual job succeeded. Callers that owe the
- * user a diagnosis (`mem embed`, `mem doctor`) call {@link readEmbeddingConfig} directly and handle
- * {@link EmbeddingConfigError} themselves.
- */
+/** The environment-driven entry point: a ready backend, or `null` when embeddings are off. Never throws, for any input. Its callers are the fail-open ones -- recall, the token-goat seam, and the post-capture write -- where the correct response to a broken embeddings setup is to rank lexically and carry on, not to fail a command whose actual job succeeded. Callers that owe the user a diagnosis (`mem embed`, `mem doctor`) call {@link readEmbeddingConfig} directly and handle {@link EmbeddingConfigError} themselves. */
 export function resolveConfiguredEmbeddingBackend(
   env: NodeJS.ProcessEnv = process.env,
   options: EmbeddingBackendOptions = {}
@@ -296,35 +229,16 @@ export interface EmbeddingMeta {
 export interface EmbeddingRankingPlan {
   /** The backend to hand `retrieve()`, or `null` when embedding search must sit this one out. */
   readonly backend: HttpEmbeddingBackend | null;
-  /**
-   * Set when a backend is configured but its vectors are not comparable with the stored ones, so
-   * `backend` was withheld. A human-readable sentence naming the fix; `null` in every other case,
-   * including the ordinary "embeddings are off" one, which is not a problem to report.
-   */
+  /** Set when a backend is configured but its vectors are not comparable with the stored ones, so `backend` was withheld. A human-readable sentence naming the fix; `null` in every other case, including the ordinary "embeddings are off" one, which is not a problem to report. */
   readonly incomparable: string | null;
 }
 
-/**
- * Decides whether embedding search may run, given the configured model and the model the stored
- * vectors were produced by.
- *
- * This exists because `cosineSimilarity` cannot detect the mistake it is protecting against: it
- * compares over `Math.min(a.length, b.length)`, so a 768-dimension query vector and a store full of
- * 1536-dimension vectors from a different model produce similarity scores that are numerically fine
- * and semantically meaningless. Nothing errors, nothing logs, and recall quietly starts ranking on
- * noise. Refusing to rank at all is the only honest answer until `mem embed --all` re-embeds the
- * store under the new model.
- */
+/** Decides whether embedding search may run, given the configured model and the model the stored vectors were produced by. This exists because `cosineSimilarity` cannot detect the mistake it is protecting against: it compares over `Math.min(a.length, b.length)`, so a 768-dimension query vector and a store full of 1536-dimension vectors from a different model produce similarity scores that are numerically fine and semantically meaningless. Nothing errors, nothing logs, and recall quietly starts ranking on noise. Refusing to rank at all is the only honest answer until `mem embed --all` re-embeds the store under the new model. */
 export function planEmbeddingRanking(
   recorded: EmbeddingMeta | null,
   env: NodeJS.ProcessEnv = process.env,
   options: EmbeddingBackendOptions = {},
-  // Set when the store holds one or more vectors (`countEmbeddedFacts(db) > 0`) but `recorded` is
-  // `null` -- an interrupted `mem embed`, or an import of an envelope with unknown embedding
-  // provenance. Those vectors are exactly as incomparable as ones from a named different model:
-  // nothing recorded which model produced them, so `cosineSimilarity` would rank on noise without
-  // complaint. Defaults to `false` for callers that cannot afford the extra count (see
-  // integration-seam.ts's budget-gated call).
+  // Set when the store holds one or more vectors (`countEmbeddedFacts(db) > 0`) but `recorded` is `null` -- an interrupted `mem embed`, or an import of an envelope with unknown embedding provenance. Those vectors are exactly as incomparable as ones from a named different model: nothing recorded which model produced them, so `cosineSimilarity` would rank on noise without complaint. Defaults to `false` for callers that cannot afford the extra count (see integration-seam.ts's budget-gated call).
   hasUnrecordedVectors: boolean = false
 ): EmbeddingRankingPlan {
   const backend = resolveConfiguredEmbeddingBackend(env, options);
