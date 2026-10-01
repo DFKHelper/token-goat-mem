@@ -76,6 +76,7 @@ import {
   exitCodeForError,
   extractErrorMessage,
   err,
+  formatJson,
   guard,
   resolveIdArgOrThrow,
   resolveRoot,
@@ -1835,17 +1836,13 @@ async function runDream(db: Database.Database, options: DreamCliOptions): Promis
   const result = await dream(facts, config, options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {});
 
   if (options.json === true) {
-    return JSON.stringify(
-      {
-        model: result.model,
-        endpoint: result.endpointLabel,
-        factsSent: result.sent.length,
-        factsAvailable: result.available,
-        candidates: result.candidates,
-      },
-      null,
-      2
-    );
+    return formatJson({
+      model: result.model,
+      endpoint: result.endpointLabel,
+      factsSent: result.sent.length,
+      factsAvailable: result.available,
+      candidates: result.candidates,
+    });
   }
 
   const header =
@@ -2092,7 +2089,7 @@ export function buildProgram(): Command {
           embeddingMeta,
           facts: facts.map((fact) => factToExportJson(fact, { supersededBy: supersededByIds.get(fact.id) ?? null })),
         };
-        process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+        process.stdout.write(`${formatJson(envelope)}\n`);
       })
     );
 
@@ -2490,7 +2487,7 @@ export function buildProgram(): Command {
             total,
             truncated,
           };
-          process.stdout.write(`${JSON.stringify(envelope, null, 2)}\n`);
+          process.stdout.write(`${formatJson(envelope)}\n`);
           return;
         }
         if (facts.length === 0) {
@@ -2581,7 +2578,7 @@ export function buildProgram(): Command {
                   }
                 : {}),
             };
-            return JSON.stringify(envelope, null, 2);
+            return formatJson(envelope);
           }
           return formatFactDetail(fact, freshness, sources, edge, history, related);
         });

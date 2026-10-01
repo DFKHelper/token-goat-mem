@@ -9,7 +9,7 @@ import type { Command } from "commander";
 import { existsSync } from "node:fs";
 
 import { AUTO_SNAPSHOT_INTERVAL_MS, listSnapshots } from "./backup.js";
-import { EXIT_USER_ERROR, extractErrorMessage, guard } from "./cliRuntime.js";
+import { EXIT_USER_ERROR, extractErrorMessage, guard, writeOutput } from "./cliRuntime.js";
 import { openDbReadOnly, resolveBackupDir, resolveDbPath } from "./db.js";
 import { MIGRATIONS } from "./migrations.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
@@ -525,11 +525,7 @@ export function registerDoctorCommand(program: Command): void {
         ];
         // `epoch` is the store's, 0 when there is no store yet, and null when a store exists but could not be read.
         const report = { findings, epoch: inspection.epoch };
-        if (options.json === true) {
-          process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-        } else {
-          process.stdout.write(`${renderFindings(report.findings)}\n`);
-        }
+        writeOutput(options.json, report, () => renderFindings(report.findings));
         // Exit 1 is the user-error code of the CLI contract (see cli.ts): "your setup needs attention".
         if (options.strict === true && report.findings.some((entry) => entry.status === "fail")) {
           process.exitCode = EXIT_USER_ERROR;

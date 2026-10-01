@@ -19,6 +19,7 @@ import {
   ambiguousIdError,
   assertPositiveFlag,
   DEFAULT_LIST_LIMIT,
+  formatJson,
   guard,
   noSuchFactError,
   SHORT_ID_LENGTH,
@@ -103,7 +104,7 @@ export function registerLogCommand(program: Command): void {
         });
         const truncated = total > entries.length;
         if (options.json === true) {
-          process.stdout.write(`${JSON.stringify({ entries, total, truncated }, null, 2)}\n`);
+          process.stdout.write(`${formatJson({ entries, total, truncated })}\n`);
           return;
         }
         if (entries.length === 0) {
