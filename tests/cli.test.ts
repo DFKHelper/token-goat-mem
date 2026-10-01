@@ -20,7 +20,8 @@ import { CAPABLE_MEM_SHIM, OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.
 import { extractRememberedId, extractSuggestedId, runCli, type CliResult } from "./support/cli.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
-import { captureSuggested, MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
+import { DOCTOR_CHECKS } from "../src/doctor.js";
+import { captureSuggested,MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 import { _clearAnchorMemoForTests } from "../src/anchors.js";
 
@@ -535,6 +536,26 @@ describe("mem doctor (read-only health check)", () => {
     expect(result.stdout).toContain("epoch: 0");
     expect(result.stdout).toContain("active=0");
     expect(result.stdout).toContain("(total 0)");
+  });
+
+  it("--json prints findings whose check names all come from the exported list", async () => {
+    await runCli(["remember", "json doctor fact", "--kind", "fact"]);
+    const result = await runCli(["doctor", "--json"]);
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(result.stdout) as { findings: { check: string; status: string; message: string }[]; epoch: number };
+    expect(report.epoch).toBe(1);
+    expect(report.findings.length).toBeGreaterThan(0);
+    for (const finding of report.findings) {
+      expect(DOCTOR_CHECKS).toContain(finding.check);
+      expect(["ok", "warn", "fail"]).toContain(finding.status);
+      expect(finding.message.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("--strict exits 0 when nothing fails, even with warnings present", async () => {
+    await runCli(["remember", "strict doctor fact", "--kind", "fact"]);
+    const result = await runCli(["doctor", "--strict"]);
+    expect(result.exitCode).toBe(0);
   });
 
   it("reflects writes in its counts without performing any itself", async () => {
@@ -3183,10 +3204,13 @@ describe("mem init/uninstall", () => {
       expect(result.stdout).not.toContain("0.2.5");
     });
 
-    it("mem doctor reports the same incompatibility for hooks already installed", async () => {
-      // Install for real with the (capable) shim the outer beforeEach already put on PATH, then swap
-      // in the incapable one -- `doctor` checks whatever settings.json already has, not what this
-      // build would write, so this is the "already installed, binary downgraded since" case.
+    /**
+     * Installs the hooks with the capable shim the outer beforeEach already put on PATH, then swaps
+     * in the incapable one and runs `fn` from the project root -- `doctor` checks whatever
+     * settings.json already has, not what this build would write, so this is the "already
+     * installed, binary downgraded since" case.
+     */
+    async function withDowngradedBinary(fn: () => Promise<void>): Promise<void> {
       const installed = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(installed.exitCode).toBe(0);
 
@@ -3198,13 +3222,34 @@ describe("mem init/uninstall", () => {
       const originalCwd = process.cwd();
       process.chdir(toolRoot);
       try {
+        await fn();
+      } finally {
+        process.chdir(originalCwd);
+      }
+    }
+
+    it("mem doctor reports the same incompatibility for hooks already installed", async () => {
+      await withDowngradedBinary(async () => {
         const doctor = await runCli(["doctor"]);
         expect(doctor.exitCode).toBe(0);
         expect(doctor.stdout).toContain("0.2.5");
         expect(doctor.stdout).toMatch(/hook-stdin|scan-session/u);
-      } finally {
-        process.chdir(originalCwd);
-      }
+      });
+    });
+
+    it("mem doctor --strict exits 1 on the incompatible binary, and --json names it as a failed hooks finding", async () => {
+      await withDowngradedBinary(async () => {
+        const strict = await runCli(["doctor", "--strict"]);
+        expect(strict.exitCode).toBe(1);
+        // --strict changes the exit code only; the report is the same text.
+        expect(strict.stdout).toContain("0.2.5");
+
+        const json = await runCli(["doctor", "--json"]);
+        expect(json.exitCode).toBe(0);
+        const report = JSON.parse(json.stdout) as { findings: { check: string; status: string }[]; epoch: number };
+        expect(report.findings.some((finding) => finding.check === "hooks" && finding.status === "fail")).toBe(true);
+        expect(typeof report.epoch).toBe("number");
+      });
     });
   });
 });
