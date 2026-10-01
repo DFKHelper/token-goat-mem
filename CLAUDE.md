@@ -11,7 +11,10 @@ npm test                             # Run all tests (vitest run)
 npx vitest run tests/storage.test.ts # Run a single test file
 npm run lint                         # Lint (eslint src tests)
 npm run typecheck                    # Type check (tsc --noEmit)
+npm run comments:write               # Join multi-line comments onto one line (the guards tier fails on any)
 ```
+
+Every comment is a single line: a `/** */` block or a run of `//` lines is joined into one, however long. `tests/guards/single-line-comments.test.ts` enforces it, along with no doc comment stacked on another (a doc stranded above a helper inserted after it).
 
 CI runs `npm run lint`, `npm run typecheck`, and `npm run test:coverage` on push and pull request (across ubuntu-latest and windows-latest with Node 20, plus Node 18 runtime floor check). The gate is the workflow status (`.github/workflows/ci.yml`).
 

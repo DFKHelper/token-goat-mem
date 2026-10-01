@@ -27,6 +27,8 @@
     "dev": "tsx src/main.ts",
     "arch:check": "node scripts/sync-arch-docs.mjs --check",
     "arch:write": "node scripts/sync-arch-docs.mjs --write",
+    "comments:check": "node scripts/single-line-comments.mjs --check",
+    "comments:write": "node scripts/single-line-comments.mjs --write",
     "prepublishOnly": "npm run lint && npm run typecheck && npm test && npm run build",
     "postinstall": "node scripts/postinstall.mjs",
     "prepare": "git config core.hooksPath .githooks || true"
