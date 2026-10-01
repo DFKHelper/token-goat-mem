@@ -113,6 +113,11 @@ describe("postinstall", () => {
     writeFakeMem(binDir, OLD_MEM_SHIM);
     const result = runPostinstall();
     expect(result.exitCode).toBe(0);
+    // On Windows the hooks launch the installed bundle directly, which supports every flag, so the stale PATH shim is not what runs them and nothing is refused.
+    if (process.platform === "win32") {
+      expect(existsSync(settingsPath())).toBe(true);
+      return;
+    }
     expect(existsSync(settingsPath())).toBe(false);
     expect(result.output).toContain("mem init claude-code --user");
   });

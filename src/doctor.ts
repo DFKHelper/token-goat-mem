@@ -14,11 +14,11 @@ import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { formatAge } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
-import { describeHookDivergence, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
+import { describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
 import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, type WiringOpts } from "./wiring.js";
 
 /** The fixed set of `check` names a finding can carry. Closed on purpose: `--json` consumers key off these strings, so a new check is a deliberate, tested addition here rather than a string typed at one call site. One name covers every line a topic prints (`hooks` is a header plus one line per event), and the order is the order the report prints in. */
-export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks", "hook-divergence", "wiring"] as const;
+export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks", "hook-divergence", "launch-time", "wiring"] as const;
 
 export type DoctorCheck = (typeof DOCTOR_CHECKS)[number];
 
@@ -122,9 +122,13 @@ function describeHookHealth(opts: WiringOpts): Finding[] {
       continue;
     }
     const health = checkClaudeHookHealth(hooks);
+    // A direct-launch hook runs its own bundle, so no mem on PATH is only a fault when some hook cannot run that way either.
+    const allCapable = health.hooks.every((hook) => hook.capable);
     lines.push(
       health.bin === null
-        ? finding("hooks", "fail", `hooks (${label}): no mem binary found on PATH -- these hooks are inert`, "npm install -g token-goat-mem")
+        ? allCapable
+          ? finding("hooks", "ok", `hooks (${label}): no mem on PATH, but the hooks launch the installed bundle directly`)
+          : finding("hooks", "fail", `hooks (${label}): no mem binary found on PATH -- these hooks are inert`, "npm install -g token-goat-mem")
         : finding("hooks", "ok", `hooks (${label}): PATH resolves mem to ${health.bin.path} (${health.bin.version ?? "unknown version"})`)
     );
     for (const hook of health.hooks) {
@@ -345,7 +349,7 @@ export function registerDoctorCommand(program: Command): void {
         const dbPath = resolveDbPath();
         // The environment checks first: none of them needs the store, so a store that is missing, corrupt, or on an older schema cannot take them down with it.
         const dream = describeDream();
-        const hooks = [...describeHookHealth(wiringOpts), ...describeHookDivergence(wiringOpts), ...describeWiringDrift(wiringOpts)];
+        const hooks = [...describeHookHealth(wiringOpts), ...describeHookDivergence(wiringOpts), ...describeLaunchTime(wiringOpts), ...describeWiringDrift(wiringOpts)];
         const inspection = inspectStoreFile(dbPath, (db) => {
           const journalMode = db.pragma("journal_mode", { simple: true }) as string;
           const foreignKeys = db.pragma("foreign_keys", { simple: true }) as number;

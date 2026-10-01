@@ -99,7 +99,7 @@ import { importFromJson, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "
 import { importFromMarkdown, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
   checkClaudeHookHealth,
-  CLAUDE_HOOK_EVENTS,
+  claudeHookEventsFor,
   describeHookGap,
   getToolWiring,
   TOOL_NAMES,
@@ -720,15 +720,15 @@ function formatWiringPlanForInit(plan: WiringPlan): string {
 
 /** `mem init claude-code`'s pre-flight message when the `mem` binary these hooks would invoke can't actually run them -- `null` when there is nothing to refuse (a binary was found and every hook it would run is capable). Named after the binary's own resolved path, not this build's, since that is the one whose flags matter at hook time; see `checkClaudeHookHealth`'s doc comment for why this is decided by capability probe rather than a version-number floor. */
 function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
+  const incapable = health.hooks.filter((hook) => !hook.capable);
+  if (incapable.length === 0) {
+    return null;
+  }
   if (health.bin === null) {
     return [
       "mem: no mem binary found on PATH -- these hooks would be inert",
       "     install with `npm i -g token-goat-mem`, or re-run with --force to write them anyway",
     ].join("\n");
-  }
-  const incapable = health.hooks.filter((hook) => !hook.capable);
-  if (incapable.length === 0) {
-    return null;
   }
   const gaps = [...new Set(incapable.map((hook) => describeHookGap(hook.command, hook.missing)))];
   return [
@@ -2659,7 +2659,7 @@ export function buildProgram(): Command {
         const wiringOpts = toWiringOpts(options);
         // Only claude-code writes hooks a shell invokes unattended later, on whatever `mem` PATH resolves to at that later time -- a config text change here can be byte-perfect and the hooks it wrote can still fail every time, silently, if that binary can't run them. The other tools' wiring (AGENTS.md instructions, tasks.json) is read and invoked directly by an agent or a human, not delegated to a `command -v mem && mem ...` shell guard, so they have no equivalent failure mode this check would catch.
         if (toolName === "claude-code" && options.force !== true) {
-          const refusal = describeHookHealthRefusal(checkClaudeHookHealth(CLAUDE_HOOK_EVENTS));
+          const refusal = describeHookHealthRefusal(checkClaudeHookHealth(claudeHookEventsFor(wiringOpts)));
           if (refusal !== null) {
             process.stdout.write(`${refusal}\n`);
             process.exitCode = EXIT_USER_ERROR;
