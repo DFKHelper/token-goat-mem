@@ -1152,6 +1152,95 @@ describe("review shows a pending fact's newest source excerpt", () => {
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────── forget --by ───────────────────────────────────────────────────────────────────────────
+
+describe("mem forget --by <winner> records the supersession edge", () => {
+  const rememberFact = async (text: string): Promise<string> =>
+    extractRememberedId(await runCli(["remember", text, "--kind", "fact"]));
+
+  const seedFactWithId = (id: string): void => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { id, text: `fact ${id}`, kind: "fact", scope: "global", source_type: "user" });
+    db.close();
+  };
+
+  it("makes show --json and export report superseded_by for the forgotten fact", async () => {
+    const loserId = await rememberFact("the deploy target is the blue cluster");
+    const winnerId = await rememberFact("zebra quartz mango pipeline runs nightly");
+
+    const forgotten = await runCli(["forget", loserId, "--by", winnerId]);
+    expect(forgotten.exitCode).toBe(0);
+    expect(forgotten.stdout).toBe(`forgot ${loserId}\n`);
+
+    const shown = await runCli(["show", loserId]);
+    expect(shown.stdout).toContain("status: superseded");
+    expect(shown.stdout).toContain(`superseded_by: ${winnerId} (active)`);
+    const envelope = JSON.parse((await runCli(["show", loserId, "--json"])).stdout) as {
+      supersededBy: { id: string } | null;
+    };
+    expect(envelope.supersededBy?.id).toBe(winnerId);
+
+    const exported = JSON.parse((await runCli(["export"])).stdout) as { facts: { id: string; superseded_by?: string | null }[] };
+    expect(exported.facts.find((fact) => fact.id === loserId)?.superseded_by).toBe(winnerId);
+  });
+
+  it("accepts a unique prefix for the winner and records the resolved full id", async () => {
+    const loserId = await rememberFact("the deploy target is the blue cluster");
+    const winnerId = await rememberFact("zebra quartz mango pipeline runs nightly");
+
+    expect((await runCli(["forget", loserId, "--by", winnerId.slice(0, 8)])).exitCode).toBe(0);
+    const envelope = JSON.parse((await runCli(["show", loserId, "--json"])).stdout) as { supersededBy: { id: string } | null };
+    expect(envelope.supersededBy?.id).toBe(winnerId);
+  });
+
+  it("accepts a pinned winner", async () => {
+    const loserId = await rememberFact("the deploy target is the blue cluster");
+    const winnerId = await rememberFact("zebra quartz mango pipeline runs nightly");
+    expect((await runCli(["pin", winnerId])).exitCode).toBe(0);
+
+    expect((await runCli(["forget", loserId, "--by", winnerId])).exitCode).toBe(0);
+    const envelope = JSON.parse((await runCli(["show", loserId, "--json"])).stdout) as { supersededBy: { id: string } | null };
+    expect(envelope.supersededBy?.id).toBe(winnerId);
+  });
+
+  it("rejects a fact naming itself as its own winner, changing nothing", async () => {
+    const id = await rememberFact("the deploy target is the blue cluster");
+
+    const result = await runCli(["forget", id, "--by", id]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("cannot supersede itself");
+    expect(JSON.parse((await runCli(["show", id, "--json"])).stdout)).toMatchObject({ fact: { status: "active" } });
+  });
+
+  it("rejects a winner that is not live, changing nothing", async () => {
+    const loserId = await rememberFact("the deploy target is the blue cluster");
+    const deadId = await rememberFact("zebra quartz mango pipeline runs nightly");
+    expect((await runCli(["forget", deadId])).exitCode).toBe(0);
+
+    const result = await runCli(["forget", loserId, "--by", deadId]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not live");
+    const shown = await runCli(["show", loserId]);
+    expect(shown.stdout).toContain("status: active");
+  });
+
+  it("rejects an unknown or ambiguous winner prefix with the same errors as the id argument, changing nothing", async () => {
+    const loserId = await rememberFact("the deploy target is the blue cluster");
+    seedFactWithId("eeee1111-0000-0000-0000-000000000001");
+    seedFactWithId("eeee2222-0000-0000-0000-000000000002");
+
+    const unknown = await runCli(["forget", loserId, "--by", "no-such-id"]);
+    expect(unknown.exitCode).toBe(1);
+    expect(unknown.stderr).toContain("no such fact: no-such-id");
+
+    const ambiguous = await runCli(["forget", loserId, "--by", "eeee"]);
+    expect(ambiguous.exitCode).toBe(1);
+    expect(ambiguous.stderr).toContain('ambiguous id prefix "eeee"');
+
+    expect((await runCli(["show", loserId])).stdout).toContain("status: active");
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────── review names what a pending correction may contradict ───────────────────────────────────────────────────────────────────────────
 
 describe("review flags what a pending correction/subject fact may contradict", () => {
@@ -1174,6 +1263,9 @@ describe("review flags what a pending correction/subject fact may contradict", (
     expect(review.exitCode).toBe(0);
     expect(review.stdout).toContain(correction.id);
     expect(review.stdout).toContain(`may contradict ${rivalId} "the release plan pins the build to v9.9.9 while docs get updated"`);
+    // Paste-ready resolution for the user who agrees the pending fact wins: it names the rival to
+    // retire and the pending fact as its successor.
+    expect(review.stdout).toContain(`mem forget ${rivalId} --by ${correction.id}`);
   });
 
   it("names the live fact for a pending fact carrying --subject even when its kind is not correction", async () => {

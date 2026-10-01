@@ -115,6 +115,7 @@ import {
   insertAuditLog,
   listAuditLogForFact,
   SUPERSEDED_AS_DUPLICATE_PREFIX,
+  SUPERSEDED_BY_FACT_PREFIX,
 } from "./db.js";
 import {
   EMBED_API_KEY_ENV,
@@ -906,7 +907,14 @@ function formatPendingContradictionLine(db: Database.Database, fact: Fact, root:
   const [top] = findRelatedFacts(db, fact, root).filter(
     (related) => related.fact.status === "active" || related.fact.status === "pinned"
   );
-  return top === undefined ? null : `    may contradict ${top.fact.id} "${auditValuePreview(top.fact.text)}"`;
+  if (top === undefined) {
+    return null;
+  }
+  // The hint is only runnable once this fact is promoted: --by refuses a winner that is still pending.
+  return (
+    `    may contradict ${top.fact.id} "${auditValuePreview(top.fact.text)}"\n` +
+    `    mem forget ${top.fact.id} --by ${fact.id}  (if this fact replaces it; promote this one first)`
+  );
 }
 
 /**
@@ -2619,12 +2627,34 @@ export function buildProgram(): Command {
   program
     .command("forget <id>")
     .description("Soft-delete a fact (marks superseded, kept for audit) and audit-log it")
+    .option(
+      "--by <winner-id>",
+      "Record the live fact (active or pinned; id or unique prefix) that replaces this one, so mem show and mem export report superseded_by instead of an unknown edge"
+    )
     .action(
-      guard(async (id: string) => {
+      guard(async (id: string, options: { readonly by?: string }) => {
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
           const wasContested = existing.status === "contested";
-          setStatusWithAudit(db, existing.id, "superseded", "forget", `forgot fact (was ${existing.status})`);
+          let detail = `forgot fact (was ${existing.status})`;
+          if (options.by !== undefined) {
+            const winner = resolveIdArgOrThrow(db, options.by);
+            if (winner.id === existing.id) {
+              throw new UsageError(`fact ${existing.id} cannot supersede itself -- name a different fact with --by`);
+            }
+            // A pending/contested/superseded winner is itself withheld from recall, so naming it
+            // would retire this fact in favour of one nothing can surface.
+            if (winner.status !== "active" && winner.status !== "pinned") {
+              throw new UsageError(
+                `fact ${winner.id} is not live (status: ${winner.status}) -- --by must name an active or pinned fact`
+              );
+            }
+            // Same `<prefix><id>: <reason>` shape reviewActions writes, so findSupersedingFactId
+            // reads it back for `mem show` and `mem export`. Status is already `superseded`, as
+            // for every other path that names a winner.
+            detail = `${SUPERSEDED_BY_FACT_PREFIX}${winner.id}: ${detail}`;
+          }
+          setStatusWithAudit(db, existing.id, "superseded", "forget", detail);
           if (wasContested) {
             reconcileContradictions(db, "forget");
           }
