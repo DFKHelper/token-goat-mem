@@ -158,6 +158,11 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Changed
 
+- **Releases publish only after the full CI matrix passes, with npm provenance.** The publish
+  workflow now calls the CI workflow and waits for it, so a tag on a commit that fails lint,
+  typecheck, or a test on either OS no longer reaches npm. The package is published with
+  `--provenance`, which links each release on npm to the commit and workflow run that built it.
+
 - **The Claude Code `Stop` hook runs `mem reflect` instead of `mem scan-session --quiet`.** It files
   the transcript exactly as before, then blocks the stop with the `mem reflect` worklist as the
   reason -- but only for suggestions that run filed, so a second stop over the same transcript is
