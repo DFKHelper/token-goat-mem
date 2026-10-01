@@ -13,6 +13,10 @@
 
 set -e
 
+# git exports these to every hook. Any test that runs `git` in a temp repo would honour them over
+# its own cwd and write into this repository instead (a stray commit, or core.bare flipped on).
+unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR
+
 echo "pre-commit: lint, typecheck, guards"
 npm run lint
 npm run typecheck

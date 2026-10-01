@@ -513,6 +513,14 @@ function readDoc(dir, docName = "ARCHITECTURE.md") {
 }
 
 function selfTest() {
+  // Under a git hook (the pre-commit guards tier) git exports GIT_DIR / GIT_INDEX_FILE, which every
+  // spawned `git` below would honour in preference to its temp-repo cwd -- committing "init" onto
+  // the real branch. Scrub them so the temp repos stay hermetic.
+  for (const name of Object.keys(process.env)) {
+    if (name.startsWith("GIT_")) {
+      delete process.env[name];
+    }
+  }
   const results = [];
   const check = (name, condition, detail) => {
     results.push({ name, pass: Boolean(condition), detail: condition ? "" : detail });
