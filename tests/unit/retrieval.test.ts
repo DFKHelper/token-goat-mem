@@ -9,6 +9,7 @@ import {
   anchorRootsFor,
   computeBm25Scores,
   cosineSimilarity,
+  QUERY_EVIDENCE_EMBED_TOP_N,
   reciprocalRankFusion,
   retrieve,
   type EmbeddingBackend,
@@ -951,6 +952,45 @@ describe("usefulness only votes on facts with query evidence", () => {
   it("usefulness still counts for a fact the query has evidence for (entity overlap)", async () => {
     const outcome = await retrieve(facts, { query: "quantum", root, usefulness, entityOverlap: new Map([["useful", 2]]) });
     expect(outcome.results[0]?.fact.id).toBe("useful");
+  });
+});
+
+describe("RetrievedFact.queryEvidence", () => {
+  const facts = [
+    makeFact({ id: "lexical", text: "deploy runbook", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
+    makeFact({ id: "entity", text: "unrelated note about cheese", kind: "fact", captured_at: "2026-01-02T00:00:00.000Z" }),
+    makeFact({ id: "graph", text: "another note about bread", kind: "fact", captured_at: "2026-01-03T00:00:00.000Z" }),
+    makeFact({ id: "none", text: "plain filler about rice", kind: "fact", captured_at: "2026-01-04T00:00:00.000Z" }),
+  ];
+  const evidence = (outcome: Awaited<ReturnType<typeof retrieve>>): string[] =>
+    outcome.results.filter((r) => r.queryEvidence).map((r) => r.fact.id).sort();
+
+  it("is true for lexical, entity, and graph signals and false for a fact with none", async () => {
+    const outcome = await retrieve(facts, {
+      query: "deploy",
+      root,
+      entityOverlap: new Map([["entity", 1]]),
+      graphScores: new Map([["graph", 1]]),
+    });
+    expect(evidence(outcome)).toEqual(["entity", "graph", "lexical"]);
+  });
+
+  it("is true for an embedding hit inside the top-N cut and false outside it", async () => {
+    // The embedding list ranks every comparable fact, so only its head may count as evidence.
+    // `f0` is the closest to the query vector, `f<n-1>` the furthest.
+    const total = QUERY_EVIDENCE_EMBED_TOP_N + 5;
+    const embedded = Array.from({ length: total }, (_unused, index) =>
+      makeFact({ id: `f${index}`, text: "plain filler about rice", kind: "fact", embedding: new Float32Array([1, index / 100]) })
+    );
+    const backend: EmbeddingBackend = { embed: () => new Float32Array([1, 0]) };
+    const outcome = await retrieve(embedded, { query: "quantum", root, embeddingBackend: backend, limit: total });
+    const expected = Array.from({ length: QUERY_EVIDENCE_EMBED_TOP_N }, (_unused, index) => `f${index}`).sort();
+    expect(evidence(outcome)).toEqual(expected);
+  });
+
+  it("is false for every fact when the query is empty", async () => {
+    const outcome = await retrieve(facts, { query: "", root, usefulness: new Map([["none", { surfaced: 1, used: 1 }]]) });
+    expect(evidence(outcome)).toEqual([]);
   });
 });
 

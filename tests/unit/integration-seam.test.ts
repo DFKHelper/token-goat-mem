@@ -1259,22 +1259,21 @@ describe("buildHintFormat", () => {
     expect(emittedIds(hit)).toEqual(["fact-a"]);
   });
 
-  it("regression: --delta still suppresses non-matching facts once an embedding backend turns fusion on", async () => {
-    // The embedding half of the `matchedQuery` regression above. Fusion is switched on by any
-    // non-empty auxiliary rank list, and an embedding list is the other one -- so the same
-    // `score !== 0` predicate that usefulness feedback broke would be broken by a configured
-    // endpoint, on installs that never run `mem used` at all.
+  it("--delta re-sends a fact only the embedding backend matched, while a fact with no evidence stays suppressed", async () => {
+    // The embedding half of the `matchedQuery` regression above, and the reason `--delta` keys off
+    // `queryEvidence` rather than the lexical-only `matchedQuery`: a fact the query reached purely by
+    // embedding was never re-sent once surfaced, however exactly it answered the new prompt.
     threeGlobalFacts();
     const baseline = await buildHint({ root, dbPath, sessionId: "sess-1", query: "what is the lint setup" });
     expect(emittedIds(baseline)).toEqual(["fact-a", "fact-b", "fact-c"]);
 
-    // A stored vector per fact plus a recorded model is what makes the embedding rank list
-    // non-empty; the stub endpoint supplies the query vector.
+    // A stored vector plus a recorded model is what makes a fact embeddable; the stub endpoint
+    // supplies the query vector. `fact-c` gets no vector, so the query has no evidence for it at all.
     const server = await startStubEmbeddingServer();
     openServers.push(server);
     const db = openStorage(dbPath);
     try {
-      for (const id of ["fact-a", "fact-b", "fact-c"]) {
+      for (const id of ["fact-a", "fact-b"]) {
         updateFact(db, id, { embedding: Float32Array.from([1, 0, 0, 0]) });
       }
       setEmbeddingMeta(db, { model: "stub-model", dimension: 4 });
@@ -1284,18 +1283,16 @@ describe("buildHintFormat", () => {
     process.env[EMBED_URL_ENV] = server.url;
     process.env[EMBED_MODEL_ENV] = "stub-model";
 
-    // Same non-matching query, so the correct answer is unchanged: everything was already sent and
-    // nothing matches, therefore header only.
     const repeat = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "what is the lint setup" });
-    expect(repeat.header).toBe(`${TGMEM_HEADER}  delta=1`);
-    expect(repeat.lines).toEqual([]);
+    expect(emittedIds(repeat)).toEqual(["fact-a", "fact-b"]);
     // The endpoint really was consulted -- otherwise this would be the BM25-only path and would
     // pass for the wrong reason.
     expect(server.requests.length).toBeGreaterThan(0);
 
-    // And a genuine lexical hit still re-sends under fusion.
+    // And a genuine lexical hit still re-sends under fusion; `fact-b` rides along on its embedding
+    // evidence, `fact-c` (no vector, no lexical hit) stays suppressed.
     const hit = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true, query: "alpha" });
-    expect(emittedIds(hit)).toEqual(["fact-a"]);
+    expect(emittedIds(hit)).toEqual(["fact-a", "fact-b"]);
   });
 
   it("non-firing: a zero-scoring fact already surfaced in the session stays suppressed by --delta (delta is not a no-op)", async () => {

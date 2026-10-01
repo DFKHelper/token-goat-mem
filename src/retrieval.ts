@@ -248,6 +248,16 @@ export interface RetrievedFact {
    * nothing matched.
    */
   readonly matchedQuery: boolean;
+  /**
+   * True when the query produced evidence for this fact by any signal, not only the lexical one:
+   * a BM25 hit, entity overlap, a graph score, or a place within the top
+   * {@link QUERY_EVIDENCE_EMBED_TOP_N} of the embedding ranking. `matchedQuery` is deliberately
+   * lexical-only (it drives the "nothing matched" footer), which made it the wrong question for
+   * `--delta`: a fact found purely by embedding or entity was suppressed as already-sent even though
+   * it answered this prompt. Also the gate on which facts the usefulness prior may vote for.
+   * `false` for every fact of an empty query -- nothing was asked, so nothing is evidence.
+   */
+  readonly queryEvidence: boolean;
   readonly freshness: AnchorVerdict;
   readonly contradiction: ContradictionOutcome;
   readonly trust: TrustLevel;
@@ -1432,6 +1442,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       // Read off the pre-fusion BM25 map on purpose: this is the lexical-match question, not the
       // ranking one, and it has to keep the same meaning whether or not a second rank list exists.
       matchedQuery: (bm25Scores.get(fact.id) ?? 0) > 0,
+      queryEvidence: queryEvidenceIds.has(fact.id),
       freshness,
       contradiction,
       trust,

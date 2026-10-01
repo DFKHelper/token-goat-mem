@@ -772,7 +772,9 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // matched nothing -- stays suppressed, and a query-less call (the SessionStart recency dump)
   // matches nothing at all, so it remains fully suppressible.
   //
-  // `matchedQuery` rather than `score !== 0`: the two agree only while BM25 is the sole rank list.
+  // `queryEvidence` (any signal the query produced for the fact: lexical, entity, graph, or a top
+  // embedding hit) rather than the lexical-only `matchedQuery`, so a fact reached only by embedding
+  // or entity overlap is re-sent too. And not `score !== 0`: the two agree only while BM25 is the sole rank list.
   // Turning on usefulness feedback or an embedding backend makes retrieval fuse via RRF, which
   // floors every ranked fact above zero -- so the old predicate would have quietly declared every
   // filler fact a match and disabled delta suppression store-wide, with no test failing to say so.
@@ -783,7 +785,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // said they will not accept. Suppressing it after one send would make PINNED_RESERVE a
   // first-prompt-only guarantee, which is not a guarantee.
   const unseen = delta
-    ? results.filter((result) => isPinned(result) || result.matchedQuery || !alreadySurfaced.has(result.fact.id))
+    ? results.filter((result) => isPinned(result) || result.queryEvidence || !alreadySurfaced.has(result.fact.id))
     : results;
 
   // The reserve is taken before the kind caps see the list, and the reserved facts are then removed
