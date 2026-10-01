@@ -10,85 +10,6 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 - **`mem facets --json` emits structured facets data for each mode.** `--list-entities --json` emits an array of `{ term, facts }` objects; `--fact <id> --json` emits `{ fact, entities, topics }`; backfill/`--all` mode emits `{ facts, entities, topics }` summary. Plain output is unchanged.
 - **`mem backup --list --json` emits snapshot records as JSON.** Outputs an array of snapshots, each with `path`, `name`, `takenAt` (ISO 8601), `epoch`, `reason`, and `size` fields. The plain output remains unchanged.
 - **`mem doctor` checks wiring drift for every supported tool, and project-vs-user hook divergence.** For each tool in `mem init`'s list whose config exists under `--root` (new on `doctor`, default the current directory) or the home directory, a `wiring` finding is `ok` when the block matches exactly what `mem init <tool>` would write now, and `warn` (remedy `mem init <tool>`, with `--user` at user level) when it is outdated, hand-edited inside its markers, or a Claude Code hook lacks an expected event. Tools mem was never wired into are one informational `ok` line, and doctor still writes nothing. A new `hook-divergence` finding warns when project and user Claude Code hooks run different mem invocations (both run, so recall is duplicated or inconsistent) and names which to remove or re-init.
-
-### Fixed
-
-- **`mem doctor` inspects the store read-only and keeps reporting when it is broken.** It used to open the store through the same path every write command does, so a health check created a missing database, ran pending migrations, took snapshots, and died with an exception on a corrupt file -- the one case it exists for. It now opens the file read-only (`openDbReadOnly`), runs the hooks, backups, embedding and dream checks regardless, and reports `store: none` (no file; nothing is created), `store: unreadable (<code>)` (a `fail`, so `--strict` exits 1), `schema: N migrations pending`, and `integrity` from `PRAGMA quick_check` as findings. `--json`'s `epoch` is `null` when a store exists but could not be read, and such a store reports only the embedding endpoint, never vector counts it did not read.
-
-- **`mem doctor` no longer reports `does not support ?` for the earliest hook shape.** The first `mem init claude-code` stamped a bare, unguarded `mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"`; the flag parser only knew the two guarded wrappers, so doctor read that hook as unparseable and printed a placeholder subcommand. Recognising a hook as mem's and reading its flags now share one list of wrapper shapes, so they cannot disagree, and a stamped command in no known shape names its remedy (`re-run mem init claude-code`) instead of `?`.
-- **`mem scan-session` no longer blocks a Windows session's suggestions as a "secret".** It stamps
-  each suggestion's `sourceRef` with the native transcript path, and Claude Code names a transcript
-  after its session UUID. The generic high-entropy check exempts path-shaped tokens by their `/`,
-  but a Windows `\` split the path into bare segments, so any session whose UUID scored above the
-  entropy cutoff (about 40% of them) had every suggestion rejected as
-  `capture_suggested_blocked_secret`. A `\` in `sourceRef` and `anchor` now counts as a path
-  separator for that check; named secret patterns still run against the raw value.
-
-- **Audit details no longer read "stored active fact fact".** The capture confirmations stopped
-  doubling the noun for `--kind fact` in an earlier release, but the audit details capture writes
-  (`stored active`, `stored pending`, `restated`) kept their own `<kind> fact` templates, so
-  `mem show` and `mem log` still printed "fact fact". Both now render through one shared noun helper.
-- **A rejected suggestion came back as `pending` once the garbage collector pruned its tombstone.**
-  `mem review --reject` marks a fact `superseded`, and the retention pass hard-deletes superseded rows
-  past 90 days or 1000 rows. Nothing distinguished a rejection from an ordinary contradiction loser.
-  But the row is what keeps the sentence out of the queue: `mem scan-session` and `mem import
-  --from-md` both dedup against stored text at any status, so deleting the tombstone deletes the only
-  record that the question was ever asked. A stable CLAUDE.md re-imported each quarter refilled the
-  queue with bullets a human had already declined, and the README's claim that rejected facts are
-  "kept for audit" was false at the 91st day. A `superseded` fact whose prior status was `pending` is
-  now exempt from both bounds, and does not consume a row-cap slot on the way past. The exemption is
-  deliberately narrow: an ordinary loser, and anything reaching `superseded` from `active`, is pruned
-  exactly as before. The honest cost is that rejection tombstones now grow without an upper bound;
-  they are bounded in practice by how often a human rejects something, which is not often, and the
-  `mem epoch --gc` documentation says so rather than leaving it to be discovered.
-- **A value that agreed except in capitalization superseded the fact it agreed with.** `subject` is
-  stored through `normalizeSubject`, `value` was stored and compared raw, and contradiction detection
-  keys on both. Two facts on one subject recording `pnpm` and `Pnpm` therefore read as a disagreement
-  about the same question, and the recall-time gate resolved it by withholding the loser. The damage
-  was invisible from `mem show`, which reported every row `active` and healthy, while recall quietly
-  surfaced one of them. Comparison now runs through a `normalizeValue` that mirrors `normalizeSubject`
-  -- trim, collapse internal whitespace, lowercase -- in both contradiction detection and the reaffirm
-  match. The raw value is still what gets stored and printed, because what the user typed is what they
-  should see. Genuinely different values still contradict; a `default_branch` of `main` against
-  `master` is unaffected, which is the case the normalization must not swallow.
-- **Two of the recall seam's three failure modes were byte-identical to having nothing to say.** An
-  unreadable store already emitted a footer saying so. A retrieval that exhausted its time budget, and
-  any other internal fault, both returned an empty line set -- exactly the bare `TGMEM/2` header a
-  project with no memory yet emits. The hook commands end in `|| true` and the warnings go to stderr,
-  so nothing downstream distinguished them either: a slow disk on `UserPromptSubmit` told the agent
-  this project had no memory while the store sat full and healthy. Each now carries its own footer
-  clause. The budget clause says the hint set is empty because retrieval ran out of time rather than
-  out of facts, and points at a plain `mem recall`; it promises no partial result, because a partial
-  response is byte-indistinguishable from a complete one on this wire and emitting one would hand a
-  consumer a subset its own contract says is everything. Neither clause needs a protocol bump: footer
-  text and footer presence have always been outside that set.
-- **`mem review` listed two buckets of facts and named no command that would accept them.**
-  `--promote` and `--reject` take `pending` and `contested`; the anchor-contradicted and overdue-pin
-  buckets hold `active` facts, so the two verbs their sibling buckets advertise exit 1 on everything
-  listed there. Recall's own caveat pointed at `mem review` to resolve a contradicted fact, which
-  delivered the user to exactly that dead end. Both buckets now print the commands that do work --
-  `mem forget` for a fact that is no longer true, `mem edit --anchor` for one whose anchor is wrong,
-  re-running `mem pin` to re-confirm a stale pin -- and the `mem edit` line carries `--force` when the
-  fact is user-stated, because `mem edit` refuses those without it and a remedy that refuses is the
-  defect this repeats. This is the same fix one release earlier applied to the contested bucket.
-- **A decaying preference reported full confidence everywhere a human could look.** A non-pinned
-  preference decays on a 180-day half-life and stops being ground truth below 0.5, but `mem show`
-  printed the stored confidence of 1 with no hint that recall had already demoted it, and the garbage
-  collector's `preferences_decayed_below_floor` count named no ids and no remedy. `mem show` now
-  prints the effective value beside the stored one and, below the floor, the two things that fix it:
-  restating the preference, or pinning it. Healthy preferences print nothing extra -- decay is
-  continuous, so a note gated on any decay at all would appear on every preference seconds after
-  capture and mean nothing.
-- **The integration block mem installs advertised six of its eleven anchor predicates.** The agent
-  reading that block is the one writing anchors, and it was never told `file-contains`,
-  `file-not-contains`, `git-branch-is`, `package-version` or `valid-until` exist. `valid-until` is the
-  natural anchor for the corrections the same block asks it to record, so the omission cost exactly
-  the facts most likely to expire. All eleven are now listed in both installed block bodies, in the
-  per-tool integration guides, and in the `--anchor` help on `remember`, `suggest` and `edit`, which
-  previously named none at all.
-
-### Added
-
 - **`mem forget <id> --by <winner-id>` records which fact replaced the forgotten one.** Plain `forget` retires a fact with no named successor, so `mem show` and `mem export` could only say `superseded_by: unknown`. `--by` takes the winner by id or unique prefix (same resolver and errors as the id argument), refuses the fact itself or a winner that is not `active`/`pinned`, and writes the same `Superseded by fact <id>` audit detail the contradiction and review paths use, in the same transaction as the forget. `mem review`'s pending `may contradict` line now ends with a paste-ready `mem forget <rival> --by <id>`.
 - **Retrieval now indexes a decision's rationale for lexical search.** `computeBm25Scores` now appends `doc.why` to the tokenized document text, so queries matching only a decision's rationale (e.g., "staging memory") can find the decision that records it. This lets "why did we..." questions in a future session surface decisions before relitigating them, without waiting for embeddings to refresh.
 - **`mem doctor --json` and `--strict`.** Every doctor line is now a structured finding
@@ -188,7 +109,312 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   unstamped `scan-session` Stop hook from an older install and rewrites it in place rather than
   leaving both to run; `mem doctor` names `reflect` as the one subcommand an older PATH binary lacks.
 
+### Fixed
+
+- **`mem doctor` inspects the store read-only and keeps reporting when it is broken.** It used to open the store through the same path every write command does, so a health check created a missing database, ran pending migrations, took snapshots, and died with an exception on a corrupt file -- the one case it exists for. It now opens the file read-only (`openDbReadOnly`), runs the hooks, backups, embedding and dream checks regardless, and reports `store: none` (no file; nothing is created), `store: unreadable (<code>)` (a `fail`, so `--strict` exits 1), `schema: N migrations pending`, and `integrity` from `PRAGMA quick_check` as findings. `--json`'s `epoch` is `null` when a store exists but could not be read, and such a store reports only the embedding endpoint, never vector counts it did not read.
+
+- **`mem doctor` no longer reports `does not support ?` for the earliest hook shape.** The first `mem init claude-code` stamped a bare, unguarded `mem recall --hint-format --root "$CLAUDE_PROJECT_DIR"`; the flag parser only knew the two guarded wrappers, so doctor read that hook as unparseable and printed a placeholder subcommand. Recognising a hook as mem's and reading its flags now share one list of wrapper shapes, so they cannot disagree, and a stamped command in no known shape names its remedy (`re-run mem init claude-code`) instead of `?`.
+- **`mem scan-session` no longer blocks a Windows session's suggestions as a "secret".** It stamps
+  each suggestion's `sourceRef` with the native transcript path, and Claude Code names a transcript
+  after its session UUID. The generic high-entropy check exempts path-shaped tokens by their `/`,
+  but a Windows `\` split the path into bare segments, so any session whose UUID scored above the
+  entropy cutoff (about 40% of them) had every suggestion rejected as
+  `capture_suggested_blocked_secret`. A `\` in `sourceRef` and `anchor` now counts as a path
+  separator for that check; named secret patterns still run against the raw value.
+
+- **Audit details no longer read "stored active fact fact".** The capture confirmations stopped
+  doubling the noun for `--kind fact` in an earlier release, but the audit details capture writes
+  (`stored active`, `stored pending`, `restated`) kept their own `<kind> fact` templates, so
+  `mem show` and `mem log` still printed "fact fact". Both now render through one shared noun helper.
+- **A rejected suggestion came back as `pending` once the garbage collector pruned its tombstone.**
+  `mem review --reject` marks a fact `superseded`, and the retention pass hard-deletes superseded rows
+  past 90 days or 1000 rows. Nothing distinguished a rejection from an ordinary contradiction loser.
+  But the row is what keeps the sentence out of the queue: `mem scan-session` and `mem import
+  --from-md` both dedup against stored text at any status, so deleting the tombstone deletes the only
+  record that the question was ever asked. A stable CLAUDE.md re-imported each quarter refilled the
+  queue with bullets a human had already declined, and the README's claim that rejected facts are
+  "kept for audit" was false at the 91st day. A `superseded` fact whose prior status was `pending` is
+  now exempt from both bounds, and does not consume a row-cap slot on the way past. The exemption is
+  deliberately narrow: an ordinary loser, and anything reaching `superseded` from `active`, is pruned
+  exactly as before. The honest cost is that rejection tombstones now grow without an upper bound;
+  they are bounded in practice by how often a human rejects something, which is not often, and the
+  `mem epoch --gc` documentation says so rather than leaving it to be discovered.
+- **A value that agreed except in capitalization superseded the fact it agreed with.** `subject` is
+  stored through `normalizeSubject`, `value` was stored and compared raw, and contradiction detection
+  keys on both. Two facts on one subject recording `pnpm` and `Pnpm` therefore read as a disagreement
+  about the same question, and the recall-time gate resolved it by withholding the loser. The damage
+  was invisible from `mem show`, which reported every row `active` and healthy, while recall quietly
+  surfaced one of them. Comparison now runs through a `normalizeValue` that mirrors `normalizeSubject`
+  -- trim, collapse internal whitespace, lowercase -- in both contradiction detection and the reaffirm
+  match. The raw value is still what gets stored and printed, because what the user typed is what they
+  should see. Genuinely different values still contradict; a `default_branch` of `main` against
+  `master` is unaffected, which is the case the normalization must not swallow.
+- **Two of the recall seam's three failure modes were byte-identical to having nothing to say.** An
+  unreadable store already emitted a footer saying so. A retrieval that exhausted its time budget, and
+  any other internal fault, both returned an empty line set -- exactly the bare `TGMEM/2` header a
+  project with no memory yet emits. The hook commands end in `|| true` and the warnings go to stderr,
+  so nothing downstream distinguished them either: a slow disk on `UserPromptSubmit` told the agent
+  this project had no memory while the store sat full and healthy. Each now carries its own footer
+  clause. The budget clause says the hint set is empty because retrieval ran out of time rather than
+  out of facts, and points at a plain `mem recall`; it promises no partial result, because a partial
+  response is byte-indistinguishable from a complete one on this wire and emitting one would hand a
+  consumer a subset its own contract says is everything. Neither clause needs a protocol bump: footer
+  text and footer presence have always been outside that set.
+- **`mem review` listed two buckets of facts and named no command that would accept them.**
+  `--promote` and `--reject` take `pending` and `contested`; the anchor-contradicted and overdue-pin
+  buckets hold `active` facts, so the two verbs their sibling buckets advertise exit 1 on everything
+  listed there. Recall's own caveat pointed at `mem review` to resolve a contradicted fact, which
+  delivered the user to exactly that dead end. Both buckets now print the commands that do work --
+  `mem forget` for a fact that is no longer true, `mem edit --anchor` for one whose anchor is wrong,
+  re-running `mem pin` to re-confirm a stale pin -- and the `mem edit` line carries `--force` when the
+  fact is user-stated, because `mem edit` refuses those without it and a remedy that refuses is the
+  defect this repeats. This is the same fix one release earlier applied to the contested bucket.
+- **A decaying preference reported full confidence everywhere a human could look.** A non-pinned
+  preference decays on a 180-day half-life and stops being ground truth below 0.5, but `mem show`
+  printed the stored confidence of 1 with no hint that recall had already demoted it, and the garbage
+  collector's `preferences_decayed_below_floor` count named no ids and no remedy. `mem show` now
+  prints the effective value beside the stored one and, below the floor, the two things that fix it:
+  restating the preference, or pinning it. Healthy preferences print nothing extra -- decay is
+  continuous, so a note gated on any decay at all would appear on every preference seconds after
+  capture and mean nothing.
+- **The integration block mem installs advertised six of its eleven anchor predicates.** The agent
+  reading that block is the one writing anchors, and it was never told `file-contains`,
+  `file-not-contains`, `git-branch-is`, `package-version` or `valid-until` exist. `valid-until` is the
+  natural anchor for the corrections the same block asks it to record, so the omission cost exactly
+  the facts most likely to expire. All eleven are now listed in both installed block bodies, in the
+  per-tool integration guides, and in the `--anchor` help on `remember`, `suggest` and `edit`, which
+  previously named none at all.
+
 ## [0.4.1] - 2026-09-16
+
+### Added
+
+- **A repeated statement counts as evidence instead of being discarded.** `mem scan-session` skipped
+  any candidate whose text the store already knew, and `mem import --from-md` reported the same skip
+  -- correct for a fact already settled, but wasteful when the match is still `pending`. A preference
+  the user had restated in four separate sessions sat in the review queue indistinguishable from one
+  said once, and the evidence that would have told them apart was thrown away at the moment it was
+  observed. A repeat now records a **sighting**: one more screened source excerpt and a counter on the
+  fact, written in the same transaction. `mem review` sorts the pending bucket by it, so the thing
+  said most often is the thing asked about first. A sighting is evidence for a human, never a
+  mechanism: it does not promote, does not change status, and does not reach the ground-truth gate.
+  The rule that a pending fact never auto-promotes -- not on time, not on repetition, not on
+  confidence -- is unchanged and absolute. Double counting is prevented by excerpt equality rather
+  than a transcript reference, because `sources` records no locator: the same transcript scanned at
+  both `Stop` and `PreCompact` yields a byte-identical excerpt and counts once, while a genuine
+  restatement arrives surrounded by different context and counts again. An excerpt that screens
+  positive for a secret records nothing at all -- under-counting is the safe direction, and there is
+  no excerpt left to compare against.
+
+- **`mem review` names the fact a pending correction may contradict.** A correction filed by the
+  scanner or by `mem suggest` carried no link to whatever it corrects, so promoting it left both
+  claims live unless the user supplied `--subject` and `--value` by hand -- and nothing on screen said
+  that was needed. Each pending correction, and any pending fact that does carry a subject, now prints
+  the single live fact sharing the most entity and topic terms with it, labelled as one it may
+  contradict. It reuses the same computation `mem show --related` already runs, so there is one notion
+  of relatedness in the tool rather than two. Term overlap establishes that two facts are about the
+  same thing, never that one negates the other, so this is a label and only a label: it supersedes
+  nothing, promotes nothing, and changes no status. Only the best match prints, on the same reasoning
+  the unanchored bucket offers only its first viable anchor -- a review queue is a queue, not a menu.
+
+- **`mem consolidate` can see across scopes.** Its comparability rule puts global and project facts in
+  structurally disjoint groups, which is right for near-duplicates -- the two surface in different
+  places, so neither is redundant given the other -- but it also meant a project fact repeating a
+  global one word for word was never compared to it. Both bind on recall to that root and there is no
+  text-collision suppression anywhere in retrieval, so the pair double-surfaced on every query and
+  double-spent the hint budget. A separate exact-text pass now runs beside the near-duplicate
+  clustering, leaving that clustering and its reasoning untouched: relaxing the shared key would have
+  let unrelated same-kind facts merge across every project. The global fact always survives, because
+  widening a project fact's scope is a decision `mem edit --scope global` makes explicitly and not one
+  this pass should invent. `--cross-project` reports the same shape across two or more projects and
+  prints that command ready to paste, including the `--force` a user-stated fact requires; it is
+  report-only and has no `--apply`, because which scope a fact belongs in is the user's judgement.
+  Matching requires subject and value to agree as well as text: two facts can be worded identically
+  and mean different things per scope -- a `default_branch` of `main` globally and `master` in one
+  repository is an override, and collapsing it would destroy the override rather than a duplicate.
+
+- **The `sources` table is fed.** Its schema, storage API, `mem show --json` surfacing and gc pruning
+  have all existed and been tested since they were added, against zero rows: no capture path ever
+  wrote one, so `sources: []` meant "mem records no sources at all", and a guard test existed only to
+  keep that admission honest. Two paths now write a source row in the same transaction as the fact
+  they explain -- `mem scan-session`, whose excerpt is the user turn the statement was lifted out of,
+  and `mem import --from-md`, whose excerpt is `<path>:<line>: <raw bullet>`. Both are cases where the
+  raw material is genuinely larger than the fact, so the row answers a question the fact cannot:
+  where did this come from, and did mem read it right. `mem remember` and `mem suggest <text>` still
+  write nothing, because there the caller's text *is* the fact and a source row would echo it back.
+  Excerpts are truncated to 600 characters and secret-screened before storage; a screened-positive
+  excerpt is dropped and the fact is still captured, since refusing to store provenance is not a
+  reason to lose the knowledge. Never the full source content.
+
+- **`mem review` shows where a pending fact came from.** The queue asked for a promote/reject decision
+  while showing only mem's own paraphrase, which is the one thing a reviewer cannot check the
+  paraphrase against. Each pending entry now carries its newest source excerpt, when one exists, under
+  the fact. Facts captured before sources were fed, and those from paths that write none, print as
+  they did -- the line is omitted rather than filled with a placeholder.
+
+- **`mem review` prints a paste-ready `mem edit --anchor` command for facts it can already verify.**
+  The `unanchored` bucket named the problem and left the fix as an exercise: an anchorless fact is
+  caveated as `unverified` forever, and closing that needs a predicate the user has to compose by
+  hand. When a fact's text mentions a path that resolves inside its own root and `file-exists`
+  against it reads `affirmed` right now, the exact command is printed. A suggestion that would read
+  `contradicted` or `unverified` is withheld -- teaching the user the feature is broken is worse than
+  saying nothing -- and only the first viable candidate is offered, so the bucket stays a queue rather
+  than a menu. The command carries `--force` for a user-stated fact, because `mem edit` refuses one
+  without it and most of a real store is user-stated: the guard exists to stop an agent rewriting a
+  user's own words unasked, and this is the user pasting it themselves with the text untouched.
+
+- **`mem export --format md`** renders the store as a shareable, git-reviewable markdown document.
+  `mem import --from-md` already read that shape from hand-written notes; nothing produced it. It is
+  explicitly not a backup, and says so in its own `--help`: a markdown round trip preserves the fact
+  *text* and nothing else -- id, status, confidence, anchor, subject and value are all lost, and
+  every bullet lands back `pending`. `--format json` remains the full-fidelity path and remains the
+  default, so the lossy surface is one a user has to ask for by name.
+
+- **`mem show --related`** lists the facts sharing the most entity and topic terms with the one being
+  shown, entity matches weighted above topic matches. The store already indexed those terms for
+  retrieval and `mem consolidate` already compared them for near-duplicates; nothing let a person
+  walk sideways from one fact to its neighbours. The target itself and superseded facts are excluded,
+  results are scope-contained to `--root`, and it is an association aid rather than a ground-truth
+  channel: pending and contested neighbours do appear, still labelled as such.
+
+- **`mem init copilot-visual-studio` and `mem init copilot-jetbrains`.** Coverage of the Copilot hosts
+  turned on one file rather than one config per IDE. Copilot CLI, Copilot chat in VS Code and Codex
+  all read `AGENTS.md`, which existing writers already produce. Visual Studio does not read it at
+  all, and JetBrains reads it only for the cloud agent -- local IntelliJ chat reads
+  `.github/copilot-instructions.md`. Both new targets write that one shared path, through the same
+  reference-counted markers, atomic temp-file-and-rename and one-time backup as every other target,
+  so installing both and removing one leaves the other's block intact. Each ships its own integration
+  doc, and the docs guard now derives the set of per-tool docs it demands from the tool list itself,
+  so the next target cannot be added without one.
+
+- **`mem dream`** reports what a configured model thinks follows from several stored facts taken
+  together -- the one kind of consolidation `mem consolidate` structurally cannot do, since Jaccard
+  over topic terms can tell that two facts restate each other but never that a third thing follows
+  from both. It is an evaluation surface and nothing more: it writes nothing, there is no `--apply`,
+  and the output is a report whose worthwhile lines are kept by typing `mem remember`. Off unless
+  `TOKEN_GOAT_MEM_DREAM_URL` and `TOKEN_GOAT_MEM_DREAM_MODEL` are set, matching how `mem embed`
+  already treats an optional model endpoint. It is the only command in the tool that sends fact text
+  off the machine, so it says so in its own `--help`, in the error it prints when unconfigured, and
+  in both docs. Only `active` and `pinned` facts are sent: a superseded fact is one the store has
+  already decided is wrong, and an inference resting on it would carry the store's authority behind
+  a retracted premise. The endpoint's reply is treated as untrusted input rather than an answer --
+  every candidate must cite at least two facts that were actually sent, by an index that resolves,
+  and must not restate a fact already stored; one that fails any check is dropped rather than
+  printed, so every `from:` id is one `mem show` opens. A malformed element is dropped alone rather
+  than failing the run. `mem doctor` gained a `dreaming:` line mirroring its `embeddings:` one,
+  because the configuration lives in environment variables and a URL exported once in a shell
+  profile is otherwise invisible to the person whose facts would be sent; it prints the endpoint
+  host and never the URL or key, since doctor output is what users paste into an issue. Errors name
+  the endpoint host and never its URL or key. No `--root`:
+  dreaming reasons over the whole live store, and a flag that read as scoping while scoping nothing
+  would repeat the sharpest edge on `mem recall`.
+
+- **`mem review --undo <id>`** reverses a `--reject`. Review is a two-key decision made one key at a
+  time, and reject was the only irreversible one: it marks the fact `superseded`, and `--promote`
+  refuses anything that is not `pending` or `contested`, so a mistyped id could not be walked back
+  through the CLI at all -- only by hand-editing the database or round-tripping a `mem export`. A
+  review queue whose reject key is unrecoverable is one users are right to hesitate over, which
+  defeats the queue. The fact returns to the status it actually had, so a rejected `contested` fact
+  comes back `contested` rather than being quietly upgraded. Scoped to rejections by name: `mem
+  forget` is a considered decision about a fact the user chose to keep, and reversing that is a
+  different question, so a fact superseded any other way is refused with the mechanism that claimed
+  it.
+
+
+- **A pinned fact could fall off the recall it was pinned for.** With no query -- the shape of the
+  `SessionStart` hook `mem init` installs -- every BM25 score ties at zero, the sort falls through to
+  recency, and the default cap of 20 keeps the newest facts. A pinned fact behind 20 newer ones
+  silently vanished from the one call the user pinned it for; only `withheld` results were ever
+  cap-exempt. Pinned facts now sort first, but *only* in that zero-signal case: under a real query
+  relevance still decides, since a pin that also won there would be a ranking cheat code and an
+  irrelevant pinned fact would displace the one that answers the question.
+
+- **Restating a fact reaffirms it instead of duplicating it.** `mem remember` had no dedup, so saying
+  the same thing twice wrote a second row and left the first one's decay clock running -- the facts a
+  user cared enough to repeat were exactly the ones drifting below the ground-truth floor, and recall
+  showed one sentence twice at two confidences. A match now refreshes `captured_at` and confidence
+  and prints `reaffirmed`. Matching is deterministic and conservative: same normalized text (case
+  folded, whitespace collapsed, one trailing period dropped), same kind, same scope *binding* (not
+  just the scope label), same subject and value -- identical text carrying a different value is a
+  correction for contradiction resolution to key on, never a repeat to swallow. Only `active` and
+  `pinned` facts are candidates: reaffirming a `pending` one would promote it without review, and a
+  `superseded` one must not be resurrected by a matching sentence. `mem suggest` never reaffirms at
+  all -- its candidates come from file and transcript content, and letting derived text refresh a
+  user-stated fact's clock would hand a `CLAUDE.md` the power to keep alive a fact nobody restated.
+
+- **`valid-until <ISO date>` anchor predicate**, for a fact that is true until a date rather than
+  until a file changes ("until the v2 migration lands, keep the shim"). Such facts previously had no
+  anchor available and stayed permanently `unverified` -- caveated forever and never surfaced in
+  `mem review` as something to resolve. The only predicate that reads no filesystem or git state. A
+  bare `YYYY-MM-DD` is read as the end of that day rather than its midnight start, so
+  `valid-until 2026-12-31` is still affirmed during the 31st. An unparseable date is `unverified`
+  rather than `contradicted` -- a typo must never read as "this fact expired" and suppress a true
+  fact -- and is rejected outright at capture, since anchors.ts would otherwise accept the typo and
+  caveat the fact forever.
+
+- **`mem show` prints the fact's audit history**, and `mem edit` records what each field said before.
+  The audit log had recorded every capture, edit, pin, and status change since the first release and
+  nothing could read it back: the trail that exists so this tool's output can be trusted was
+  write-only. It matters most for `mem edit`, which overwrites text in place -- the previous wording
+  survived nowhere in the store, and the audit row said only which field names changed. Values are
+  previewed rather than stored whole, so editing a long fact cannot turn one audit row into a second
+  copy of the store. Deliberately not a version chain: that is a schema migration and a retention
+  policy bought for a question the audit log can already answer.
+
+
+- **Capture had no path that did not depend on an agent volunteering it** -- both hooks `mem init claude-code` installed (`SessionStart`, `UserPromptSubmit`) are recall paths, so unless the agent obeyed the `CLAUDE.md` instruction block or the user typed `mem remember` by hand, a session ended with everything it established forgotten. That made capture the weakest link in a tool whose entire purpose is not forgetting.
+
+  `mem scan-session` closes it, wired as a third hook on `Stop` -- the only event that fires after the user has actually spoken, and the only one whose envelope carries `transcript_path`. It matches sentences against a fixed table of durable-statement openers (`remember that`, `from now on`, `always`/`never`, `don't`, `we decided`, `decision:`) and files each match as **pending**. No model is involved, so the same transcript always yields the same candidates; nothing it produces can be recalled until `mem review --promote` resolves it, and the dedup matches on fact text so a rejected suggestion is never re-filed by a later scan. Takes `--transcript <path>` as a manual/testing entry point and `--quiet` (the shape `mem init` installs, since a `Stop` hook's stdout lands in the session it just read).
+
+  **Only the human's own text is scanned, which is narrower than it sounds.** A transcript stores tool results, `<system-reminder>` injections, slash-command payloads and their stdout, relayed subagent reports, and compaction summaries of the assistant's own prior output -- all under the user role, and all but the first as ordinary `text` blocks. Treating any of them as speech would let a file mem reads dictate what mem remembers. Each is rejected: tool-result blocks and `toolUseResult` envelopes, `isMeta`/`isCompactSummary`/`isVisibleInTranscriptOnly` entries, entries whose `origin.kind` is present and not `human`, and blocks carrying a `<command-name>`/`<command-message>`/`<local-command-stdout>`/`<task-notification>` wrapper; `<system-reminder>` spans are stripped out of otherwise genuine turns rather than discarding the turn. Both content shapes (bare string and block array) go through one sanitizer -- an earlier revision returned string content unfiltered, which exempted it from every check above.
+
+  Dogfooded against a real 33 MB session transcript at each step: 28 proposed facts before these channels were excluded, 0 after, with every one of the 28 traced to a channel rather than to the user. Five separate guards, each independently revert-proved.
+
+- **A project-scoped fact was bound to the absolute path it happened to be captured at**, so it
+  vanished from a second clone of the same repository, from every git worktree (a different root by
+  construction), and from an `mem export`/`mem import` onto another machine -- the three cases a
+  memory tool exists to cover. A new `scope_repo` column records
+  `<normalized git remote>#<root relative to the working tree>` alongside the path, and recall
+  matches a fact whose path binding *or* identity binding holds.
+
+  Identity is the remote **plus the subpath** on purpose: a monorepo has one remote and many project
+  roots, so remote-only identity would leak `packages/a`'s decisions into `packages/b`. The remote is
+  normalized so `git@github.com:acme/widget.git`, `https://github.com/acme/widget`, and
+  `ssh://git@github.com/acme/widget.git` produce one string; several remotes with no `origin` is
+  genuinely ambiguous and yields no identity rather than a guess. Nothing shells out -- `git` need
+  not be installed, and only `.git`'s own files are read (including the `commondir` indirection,
+  without which every worktree reads as remote-less). Identity only ever widens: the path comparison
+  runs first and is unchanged, and a fact with no identity is matched by path exactly as before.
+  `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path` restores the path-only binding at both capture and recall,
+  for two clones that are deliberately not the same project.
+
+  Contradiction bucketing deliberately still keys on `scope_root`: that key decides the persisted
+  `superseded`/`contested` transitions, no honest backfill exists for facts captured before this
+  column, and widening it would rewrite facts across checkouts on the first `mem epoch --gc` after
+  upgrade. The cost, stated rather than hidden: two facts on one subject captured in two clones are
+  both in scope and are not detected as rivals.
+
+- **`mem import --from-md --captured-at <iso>`** back-dates a whole import run instead of stamping
+  everything with the moment of the import. A `CLAUDE.md` full of two-year-old conventions imported
+  today otherwise reads as the newest thing in the store, and `captured_at` drives both time-decay
+  and contradiction precedence, so those bullets outranked facts the user actually stated recently.
+  There is no automatic default because no honest one exists: mtime is reset to checkout time by
+  `git clone`, restored backups carry arbitrary ones, and the real answer is the file's last commit
+  date -- which this codebase deliberately does not shell out to git for. Hence the one-liner in
+  `--help`: `--captured-at "$(git log -1 --format=%aI -- CLAUDE.md)"`. A malformed or future value is
+  rejected once at the CLI boundary with exit 1, rather than being reported once per candidate while
+  the command still exits 0.
+
+### Changed
+
+- The `mem recall --hint-format` footer now says `N more in scope, not sent` rather than
+  `N more matched, not sent`. `retrieve()` ranks the scoped pool, it does not filter it, so the
+  count includes facts that never matched the query -- the old wording asserted something untrue.
+- The transaction-mode guard now catches an inline `db.transaction(...)()` invocation. Its regex
+  keyed on a `tx`-named variable, so the one call site that did not follow that convention was
+  invisible to it and ran in deferred mode while the guard reported zero offenders.
+- `CLAUDE.md` no longer claims there is no CI workflow, and `mem dream` no longer claims to be the
+  only command that sends fact text off the machine (`mem embed` does too).
 
 ### Fixed
 
@@ -777,48 +1003,6 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   guard and its error message now name all four modes.
 - **`mem import --from-md` had no file size cap** while the JSON path capped at 50 MB. Both now
   share the same constant.
-
-### Security
-
-- **`mem import --from-json` accepted a `scopeRoot` pointing anywhere on disk.** The field was
-  copied verbatim after a bare non-empty-string check -- the validation error text claimed to
-  expect an absolute path without ever verifying one -- and for a `project`-scoped fact it becomes
-  the root that anchor predicates are evaluated against. A crafted import file could therefore turn
-  every later `mem recall` into a file-existence and content-substring oracle for a directory
-  outside `--root`. `scopeRoot` is now required to be absolute and contained by the import root,
-  reusing the same containment check every anchor argument already goes through; a row that fails
-  is skipped like any other invalid row rather than aborting the file.
-- **`--path` was documented as "resolved against `--root`" and was not.** It used a bare
-  `path.resolve`, so `--path "../../other-repo"` bound a fact to a tree outside the root it was
-  captured under. All capture paths now enforce containment.
-- **`SecretDetectedError` carried the raw credential.** The message was redacted, but the thrown
-  object retained the full literal, so any caller logging or serializing it echoed the secret back.
-  The error now carries only the pattern name, field, redacted preview, and length.
-- **`mem edit` copied the prior field value into the audit log without re-screening it,** making a
-  second at-rest copy of anything that got past capture screening. Prior values are now screened
-  and redacted on the way in. Because the audit row is also what `--undo` restores from, undoing an
-  edit whose prior value was redacted now refuses and says so, rather than restoring the redaction
-  marker in as the fact's text and reporting success.
-- **AWS STS session key ids (`ASIA...`) were stored verbatim** -- only `AKIA` was matched, and at 20
-  characters they sit permanently below the generic entropy floor, so no fallback layer caught them.
-- **The OpenAI key pattern could not match the current `sk-proj-` format,** stopping four characters
-  in because `-` was absent from its character class.
-- **`password-assignment` matched inside longer words,** flagging `notpassword=` and `mypwd=` as
-  credentials. A screener that refuses ordinary text trains users into blanket allowlists, which is
-  its own security failure.
-
-### Changed
-
-- The `mem recall --hint-format` footer now says `N more in scope, not sent` rather than
-  `N more matched, not sent`. `retrieve()` ranks the scoped pool, it does not filter it, so the
-  count includes facts that never matched the query -- the old wording asserted something untrue.
-- The transaction-mode guard now catches an inline `db.transaction(...)()` invocation. Its regex
-  keyed on a `tx`-named variable, so the one call site that did not follow that convention was
-  invisible to it and ran in deferred mode while the guard reported zero offenders.
-- `CLAUDE.md` no longer claims there is no CI workflow, and `mem dream` no longer claims to be the
-  only command that sends fact text off the machine (`mem embed` does too).
-### Fixed
-
 - **`mem recall --hint-format` could not tell "nothing to say" from "held things back".** A
   response carrying two of six matching decisions was byte-identical to one carrying all six, and a
   response for a project with three facts sitting in the review queue was byte-identical -- a bare
@@ -906,241 +1090,36 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
   matters most: an agent gets one shot at the context it is handed and never sees what ranked below
   the cap, so a mis-ranked identifier is not a worse ordering but a fact the agent never learns.
 
-### Added
+### Security
 
-- **A repeated statement counts as evidence instead of being discarded.** `mem scan-session` skipped
-  any candidate whose text the store already knew, and `mem import --from-md` reported the same skip
-  -- correct for a fact already settled, but wasteful when the match is still `pending`. A preference
-  the user had restated in four separate sessions sat in the review queue indistinguishable from one
-  said once, and the evidence that would have told them apart was thrown away at the moment it was
-  observed. A repeat now records a **sighting**: one more screened source excerpt and a counter on the
-  fact, written in the same transaction. `mem review` sorts the pending bucket by it, so the thing
-  said most often is the thing asked about first. A sighting is evidence for a human, never a
-  mechanism: it does not promote, does not change status, and does not reach the ground-truth gate.
-  The rule that a pending fact never auto-promotes -- not on time, not on repetition, not on
-  confidence -- is unchanged and absolute. Double counting is prevented by excerpt equality rather
-  than a transcript reference, because `sources` records no locator: the same transcript scanned at
-  both `Stop` and `PreCompact` yields a byte-identical excerpt and counts once, while a genuine
-  restatement arrives surrounded by different context and counts again. An excerpt that screens
-  positive for a secret records nothing at all -- under-counting is the safe direction, and there is
-  no excerpt left to compare against.
-
-- **`mem review` names the fact a pending correction may contradict.** A correction filed by the
-  scanner or by `mem suggest` carried no link to whatever it corrects, so promoting it left both
-  claims live unless the user supplied `--subject` and `--value` by hand -- and nothing on screen said
-  that was needed. Each pending correction, and any pending fact that does carry a subject, now prints
-  the single live fact sharing the most entity and topic terms with it, labelled as one it may
-  contradict. It reuses the same computation `mem show --related` already runs, so there is one notion
-  of relatedness in the tool rather than two. Term overlap establishes that two facts are about the
-  same thing, never that one negates the other, so this is a label and only a label: it supersedes
-  nothing, promotes nothing, and changes no status. Only the best match prints, on the same reasoning
-  the unanchored bucket offers only its first viable anchor -- a review queue is a queue, not a menu.
-
-- **`mem consolidate` can see across scopes.** Its comparability rule puts global and project facts in
-  structurally disjoint groups, which is right for near-duplicates -- the two surface in different
-  places, so neither is redundant given the other -- but it also meant a project fact repeating a
-  global one word for word was never compared to it. Both bind on recall to that root and there is no
-  text-collision suppression anywhere in retrieval, so the pair double-surfaced on every query and
-  double-spent the hint budget. A separate exact-text pass now runs beside the near-duplicate
-  clustering, leaving that clustering and its reasoning untouched: relaxing the shared key would have
-  let unrelated same-kind facts merge across every project. The global fact always survives, because
-  widening a project fact's scope is a decision `mem edit --scope global` makes explicitly and not one
-  this pass should invent. `--cross-project` reports the same shape across two or more projects and
-  prints that command ready to paste, including the `--force` a user-stated fact requires; it is
-  report-only and has no `--apply`, because which scope a fact belongs in is the user's judgement.
-  Matching requires subject and value to agree as well as text: two facts can be worded identically
-  and mean different things per scope -- a `default_branch` of `main` globally and `master` in one
-  repository is an override, and collapsing it would destroy the override rather than a duplicate.
-
-- **The `sources` table is fed.** Its schema, storage API, `mem show --json` surfacing and gc pruning
-  have all existed and been tested since they were added, against zero rows: no capture path ever
-  wrote one, so `sources: []` meant "mem records no sources at all", and a guard test existed only to
-  keep that admission honest. Two paths now write a source row in the same transaction as the fact
-  they explain -- `mem scan-session`, whose excerpt is the user turn the statement was lifted out of,
-  and `mem import --from-md`, whose excerpt is `<path>:<line>: <raw bullet>`. Both are cases where the
-  raw material is genuinely larger than the fact, so the row answers a question the fact cannot:
-  where did this come from, and did mem read it right. `mem remember` and `mem suggest <text>` still
-  write nothing, because there the caller's text *is* the fact and a source row would echo it back.
-  Excerpts are truncated to 600 characters and secret-screened before storage; a screened-positive
-  excerpt is dropped and the fact is still captured, since refusing to store provenance is not a
-  reason to lose the knowledge. Never the full source content.
-
-- **`mem review` shows where a pending fact came from.** The queue asked for a promote/reject decision
-  while showing only mem's own paraphrase, which is the one thing a reviewer cannot check the
-  paraphrase against. Each pending entry now carries its newest source excerpt, when one exists, under
-  the fact. Facts captured before sources were fed, and those from paths that write none, print as
-  they did -- the line is omitted rather than filled with a placeholder.
-
-- **`mem review` prints a paste-ready `mem edit --anchor` command for facts it can already verify.**
-  The `unanchored` bucket named the problem and left the fix as an exercise: an anchorless fact is
-  caveated as `unverified` forever, and closing that needs a predicate the user has to compose by
-  hand. When a fact's text mentions a path that resolves inside its own root and `file-exists`
-  against it reads `affirmed` right now, the exact command is printed. A suggestion that would read
-  `contradicted` or `unverified` is withheld -- teaching the user the feature is broken is worse than
-  saying nothing -- and only the first viable candidate is offered, so the bucket stays a queue rather
-  than a menu. The command carries `--force` for a user-stated fact, because `mem edit` refuses one
-  without it and most of a real store is user-stated: the guard exists to stop an agent rewriting a
-  user's own words unasked, and this is the user pasting it themselves with the text untouched.
-
-- **`mem export --format md`** renders the store as a shareable, git-reviewable markdown document.
-  `mem import --from-md` already read that shape from hand-written notes; nothing produced it. It is
-  explicitly not a backup, and says so in its own `--help`: a markdown round trip preserves the fact
-  *text* and nothing else -- id, status, confidence, anchor, subject and value are all lost, and
-  every bullet lands back `pending`. `--format json` remains the full-fidelity path and remains the
-  default, so the lossy surface is one a user has to ask for by name.
-
-- **`mem show --related`** lists the facts sharing the most entity and topic terms with the one being
-  shown, entity matches weighted above topic matches. The store already indexed those terms for
-  retrieval and `mem consolidate` already compared them for near-duplicates; nothing let a person
-  walk sideways from one fact to its neighbours. The target itself and superseded facts are excluded,
-  results are scope-contained to `--root`, and it is an association aid rather than a ground-truth
-  channel: pending and contested neighbours do appear, still labelled as such.
-
-- **`mem init copilot-visual-studio` and `mem init copilot-jetbrains`.** Coverage of the Copilot hosts
-  turned on one file rather than one config per IDE. Copilot CLI, Copilot chat in VS Code and Codex
-  all read `AGENTS.md`, which existing writers already produce. Visual Studio does not read it at
-  all, and JetBrains reads it only for the cloud agent -- local IntelliJ chat reads
-  `.github/copilot-instructions.md`. Both new targets write that one shared path, through the same
-  reference-counted markers, atomic temp-file-and-rename and one-time backup as every other target,
-  so installing both and removing one leaves the other's block intact. Each ships its own integration
-  doc, and the docs guard now derives the set of per-tool docs it demands from the tool list itself,
-  so the next target cannot be added without one.
-
-- **`mem dream`** reports what a configured model thinks follows from several stored facts taken
-  together -- the one kind of consolidation `mem consolidate` structurally cannot do, since Jaccard
-  over topic terms can tell that two facts restate each other but never that a third thing follows
-  from both. It is an evaluation surface and nothing more: it writes nothing, there is no `--apply`,
-  and the output is a report whose worthwhile lines are kept by typing `mem remember`. Off unless
-  `TOKEN_GOAT_MEM_DREAM_URL` and `TOKEN_GOAT_MEM_DREAM_MODEL` are set, matching how `mem embed`
-  already treats an optional model endpoint. It is the only command in the tool that sends fact text
-  off the machine, so it says so in its own `--help`, in the error it prints when unconfigured, and
-  in both docs. Only `active` and `pinned` facts are sent: a superseded fact is one the store has
-  already decided is wrong, and an inference resting on it would carry the store's authority behind
-  a retracted premise. The endpoint's reply is treated as untrusted input rather than an answer --
-  every candidate must cite at least two facts that were actually sent, by an index that resolves,
-  and must not restate a fact already stored; one that fails any check is dropped rather than
-  printed, so every `from:` id is one `mem show` opens. A malformed element is dropped alone rather
-  than failing the run. `mem doctor` gained a `dreaming:` line mirroring its `embeddings:` one,
-  because the configuration lives in environment variables and a URL exported once in a shell
-  profile is otherwise invisible to the person whose facts would be sent; it prints the endpoint
-  host and never the URL or key, since doctor output is what users paste into an issue. Errors name
-  the endpoint host and never its URL or key. No `--root`:
-  dreaming reasons over the whole live store, and a flag that read as scoping while scoping nothing
-  would repeat the sharpest edge on `mem recall`.
-
-- **`mem review --undo <id>`** reverses a `--reject`. Review is a two-key decision made one key at a
-  time, and reject was the only irreversible one: it marks the fact `superseded`, and `--promote`
-  refuses anything that is not `pending` or `contested`, so a mistyped id could not be walked back
-  through the CLI at all -- only by hand-editing the database or round-tripping a `mem export`. A
-  review queue whose reject key is unrecoverable is one users are right to hesitate over, which
-  defeats the queue. The fact returns to the status it actually had, so a rejected `contested` fact
-  comes back `contested` rather than being quietly upgraded. Scoped to rejections by name: `mem
-  forget` is a considered decision about a fact the user chose to keep, and reversing that is a
-  different question, so a fact superseded any other way is refused with the mechanism that claimed
-  it.
-
-
-- **A pinned fact could fall off the recall it was pinned for.** With no query -- the shape of the
-  `SessionStart` hook `mem init` installs -- every BM25 score ties at zero, the sort falls through to
-  recency, and the default cap of 20 keeps the newest facts. A pinned fact behind 20 newer ones
-  silently vanished from the one call the user pinned it for; only `withheld` results were ever
-  cap-exempt. Pinned facts now sort first, but *only* in that zero-signal case: under a real query
-  relevance still decides, since a pin that also won there would be a ranking cheat code and an
-  irrelevant pinned fact would displace the one that answers the question.
-
-- **Restating a fact reaffirms it instead of duplicating it.** `mem remember` had no dedup, so saying
-  the same thing twice wrote a second row and left the first one's decay clock running -- the facts a
-  user cared enough to repeat were exactly the ones drifting below the ground-truth floor, and recall
-  showed one sentence twice at two confidences. A match now refreshes `captured_at` and confidence
-  and prints `reaffirmed`. Matching is deterministic and conservative: same normalized text (case
-  folded, whitespace collapsed, one trailing period dropped), same kind, same scope *binding* (not
-  just the scope label), same subject and value -- identical text carrying a different value is a
-  correction for contradiction resolution to key on, never a repeat to swallow. Only `active` and
-  `pinned` facts are candidates: reaffirming a `pending` one would promote it without review, and a
-  `superseded` one must not be resurrected by a matching sentence. `mem suggest` never reaffirms at
-  all -- its candidates come from file and transcript content, and letting derived text refresh a
-  user-stated fact's clock would hand a `CLAUDE.md` the power to keep alive a fact nobody restated.
-
-- **`valid-until <ISO date>` anchor predicate**, for a fact that is true until a date rather than
-  until a file changes ("until the v2 migration lands, keep the shim"). Such facts previously had no
-  anchor available and stayed permanently `unverified` -- caveated forever and never surfaced in
-  `mem review` as something to resolve. The only predicate that reads no filesystem or git state. A
-  bare `YYYY-MM-DD` is read as the end of that day rather than its midnight start, so
-  `valid-until 2026-12-31` is still affirmed during the 31st. An unparseable date is `unverified`
-  rather than `contradicted` -- a typo must never read as "this fact expired" and suppress a true
-  fact -- and is rejected outright at capture, since anchors.ts would otherwise accept the typo and
-  caveat the fact forever.
-
-- **`mem show` prints the fact's audit history**, and `mem edit` records what each field said before.
-  The audit log had recorded every capture, edit, pin, and status change since the first release and
-  nothing could read it back: the trail that exists so this tool's output can be trusted was
-  write-only. It matters most for `mem edit`, which overwrites text in place -- the previous wording
-  survived nowhere in the store, and the audit row said only which field names changed. Values are
-  previewed rather than stored whole, so editing a long fact cannot turn one audit row into a second
-  copy of the store. Deliberately not a version chain: that is a schema migration and a retention
-  policy bought for a question the audit log can already answer.
-
-
-- **Capture had no path that did not depend on an agent volunteering it** -- both hooks `mem init claude-code` installed (`SessionStart`, `UserPromptSubmit`) are recall paths, so unless the agent obeyed the `CLAUDE.md` instruction block or the user typed `mem remember` by hand, a session ended with everything it established forgotten. That made capture the weakest link in a tool whose entire purpose is not forgetting.
-
-  `mem scan-session` closes it, wired as a third hook on `Stop` -- the only event that fires after the user has actually spoken, and the only one whose envelope carries `transcript_path`. It matches sentences against a fixed table of durable-statement openers (`remember that`, `from now on`, `always`/`never`, `don't`, `we decided`, `decision:`) and files each match as **pending**. No model is involved, so the same transcript always yields the same candidates; nothing it produces can be recalled until `mem review --promote` resolves it, and the dedup matches on fact text so a rejected suggestion is never re-filed by a later scan. Takes `--transcript <path>` as a manual/testing entry point and `--quiet` (the shape `mem init` installs, since a `Stop` hook's stdout lands in the session it just read).
-
-  **Only the human's own text is scanned, which is narrower than it sounds.** A transcript stores tool results, `<system-reminder>` injections, slash-command payloads and their stdout, relayed subagent reports, and compaction summaries of the assistant's own prior output -- all under the user role, and all but the first as ordinary `text` blocks. Treating any of them as speech would let a file mem reads dictate what mem remembers. Each is rejected: tool-result blocks and `toolUseResult` envelopes, `isMeta`/`isCompactSummary`/`isVisibleInTranscriptOnly` entries, entries whose `origin.kind` is present and not `human`, and blocks carrying a `<command-name>`/`<command-message>`/`<local-command-stdout>`/`<task-notification>` wrapper; `<system-reminder>` spans are stripped out of otherwise genuine turns rather than discarding the turn. Both content shapes (bare string and block array) go through one sanitizer -- an earlier revision returned string content unfiltered, which exempted it from every check above.
-
-  Dogfooded against a real 33 MB session transcript at each step: 28 proposed facts before these channels were excluded, 0 after, with every one of the 28 traced to a channel rather than to the user. Five separate guards, each independently revert-proved.
-
-- **A project-scoped fact was bound to the absolute path it happened to be captured at**, so it
-  vanished from a second clone of the same repository, from every git worktree (a different root by
-  construction), and from an `mem export`/`mem import` onto another machine -- the three cases a
-  memory tool exists to cover. A new `scope_repo` column records
-  `<normalized git remote>#<root relative to the working tree>` alongside the path, and recall
-  matches a fact whose path binding *or* identity binding holds.
-
-  Identity is the remote **plus the subpath** on purpose: a monorepo has one remote and many project
-  roots, so remote-only identity would leak `packages/a`'s decisions into `packages/b`. The remote is
-  normalized so `git@github.com:acme/widget.git`, `https://github.com/acme/widget`, and
-  `ssh://git@github.com/acme/widget.git` produce one string; several remotes with no `origin` is
-  genuinely ambiguous and yields no identity rather than a guess. Nothing shells out -- `git` need
-  not be installed, and only `.git`'s own files are read (including the `commondir` indirection,
-  without which every worktree reads as remote-less). Identity only ever widens: the path comparison
-  runs first and is unchanged, and a fact with no identity is matched by path exactly as before.
-  `TOKEN_GOAT_MEM_PROJECT_IDENTITY=path` restores the path-only binding at both capture and recall,
-  for two clones that are deliberately not the same project.
-
-  Contradiction bucketing deliberately still keys on `scope_root`: that key decides the persisted
-  `superseded`/`contested` transitions, no honest backfill exists for facts captured before this
-  column, and widening it would rewrite facts across checkouts on the first `mem epoch --gc` after
-  upgrade. The cost, stated rather than hidden: two facts on one subject captured in two clones are
-  both in scope and are not detected as rivals.
-
-- **`mem import --from-md --captured-at <iso>`** back-dates a whole import run instead of stamping
-  everything with the moment of the import. A `CLAUDE.md` full of two-year-old conventions imported
-  today otherwise reads as the newest thing in the store, and `captured_at` drives both time-decay
-  and contradiction precedence, so those bullets outranked facts the user actually stated recently.
-  There is no automatic default because no honest one exists: mtime is reset to checkout time by
-  `git clone`, restored backups carry arbitrary ones, and the real answer is the file's last commit
-  date -- which this codebase deliberately does not shell out to git for. Hence the one-liner in
-  `--help`: `--captured-at "$(git log -1 --format=%aI -- CLAUDE.md)"`. A malformed or future value is
-  rejected once at the CLI boundary with exit 1, rather than being reported once per candidate while
-  the command still exits 0.
+- **`mem import --from-json` accepted a `scopeRoot` pointing anywhere on disk.** The field was
+  copied verbatim after a bare non-empty-string check -- the validation error text claimed to
+  expect an absolute path without ever verifying one -- and for a `project`-scoped fact it becomes
+  the root that anchor predicates are evaluated against. A crafted import file could therefore turn
+  every later `mem recall` into a file-existence and content-substring oracle for a directory
+  outside `--root`. `scopeRoot` is now required to be absolute and contained by the import root,
+  reusing the same containment check every anchor argument already goes through; a row that fails
+  is skipped like any other invalid row rather than aborting the file.
+- **`--path` was documented as "resolved against `--root`" and was not.** It used a bare
+  `path.resolve`, so `--path "../../other-repo"` bound a fact to a tree outside the root it was
+  captured under. All capture paths now enforce containment.
+- **`SecretDetectedError` carried the raw credential.** The message was redacted, but the thrown
+  object retained the full literal, so any caller logging or serializing it echoed the secret back.
+  The error now carries only the pattern name, field, redacted preview, and length.
+- **`mem edit` copied the prior field value into the audit log without re-screening it,** making a
+  second at-rest copy of anything that got past capture screening. Prior values are now screened
+  and redacted on the way in. Because the audit row is also what `--undo` restores from, undoing an
+  edit whose prior value was redacted now refuses and says so, rather than restoring the redaction
+  marker in as the fact's text and reporting success.
+- **AWS STS session key ids (`ASIA...`) were stored verbatim** -- only `AKIA` was matched, and at 20
+  characters they sit permanently below the generic entropy floor, so no fallback layer caught them.
+- **The OpenAI key pattern could not match the current `sk-proj-` format,** stopping four characters
+  in because `-` was absent from its character class.
+- **`password-assignment` matched inside longer words,** flagging `notpassword=` and `mypwd=` as
+  credentials. A screener that refuses ordinary text trains users into blanket allowlists, which is
+  its own security failure.
 
 ## [0.4.0] - 2026-09-03
-
-### Fixed
-
-- **`mem recall --hint-format` silently discarded a positional query, returning identical output for any two searches** -- `recall` is declared `.command("recall [query]")` (`src/cli.ts`), so the query is a positional, not a `--flag`. `buildHintFormat`/`buildHintFormatUnsafe` (`src/integration-seam.ts`) hardcoded `query: ""` in their call to `retrieve()`, so `mem recall "some query" --hint-format --root .` and `mem recall "zzzz nonexistent xyzzy" --hint-format --root .` produced byte-identical output on the same store, with nothing indicating the query had no effect. The plain (non-hint-format) recall path already treats this exact silence as a defect it refuses to ship -- it prints `note: query matched no fact text -- showing most recent instead` precisely so "the reader is shown unrelated facts with no cue that their query contributed nothing to the ordering" -- but that guard sat after the point where `--hint-format` already returned, so the same silence shipped on the agent-facing path, where it is worse: the consumer surfaces `display` strings verbatim into an LLM's context with no way to notice they are unrelated to what was asked.
-
-  The positional now flows all the way through: `recall`'s action passes the query into the new `HintFormatOptions.query`, `buildHintFormatUnsafe` forwards it to `retrieve()` in place of the hardcoded `""`, and `retrieve()`'s existing BM25 ranking (previously dormant on this path, since a query-less call scores every candidate 0 and falls through to recency) now actually reorders the emitted TGMEM lines by relevance. A query is a ranking input, never a filter -- matching nothing reorders, it does not narrow, consistent with plain `recall`'s documented contract. An absent or empty query is unchanged byte-for-byte: `SessionStart`'s query-less call still gets the original recency-only behaviour, since BM25 ties every candidate at 0 with no query terms. The `incompatibleFlags` guard this file's previous entry added for the positional (`recall "<query>" --hint-format` exiting 1) is removed now that the query has a real effect to honor instead of an effect to error on.
-
-- **Every installed memory-capture instruction taught agents to write facts that can never become ground truth** -- the "## Memory" prose `mem init` writes into `CLAUDE.md` (`CLAUDE_CODE_CLAUDE_MD_BODY`) and into the shared `AGENTS.md` block for Codex/Copilot CLI/Copilot VS Code (`AGENTS_MD_SHARED_BODY`, both in `src/wiring.ts`) told an agent to run `mem remember` with `--kind`/`--subject`/`--value`, but never mentioned `--anchor` at all. Three-valued freshness (`affirmed`/`unverified`/`contradicted`) is this project's most distinctive design idea, and an anchor is the only way a fact ever earns `affirmed` ground truth instead of surfacing caveated forever -- yet an agent following the installed instructions literally, which is the whole point of installing them, had no way to know the capability existed. Verified against a real store on this machine: 3 facts, 0 anchored, every recalled line reading `(unverified, YYYY-MM)`.
-
-  Both constants now add a short `--anchor` line naming the real predicate set (`file-exists`, `file-absent`, `file-newer-than`, `glob-exists`, `git-tracked`, `newest-of`), one concrete example, and the constraint that the anchor path must stay inside `--root` (no `..`, no absolute path, which v0.3.2 already rejects at capture with exit 1). `docs/integrations/{claude-code,codex,copilot-cli,copilot-vscode}.md` and this repository's own `CLAUDE.md` are updated to match byte-for-byte, verified by the existing structural doc-consistency test that compares each doc's fenced block against what `install()` actually writes to disk.
-
-- **A fully-consumed retrieval budget was reported as headroom, making the seam's one deterministic degradation handle depend on the clock** -- `buildHintFormat` (`src/integration-seam.ts`) computed `truncated = elapsed > budgetMs`, so a budget of N milliseconds counted as exceeded only *after* N had passed, never on reaching it. At the real 150ms budget that distinction is invisible, but `retrievalBudgetMs: 0` is the handle callers and tests use to force the budget-exhausted contract on purpose, and under a strict `>` a zero budget reported a healthy response whenever the work finished inside a single millisecond. A ten-fact, anchor-free retrieval on a fast runner does exactly that: `elapsed` reads `0`, `0 > 0` is false, and the caller that allotted no time at all was handed a full hint set as though the budget had been honored.
-
-  This surfaced as an intermittent Linux-only CI failure of `tests/unit/integration-seam.test.ts`'s own budget test -- the one whose comment says forcing the budget to 0 exercises the degradation path "so the degradation contract is pinned rather than inferred from a flake". It failed on `ubuntu-latest` for commit `9fd6f2e` and passed on the next commit with the test code byte-identical, which is what identified it as a boundary condition rather than a regression: the assertion was a coin flip decided by how fast the runner completed the retrieval.
-
-  `truncated` is now `elapsed >= budgetMs`: the budget is the time available, so having consumed all of it is already an overrun, and a zero budget is unconditionally exhausted regardless of platform or load. Nothing in production passes `0` (`options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS` only substitutes for nullish, and the suite's non-truncating constant is an hour), so the change is confined to the boundary itself. The new regression test freezes `Date.now` so `elapsed` is pinned to exactly `0` on every platform, making this the boundary case rather than a race that happens to land on it -- it fails against the old `>` on Windows, where the original flake never reproduced.
 
 ### Added
 
@@ -1158,7 +1137,29 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 - **`tokenize` (`src/retrieval.ts`) now drops standard English function words before stemming, at both index and query time** -- with `--delta` re-sending any already-surfaced fact that scores non-zero for the current prompt, a prompt like "what is the plan for today" re-sent most of a store on `the`/`is`/`for`/`a` alone (measured on a 6-fact store: 4 of 7 realistic unrelated prompts re-sent 2/6 facts; a more function-word-heavy store leaked 5/6), which was the difference between delta working and not. The list (`STOPWORDS`, exported) is a small conventional set of articles, prepositions, auxiliaries, pronouns, conjunctions, and interrogatives; no domain terms, and deliberately not a long published list. Negations (`no`, `not`, `nor`, `never`, `none`, `neither`, `nothing`, `without`, `cannot`, `dont`, `cant`, `wont`) are kept as content words on purpose, because this store holds negative preferences and corrections, and `n't` contractions are expanded to `... not` before the apostrophe split so "don't"/"can't"/"won't" keep their negation. A prompt made entirely of stopwords leaves no query terms and falls through to the existing no-query behaviour (recency order, fully suppressible under `--delta`); a fact whose text is mostly stopwords is still indexed by its content words. Nothing is persisted from `tokenize` (scores are computed per call), so existing stores are unaffected. Plain `mem recall` ranking changes too: on the `npm run eval` fixture set (BM25 in isolation, not end-to-end) `query-stem` moved from p@8 74.7% / nDCG@8 95.6% to 77.3% / 98.7%, deterministic across runs. `mem recall --hint-format` additionally honours a `TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS` test/advanced override for the 150 ms soft budget, so subprocess-level tests are not hostage to runner load.
 
+### Fixed
+
+- **`mem recall --hint-format` silently discarded a positional query, returning identical output for any two searches** -- `recall` is declared `.command("recall [query]")` (`src/cli.ts`), so the query is a positional, not a `--flag`. `buildHintFormat`/`buildHintFormatUnsafe` (`src/integration-seam.ts`) hardcoded `query: ""` in their call to `retrieve()`, so `mem recall "some query" --hint-format --root .` and `mem recall "zzzz nonexistent xyzzy" --hint-format --root .` produced byte-identical output on the same store, with nothing indicating the query had no effect. The plain (non-hint-format) recall path already treats this exact silence as a defect it refuses to ship -- it prints `note: query matched no fact text -- showing most recent instead` precisely so "the reader is shown unrelated facts with no cue that their query contributed nothing to the ordering" -- but that guard sat after the point where `--hint-format` already returned, so the same silence shipped on the agent-facing path, where it is worse: the consumer surfaces `display` strings verbatim into an LLM's context with no way to notice they are unrelated to what was asked.
+
+  The positional now flows all the way through: `recall`'s action passes the query into the new `HintFormatOptions.query`, `buildHintFormatUnsafe` forwards it to `retrieve()` in place of the hardcoded `""`, and `retrieve()`'s existing BM25 ranking (previously dormant on this path, since a query-less call scores every candidate 0 and falls through to recency) now actually reorders the emitted TGMEM lines by relevance. A query is a ranking input, never a filter -- matching nothing reorders, it does not narrow, consistent with plain `recall`'s documented contract. An absent or empty query is unchanged byte-for-byte: `SessionStart`'s query-less call still gets the original recency-only behaviour, since BM25 ties every candidate at 0 with no query terms. The `incompatibleFlags` guard this file's previous entry added for the positional (`recall "<query>" --hint-format` exiting 1) is removed now that the query has a real effect to honor instead of an effect to error on.
+
+- **Every installed memory-capture instruction taught agents to write facts that can never become ground truth** -- the "## Memory" prose `mem init` writes into `CLAUDE.md` (`CLAUDE_CODE_CLAUDE_MD_BODY`) and into the shared `AGENTS.md` block for Codex/Copilot CLI/Copilot VS Code (`AGENTS_MD_SHARED_BODY`, both in `src/wiring.ts`) told an agent to run `mem remember` with `--kind`/`--subject`/`--value`, but never mentioned `--anchor` at all. Three-valued freshness (`affirmed`/`unverified`/`contradicted`) is this project's most distinctive design idea, and an anchor is the only way a fact ever earns `affirmed` ground truth instead of surfacing caveated forever -- yet an agent following the installed instructions literally, which is the whole point of installing them, had no way to know the capability existed. Verified against a real store on this machine: 3 facts, 0 anchored, every recalled line reading `(unverified, YYYY-MM)`.
+
+  Both constants now add a short `--anchor` line naming the real predicate set (`file-exists`, `file-absent`, `file-newer-than`, `glob-exists`, `git-tracked`, `newest-of`), one concrete example, and the constraint that the anchor path must stay inside `--root` (no `..`, no absolute path, which v0.3.2 already rejects at capture with exit 1). `docs/integrations/{claude-code,codex,copilot-cli,copilot-vscode}.md` and this repository's own `CLAUDE.md` are updated to match byte-for-byte, verified by the existing structural doc-consistency test that compares each doc's fenced block against what `install()` actually writes to disk.
+
+- **A fully-consumed retrieval budget was reported as headroom, making the seam's one deterministic degradation handle depend on the clock** -- `buildHintFormat` (`src/integration-seam.ts`) computed `truncated = elapsed > budgetMs`, so a budget of N milliseconds counted as exceeded only *after* N had passed, never on reaching it. At the real 150ms budget that distinction is invisible, but `retrievalBudgetMs: 0` is the handle callers and tests use to force the budget-exhausted contract on purpose, and under a strict `>` a zero budget reported a healthy response whenever the work finished inside a single millisecond. A ten-fact, anchor-free retrieval on a fast runner does exactly that: `elapsed` reads `0`, `0 > 0` is false, and the caller that allotted no time at all was handed a full hint set as though the budget had been honored.
+
+  This surfaced as an intermittent Linux-only CI failure of `tests/unit/integration-seam.test.ts`'s own budget test -- the one whose comment says forcing the budget to 0 exercises the degradation path "so the degradation contract is pinned rather than inferred from a flake". It failed on `ubuntu-latest` for commit `9fd6f2e` and passed on the next commit with the test code byte-identical, which is what identified it as a boundary condition rather than a regression: the assertion was a coin flip decided by how fast the runner completed the retrieval.
+
+  `truncated` is now `elapsed >= budgetMs`: the budget is the time available, so having consumed all of it is already an overrun, and a zero budget is unconditionally exhausted regardless of platform or load. Nothing in production passes `0` (`options.retrievalBudgetMs ?? RETRIEVAL_BUDGET_MS` only substitutes for nullish, and the suite's non-truncating constant is an hour), so the change is confined to the boundary itself. The new regression test freezes `Date.now` so `elapsed` is pinned to exactly `0` on every platform, making this the boundary case rather than a race that happens to land on it -- it fails against the old `>` on Windows, where the original flake never reproduced.
+
 ## [0.3.2] - 2026-09-02
+
+### Changed
+
+- A row that previously imported with an unbound `scopeRoot` and silently could never be recalled now reports `skipped_error` at import time instead. It was unrecallable either way; this surfaces that at the point of import rather than after the fact.
+- A `mem remember`/`suggest`/`edit`/`import --from-md` invocation with `--scope path` and no `--path` (or `--path` with no `--scope path`) now exits 1 where it previously succeeded and silently bound to the wrong root.
+- `mem remember`/`edit`/`import --from-md` now reject a path-taking anchor argument that traverses above the root (`..`) or names an absolute path (e.g. `file-exists /etc/passwd`) at capture time, where it previously succeeded and stored an anchor that could only ever evaluate `unverified`. Already-stored anchors of this shape are unaffected; JSON import's validation path is unchanged.
 
 ### Fixed
 
@@ -1205,12 +1206,6 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 - **`mem recall` gave no signal when its anchor time budget ran out** -- `retrieve()` gives every fact's anchor a shared `anchorTimeBudgetMs` deadline (default 100ms) and forces any anchor still unevaluated when that deadline passes to `unverified`, the same output a fact with a no-op anchor or a genuinely inconclusive predicate produces. A large store, a slow filesystem, or a query anchored heavily in `glob-exists`/`git-tracked` could silently degrade every remaining fact's freshness to `unverified` with nothing in the output to distinguish "mem checked and truly cannot tell" from "mem ran out of time and did not check." An `affirmed` fact silently downgrading to a hint, or a `contradicted` one silently stopping being withheld, looked identical to normal operation.
 
   `evaluateAnchor` now accepts an optional out-parameter set when its returned `unverified` is a time-budget bailout rather than a genuine predicate outcome (a budget-limited verdict is never memoized, so a later cache hit can never masquerade as a budget hit). `retrieve()` counts these per call and returns the total as `anchorBudgetHits` on its outcome; `mem recall` prints `note: anchor budget exhausted; N freshness verdict(s) reported as unverified` when that count is nonzero, and stays silent otherwise -- the ordinary small-store case that finishes well inside the deadline is unaffected.
-
-### Changed
-
-- A row that previously imported with an unbound `scopeRoot` and silently could never be recalled now reports `skipped_error` at import time instead. It was unrecallable either way; this surfaces that at the point of import rather than after the fact.
-- A `mem remember`/`suggest`/`edit`/`import --from-md` invocation with `--scope path` and no `--path` (or `--path` with no `--scope path`) now exits 1 where it previously succeeded and silently bound to the wrong root.
-- `mem remember`/`edit`/`import --from-md` now reject a path-taking anchor argument that traverses above the root (`..`) or names an absolute path (e.g. `file-exists /etc/passwd`) at capture time, where it previously succeeded and stored an anchor that could only ever evaluate `unverified`. Already-stored anchors of this shape are unaffected; JSON import's validation path is unchanged.
 
 ## [0.3.1] - 2026-08-30
 
@@ -1272,6 +1267,10 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 - **The pre-commit gate CONTRIBUTING.md specifies is now a real hook** -- `npm run lint && npm run typecheck && npm run test:guards` was documented as the check to run before every commit, with no `.husky`, no `.git/hooks/pre-commit`, and no hook manager behind it; it was a convention someone had to remember to type, and a commit that skipped it was indistinguishable from one that passed. `.githooks/pre-commit` now runs it, enabled by a `prepare` script that points `core.hooksPath` at the directory on `npm install`. It stays deliberately narrow -- the guards tier is pure introspection with no I/O, so the hook is fast enough that nobody reaches for `--no-verify` out of habit, and `npm test` stays a pre-push concern. Verified by staging a deliberate type error and confirming the commit was refused.
 
+### Changed
+
+- **`mem recall` now binds facts to the project they were captured in** -- `--root` reached only anchor evaluation, so the store was searched whole: standing in one project and running `mem recall` surfaced another project's decisions as if they were local. `--scope project` did not help, because it matched the scope *label* rather than the binding, narrowing to "scoped to some project" instead of "scoped to this one" -- so even the README's own `mem recall --root . --scope project` example returned the wrong project's facts. A `project` fact now surfaces only from its own root, a `path` fact only from a root containing its file, and `global` facts from anywhere, unchanged. The filter runs inside `retrieve` alongside every other filter rather than narrowing the SQL query, because a pre-filtered pool hides a fact's rival from contradiction resolution, whose reinstatement pass then reads that absence as "nothing contests this" -- and scope binding is the filter most likely to separate two rivals, since a contradiction is keyed on subject + scope. `mem recall --hint-format` already scoped this way; the two paths now agree.
+
 ### Fixed
 
 - **`mem recall | head -1` crashed instead of exiting** -- a reader that closes the pipe early, which is exactly what `head`, `grep -q`, and any `| less` the user quits out of do, left the next write failing with EPIPE. Nothing listened for `error` on stdout, so node promoted it to an unhandled `error` event: a stack trace and exit code 1 for a pipeline that did what the user asked. Terminating early is the reader's prerogative, not an error for the writer, so both output streams now exit quietly on EPIPE. Found by the new CI workflow on its first run -- the Node 18 Linux job's own `recall | grep -q` check is what died. Windows does not raise EPIPE for a closed pipe, so no amount of local testing on the development machine could have surfaced it.
@@ -1292,15 +1291,17 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 - **CONTRIBUTING.md described end-to-end coverage the suite did not have** -- it told contributors `npm test` "includes end-to-end tests that build and exercise the shipped `dist/token-goat-mem.mjs` bundle," which was true of a single test asserting `--version`. It now describes the three tiers that actually exist and says which one a new test belongs in.
 - **The 0.2.6 note over-claimed comment preservation** -- "Comments and trailing commas survive in both directions" covered a paragraph spanning both config paths, but only `.vscode/*.json` is parsed as JSONC. `.claude/settings.json` is parsed as strict JSON, matching Claude Code's own format, and a commented one is refused with a conflict error rather than modified. The claim is now scoped to the path it holds for.
 
-### Changed
-
-- **`mem recall` now binds facts to the project they were captured in** -- `--root` reached only anchor evaluation, so the store was searched whole: standing in one project and running `mem recall` surfaced another project's decisions as if they were local. `--scope project` did not help, because it matched the scope *label* rather than the binding, narrowing to "scoped to some project" instead of "scoped to this one" -- so even the README's own `mem recall --root . --scope project` example returned the wrong project's facts. A `project` fact now surfaces only from its own root, a `path` fact only from a root containing its file, and `global` facts from anywhere, unchanged. The filter runs inside `retrieve` alongside every other filter rather than narrowing the SQL query, because a pre-filtered pool hides a fact's rival from contradiction resolution, whose reinstatement pass then reads that absence as "nothing contests this" -- and scope binding is the filter most likely to separate two rivals, since a contradiction is keyed on subject + scope. `mem recall --hint-format` already scoped this way; the two paths now agree.
-
 ## [0.2.6] - 2026-08-29
 
 Every fix in this release is in `mem init` / `mem uninstall`. The documented promise for those two
 commands is that uninstall reverses exactly what init wrote and leaves everything else alone; five
 separate defects broke it, one of them by deleting the user's own text.
+
+### Added
+
+- **Nine regression tests that assert on file bytes, not parsed structure** -- the formatting damage above was invisible to the existing suite because every assertion went through `JSON.parse`, and the round-trip leaks were worse than invisible: two tests had encoded the leftover empty containers as the expected result, one of them inside a test named "uninstall returns the file to its pre-install state". The new tests seed hand-formatted fixtures -- four-space, tab-indented, single-line, comment-carrying, CRLF -- and compare the file to itself after an install/uninstall cycle. Five were verified failing against the previous implementation before the fix landed.
+- **Three regression tests for malformed and stale markers** -- an orphaned start marker ahead of a real block, a stray end marker before one, and a shared block whose body was written by an older version. Each was verified failing first.
+- **A `## Line endings` section in CONTRIBUTING.md** -- explains what `.gitattributes` pins, when to run `git add --renormalize .`, and the distinction that matters here: files mem *edits* are the user's, and code that writes them must never hard-code `\n`.
 
 ### Fixed
 
@@ -1313,20 +1314,9 @@ separate defects broke it, one of them by deleting the user's own text.
 - **The dry run described a shared-block install it was no longer doing** -- now that a reinstall refreshes a stale body, a tool already named in `tools=` can have work to do, and `mem init --dry-run` still reported it as "install would join existing shared block (adds `<tool>` to tools=)". That case now says it would refresh the body.
 - **The `npm audit` note in CONTRIBUTING.md described advisories that no longer exist** -- it documented five dev-only advisories in the esbuild/vite/vitest chain and the reasoning for not forcing the fix. The toolchain upgrade that cleared all five landed before 0.2.5; `npm audit` has reported zero since, and the paragraph telling contributors otherwise outlived it.
 
-### Added
-
-- **Nine regression tests that assert on file bytes, not parsed structure** -- the formatting damage above was invisible to the existing suite because every assertion went through `JSON.parse`, and the round-trip leaks were worse than invisible: two tests had encoded the leftover empty containers as the expected result, one of them inside a test named "uninstall returns the file to its pre-install state". The new tests seed hand-formatted fixtures -- four-space, tab-indented, single-line, comment-carrying, CRLF -- and compare the file to itself after an install/uninstall cycle. Five were verified failing against the previous implementation before the fix landed.
-- **Three regression tests for malformed and stale markers** -- an orphaned start marker ahead of a real block, a stray end marker before one, and a shared block whose body was written by an older version. Each was verified failing first.
-- **A `## Line endings` section in CONTRIBUTING.md** -- explains what `.gitattributes` pins, when to run `git add --renormalize .`, and the distinction that matters here: files mem *edits* are the user's, and code that writes them must never hard-code `\n`.
-
 ## [0.2.5] - 2026-08-28
 
 Documentation and CI only -- no runtime change. `mem` behaves identically to 0.2.4.
-
-### Fixed
-
-- **The README no longer contradicts itself about installation** -- it carried two install sections, one saying `npm install -g token-goat-mem` and one saying "Not yet published to npm -- install from source". The claim was written at v0.1.0 when it was true; 0.2.0 updated the block at the top of the file and missed the `## Install` section further down, so the file has told readers both things at once through every release since. The duplication was the cause, so it is gone: `## Install` is now the single place carrying the npm command, the from-source steps, requirements and verification, and the top of the README is a one-line quick start that links to it. Published packages snapshot the README at publish time, so npmjs.com showed the stale text until this release.
-- **The copilot-vscode integration doc documented the keybindings 0.2.4 replaced** -- that release moved `ctrl+shift+m`/`ctrl+shift+n` to the chords `ctrl+k m`/`ctrl+k r` because the originals shadowed View: Problems and New Window, but only `src/wiring.ts` was updated. The doc presents itself as "what `mem init copilot-vscode` writes, if you'd rather do it by hand", so anyone following it installed by hand the exact two shadowing bindings the release had just removed.
 
 ### Added
 
@@ -1336,7 +1326,16 @@ Documentation and CI only -- no runtime change. `mem` behaves identically to 0.2
 
 - **CI moved `actions/checkout` and `actions/setup-node` from v4 to v7** -- the v4 actions target Node 20, which the runners now force onto Node 24. The breaking changes across the two intervening majors were checked against this workflow: setup-node v5's automatic caching activates only on a `packageManager` field, which this package does not have, and `registry-url`/`NODE_AUTH_TOKEN` (which the publish step depends on) are unchanged throughout. `node-version: 20` is untouched -- it selects the Node that builds the package, not the action runtime the deprecation concerns.
 
+### Fixed
+
+- **The README no longer contradicts itself about installation** -- it carried two install sections, one saying `npm install -g token-goat-mem` and one saying "Not yet published to npm -- install from source". The claim was written at v0.1.0 when it was true; 0.2.0 updated the block at the top of the file and missed the `## Install` section further down, so the file has told readers both things at once through every release since. The duplication was the cause, so it is gone: `## Install` is now the single place carrying the npm command, the from-source steps, requirements and verification, and the top of the README is a one-line quick start that links to it. Published packages snapshot the README at publish time, so npmjs.com showed the stale text until this release.
+- **The copilot-vscode integration doc documented the keybindings 0.2.4 replaced** -- that release moved `ctrl+shift+m`/`ctrl+shift+n` to the chords `ctrl+k m`/`ctrl+k r` because the originals shadowed View: Problems and New Window, but only `src/wiring.ts` was updated. The doc presents itself as "what `mem init copilot-vscode` writes, if you'd rather do it by hand", so anyone following it installed by hand the exact two shadowing bindings the release had just removed.
+
 ## [0.2.4] - 2026-08-28
+
+### Changed
+
+- **The VS Code keybindings `mem init` installs no longer shadow two editor defaults** — `ctrl+shift+m` (View: Problems) and `ctrl+shift+n` (New Window) were bound outright, and since a later entry in `keybindings.json` wins, installing mem quietly took both away. They are now the chords `ctrl+k m` and `ctrl+k r`: `ctrl+k` is VS Code's conventional extension prefix, so a second keystroke follows and the binding collides with far less. `mem uninstall` removes the old pair by its stamp, so an existing install is replaced rather than accumulated.
 
 ### Fixed
 
@@ -1347,12 +1346,11 @@ Documentation and CI only -- no runtime change. `mem` behaves identically to 0.2
 - **`updateFact` now trims `text` and `value`, as `insertFact` always has** — the same content arrived normalized or not depending on which door it came through. Not cosmetic: `value` is half the contradiction key, so `" yarn "` and `"yarn"` were two distinct values to the detector and an edit that should have superseded a rival silently failed to match it.
 - **The `--hint-format` seam now selects `prior_status`** — its row mapper had drifted from storage's. `resolveContradictions` reads that column to restore `pinned` when it reinstates a fact whose rival is gone, so on the hint path every reinstatement landed on `active`, stripping a pinned fact of its decay exemption. Latent today, since the TGMEM line encodes neither trust level nor pinned state, but it is real input to retrieval on the one surface another tool consumes programmatically.
 
+## [0.2.3] - 2026-08-27
+
 ### Changed
 
-- **The VS Code keybindings `mem init` installs no longer shadow two editor defaults** — `ctrl+shift+m` (View: Problems) and `ctrl+shift+n` (New Window) were bound outright, and since a later entry in `keybindings.json` wins, installing mem quietly took both away. They are now the chords `ctrl+k m` and `ctrl+k r`: `ctrl+k` is VS Code's conventional extension prefix, so a second keystroke follows and the binding collides with far less. `mem uninstall` removes the old pair by its stamp, so an existing install is replaced rather than accumulated.
-
-
-## [0.2.3] - 2026-08-27
+- **`SECURITY.md` no longer claims outstanding dev-dependency advisories** — those were cleared in 0.2.2 (esbuild 0.24 to 0.28, vitest 2 to 4); `npm audit` reports zero across prod and dev.
 
 ### Security
 
@@ -1361,10 +1359,6 @@ Documentation and CI only -- no runtime change. `mem` behaves identically to 0.2
 - **Both git reads are now size-capped before the read, not after** — `.git/index` was read whole into memory and only then checked against `MAX_GIT_INDEX_ENTRIES`, so the bound arrived after the allocation it was supposed to prevent; the `.git` pointer file had no bound at all. The index is now capped at 32 MB (a 100k-file tree indexes at roughly 10 MB, so no real repository is affected) and the pointer file at 4 KB, both from `statSync` before any `readFileSync`. Over the cap is `unverified`: the parse cannot be completed confidently, so no verdict is claimed.
 - **The TGMEM emitter no longer trusts a fact id it did not write** — a line puts `id` in an unquoted, whitespace-delimited field, so an id carrying a newline could forge an entire second line in the consumer's parse. `display` is JSON-encoded and immune; `id` cannot be quoted without breaking the published wire contract, so the emitter drops any id containing whitespace or a control character and logs it, leaving well-formed neighbours untouched. No supported write path produces such an id (mem writes a `randomUUID`, and `import --from-json` validates), which is precisely why the check belongs at the emitter: it is the boundary that reads a database another version, or a person, may have written.
 - **The atomic config write no longer widens a restrictive file's permissions** — `writeManagedFile` replaces the inode rather than updating it, so the replacement carried whatever the umask gave it. Adding mem's block to a `~/.claude/settings.json` the user had deliberately set to 0600 silently made it world-readable. The target's mode is now captured before the write and applied to the temp file before the rename.
-
-### Changed
-
-- **`SECURITY.md` no longer claims outstanding dev-dependency advisories** — those were cleared in 0.2.2 (esbuild 0.24 to 0.28, vitest 2 to 4); `npm audit` reports zero across prod and dev.
 
 ## [0.2.2] - 2026-08-27
 
