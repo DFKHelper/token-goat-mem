@@ -924,6 +924,36 @@ describe("regression: superseded facts are excluded entirely from results, not e
   });
 });
 
+describe("usefulness only votes on facts with query evidence", () => {
+  const facts = [
+    makeFact({ id: "match", text: "deploy runbook for the staging gate", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
+    makeFact({ id: "useful", text: "unrelated note about cheese", kind: "fact", captured_at: "2026-01-02T00:00:00.000Z" }),
+  ];
+  const usefulness = new Map([["useful", { surfaced: 3, used: 3 }]]);
+
+  it("a confirmed-useful fact that matches nothing in the query never outranks a lexical match", async () => {
+    const outcome = await retrieve(facts, { query: "deploy", root, usefulness });
+    expect(outcome.results.map((r) => r.fact.id)).toEqual(["match", "useful"]);
+  });
+
+  it("a query matching nothing lexically, with only usefulness data, reports zeroSignal", async () => {
+    const outcome = await retrieve(facts, { query: "quantum", root, usefulness });
+    expect(outcome.zeroSignal).toBe(true);
+    expect(outcome.results.every((r) => r.score === 0)).toBe(true);
+  });
+
+  it("an empty query still lets usefulness order the results", async () => {
+    const outcome = await retrieve(facts, { query: "", root, usefulness: new Map([["match", { surfaced: 2, used: 2 }]]) });
+    expect(outcome.results.map((r) => r.fact.id)).toEqual(["match", "useful"]);
+    expect(outcome.zeroSignal).toBe(false);
+  });
+
+  it("usefulness still counts for a fact the query has evidence for (entity overlap)", async () => {
+    const outcome = await retrieve(facts, { query: "quantum", root, usefulness, entityOverlap: new Map([["useful", 2]]) });
+    expect(outcome.results[0]?.fact.id).toBe("useful");
+  });
+});
+
 describe("usefulness as a third RRF rank list", () => {
   const facts = [
     makeFact({ id: "a", text: "deploy runbook mentions the deploy step", kind: "fact", captured_at: "2026-01-03T00:00:00.000Z" }),

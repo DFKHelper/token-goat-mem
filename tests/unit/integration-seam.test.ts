@@ -1615,6 +1615,19 @@ describe("the footer discloses what the payload withheld", () => {
     expect(footerOf(result)).toContain("no match for this query -- showing recent facts instead");
   });
 
+  it("still says nothing matched when the only signal is usefulness data for an unrelated fact", async () => {
+    seedDecisions(1);
+    await buildHint({ root, dbPath, sessionId: "sess-u", query: "deploy" });
+    const db = openStorage(dbPath);
+    try {
+      markRecallUsed(db, ["cut-dec-0"], "sess-u", "2026-07-05T00:00:00.000Z");
+    } finally {
+      db.close();
+    }
+    const result = await buildHint({ root, dbPath, query: "zzzznomatchwhatsoever" });
+    expect(footerOf(result)).toContain("no match for this query -- showing recent facts instead");
+  });
+
   it("does not say 'no match' when the query genuinely matches", async () => {
     seedDecisions(1);
     const result = await buildHint({ root, dbPath, query: "deploy" });
@@ -1728,6 +1741,29 @@ describe("the elbow cutoff", () => {
     // exactly, so without the elbow all 4 would ship. The elbow should cut the trailing lo-group
     // fact the cap alone would have let through.
     seedFacts(dbPath, [...seedHiGroup("decision", 3), ...seedLoGroup("decision", 1)]);
+    const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
+    const lines = factLines(result);
+    expect(lines).toHaveLength(3);
+    expect(lines.every((line) => line.includes("id=hi-"))).toBe(true);
+  });
+
+  it("a confirmed-useful fact unrelated to the query neither displaces the real matches nor triggers the elbow", async () => {
+    // Before usefulness was gated on query evidence, the unrelated-but-useful fact fused above every
+    // real match, so the elbow saw [useful, hi...] with a sharp drop after the first entry and cut
+    // the genuine matches away.
+    seedFacts(dbPath, [
+      ...seedHiGroup("decision", 3),
+      ...seedLoGroup("decision", 1),
+      { id: "useful-unrelated", text: "cheese platter inventory", kind: "decision", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+    ]);
+    // Surface it in a session first so a recall_log row exists to confirm as used.
+    await buildHint({ root, dbPath, sessionId: "sess-u", query: "cheese" });
+    const db = openStorage(dbPath);
+    try {
+      markRecallUsed(db, ["useful-unrelated"], "sess-u", "2026-01-05T00:00:00.000Z");
+    } finally {
+      db.close();
+    }
     const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
     const lines = factLines(result);
     expect(lines).toHaveLength(3);

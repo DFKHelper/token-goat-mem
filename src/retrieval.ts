@@ -157,6 +157,10 @@ export interface RetrievalOptions {
    * A fact absent from this map contributes nothing, the same way a missing id already behaves in
    * `reciprocalRankFusion` -- so a never-surfaced fact is neither rewarded nor punished, which is the
    * only honest reading of "no feedback yet".
+   *
+   * With a non-empty query this is a tiebreaker among facts the query has evidence for (lexical,
+   * entity, graph, or a top embedding hit), never evidence itself: a useful fact the query has
+   * nothing to do with does not vote. An empty query applies it unfiltered.
    */
   readonly usefulness?: ReadonlyMap<string, { surfaced: number; used: number }>;
   /**
@@ -278,6 +282,15 @@ export const GROUND_TRUTH_CONFIDENCE_FLOOR = 0.5;
  * than in cli.ts because the withheld-exempt slicing it bounds happens inside `retrieve()` itself.
  */
 export const DEFAULT_RECALL_LIMIT = 20;
+
+/**
+ * How many of the embedding ranking's top facts count as "the query has evidence for this fact".
+ * The embedding list ranks every comparable fact (cosine similarity is defined for all of them), so
+ * membership alone proves nothing; only the head is a claim that the query is about the fact. Tied
+ * to the recall limit because a fact below that cut would not be shown on the strength of the
+ * embedding anyway.
+ */
+export const QUERY_EVIDENCE_EMBED_TOP_N = DEFAULT_RECALL_LIMIT;
 
 /** Preferences/corrections are recalled aggressively (P6) — a small ranking boost relative to precision-biased decisions/facts. */
 export const AGGRESSIVE_RECALL_BOOST = 1.15;
@@ -1242,7 +1255,8 @@ export interface RetrieveOutcome {
   readonly withheldCount: number;
   /**
    * True when no rank list existed for this call at all -- no lexical match, no embedding signal, no
-   * usefulness signal -- so every fact tied at zero and `results` is ordered by recency (a pin,
+   * usefulness signal (for a non-empty query, usefulness counts only on facts the query has evidence
+   * for) -- so every fact tied at zero and `results` is ordered by recency (a pin,
    * where present) rather than relevance. Distinct from asking whether any individual result
    * "matched": `matchedQuery` (`RetrievedFact`) is read off the pre-fusion BM25 map alone, so it is
    * `false` for every result of a query answered purely by embedding signal, even though that query
@@ -1310,7 +1324,11 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     const delta = (bm25Scores.get(b.id) ?? 0) - (bm25Scores.get(a.id) ?? 0);
     return delta !== 0 ? delta : b.captured_at.localeCompare(a.captured_at);
   });
-  const bm25RankIds = bm25Ranked.map((fact) => fact.id);
+  // Only facts the query actually matched. The zero-score tail of `bm25Ranked` is pure recency
+  // order, and handing it to RRF made recency vote on relevance -- the same flaw the all-zero case
+  // below guards against, just hiding in the tail of an otherwise informative list. This mirrors
+  // `entityOverlapRanking` / `graphScoreRanking`, which only ever carry positive signals.
+  const bm25RankIds = bm25Ranked.filter((fact) => (bm25Scores.get(fact.id) ?? 0) > 0).map((fact) => fact.id);
 
   let embeddingRankIds: string[] = [];
   // A query that trips secret screening is never handed to the embedding endpoint -- BM25 still
@@ -1339,12 +1357,31 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     }
   }
 
-  const usefulnessRankIds = usefulnessRanking(filtered, options.usefulness);
-
   // Built as a list of the non-empty auxiliary lists rather than a branch per combination, so a
   // fourth signal is one push rather than another doubling of cases.
   const entityRankIds = entityOverlapRanking(filtered, options.entityOverlap);
   const graphRankIds = graphScoreRanking(filtered, options.graphScores);
+
+  // Which facts the query itself produced evidence for: a lexical hit, an entity or graph signal,
+  // or a place near the top of the embedding ranking. `embeddingRankIds` ranks *every* comparable
+  // fact, so on its own it would make everything "evidence"; only its head counts.
+  //
+  // Usefulness is a prior about a fact, not evidence about the query. Left ungated, a fact that was
+  // once confirmed useful fused above a genuine lexical match it had nothing to do with (and the
+  // seam's elbow cutoff then dropped the real match), and for a query nothing matched it made the
+  // rank-list set non-empty, hiding the "nothing matched" footer and the zero-signal pin ordering.
+  // With an empty query (browse / SessionStart) there is no evidence to require, so usefulness
+  // ranks as before.
+  const hasQuery = options.query.trim().length > 0;
+  const queryEvidenceIds = new Set<string>();
+  if (hasQuery) {
+    for (const ids of [bm25RankIds, entityRankIds, graphRankIds, embeddingRankIds.slice(0, QUERY_EVIDENCE_EMBED_TOP_N)]) {
+      for (const id of ids) {
+        queryEvidenceIds.add(id);
+      }
+    }
+  }
+  const usefulnessRankIds = usefulnessRanking(filtered, options.usefulness).filter((id) => !hasQuery || queryEvidenceIds.has(id));
   const extraRankLists = [embeddingRankIds, usefulnessRankIds, entityRankIds, graphRankIds].filter((list) => list.length > 0);
 
   // A BM25 list where every score is zero is a *ranking* but not a *signal*: nothing matched, so
@@ -1356,7 +1393,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   // `deployments use blue-green` *third*, because the recency list outvoted the embedding list
   // everywhere except the bottom pair. Every ranking test until then used a query that did match
   // lexically, so the zero case never reached fusion.
-  const bm25IsInformative = bm25RankIds.some((id) => (bm25Scores.get(id) ?? 0) > 0);
+  const bm25IsInformative = bm25RankIds.length > 0;
   const rankLists = bm25IsInformative ? [bm25RankIds, ...extraRankLists] : extraRankLists;
 
   // Fusion runs only when there is something to fuse *with*: RRF over a single list is that list's
@@ -1371,9 +1408,11 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   if (rankLists.length === 0) {
     // Nothing matched and no auxiliary signal exists: every fact ties at zero and the caller's own
     // recency tie-break orders them, exactly as it did before any of this existed.
-    fusedScores = new Map<string, number>(bm25RankIds.map((id) => [id, 0]));
+    fusedScores = new Map<string, number>(filtered.map((fact) => [fact.id, 0]));
   } else if (rankLists.length === 1 && bm25IsInformative) {
-    fusedScores = new Map<string, number>(bm25RankIds.map((id) => [id, bm25Scores.get(id) ?? 0]));
+    // `bm25RankIds` now holds only matches, so non-matching facts are scored 0 from `filtered`
+    // (the `--delta` contract: a fact that matched nothing scores exactly 0 under raw BM25).
+    fusedScores = new Map<string, number>(filtered.map((fact) => [fact.id, bm25Scores.get(fact.id) ?? 0]));
   } else {
     fusedScores = reciprocalRankFusion(rankLists);
   }
@@ -1409,7 +1448,9 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const visible = options.hintFormat === true ? results.filter((result) => result.trust !== "withheld") : results;
   const withheldCount = results.length - visible.length;
 
-  // With no rank list at all -- no query, no embedding signal, no usefulness signal -- every score
+  // With no rank list at all -- no query, no embedding signal, no usefulness signal (and with a
+  // query present, usefulness only counts for facts the query has evidence for, so usefulness data
+  // alone never makes a query that matched nothing look like it had signal) -- every score
   // ties at zero and this sort falls through to its recency tie-break, so the cap below keeps the
   // newest `limit` facts and silently drops everything older. That is exactly the shape of the
   // `SessionStart` recall `mem init` installs, and a pinned fact is precisely the fact the user has
