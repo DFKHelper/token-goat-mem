@@ -6,6 +6,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Added
 
+- **`mem review --promote <id> --subject <key> --value <value>` keys a pending fact as it activates it.** Keying, activation, and the contradiction pass the new key makes the fact eligible for run in one transaction, and the audit row records `keyed <subject>=<value>`, so a suggested fact no longer needs a follow-up `mem edit` to become supersedable. Both flags are required together, only with `--promote`, and are validated and secret-screened like `mem remember`'s; a contested fact is already keyed and is refused with a pointer to `mem edit`.
 - **`mem epoch --json` emits the current write epoch as JSON.** Outputs `{ epoch: <number> }`. The plain output remains unchanged byte-for-byte for cache invalidation.
 - **`mem facets --json` emits structured facets data for each mode.** `--list-entities --json` emits an array of `{ term, facts }` objects; `--fact <id> --json` emits `{ fact, entities, topics }`; backfill/`--all` mode emits `{ facts, entities, topics }` summary. Plain output is unchanged.
 - **`mem backup --list --json` emits snapshot records as JSON.** Outputs an array of snapshots, each with `path`, `name`, `takenAt` (ISO 8601), `epoch`, `reason`, and `size` fields. The plain output remains unchanged.

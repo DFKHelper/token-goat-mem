@@ -48,6 +48,7 @@ import {
   screenInputOrThrow,
   screenReviewReasonOrThrow,
   validateFactEditOrThrow,
+  validateFactFieldsOrThrow,
   type CaptureExplicitInput,
   type CaptureSuggestedInput,
 } from "./capture.js";
@@ -1868,6 +1869,8 @@ interface ReviewCliOptions {
   readonly reject?: string;
   readonly undo?: string;
   readonly reason?: string;
+  readonly subject?: string;
+  readonly value?: string;
   readonly root?: string;
   readonly summary?: boolean;
   readonly section?: string;
@@ -2880,6 +2883,8 @@ export function buildProgram(): Command {
     .option("--reject <id>", "Reject a pending fact (marks superseded)")
     .option("--undo <id>", "Reverse a `--reject`, restoring the fact to the status it had before")
     .option("--reason <text>", "Why, recorded on the --promote/--reject/--undo audit row (shown by `mem log`)")
+    .option("--subject <key>", "--promote only, with --value: key the pending fact for contradiction resolution as it activates")
+    .option("--value <value>", "--promote only, with --subject: the value half of that key")
     .option("--root <path>", "Project root for anchor freshness evaluation (default: current directory)")
     .option("--summary", "Print counts per bucket (pending/contested/contradicted/pins/unanchored) instead of full listings")
     .option("--section <pending|contested|contradicted|pins|unanchored>", "Only show one bucket's full listing")
@@ -2899,9 +2904,31 @@ export function buildProgram(): Command {
         const screenedReason = (db: Database.Database): string | undefined =>
           reasonText === undefined ? undefined : screenReviewReasonOrThrow(db, reasonText, resolveRoot(options.root));
 
+        const { subject, value } = options;
+        if ((subject !== undefined || value !== undefined) && options.promote === undefined) {
+          throw new UsageError("--subject and --value can only be used with --promote");
+        }
+        if ((subject === undefined) !== (value === undefined)) {
+          throw new UsageError("--subject and --value must be provided together");
+        }
+        const key = subject !== undefined && value !== undefined ? { subject, value } : undefined;
+        if (key !== undefined) {
+          validateFactFieldsOrThrow(key);
+        }
+
         if (options.promote !== undefined) {
           const id = options.promote;
-          const outcome = await withDb((db) => promotePending(db, id, screenedReason(db)));
+          const outcome = await withDb((db) => {
+            const reason = screenedReason(db);
+            if (key === undefined) {
+              return promotePending(db, id, reason);
+            }
+            // Screened like `mem edit`'s fields: the key is persisted, so a secret in it is refused before anything is written, and the refusal is attributed to the fact.
+            const factId = resolveIdArgOrThrow(db, id).id;
+            const root = resolveRoot(options.root);
+            screenInputOrThrow(db, { text: "", kind: "fact", ...key, root }, root, "review_promote", factId);
+            return promotePending(db, factId, reason, key);
+          });
           process.stdout.write(`promoted ${outcome.id}\n`);
           if (outcome.note !== undefined) {
             process.stdout.write(`${outcome.note}\n`);

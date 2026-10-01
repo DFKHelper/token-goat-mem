@@ -9,7 +9,7 @@ import type Database from "better-sqlite3";
 import { resolveIdArgOrThrow, UsageError } from "./cliRuntime.js";
 import { detectContradictions, type FactStatusUpdate } from "./contradiction.js";
 import { insertAuditLog, listAuditLogForFact, SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
-import { listFacts, setFactStatus } from "./storage.js";
+import { listFacts, setFactStatus, updateFact } from "./storage.js";
 import type { FactStatus } from "./types.js";
 
 /**
@@ -75,6 +75,12 @@ export interface PromotionOutcome {
   readonly note?: string;
 }
 
+/** The contradiction key `mem review --promote --subject --value` gives a pending fact as it activates it; the caller has already validated and screened both fields. */
+export interface PromotionKey {
+  readonly subject: string;
+  readonly value: string;
+}
+
 /**
  * Contradiction resolution keys on `subject` + `value` (`detectContradictions` filters to facts
  * that have one), so a fact promoted without a subject becomes ground truth nothing can ever
@@ -99,7 +105,7 @@ function withReason(detail: string, reason: string | undefined): string {
   return reason === undefined ? detail : `${detail}; reason: ${reason}`;
 }
 
-export function promotePending(db: Database.Database, id: string, reason?: string): PromotionOutcome {
+export function promotePending(db: Database.Database, id: string, reason?: string, key?: PromotionKey): PromotionOutcome {
   const fact = resolveIdArgOrThrow(db, id);
   // `detectContradictions` is run over the same pool `formatReview` derives its `contested` bucket
   // from -- active/pinned/contested -- and read before any status is written below, for the same
@@ -120,6 +126,9 @@ export function promotePending(db: Database.Database, id: string, reason?: strin
     throw new UsageError(
       `fact ${fact.id} is not pending or contested (status=${fact.status}) -- only withheld facts can be promoted`
     );
+  }
+  if (isContested && key !== undefined) {
+    throw new UsageError(`fact ${fact.id} is contested, so it is already keyed -- use \`mem edit ${fact.id} --subject <key> --value <value>\` to change its key`);
   }
   if (isContested) {
     // A fact whose persisted status is still `contested` but which no longer sits in a live
@@ -153,14 +162,22 @@ export function promotePending(db: Database.Database, id: string, reason?: strin
     // subject -- so the unkeyed caveat below cannot apply to this branch.
     return { id: fact.id };
   }
-  setStatusWithAudit(
-    db,
-    fact.id,
-    "active",
-    "review_promote",
-    withReason("promoted pending fact to active via explicit review", reason)
-  );
-  const unkeyed = fact.subject === null || fact.subject === undefined;
+  if (key === undefined) {
+    setStatusWithAudit(db, fact.id, "active", "review_promote", withReason("promoted pending fact to active via explicit review", reason));
+  } else {
+    // Keying, activation, and the contradiction pass the new key makes the fact eligible for commit together, so no reader sees it keyed but pending or active but unreconciled.
+    const tx = db.transaction((): void => {
+      const keyed = updateFact(db, fact.id, key);
+      if (keyed === undefined) {
+        throw new UsageError(`no such fact: ${fact.id}`);
+      }
+      setStatusWithAudit(db, fact.id, "active", "review_promote", withReason(`promoted pending fact to active via explicit review; keyed ${keyed.subject ?? ""}=${keyed.value ?? ""}`, reason));
+      reconcileContradictions(db, "review_promote");
+    });
+    // BEGIN IMMEDIATE: `updateFact` reads before writing; see storage.insertFact.
+    tx.immediate();
+  }
+  const unkeyed = key === undefined && (fact.subject === null || fact.subject === undefined);
   return { id: fact.id, ...(unkeyed ? { note: unkeyedPromotionNote(fact.id) } : {}) };
 }
 
