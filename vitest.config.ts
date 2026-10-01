@@ -1,9 +1,12 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    // Claude Code checks agent worktrees out under .claude/worktrees/, each a full copy of this
+    // repository; without this the suite runs every copy's tests against that copy's own src/.
+    exclude: [...configDefaults.exclude, ".claude/**"],
     // Vitest's 5s default is a bound on how long a legitimate operation may take, and on a cold
     // windows-latest runner it is too tight for this suite: the bundle tests spawn the built
     // binary as a subprocess, and the scale tests build a 500-fact SQLite store. Three
