@@ -41,7 +41,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { AnchorCacheStore, AnchorVerdict } from "./anchors.js";
-import { openDb, resolveDbPath } from "./db.js";
+import { openDb, resolveDbPath, type OpenDbOptions } from "./db.js";
 import { getEpoch, writeEpoch } from "./epoch.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
@@ -79,8 +79,8 @@ export function ensureStorageSchema(db: Db): void {
  * `facts`). Callers are responsible for calling `.close()` when done, same
  * contract as `openDb`.
  */
-export function openStorage(dbPath: string = resolveDbPath()): Db {
-  const db = openDb(dbPath);
+export function openStorage(dbPath: string = resolveDbPath(), options: OpenDbOptions = {}): Db {
+  const db = openDb(dbPath, options);
   // `openDb` closes its own handle if it fails, but this second phase runs after it has returned
   // successfully, so the same guarantee has to be repeated here or the handle leaks with no
   // reference left to close it by. `ensureStorageSchema` is a real throw site, not a formality: it

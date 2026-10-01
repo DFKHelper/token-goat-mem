@@ -125,6 +125,16 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 `;
 
+export interface OpenDbOptions {
+  /**
+   * Whether opening an existing store may take its automatic snapshot (src/backup.ts's
+   * `snapshotOnOpen`). Default true. src/restore.ts turns it off: a restore takes its own pre-restore
+   * snapshot, migrates a staging copy that is nobody's store, and must not prune the auto snapshot it
+   * may be restoring from.
+   */
+  autoSnapshot?: boolean;
+}
+
 /**
  * Opens (creating if absent) the mem sqlite database at `dbPath` (default:
  * the resolved home's `mem.db`), enables WAL mode (Section 3: durability
@@ -132,7 +142,7 @@ CREATE TABLE IF NOT EXISTS meta (
  * (`facts`, `audit_log`, `meta`) exists. Callers are responsible for calling
  * `.close()` when done.
  */
-export function openDb(dbPath: string = resolveDbPath()): Database.Database {
+export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions = {}): Database.Database {
   const home = dirname(dbPath);
   // Read before `new Database` creates the file: a store this call creates has nothing to snapshot.
   const existed = existsSync(dbPath);
@@ -163,7 +173,7 @@ export function openDb(dbPath: string = resolveDbPath()): Database.Database {
     db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
     // Before migrations, so a store about to be migrated is copied as it was (src/backup.ts). Never
     // throws: a snapshot that cannot be written must not cost the caller its database.
-    if (existed) {
+    if (existed && options.autoSnapshot !== false) {
       snapshotOnOpen(db, { dir: resolveBackupDir(home), pendingMigrations: hasPendingMigrations(db) });
     }
     // db.ts owns the whole-database `PRAGMA user_version` counter: every table any module adds --

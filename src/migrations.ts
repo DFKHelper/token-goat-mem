@@ -263,6 +263,13 @@ export const MIGRATIONS: readonly MigrationStep[] = [
 ];
 
 /**
+ * The schema version a fully migrated store carries in `PRAGMA user_version`. A store above it was
+ * written by a newer mem: this one can open it (`runMigrations` leaves it alone) but must not restore
+ * it over the live store, whose newer columns it would silently drop.
+ */
+export const LATEST_SCHEMA_VERSION: number = MIGRATIONS.at(-1)?.version ?? 0;
+
+/**
  * Whether `db` is behind the newest migration -- i.e. whether `runMigrations` is about to rewrite it.
  * Read before migrating so src/backup.ts can copy the store as it was first.
  */

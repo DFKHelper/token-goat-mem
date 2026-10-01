@@ -5,7 +5,7 @@
     ["Entry", ["src/main.ts", "src/cli.ts", "src/cliRuntime.ts", "src/timeline.ts", "src/doctor.ts", "src/backupCommands.ts", "src/reflect.ts", "src/index.ts"]],
     ["Retrieval", ["src/retrieval.ts", "src/related.ts", "src/embeddings.ts", "src/anchors.ts", "src/contradiction.ts", "src/facets.ts", "src/factgraph.ts"]],
     ["Capture", ["src/capture.ts", "src/sessionScan.ts", "src/sessionCapture.ts", "src/import.ts", "src/exportImport.ts", "src/consolidate.ts", "src/dream.ts", "src/reviewActions.ts"]],
-    ["Storage", ["src/db.ts", "src/storage.ts", "src/epoch.ts", "src/migrations.ts", "src/backup.ts"]],
+    ["Storage", ["src/db.ts", "src/storage.ts", "src/epoch.ts", "src/migrations.ts", "src/backup.ts", "src/restore.ts"]],
     ["Integration", ["src/integration-seam.ts", "src/wiring.ts", "src/hook-envelope.ts"]],
     ["Support", ["src/types.ts", "src/pathUtils.ts", "src/fileUtils.ts", "src/projectIdentity.ts", "src/factText.ts", "src/timeUtils.ts"]]
   ],

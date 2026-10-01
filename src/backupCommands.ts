@@ -8,11 +8,11 @@ import type { Command } from "commander";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 
-import { listSnapshots, restoreSnapshot, takeSnapshot, validateSnapshotFile, type Snapshot } from "./backup.js";
-import { extractErrorMessage, guard, UsageError, withDb } from "./cliRuntime.js";
+import { listSnapshots, takeSnapshot, type Snapshot } from "./backup.js";
+import { guard, UsageError, withDb } from "./cliRuntime.js";
 import { resolveBackupDir, resolveDbPath } from "./db.js";
 import { formatBytes } from "./fileUtils.js";
-import { advanceEpochPast, getEpoch } from "./storage.js";
+import { restoreStore, UnusableSnapshotError } from "./restore.js";
 
 function describeSnapshot(snapshot: Snapshot): string {
   return `${snapshot.name}  ${snapshot.takenAt.toISOString()}  epoch ${String(snapshot.epoch)}  ${formatBytes(snapshot.bytes)}  ${snapshot.reason}`;
@@ -76,7 +76,8 @@ export function registerBackupCommands(program: Command): void {
     .description(
       "Replace the store with a snapshot -- a name from `mem backup --list` or a path to a snapshot file. The store it " +
         "replaces is snapshotted first (a pre-restore snapshot, printed on success), so a restore can itself be undone. " +
-        "The epoch moves forward past both stores so every cache keyed on it refreshes."
+        "The snapshot is checked and migrated on a private copy before anything is replaced, and a snapshot from a newer " +
+        "mem is refused. The epoch moves forward past both stores so every cache keyed on it refreshes."
     )
     .action(
       guard(async (arg: string) => {
@@ -86,17 +87,12 @@ export function registerBackupCommands(program: Command): void {
         if (canonicalPath(source) === canonicalPath(dbPath)) {
           throw new UsageError(`restore: ${source} is the live store itself`);
         }
-        try {
-          validateSnapshotFile(source);
-        } catch (error) {
-          throw new UsageError(`restore: ${source} is not a usable mem store (${extractErrorMessage(error)})`);
-        }
-        const { previousEpoch, preRestore } = await withDb((db) => ({
-          previousEpoch: getEpoch(db),
-          preRestore: takeSnapshot(db, dir, "pre-restore"),
-        }));
-        await restoreSnapshot(source, dbPath);
-        const epoch = await withDb((db) => advanceEpochPast(db, previousEpoch));
+        const { epoch, preRestore } = await restoreStore({ source, dbPath, backupDir: dir }).catch((error: unknown) => {
+          if (error instanceof UnusableSnapshotError) {
+            throw new UsageError(`restore: ${source} is not a usable mem store (${error.message})`);
+          }
+          throw error;
+        });
         process.stdout.write(
           `restored ${source}; epoch now ${String(epoch)}\n` +
             `the replaced store is saved at ${preRestore.path} (\`mem restore ${preRestore.path}\` undoes this)\n`

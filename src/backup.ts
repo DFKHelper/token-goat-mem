@@ -173,38 +173,3 @@ export function snapshotOnOpen(db: Database.Database, options: SnapshotOnOpenOpt
     return undefined;
   }
 }
-
-/**
- * Throws unless `path` is an intact SQLite file holding a mem store. Checked before a restore replaces
- * anything, so a mistyped path or a damaged copy is refused while the live store is still untouched.
- */
-export function validateSnapshotFile(path: string): void {
-  const db = new Database(path, { readonly: true, fileMustExist: true });
-  try {
-    const check = db.pragma("quick_check", { simple: true });
-    if (check !== "ok") {
-      throw new Error(`integrity check failed: ${String(check)}`);
-    }
-    const facts = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'facts'").get();
-    if (facts === undefined) {
-      throw new Error("no facts table -- not a mem store");
-    }
-  } finally {
-    db.close();
-  }
-}
-
-/**
- * Replaces the store at `dbPath` with the snapshot at `source`, page by page through SQLite's online
- * backup API -- which also resets the live store's WAL, so no stale sidecar page can resurface over
- * the restored ones the way it would after a plain file copy. The caller must hold no connection to
- * `dbPath` open, and moves the epoch forward afterwards (`advanceEpochPast` in src/storage.ts).
- */
-export async function restoreSnapshot(source: string, dbPath: string): Promise<void> {
-  const db = new Database(source, { readonly: true, fileMustExist: true });
-  try {
-    await db.backup(dbPath);
-  } finally {
-    db.close();
-  }
-}
