@@ -143,6 +143,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/cli.ts` | Entry | Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list) | buildProgram, run |
 | `src/cliRuntime.ts` | Entry | The runtime every `mem` command action shares: the exit-code contract, the error-to-exit-code mapping, the `guard` wrapp | EXIT_SUCCESS, EXIT_USER_ERROR, EXIT_INTERNAL_ERROR, UsageError, exitCodeForError |
 | `src/doctor.ts` | Entry | `mem doctor`: the read-only environment and store health check | DOCTOR_CHECKS, DoctorCheck, FindingStatus, Finding, describeBackups |
+| `src/doctorWiring.ts` | Entry | `mem doctor`'s wiring checks, kept out of doctor.ts: whether each supported tool's mem block is present and current (`wi | wiringHomeFromEnv, describeWiringDrift, describeHookDivergence |
 | `src/index.ts` | Entry | Library entry point | — |
 | `src/main.ts` | Entry | Package executable | — |
 | `src/reflect.ts` | Entry | `mem reflect`: the end-of-session worklist that turns pending suggestions into decisions, update-before-create | registerReflectCommand |

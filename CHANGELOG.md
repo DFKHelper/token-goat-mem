@@ -4,6 +4,10 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+### Added
+
+- **`mem doctor` checks wiring drift for every supported tool, and project-vs-user hook divergence.** For each tool in `mem init`'s list whose config exists under `--root` (new on `doctor`, default the current directory) or the home directory, a `wiring` finding is `ok` when the block matches exactly what `mem init <tool>` would write now, and `warn` (remedy `mem init <tool>`, with `--user` at user level) when it is outdated, hand-edited inside its markers, or a Claude Code hook lacks an expected event. Tools mem was never wired into are one informational `ok` line, and doctor still writes nothing. A new `hook-divergence` finding warns when project and user Claude Code hooks run different mem invocations (both run, so recall is duplicated or inconsistent) and names which to remove or re-init.
+
 ### Fixed
 
 - **`mem doctor` inspects the store read-only and keeps reporting when it is broken.** It used to open the store through the same path every write command does, so a health check created a missing database, ran pending migrations, took snapshots, and died with an exception on a corrupt file -- the one case it exists for. It now opens the file read-only (`openDbReadOnly`), runs the hooks, backups, embedding and dream checks regardless, and reports `store: none` (no file; nothing is created), `store: unreadable (<code>)` (a `fail`, so `--strict` exits 1), `schema: N migrations pending`, and `integrity` from `PRAGMA quick_check` as findings. `--json`'s `epoch` is `null` when a store exists but could not be read, and such a store reports only the embedding endpoint, never vector counts it did not read.

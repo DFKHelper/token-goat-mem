@@ -18,7 +18,8 @@ import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { formatAge } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
-import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands } from "./wiring.js";
+import { describeHookDivergence, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
+import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, type WiringOpts } from "./wiring.js";
 
 /**
  * The fixed set of `check` names a finding can carry. Closed on purpose: `--json` consumers key off
@@ -26,7 +27,7 @@ import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands } f
  * one call site. One name covers every line a topic prints (`hooks` is a header plus one line per
  * event), and the order is the order the report prints in.
  */
-export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks"] as const;
+export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks", "hook-divergence", "wiring"] as const;
 
 export type DoctorCheck = (typeof DOCTOR_CHECKS)[number];
 
@@ -167,9 +168,9 @@ function describeScopePlacement(unreachableRoots: number, unreachableFacts: numb
  * binary rejecting a newer install's flags produces a `capable: false` line here on the very first
  * `mem doctor` run, instead of five days of silent `|| true` swallowing.
  */
-function describeHookHealth(): Finding[] {
-  const project = installedClaudeHookCommands({ root: process.cwd() });
-  const user = installedClaudeHookCommands({ root: process.cwd(), user: true });
+function describeHookHealth(opts: WiringOpts): Finding[] {
+  const project = installedClaudeHookCommands(opts);
+  const user = installedClaudeHookCommands({ ...opts, user: true });
   if (project.length === 0 && user.length === 0) {
     // No hooks installed is a choice, not a fault: nothing is inert, so it is `ok`.
     return [finding("hooks", "ok", "hooks: no Claude Code hooks installed here (`mem init claude-code` to add them)")];
@@ -438,14 +439,17 @@ export function registerDoctorCommand(program: Command): void {
     .command("doctor")
     .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how many decisions and corrections carry a why, how much of the store fits in one recall block, and project/path-scoped facts whose root is gone")
     .option("--json", "Output the findings as machine-readable JSON: { findings: [{ check, status, message, remedy? }], epoch } (unstable, pre-1.0)")
+    .option("--root <dir>", "Project root whose Claude Code hooks and tool config files doctor inspects (default: the current directory)")
     .option("--strict", "Exit 1 when any finding has status fail (an installed hook that cannot run, an unreadable store); without it doctor always exits 0 so a warning never breaks a script")
     .action(
-      guard((options: { json?: boolean; strict?: boolean }) => {
+      guard((options: { json?: boolean; strict?: boolean; root?: string }) => {
+        const homeDir = wiringHomeFromEnv();
+        const wiringOpts: WiringOpts = { ...(options.root === undefined ? {} : { root: options.root }), ...(homeDir === undefined ? {} : { homeDir }) };
         const dbPath = resolveDbPath();
         // The environment checks first: none of them needs the store, so a store that is missing,
         // corrupt, or on an older schema cannot take them down with it.
         const dream = describeDream();
-        const hooks = describeHookHealth();
+        const hooks = [...describeHookHealth(wiringOpts), ...describeHookDivergence(wiringOpts), ...describeWiringDrift(wiringOpts)];
         const inspection = inspectStoreFile(dbPath, (db) => {
           const journalMode = db.pragma("journal_mode", { simple: true }) as string;
           const foreignKeys = db.pragma("foreign_keys", { simple: true }) as number;

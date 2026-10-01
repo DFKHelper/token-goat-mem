@@ -55,6 +55,7 @@ import { detectContradictions } from "./contradiction.js";
 import { ageInDays, daysAgoIso } from "./timeUtils.js";
 import { registerBackupCommands } from "./backupCommands.js";
 import { registerDoctorCommand } from "./doctor.js";
+import { wiringHomeFromEnv } from "./doctorWiring.js";
 import { registerReflectCommand } from "./reflect.js";
 import { findRelatedFacts, type RelatedFact } from "./related.js";
 import { formatAuditLine, registerLogCommand } from "./timeline.js";
@@ -1903,11 +1904,11 @@ interface UninstallCliOptions {
 
 /** `TOKEN_GOAT_MEM_WIRING_HOME` overrides the home directory user-level wiring (Claude Code's user `settings.json`, VS Code's user `keybindings.json`) resolves under -- same override-for-tests purpose as `TOKEN_GOAT_MEM_HOME` in db.ts, kept as a separate variable since it names a different directory (a coding tool's home, not mem's own data home). */
 function toWiringOpts(options: { readonly root?: string; readonly user?: boolean }): WiringOpts {
-  const homeOverride = process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+  const homeOverride = wiringHomeFromEnv();
   return {
     ...(options.root !== undefined ? { root: options.root } : {}),
     ...(options.user === true ? { user: true } : {}),
-    ...(typeof homeOverride === "string" && homeOverride.trim().length > 0 ? { homeDir: homeOverride } : {}),
+    ...(homeOverride !== undefined ? { homeDir: homeOverride } : {}),
   };
 }
 
