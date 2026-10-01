@@ -22,6 +22,7 @@ import { extractRememberedId, extractSuggestedId, runCli, type CliResult } from 
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { DOCTOR_CHECKS } from "../src/doctor.js";
+import { getEpoch } from "../src/epoch.js";
 import { captureSuggested,MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 import { _clearAnchorMemoForTests } from "../src/anchors.js";
@@ -574,6 +575,32 @@ describe("mem doctor (read-only health check)", () => {
       const report = JSON.parse(json.stdout) as { findings: { check: string; status: string }[] };
       expect(report.findings.some((entry) => entry.check === "store" && entry.status === "fail")).toBe(true);
     });
+
+    it("reports the embedding endpoint but no vector counts it could not read", async () => {
+      const result = await runCli(["doctor"]);
+      expect(result.stdout).toContain("embeddings: off");
+      expect(result.stdout).not.toContain("embedding store:");
+      expect(result.stdout).not.toContain("embedding coverage:");
+    });
+  });
+
+  it("on an older store missing a column a pending migration adds, reports the migration and the epoch, not an unreadable store", async () => {
+    await runCli(["remember", "a fact from before why existed", "--kind", "fact", "--scope", "global"]);
+    const raw = openDb(resolveDbPath());
+    const epoch = getEpoch(raw);
+    raw.exec("ALTER TABLE facts DROP COLUMN why");
+    raw.pragma("user_version = 5");
+    raw.close();
+    const result = await runCli(["doctor", "--json"]);
+    expect(result.exitCode).toBe(0);
+    const report = JSON.parse(result.stdout) as { findings: { check: string; status: string; message: string }[]; epoch: number | null };
+    expect(report.epoch).toBe(epoch);
+    expect(report.findings.find((entry) => entry.check === "schema")).toMatchObject({ status: "warn", message: "schema: 1 migration pending (the next write applies them)" });
+    expect(report.findings.find((entry) => entry.check === "integrity")).toMatchObject({ status: "ok" });
+    expect(report.findings.some((entry) => entry.check === "store" && entry.status === "fail")).toBe(false);
+    const messages = report.findings.map((entry) => entry.message);
+    expect(messages.some((message) => message.startsWith("embeddings: off"))).toBe(true);
+    expect(messages.some((message) => message.startsWith("embedding store:") || message.startsWith("embedding coverage:"))).toBe(false);
   });
 
   it("does not migrate a store from an older schema; it reports the pending migrations", async () => {

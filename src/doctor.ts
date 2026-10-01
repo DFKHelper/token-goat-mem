@@ -13,7 +13,7 @@ import { EXIT_USER_ERROR, extractErrorMessage, guard } from "./cliRuntime.js";
 import { openDbReadOnly, resolveBackupDir, resolveDbPath } from "./db.js";
 import { MIGRATIONS } from "./migrations.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
-import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
+import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, type EmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { formatAge } from "./timeUtils.js";
@@ -239,8 +239,16 @@ function describeDream(): Finding[] {
   ];
 }
 
+/** What the store says about its vectors: the recorded model, and how many of the embeddable facts carry one. */
+interface EmbeddingCounts {
+  readonly recorded: EmbeddingMeta | null;
+  readonly embeddedFacts: number;
+  readonly totalFacts: number;
+}
+
 /**
- * The embedding lines of `mem doctor`'s report.
+ * The embedding lines of `mem doctor`'s report. `counts` is `null` when the store could not be
+ * read, and then only the endpoint line prints.
  *
  * Unconfigured is a healthy state and reads like one -- "off", with the two variables that would
  * turn it on -- because the overwhelming majority of installs never configure an endpoint and a
@@ -250,8 +258,29 @@ function describeDream(): Finding[] {
  * length. So is the endpoint: only its host reaches stdout, so a URL carrying userinfo cannot leak
  * through a health check someone pastes into an issue.
  */
-function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: number, totalFacts: number): Finding[] {
+function describeEmbeddings(counts: EmbeddingCounts | null): Finding[] {
   const embed = (status: FindingStatus, message: string, remedy?: string): Finding => finding("embeddings", status, message, remedy);
+  let config: EmbeddingConfig | null = null;
+  let endpoint: Finding;
+  try {
+    config = readEmbeddingConfig();
+    endpoint =
+      config === null
+        ? embed("ok", `embeddings: off (set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV} to enable)`)
+        : embed(
+            "ok",
+            `embeddings: ${endpointLabelFor(config.url)}, model ${config.model}, api key ${config.apiKey === undefined ? "absent" : "configured"} ` +
+              "-- `mem remember`/`mem suggest`/`mem embed` send fact text to this endpoint, and `mem recall` sends the query text (every prompt, if wired via a hook)"
+          );
+  } catch (error) {
+    endpoint = embed("warn", `embeddings: misconfigured -- ${extractErrorMessage(error)}`);
+  }
+  // The endpoint is environment, not store: it is all that can be said when the store was not read,
+  // and a "nothing embedded yet" or "0/0" line there would report a count nobody took.
+  if (counts === null) {
+    return [endpoint];
+  }
+  const { recorded, embeddedFacts, totalFacts } = counts;
   const coverage = `embedding coverage: ${embeddedFacts}/${totalFacts} facts`;
   // `recorded === null` alone does not mean nothing is embedded: an interrupted `mem embed` or an
   // import of unknown provenance can leave vectors on disk with no recorded model, and that state
@@ -262,25 +291,12 @@ function describeEmbeddings(recorded: EmbeddingMeta | null, embeddedFacts: numbe
       : embeddedFacts > 0
         ? embed("warn", `embedding store: ${embeddedFacts} vector(s) with no recorded model -- provenance unknown; run \`mem embed --all\` to relabel`, "mem embed --all")
         : embed("ok", "embedding store: nothing embedded yet");
-  let config;
-  try {
-    config = readEmbeddingConfig();
-  } catch (error) {
-    return [embed("warn", `embeddings: misconfigured -- ${extractErrorMessage(error)}`), stored, embed("ok", coverage)];
-  }
   if (config === null) {
-    // Coverage is only a shortfall once an endpoint could close it: with embeddings off, 0/N is the
-    // healthy default, and flagging it would train people to ignore the line.
-    return [embed("ok", `embeddings: off (set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV} to enable)`), stored, embed("ok", coverage)];
+    // Coverage is only a shortfall once an endpoint could close it: with embeddings off (or
+    // misconfigured), 0/N is not something to act on, and flagging it would train people to ignore the line.
+    return [endpoint, stored, embed("ok", coverage)];
   }
-  const lines = [
-    embed(
-      "ok",
-      `embeddings: ${endpointLabelFor(config.url)}, model ${config.model}, api key ${config.apiKey === undefined ? "absent" : "configured"} ` +
-        "-- `mem remember`/`mem suggest`/`mem embed` send fact text to this endpoint, and `mem recall` sends the query text (every prompt, if wired via a hook)"
-    ),
-    stored,
-  ];
+  const lines = [endpoint, stored];
   if (recorded !== null && recorded.model !== config.model) {
     lines.push(embed("warn", `embedding ranking: disabled -- stored vectors are ${recorded.model}'s; run \`mem embed --all\` to re-embed`, "mem embed --all"));
   } else if (recorded === null && embeddedFacts > 0) {
@@ -362,7 +378,14 @@ function unreadableStore(error: unknown): Finding {
  * attempted anyway but dropped if a table a later migration adds is missing.
  */
 function inspectStoreFile(dbPath: string, inspect: (db: Database.Database) => StoreDetail): StoreInspection {
-  const absent: StoreInspection = { before: [], embeddings: describeEmbeddings(null, 0, 0), trailing: [], epoch: 0 };
+  const absent: StoreInspection = {
+    before: [],
+    embeddings: describeEmbeddings({ recorded: null, embeddedFacts: 0, totalFacts: 0 }),
+    trailing: [],
+    epoch: 0,
+  };
+  // A store that would not open or read says nothing about its vectors: only the endpoint line prints.
+  const unread: StoreInspection = { ...absent, embeddings: describeEmbeddings(null) };
   if (!existsSync(dbPath)) {
     return { ...absent, before: [finding("store", "warn", `store: none at ${dbPath} (mem remember creates it)`, "mem remember")] };
   }
@@ -370,7 +393,7 @@ function inspectStoreFile(dbPath: string, inspect: (db: Database.Database) => St
   try {
     db = openDbReadOnly(dbPath);
   } catch (error) {
-    return { ...absent, before: [unreadableStore(error)], epoch: null };
+    return { ...unread, before: [unreadableStore(error)], epoch: null };
   }
   try {
     const userVersion = db.pragma("user_version", { simple: true }) as number;
@@ -398,12 +421,12 @@ function inspectStoreFile(dbPath: string, inspect: (db: Database.Database) => St
         } catch {
           // `meta` is in the baseline schema, so this is a damaged store, which the quick_check above already reported.
         }
-        return { ...absent, before: checks, epoch };
+        return { ...unread, before: checks, epoch };
       }
       throw error;
     }
   } catch (error) {
-    return { ...absent, before: [unreadableStore(error)], epoch: null };
+    return { ...unread, before: [unreadableStore(error)], epoch: null };
   } finally {
     db.close();
   }
@@ -469,7 +492,11 @@ export function registerDoctorCommand(program: Command): void {
               finding("store", "ok", `sources: ${sourceRows}`),
               finding("store", "ok", `audit_log rows: ${auditRows}`),
             ],
-            embeddings: describeEmbeddings(getEmbeddingMeta(db) ?? null, countEmbeddedFacts(db, { excludeSuperseded: true }), embeddableFacts),
+            embeddings: describeEmbeddings({
+              recorded: getEmbeddingMeta(db) ?? null,
+              embeddedFacts: countEmbeddedFacts(db, { excludeSuperseded: true }),
+              totalFacts: embeddableFacts,
+            }),
             trailing: [
               ...describeFacets(countFactsWithTerms(db), totalFacts),
               ...describeWhyCoverage(rationale.withWhy, rationale.total),
