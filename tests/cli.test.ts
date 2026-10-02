@@ -488,6 +488,26 @@ describe("exit-code and stderr/stdout contract (cli.ts module doc)", () => {
 // ─────────────────────────────────────────────────────────────────────────── mem doctor ───────────────────────────────────────────────────────────────────────────
 
 describe("mem doctor (read-only health check)", () => {
+  let originalCwd: string;
+  let wiringRoot: string;
+  let wiringHome: string;
+
+  beforeEach(() => {
+    // Doctor inspects the cwd's project hooks and the user's ~/.claude; left real, this repo's own committed hooks and whatever mem the machine has on PATH decide the hooks findings (and --strict's exit code), so CI without a global mem saw them fail.
+    originalCwd = process.cwd();
+    wiringRoot = mkdtempSync(join(tmpdir(), "mem-cli-doctor-root-"));
+    wiringHome = mkdtempSync(join(tmpdir(), "mem-cli-doctor-home-"));
+    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = wiringHome;
+    process.chdir(wiringRoot);
+  });
+
+  afterEach(() => {
+    process.chdir(originalCwd);
+    delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    rmSync(wiringRoot, { recursive: true, force: true });
+    rmSync(wiringHome, { recursive: true, force: true });
+  });
+
   it("reports db path, WAL mode, schema tables, epoch, and zeroed fact counts on an empty store", async () => {
     // Doctor no longer creates the store, so an empty one has to exist already (epoch stays 0).
     openDb(resolveDbPath()).close();
@@ -510,7 +530,7 @@ describe("mem doctor (read-only health check)", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain(`store: none at ${join(home, "mem.db")} (mem remember creates it)`);
     // The environment checks still report without a store behind them.
-    expect(result.stdout).toContain("hooks (");
+    expect(result.stdout).toContain("hooks: no Claude Code hooks installed here");
     expect(result.stdout).toContain("backups:");
     expect(existsSync(join(home, "mem.db"))).toBe(false);
     expect(existsSync(`${join(home, "mem.db")}-wal`)).toBe(false);
@@ -527,7 +547,7 @@ describe("mem doctor (read-only health check)", () => {
       const result = await runCli(["doctor"]);
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("store: unreadable (SQLITE_NOTADB) -- see mem backup --list / mem restore");
-      expect(result.stdout).toContain("hooks (");
+      expect(result.stdout).toContain("hooks: no Claude Code hooks installed here");
       expect(result.stdout).toContain("backups:");
     });
 
