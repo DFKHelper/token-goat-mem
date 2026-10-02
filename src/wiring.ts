@@ -37,7 +37,7 @@ export interface WiringResult {
 
 export interface WiringPlanEntry {
   readonly path: string;
-  readonly installAction: "create" | "update" | "noop";
+  readonly installAction: "create" | "update" | "delete" | "noop";
   readonly uninstallAction: "remove" | "noop";
   readonly detail: string;
 }
@@ -242,7 +242,13 @@ function runDescribe(files: readonly ManagedFile[]): WiringPlan {
 
     const installNext = file.install(current);
     const installAction: WiringPlanEntry["installAction"] =
-      installNext === undefined || installNext === current ? "noop" : current === undefined ? "create" : "update";
+      installNext === undefined || installNext === current
+        ? "noop"
+        : current === undefined
+          ? "create"
+          : file.installDeletesIfEmpty === true && isEmptyManagedContent(installNext)
+            ? "delete"
+            : "update";
 
     const uninstallNext = file.uninstall(current);
     const uninstallAction: WiringPlanEntry["uninstallAction"] = uninstallNext === undefined || uninstallNext === current ? "noop" : "remove";

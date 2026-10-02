@@ -152,6 +152,8 @@ describe("claudeCode project install beside user hooks", () => {
   it("drops project hooks an earlier install wrote, deleting a settings file that held only them", () => {
     claudeCode.install({ root, homeDir: home });
     claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
+    // The dry run must name the same action the install then takes, not an update to an empty file.
+    expect(claudeCode.describe({ root, homeDir: home }).entries.find((entry) => entry.path === projectSettings())?.installAction).toBe("delete");
     const result = claudeCode.install({ root, homeDir: home });
     expect(result.changes.find((change) => change.path === projectSettings())?.action).toBe("delete");
     expect(existsSync(projectSettings())).toBe(false);
