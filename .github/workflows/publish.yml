@@ -24,7 +24,8 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
 
-      - run: npm ci
+      # --ignore-scripts for the same reason as ci.yml: a lockfile install otherwise compiles better-sqlite3 over its shipped prebuilds.
+      - run: npm ci --ignore-scripts
 
       - name: Verify tag matches package.json version
         if: github.ref_type == 'tag'
