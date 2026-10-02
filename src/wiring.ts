@@ -121,7 +121,7 @@ function looksMemAuthored(content: string): boolean {
   return content.includes("<!-- token-goat-mem:") || content.includes(`"${STAMP_KEY}"`);
 }
 
-/** Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the transform once if the file changed between the initial read and the pre-write check. Exported for direct unit testing of the retry path. `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever capture content mem is about to touch for the first time (install), never a snapshot of mem's own managed content on the way out. `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by uninstall rather than left behind empty. Whenever `!backup` (the uninstall path) and the write leaves `path` deleted or holding no mem markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks` / delete-if-empty checks. */
+/** Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the transform once if the file changed between the initial read and the pre-write check. Exported for direct unit testing of the retry path. `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever capture content mem is about to touch for the first time (install), never a snapshot of mem's own managed content on the way out. `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by uninstall rather than left behind empty. Whenever the write deletes `path`, or `!backup` (the uninstall path) and it leaves `path` holding no mem markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks` / delete-if-empty checks. */
 export function writeManagedFile(
   op: FileOp,
   opts: { backup?: boolean; deleteIfEmpty?: boolean; detailFor?: (before: string, after: string) => string | undefined } = {}
@@ -151,10 +151,8 @@ export function writeManagedFile(
     const bakContent = existsSync(bakPath) ? readFileSync(bakPath, "utf8") : undefined;
     if (bakContent === undefined || looksMemAuthored(bakContent)) {
       rmSync(op.path, { force: true });
-      // The file is gone and held nothing but mem's own content, so the snapshot that distinguished "mem created this" from "the user's own empty file" has nothing left to disambiguate. Leaving it behind is what let a `.bak` from one install/uninstall cycle survive to mislead the next one after the user deleted the file by hand and reinstalled from scratch.
-      if (!backup) {
-        rmSync(bakPath, { force: true });
-      }
+      // The file is gone and held nothing but mem's own content, so the snapshot that distinguished "mem created this" from "the user's own empty file" has nothing left to disambiguate, whether uninstall or an install that strips mem's content removed it. Leaving it behind is what let a `.bak` from one install/uninstall cycle survive to mislead the next one after the user deleted the file by hand and reinstalled from scratch.
+      rmSync(bakPath, { force: true });
       return { path: op.path, action: "delete", detail: "removed file that held only mem's own content" };
     }
   }

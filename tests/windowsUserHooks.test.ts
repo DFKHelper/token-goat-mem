@@ -160,6 +160,16 @@ describe("claudeCode project install beside user hooks", () => {
     expect(claudeMd()).toContain("<!-- token-goat-mem:claude-code:start -->");
   });
 
+  it("removes a mem-authored .bak along with the settings file it drops, as uninstall would", () => {
+    claudeCode.install({ root, homeDir: home });
+    // An older install era's snapshot of mem's own hooks, which only the deleted file could have needed.
+    writeFileSync(`${projectSettings()}.token-goat-mem.bak`, readFileSync(projectSettings(), "utf8"), "utf8");
+    claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
+    claudeCode.install({ root, homeDir: home });
+    expect(existsSync(projectSettings())).toBe(false);
+    expect(existsSync(`${projectSettings()}.token-goat-mem.bak`)).toBe(false);
+  });
+
   it("keeps the project's own settings when it drops mem's hooks from them", () => {
     mkdirSync(dirname(projectSettings()), { recursive: true });
     writeFileSync(projectSettings(), '{\n  "model": "opus"\n}\n', "utf8");
