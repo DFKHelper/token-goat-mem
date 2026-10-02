@@ -7,6 +7,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 ### Changed
 
 - **Node.js 22.12 or later is now required.** Node 18 and Node 20 are both past end of life, and the current releases of mem's runtime dependencies (better-sqlite3, commander) no longer support them. `engines` is now `>=22.12.0` and the bundle is built for `node22`. CI runs the full suite, including the tests that drive the built bundle, on Node 22 and Node 24 on both Linux and Windows. This replaces the old Node 18 check, which could only smoke-test the bundle because the test toolchain no longer ran there.
+- **better-sqlite3 13 (SQLite 3.53).** It ships its native binaries inside the npm package, so `npm i -g token-goat-mem` no longer downloads a prebuilt binary at install time or, when none matches the running Node, compiles one with node-gyp.
 
 ### Fixed
 
