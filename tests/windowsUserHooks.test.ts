@@ -137,14 +137,28 @@ describe("capability pre-flight with the bundle as launcher", () => {
   });
 });
 
-describe("describeHookDivergence normalises invocations", () => {
-  it("does not flag project and user hooks that differ only by launcher", () => {
+describe("describeHookDivergence across launchers", () => {
+  it("warns that project and user hooks differing only by launcher each run twice, and names dropping the project hooks", () => {
     claudeCode.install({ root, homeDir: home });
     claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
     expect(installedClaudeHookCommands({ root, homeDir: home, user: true })[0]?.command).toContain("node ");
     const findings = describeHookDivergence({ root, homeDir: home });
     expect(findings).toHaveLength(1);
-    expect(findings[0]?.status).toBe("ok");
+    expect(findings[0]?.status).toBe("warn");
+    expect(findings[0]?.message).toContain("runs twice");
+    for (const event of EVENTS) {
+      expect(findings[0]?.message).toContain(event);
+    }
+    expect(findings[0]?.remedy).toContain(`mem uninstall claude-code --root ${root}`);
+    expect(findings[0]?.remedy).not.toContain("--user");
+  });
+
+  it("stays ok when both levels hold the identical command, which Claude Code runs once", () => {
+    claudeCode.install({ root, homeDir: home, platform: "win32", bundlePath: BUNDLE });
+    claudeCode.install({ root, homeDir: home, user: true, platform: "linux", bundlePath: BUNDLE });
+    expect(commandsOf(root)).toEqual(commandsOf(home));
+    const findings = describeHookDivergence({ root, homeDir: home });
+    expect(findings).toEqual([expect.objectContaining({ status: "ok" })]);
   });
 
   it("still flags hooks whose flags differ", () => {

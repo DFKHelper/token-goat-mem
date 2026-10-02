@@ -2,6 +2,12 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **`mem doctor` reports hooks that run twice.** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical. Since 0.5.0 a Windows user hook launches node on the bundle while a project hook still calls `mem`, so a project with its own mem hooks ran every event twice and received recall twice, while `hook-divergence` reported the two levels as matching. It is now `ok` only when the commands are identical, and warns on a launcher-only difference, naming the events and `mem uninstall claude-code` to drop the redundant project hooks.
+
 ## [0.5.0] - 2026-10-01
 
 ### Added

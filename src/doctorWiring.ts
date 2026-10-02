@@ -105,21 +105,33 @@ function normalisedInvocation(command: string): string {
   return spec === null ? command : [spec.subcommand, ...spec.flags].join(" ");
 }
 
-/** Claude Code runs project and user hooks both, so mem installed at both levels with different invocations means duplicate or inconsistent recall. Silent when only one level has hooks. */
+/** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical, so mem installed at both levels is `ok` only when every event's command matches byte for byte. Different invocations mean inconsistent recall; the same invocation through a different launcher (the Windows user hook's `node <bundle>` against a project's `mem`) means every event runs twice. Silent when only one level has hooks. */
 export function describeHookDivergence(opts: WiringOpts): Finding[] {
   const project = installedClaudeHookCommands({ ...opts, user: false });
   const user = installedClaudeHookCommands({ ...opts, user: true });
   if (project.length === 0 || user.length === 0) {
     return [];
   }
-  const projectByEvent = new Map(project.map((hook) => [hook.event, normalisedInvocation(hook.command)]));
-  const userByEvent = new Map(user.map((hook) => [hook.event, normalisedInvocation(hook.command)]));
+  const projectByEvent = new Map(project.map((hook) => [hook.event, hook.command]));
+  const userByEvent = new Map(user.map((hook) => [hook.event, hook.command]));
   const events = [...new Set([...projectByEvent.keys(), ...userByEvent.keys()])];
-  const differing = events.filter((event) => projectByEvent.get(event) !== userByEvent.get(event));
-  if (differing.length === 0) {
-    return [{ check: "hook-divergence", status: "ok", message: "hook-divergence: project and user Claude Code hooks match" }];
-  }
+  const invocationOf = (command: string | undefined): string | undefined => (command === undefined ? undefined : normalisedInvocation(command));
+  const differing = events.filter((event) => invocationOf(projectByEvent.get(event)) !== invocationOf(userByEvent.get(event)));
   const rootArg = opts.root === undefined ? "" : ` --root ${opts.root}`;
+  if (differing.length === 0) {
+    const doubled = events.filter((event) => projectByEvent.get(event) !== userByEvent.get(event));
+    if (doubled.length === 0) {
+      return [{ check: "hook-divergence", status: "ok", message: "hook-divergence: project and user Claude Code hooks are identical, so Claude Code runs each once" }];
+    }
+    return [
+      {
+        check: "hook-divergence",
+        status: "warn",
+        message: `hook-divergence: project and user Claude Code hooks launch mem differently for ${doubled.join(", ")} -- Claude Code skips a duplicate only when the command text is identical, so each runs twice (recall is injected twice)`,
+        remedy: `mem uninstall claude-code${rootArg} (the user hooks already cover every project)`,
+      },
+    ];
+  }
   return [
     {
       check: "hook-divergence",
