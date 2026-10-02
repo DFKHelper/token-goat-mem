@@ -4,6 +4,10 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+### Changed
+
+- **Node.js 22.12 or later is now required.** Node 18 and Node 20 are both past end of life, and the current releases of mem's runtime dependencies (better-sqlite3, commander) no longer support them. `engines` is now `>=22.12.0` and the bundle is built for `node22`. CI runs the full suite, including the tests that drive the built bundle, on Node 22 and Node 24 on both Linux and Windows. This replaces the old Node 18 check, which could only smoke-test the bundle because the test toolchain no longer ran there.
+
 ### Fixed
 
 - **`mem doctor` reports hooks that run twice.** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical. Since 0.5.0 a Windows user hook launches node on the bundle while a project hook still calls `mem`, so a project with its own mem hooks ran every event twice and received recall twice, while `hook-divergence` reported the two levels as matching. It is now `ok` only when the commands are identical, and warns on a launcher-only difference, naming the events and `mem init claude-code` as the fix (see below); `mem uninstall claude-code` would also have stripped the `CLAUDE.md` block.

@@ -21,7 +21,7 @@ mem --help
 
 Building from source, requirements, and verifying the install: [Install](#install).
 
-[![PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)](LICENSE) ![requires Node.js](https://img.shields.io/badge/requires-Node.js%20%3E%3D18-339933?logo=node.js&logoColor=white)
+[![PolyForm Noncommercial](https://img.shields.io/badge/license-PolyForm%20Noncommercial-lightgrey)](LICENSE) ![requires Node.js](https://img.shields.io/badge/requires-Node.js%20%3E%3D22.12-339933?logo=node.js&logoColor=white)
 
 > Built and maintained by [DFK Helper](https://dfkhelper.com). Free under PolyForm Noncommercial. If it saves your tokens, or your sanity, drop a star at the top of this page.
 
@@ -63,7 +63,7 @@ The defining engineering problem is not *retrieval* — it is **correctness and 
 
 ## Install
 
-**Requirements:** Node.js 18 or later
+**Requirements:** Node.js 22.12 or later
 
 ```
 npm install -g token-goat-mem

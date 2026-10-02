@@ -8,7 +8,7 @@ on:
 
 jobs:
   check:
-    name: gate (${{ matrix.os }})
+    name: gate (node ${{ matrix.node }}, ${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       # Don't cancel siblings when one fails: a Windows-only failure is exactly what this matrix
@@ -22,17 +22,15 @@ jobs:
         # never run on Windows, one wiring test never runs anywhere else. Locally each is skipped
         # on whichever machine the contributor happens to have.
         os: [ubuntu-latest, windows-latest]
+        # The supported floor (package.json `engines: >=22.12.0`) and the current Active LTS. The whole suite runs on both, and it drives the built bundle as a subprocess under the same Node, so the floor job is what catches a newer-Node-only API reaching the shipped artifact.
+        node: [22, 24]
 
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          # The toolchain floor, not the runtime floor: vitest 4 declares
-          # `engines: ^20 || ^22 || >=24`, so the suite cannot run on Node 18 at all. Node 18 is
-          # still a supported *runtime* for the shipped bundle -- the `runtime-floor` job below is
-          # what actually holds package.json's `engines: >=18` honest.
-          node-version: 20
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - run: npm ci
@@ -50,41 +48,3 @@ jobs:
       # vitest.config.ts, so a chunk of src/ losing its tests fails here instead of silently.
       - name: Test
         run: npm run test:coverage
-
-  runtime-floor:
-    # package.json promises `engines: { node: ">=18" }` and esbuild builds with `target: node18`,
-    # but nothing ever ran on 18. The test suite cannot: vitest 4 requires Node 20+. The bundle can,
-    # and the bundle is the only thing that claim is about -- so this job builds it and drives it
-    # directly, no vitest. It is the narrowest check that would actually catch a Node-20-only API
-    # reaching the shipped artifact.
-    name: runtime floor (node 18, ${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 18
-          cache: npm
-
-      # Dev dependencies declare Node 20+, so npm would refuse to install them under a strict
-      # engine check. The build and the runtime deps themselves are Node 18 clean, which is the
-      # thing under test.
-      - run: npm ci --engine-strict=false
-
-      - run: npm run build
-
-      - name: Run the built bundle on the oldest supported Node
-        shell: bash
-        run: |
-          set -euo pipefail
-          export TOKEN_GOAT_MEM_HOME="$(mktemp -d)"
-          node dist/token-goat-mem.mjs --version
-          node dist/token-goat-mem.mjs doctor
-          node dist/token-goat-mem.mjs remember "ci runtime floor check" --kind fact --scope global
-          node dist/token-goat-mem.mjs recall "runtime floor" | grep -q "ci runtime floor check"
