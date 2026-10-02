@@ -5674,6 +5674,23 @@ describe("import --from-md --captured-at", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── reaffirmation ───────────────────────────────────────────────────────────────────────────
 
+describe("unquoted multi-word arguments are refused, not truncated", () => {
+  it("stores nothing when remember's text arrives as several words", async () => {
+    // Commander before 13 accepted excess arguments silently, so `mem remember the build runs on node 22` stored the fact "the" and exited 0.
+    const result = await runCli(["remember", "the", "build", "runs", "on", "node", "22", "--kind", "fact"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("too many arguments for 'remember'");
+    const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: unknown[] };
+    expect(listed.facts).toHaveLength(0);
+  });
+
+  it("refuses a multi-word recall query rather than searching on its first word", async () => {
+    const result = await runCli(["recall", "build", "runs"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("too many arguments for 'recall'");
+  });
+});
+
 describe("mem remember reaffirms rather than duplicating", () => {
   async function facts(): Promise<Array<Record<string, unknown>>> {
     const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: Array<Record<string, unknown>> };
