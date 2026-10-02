@@ -203,6 +203,8 @@ interface ManagedFile {
   readonly describeDetail?: (current: string | undefined, installAction: WiringFileAction, uninstallAction: WiringFileAction) => string | undefined;
   /** Optional override for install()'s reported `detail` when the file already existed, consulted with the pre- and post-install content. Returns `undefined` to fall back to the generic "updated existing file" wording. Used by Claude Code's settings.json to call out an unstamped hook adopted from an older mem install, rather than reporting it as an ordinary update. */
   readonly installDetail?: (before: string, after: string) => string | undefined;
+  /** When install strips mem's content rather than adding it, deletes a file left holding nothing else, exactly as uninstall would. Used by Claude Code's project settings.json once user-level hooks cover every project. */
+  readonly installDeletesIfEmpty?: boolean;
 }
 
 /** Computes every file's next content up front -- discarding the result -- before any file is written, so a `WiringConflictError` thrown by a later file's transform is raised before an earlier file has been written to disk. Mirrors the read-then-transform shape `runDescribe` already uses to compute a dry-run plan without writing anything. */
@@ -217,7 +219,10 @@ function runInstall(files: readonly ManagedFile[]): WiringResult {
   validateAll(files, (file) => file.install);
   return {
     changes: files.map((file) =>
-      writeManagedFile({ path: file.path, transform: file.install }, file.installDetail === undefined ? {} : { detailFor: file.installDetail })
+      writeManagedFile(
+        { path: file.path, transform: file.install },
+        { ...(file.installDetail === undefined ? {} : { detailFor: file.installDetail }), ...(file.installDeletesIfEmpty === true ? { deleteIfEmpty: true } : {}) }
+      )
     ),
   };
 }
@@ -1482,17 +1487,27 @@ export function vscodeUserDir(homeDir: string): string {
 
 export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user, hookEvents }) => {
   const settingsPath = user ? join(homeDir, ".claude", "settings.json") : join(root, ".claude", "settings.json");
-  const settingsEntry: ManagedFile = {
-    path: settingsPath,
-    install: (current) => installClaudeSettings(current, settingsPath, hookEvents),
-    uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
-    installDetail: (before) => {
-      const adopted = claudeHookAdoptions(before);
-      return adopted.length === 0
-        ? undefined
-        : `updated existing file (adopted a pre-existing ${adopted.join(", ")} hook written by an older mem install)`;
-    },
-  };
+  // Claude Code runs project and user hooks both and skips a duplicate only when the command text matches, which the Windows user hook's direct launcher never does, so once user hooks exist a project install drops its own instead of adding a second set.
+  const coveredByUserHooks = !user && installedClaudeHookCommands({ root, homeDir, user: true }).length > 0;
+  const settingsEntry: ManagedFile = coveredByUserHooks
+    ? {
+        path: settingsPath,
+        install: (current) => uninstallClaudeSettings(current, settingsPath),
+        uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
+        installDetail: () => "removed mem's project hooks: the user-level hooks already run in every project",
+        installDeletesIfEmpty: true,
+      }
+    : {
+        path: settingsPath,
+        install: (current) => installClaudeSettings(current, settingsPath, hookEvents),
+        uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
+        installDetail: (before) => {
+          const adopted = claudeHookAdoptions(before);
+          return adopted.length === 0
+            ? undefined
+            : `updated existing file (adopted a pre-existing ${adopted.join(", ")} hook written by an older mem install)`;
+        },
+      };
   if (user) {
     return [settingsEntry];
   }

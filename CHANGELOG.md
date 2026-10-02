@@ -6,7 +6,8 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
-- **`mem doctor` reports hooks that run twice.** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical. Since 0.5.0 a Windows user hook launches node on the bundle while a project hook still calls `mem`, so a project with its own mem hooks ran every event twice and received recall twice, while `hook-divergence` reported the two levels as matching. It is now `ok` only when the commands are identical, and warns on a launcher-only difference, naming the events and `mem uninstall claude-code` to drop the redundant project hooks.
+- **`mem doctor` reports hooks that run twice.** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical. Since 0.5.0 a Windows user hook launches node on the bundle while a project hook still calls `mem`, so a project with its own mem hooks ran every event twice and received recall twice, while `hook-divergence` reported the two levels as matching. It is now `ok` only when the commands are identical, and warns on a launcher-only difference, naming the events and `mem init claude-code` as the fix (see below); `mem uninstall claude-code` would also have stripped the `CLAUDE.md` block.
+- **A project `mem init claude-code` no longer adds hooks that user-level hooks already cover.** The user hooks run in every project, so once `~/.claude/settings.json` holds mem's hooks a project install writes only the `CLAUDE.md` block and removes mem's hooks from the project `.claude/settings.json`, deleting the file when nothing else is left in it. Without user hooks the project install writes its hooks as before. `mem doctor` counts a project settings file with no mem hooks as current in that case, and its `hook-divergence` remedies now name `mem init claude-code` rather than an uninstall.
 
 ## [0.5.0] - 2026-10-01
 

@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { describeHookDivergence, describeLaunchTime, LAUNCH_TIME_WARN_MS } from "../src/doctorWiring.js";
+import { describeHookDivergence, describeLaunchTime, describeWiringDrift, LAUNCH_TIME_WARN_MS } from "../src/doctorWiring.js";
 import { checkClaudeHookHealth, claudeCode, claudeHookEventsFor, CLAUDE_HOOK_EVENTS, installedClaudeHookCommands, parseHookCommandSpec } from "../src/wiring.js";
 
 let root: string;
@@ -73,11 +73,11 @@ describe("claudeCode user install with the direct launcher", () => {
   });
 
   it("writes the direct-node command into the user settings and never into project settings", () => {
+    claudeCode.install({ root, homeDir: home, platform: "win32", bundlePath: BUNDLE });
     claudeCode.install(opts());
     for (const command of commandsOf(home)) {
       expect(command).toContain(`node "${BUNDLE}"`);
     }
-    claudeCode.install({ root, homeDir: home });
     for (const command of commandsOf(root)) {
       expect(command).not.toContain("node ");
       expect(command).not.toContain(BUNDLE);
@@ -137,6 +137,53 @@ describe("capability pre-flight with the bundle as launcher", () => {
   });
 });
 
+describe("claudeCode project install beside user hooks", () => {
+  const projectSettings = (): string => join(root, ".claude", "settings.json");
+  const claudeMd = (): string => readFileSync(join(root, "CLAUDE.md"), "utf8");
+
+  it("writes no project hooks once user-level hooks exist, since Claude Code would run both, and still writes the CLAUDE.md block", () => {
+    claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
+    claudeCode.install({ root, homeDir: home });
+    expect(existsSync(projectSettings())).toBe(false);
+    expect(claudeMd()).toContain("<!-- token-goat-mem:claude-code:start -->");
+    expect(describeHookDivergence({ root, homeDir: home })).toEqual([]);
+  });
+
+  it("drops project hooks an earlier install wrote, deleting a settings file that held only them", () => {
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
+    const result = claudeCode.install({ root, homeDir: home });
+    expect(result.changes.find((change) => change.path === projectSettings())?.action).toBe("delete");
+    expect(existsSync(projectSettings())).toBe(false);
+    expect(claudeMd()).toContain("<!-- token-goat-mem:claude-code:start -->");
+  });
+
+  it("keeps the project's own settings when it drops mem's hooks from them", () => {
+    mkdirSync(dirname(projectSettings()), { recursive: true });
+    writeFileSync(projectSettings(), '{\n  "model": "opus"\n}\n', "utf8");
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.install({ root, homeDir: home, user: true });
+    claudeCode.install({ root, homeDir: home });
+    const settings = JSON.parse(readFileSync(projectSettings(), "utf8")) as Record<string, unknown>;
+    expect(settings["model"]).toBe("opus");
+    expect(installedClaudeHookCommands({ root, homeDir: home })).toEqual([]);
+  });
+
+  it("reports the project wiring stale while redundant project hooks remain, and current once init drops them", () => {
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
+    const projectFinding = (): unknown => describeWiringDrift({ root, homeDir: home }).find((finding) => finding.message.startsWith("wiring (claude-code, project)"));
+    expect(projectFinding()).toEqual(expect.objectContaining({ status: "warn", remedy: `mem init claude-code --root ${root}` }));
+    claudeCode.install({ root, homeDir: home });
+    expect(projectFinding()).toEqual(expect.objectContaining({ status: "ok" }));
+  });
+
+  it("still writes project hooks when no user-level hooks exist", () => {
+    claudeCode.install({ root, homeDir: home });
+    expect(installedClaudeHookCommands({ root, homeDir: home }).map((hook) => hook.event)).toEqual(EVENTS);
+  });
+});
+
 describe("describeHookDivergence across launchers", () => {
   it("warns that project and user hooks differing only by launcher each run twice, and names dropping the project hooks", () => {
     claudeCode.install({ root, homeDir: home });
@@ -149,7 +196,7 @@ describe("describeHookDivergence across launchers", () => {
     for (const event of EVENTS) {
       expect(findings[0]?.message).toContain(event);
     }
-    expect(findings[0]?.remedy).toContain(`mem uninstall claude-code --root ${root}`);
+    expect(findings[0]?.remedy).toContain(`mem init claude-code --root ${root}`);
     expect(findings[0]?.remedy).not.toContain("--user");
   });
 

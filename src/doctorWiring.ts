@@ -105,7 +105,7 @@ function normalisedInvocation(command: string): string {
   return spec === null ? command : [spec.subcommand, ...spec.flags].join(" ");
 }
 
-/** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical, so mem installed at both levels is `ok` only when every event's command matches byte for byte. Different invocations mean inconsistent recall; the same invocation through a different launcher (the Windows user hook's `node <bundle>` against a project's `mem`) means every event runs twice. Silent when only one level has hooks. */
+/** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical, so mem installed at both levels is `ok` only when every event's command matches byte for byte. Different invocations mean inconsistent recall; the same invocation through a different launcher (the Windows user hook's `node <bundle>` against a project's `mem`) means every event runs twice. Either way the fix is a project `mem init claude-code`, which drops the project hooks once user hooks exist; `mem uninstall claude-code` would also strip the CLAUDE.md block. Silent when only one level has hooks. */
 export function describeHookDivergence(opts: WiringOpts): Finding[] {
   const project = installedClaudeHookCommands({ ...opts, user: false });
   const user = installedClaudeHookCommands({ ...opts, user: true });
@@ -128,7 +128,7 @@ export function describeHookDivergence(opts: WiringOpts): Finding[] {
         check: "hook-divergence",
         status: "warn",
         message: `hook-divergence: project and user Claude Code hooks launch mem differently for ${doubled.join(", ")} -- Claude Code skips a duplicate only when the command text is identical, so each runs twice (recall is injected twice)`,
-        remedy: `mem uninstall claude-code${rootArg} (the user hooks already cover every project)`,
+        remedy: `mem init claude-code${rootArg} (drops the project hooks, since the user hooks already run in every project, and keeps the CLAUDE.md block)`,
       },
     ];
   }
@@ -137,7 +137,7 @@ export function describeHookDivergence(opts: WiringOpts): Finding[] {
       check: "hook-divergence",
       status: "warn",
       message: `hook-divergence: project and user Claude Code hooks differ for ${differing.join(", ")} -- both run, so recall is duplicated or inconsistent`,
-      remedy: `mem uninstall claude-code${rootArg} (drop the project hooks) or mem uninstall claude-code --user (drop the user hooks), then mem init claude-code --user to keep one current set`,
+      remedy: `mem init claude-code --user, then mem init claude-code${rootArg} (one current set of user hooks; the project install drops its own and keeps the CLAUDE.md block)`,
     },
   ];
 }

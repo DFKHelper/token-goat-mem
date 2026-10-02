@@ -135,8 +135,8 @@ describe("mem doctor project-vs-user hook divergence", () => {
     const findings = await doctorFindings("hook-divergence");
     expect(findings).toHaveLength(1);
     expect(findings[0]?.status).toBe("warn");
-    expect(findings[0]?.remedy).toContain("mem uninstall claude-code");
-    expect(findings[0]?.remedy).toContain("mem init claude-code");
+    expect(findings[0]?.remedy).toContain("mem init claude-code --user");
+    expect(findings[0]?.remedy).not.toContain("uninstall");
   });
 
   it("does not warn when project and user hooks are identical", async () => {

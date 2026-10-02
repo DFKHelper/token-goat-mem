@@ -20,6 +20,8 @@ function runBundle(args: readonly string[]): string {
     env: {
       ...process.env,
       TOKEN_GOAT_MEM_HOME: memHome,
+      // A project install reads the user-level Claude Code hooks, so keep the real ~/.claude out of it.
+      TOKEN_GOAT_MEM_WIRING_HOME: memHome,
       PATH: `${fakeMemDir}${delimiter}${process.env["PATH"] ?? ""}`,
     },
   });

@@ -7,13 +7,13 @@ Shell-out patterns and hook wiring for Claude Code.
 Once `mem` is on PATH (see Installation below), wire it into Claude Code in one command:
 
 ```bash
-mem init claude-code --root .          # writes .claude/settings.json + CLAUDE.md
+mem init claude-code --root .          # writes .claude/settings.json + CLAUDE.md (only CLAUDE.md once user hooks exist)
 mem init claude-code --user            # writes ~/.claude/settings.json instead (no CLAUDE.md)
 mem init claude-code --dry-run         # preview what would be written, without touching disk
 mem init claude-code --force           # write hooks even if the PATH mem binary can't run them
 ```
 
-This writes exactly the `SessionStart`, `UserPromptSubmit`, `Stop`, and `PreCompact` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten -- except a hook whose command matches mem's own invocation shape for that event, an orphan left by an install that predates stamping, which is adopted in place and stamped instead of treated as a conflict. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. See `mem init --help` / `mem uninstall --help` for the full flag reference.
+This writes exactly the `SessionStart`, `UserPromptSubmit`, `Stop`, and `PreCompact` hooks and the `CLAUDE.md` instructions documented below (as marked blocks/stamped entries), so it's safe to re-run: re-running upgrades mem's own entries in place instead of duplicating them, and a pre-existing hand-written entry with the same identity aborts the write with a conflict error instead of being silently overwritten -- except a hook whose command matches mem's own invocation shape for that event, an orphan left by an install that predates stamping, which is adopted in place and stamped instead of treated as a conflict. `mem uninstall claude-code` reverses exactly what `init` wrote and nothing else. Claude Code runs project and user hooks both, skipping a duplicate only when the command text is identical, so once user-level hooks exist a project `init` writes only the `CLAUDE.md` block and removes any mem hooks from the project `.claude/settings.json` rather than doubling every event. See `mem init --help` / `mem uninstall --help` for the full flag reference.
 
 Before writing anything, `mem init claude-code` resolves whatever `mem` binary is actually on PATH (which may not be this same install -- PATH is looked up fresh, not assumed) and checks it against the hooks it's about to write. If that binary can't run them -- missing entirely, or missing a flag/subcommand these hooks need -- `init` refuses and names the binary's path and version instead of writing hooks that would fail silently at session time; pass `--force` to write them anyway. `mem doctor` runs the same check against whatever hooks are already installed, any time you want to re-verify.
 
