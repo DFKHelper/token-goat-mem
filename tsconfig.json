@@ -13,7 +13,6 @@
     "useUnknownInCatchVariables": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "esModuleInterop": false,
     "allowSyntheticDefaultImports": true,
     "allowImportingTsExtensions": true,
     "noEmit": true

@@ -14,6 +14,15 @@ npm run build                # bundle to dist/token-goat-mem.mjs
 npm run dev                  # run the CLI from source (tsx src/main.ts)
 ```
 
+## Two TypeScripts
+
+`tsc` is TypeScript 7, installed under the alias `@typescript/native`. TypeScript 7's native
+compiler ships no JavaScript API, and two things here need one: typescript-eslint (type-aware
+rules, which also peers `typescript <6.1`) and `scripts/single-line-comments.mjs`. So the
+`typescript` dependency resolves to `@typescript/typescript6`, the TS 6 API package, whose own
+binary is `tsc6` and so does not collide. Drop the split once typescript-eslint supports
+TypeScript 7.
+
 ## Line endings
 
 `.gitattributes` pins every tracked text file to LF in the working tree, so a clone made with
