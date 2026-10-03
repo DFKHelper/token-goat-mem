@@ -65,7 +65,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/better-sqlite3": "^7.6.11",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^5.0.3",
     "esbuild": "^0.28.2",
