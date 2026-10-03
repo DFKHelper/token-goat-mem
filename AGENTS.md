@@ -12,7 +12,7 @@ Token-Goat Mem is a local-first conversational memory companion for Claude Code 
 npm install
 npm test            # full test suite (vitest run)
 npm run test:guards # fast I/O-free structural guards (tests/guards)
-npm run typecheck   # tsc --noEmit
+npm run typecheck   # tsc --noEmit on src, then on src + tests + eval (tsconfig.eslint.json)
 npm run lint        # ESLint
 npm run build       # bundle to dist/token-goat-mem.mjs
 ```

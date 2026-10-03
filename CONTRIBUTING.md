@@ -8,7 +8,7 @@ Dev environment notes specific to this repo. Shared conventions for agents and c
 npm install
 npm test                     # full test suite (vitest run)
 npm run test:guards          # fast I/O-free structural guards (~2s)
-npm run typecheck            # type check (tsc --noEmit)
+npm run typecheck            # type check (tsc --noEmit on src, then on src + tests + eval via tsconfig.eslint.json)
 npm run lint                 # ESLint
 npm run build                # bundle to dist/token-goat-mem.mjs
 npm run dev                  # run the CLI from source (tsx src/main.ts)

@@ -9,8 +9,8 @@ npm install                          # Install dependencies
 npm run build                        # Build the shipping bundle (dist/token-goat-mem.mjs)
 npm test                             # Run all tests (vitest run)
 npx vitest run tests/storage.test.ts # Run a single test file
-npm run lint                         # Lint (eslint src tests)
-npm run typecheck                    # Type check (tsc --noEmit)
+npm run lint                         # Lint (eslint src tests eval)
+npm run typecheck                    # Type check (tsc --noEmit on src, then on src + tests + eval via tsconfig.eslint.json)
 npm run comments:write               # Join multi-line comments onto one line (the guards tier fails on any)
 ```
 

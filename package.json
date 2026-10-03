@@ -17,7 +17,7 @@
   },
   "scripts": {
     "build": "node esbuild.config.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.eslint.json",
     "test": "vitest run",
     "test:guards": "vitest run tests/guards",
     "test:coverage": "vitest run --coverage",
