@@ -343,17 +343,22 @@ describe("valid-until", () => {
   });
 
   describe("Item 2: a bare date expires at the end of the user's local day, not UTC end-of-day", () => {
-    const originalTZ = process.env.TZ;
+    const originalTZ = process.env["TZ"];
 
     beforeEach(() => {
       // UTC-8 (UTC-7 during DST). A user here reaches local 4pm on the target date at 23:59:59.999Z -- exactly the moment the old `${raw}T23:59:59.999Z` construction expired the fact, hours before this user's own day was over.
-      process.env.TZ = "America/Los_Angeles";
+      process.env["TZ"] = "America/Los_Angeles";
       vi.useFakeTimers();
     });
 
     afterEach(() => {
       vi.useRealTimers();
-      process.env.TZ = originalTZ;
+      // Assigning `undefined` to a `process.env` key stores the string "undefined", so an originally unset TZ has to be deleted rather than restored.
+      if (originalTZ === undefined) {
+        delete process.env["TZ"];
+      } else {
+        process.env["TZ"] = originalTZ;
+      }
     });
 
     it("is still affirmed after UTC end-of-day has passed, while it is still the 15th locally", () => {
