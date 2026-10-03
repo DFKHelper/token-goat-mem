@@ -14,31 +14,19 @@ import {
   type DreamConfig,
 } from "../../src/dream.js";
 import type { Fact } from "../../src/types.js";
+import { makeFact } from "../support/fact.js";
 
 const CONFIG: DreamConfig = { url: "https://models.example.com/v1/chat/completions", model: "test-model" };
 
-function makeFact(id: string, text: string, capturedAt = "2026-01-01T00:00:00.000Z"): Fact {
-  return {
-    id,
-    text,
-    kind: "fact",
-    subject: null,
-    value: null,
-    scope: "global",
-    source_type: "user",
-    source_ref: null,
-    captured_at: capturedAt,
-    anchor: null,
-    status: "active",
-    confidence: 1,
-    embedding: null,
-  };
+/** Positional adapter over the shared factory: dream's inputs are global `fact`-kind facts, not its project-scoped `preference` default. */
+function dreamFact(id: string, text: string, capturedAt = "2026-01-01T00:00:00.000Z"): Fact {
+  return makeFact({ id, text, kind: "fact", scope: "global", captured_at: capturedAt });
 }
 
 const FACTS = [
-  makeFact("f1", "releases are cut by hand from a laptop"),
-  makeFact("f2", "the deploy script is run manually after each tag"),
-  makeFact("f3", "there is no CI workflow in the repository"),
+  dreamFact("f1", "releases are cut by hand from a laptop"),
+  dreamFact("f2", "the deploy script is run manually after each tag"),
+  dreamFact("f3", "there is no CI workflow in the repository"),
 ];
 
 /** A fetch that answers every request with `content` as the assistant message. */
@@ -178,7 +166,7 @@ describe("dream", () => {
   it("sends the newest facts and reports the truncation", async () => {
     // A store larger than the cap must not be silently reasoned over in part.
     const many = Array.from({ length: MAX_DREAM_FACTS + 5 }, (_unused, index) =>
-      makeFact(`f${index}`, `fact number ${index}`, `2026-01-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`)
+      dreamFact(`f${index}`, `fact number ${index}`, `2026-01-01T00:00:${String(index % 60).padStart(2, "0")}.000Z`)
     );
     const result = await dream(many, CONFIG, { fetchImpl: replyWith(candidatesJson([])) });
     expect(result.sent).toHaveLength(MAX_DREAM_FACTS);

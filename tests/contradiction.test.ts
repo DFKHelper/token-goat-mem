@@ -8,29 +8,7 @@ import {
   resolveContradictions,
   sameContradictionBucket,
 } from "../src/contradiction.js";
-import type { Fact } from "../src/types.js";
-
-function makeFact(overrides: Partial<Fact> & Pick<Fact, "id">): Fact {
-  return {
-    id: overrides.id,
-    text: overrides.text ?? `fact ${overrides.id}`,
-    kind: overrides.kind ?? "preference",
-    subject: overrides.subject ?? null,
-    value: overrides.value ?? null,
-    scope: overrides.scope ?? "project",
-    scopeRoot: overrides.scopeRoot ?? null,
-    scopeRepo: overrides.scopeRepo ?? null,
-    source_type: overrides.source_type ?? "user",
-    source_ref: overrides.source_ref ?? null,
-    captured_at: overrides.captured_at ?? "2026-01-01T00:00:00.000Z",
-    anchor: overrides.anchor ?? null,
-    status: overrides.status ?? "active",
-    confidence: overrides.confidence ?? 1,
-    embedding: overrides.embedding ?? null,
-    status_changed_at: overrides.status_changed_at ?? null,
-    prior_status: overrides.prior_status ?? null,
-  };
-}
+import { makeFact } from "./support/fact.js";
 
 describe("detectContradictions", () => {
   it("returns no groups or updates for facts with no subject/value overlap (happy path, no contradiction)", () => {

@@ -6,6 +6,7 @@ import { openDb } from "../../src/db.js";
 import { markRecallUsed, openStorage, setEmbeddingMeta, updateFact } from "../../src/storage.js";
 import { EMBED_MODEL_ENV, EMBED_URL_ENV } from "../../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer } from "../support/embedding-server.js";
+import { makeFact } from "../support/fact.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
 import {
   buildHintFormat,
@@ -1217,22 +1218,9 @@ describe("buildHintFormat", () => {
 
   it("no kind boost can lift a zero score past the delta predicate: boosted kinds on a non-matching query score exactly 0", async () => {
     expect(AGGRESSIVE_RECALL_BOOST).toBeGreaterThan(1);
-    const facts: Fact[] = (["preference", "correction", "decision", "fact"] as const).map((kind, index) => ({
-      id: `${kind}-1`,
-      text: `${kind} about something unrelated`,
-      kind,
-      subject: null,
-      value: null,
-      scope: "global",
-      scopeRoot: null,
-      source_type: "user",
-      source_ref: null,
-      captured_at: `2026-01-0${index + 1}T00:00:00.000Z`,
-      anchor: null,
-      status: "active",
-      confidence: 1,
-      embedding: null,
-    }));
+    const facts: Fact[] = (["preference", "correction", "decision", "fact"] as const).map((kind, index) =>
+      makeFact({ id: `${kind}-1`, text: `${kind} about something unrelated`, kind, scope: "global", scopeRoot: null, captured_at: `2026-01-0${index + 1}T00:00:00.000Z` })
+    );
     for (const query of ["", "what is the lint setup"]) {
       const { results } = await retrieve(facts, { query, root, hintFormat: true, limit: 100 });
       expect(results).toHaveLength(4);
@@ -1317,7 +1305,7 @@ describe("buildHintFormat", () => {
   });
 
   function bareFact(id: string, text: string, kind: Fact["kind"] = "fact"): Fact {
-    return { id, text, kind, subject: null, value: null, scope: "global", scopeRoot: null, source_type: "user", source_ref: null, captured_at: "2026-01-01T00:00:00.000Z", anchor: null, status: "active", confidence: 1, embedding: null };
+    return makeFact({ id, text, kind, scope: "global", scopeRoot: null });
   }
 
   it("negations are never stripped: a fact and a query that share only a negation word still score on it", async () => {

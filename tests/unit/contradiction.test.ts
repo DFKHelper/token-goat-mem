@@ -7,26 +7,7 @@ import {
   resolveContradictions,
   getGroundTruthFacts,
 } from "../../src/contradiction.js";
-import type { Fact } from "../../src/types.js";
-
-function makeFact(overrides: Partial<Fact> & Pick<Fact, "id">): Fact {
-  return {
-    id: overrides.id,
-    text: overrides.text ?? `fact ${overrides.id}`,
-    kind: overrides.kind ?? "preference",
-    subject: overrides.subject ?? null,
-    value: overrides.value ?? null,
-    scope: overrides.scope ?? "project",
-    ...(overrides.scopeRoot !== undefined ? { scopeRoot: overrides.scopeRoot } : {}),
-    source_type: overrides.source_type ?? "user",
-    source_ref: overrides.source_ref ?? null,
-    captured_at: overrides.captured_at ?? "2026-01-01T00:00:00.000Z",
-    anchor: overrides.anchor ?? null,
-    status: overrides.status ?? "active",
-    confidence: overrides.confidence ?? 1,
-    embedding: overrides.embedding ?? null,
-  };
-}
+import { makeFact } from "../support/fact.js";
 
 describe("detectContradictions", () => {
   it("ignores facts without a subject/value key", () => {

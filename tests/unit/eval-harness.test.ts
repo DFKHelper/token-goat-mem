@@ -9,21 +9,12 @@ import { validateAnchorSyntax } from "../../src/capture.js";
 import { generateScenarios } from "../../eval/queries.js";
 import { evaluateConfig } from "../../eval/harness.js";
 import { mulberry32, pick, pickN, chance } from "../../eval/prng.js";
+import { makeFact } from "../support/fact.js";
 
+/** An `EvalFact` over the shared `Fact` factory: a global `fact`-kind base plus the eval-only bookkeeping fields. */
 function fact(overrides: Partial<EvalFact> & Pick<EvalFact, "id" | "text">): EvalFact {
   return {
-    kind: "fact",
-    subject: null,
-    value: null,
-    scope: "global",
-    scopeRoot: null,
-    source_type: "user",
-    source_ref: null,
-    captured_at: "2026-01-01T00:00:00.000Z",
-    anchor: null,
-    status: "active",
-    confidence: 1,
-    embedding: null,
+    ...makeFact({ id: overrides.id, kind: "fact", scope: "global", scopeRoot: null }),
     _template: "t",
     _value: "v",
     _isDuplicate: false,

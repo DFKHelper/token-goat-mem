@@ -15,22 +15,7 @@ import {
   type EmbeddingBackend,
 } from "../../src/retrieval.js";
 import type { Fact } from "../../src/types.js";
-
-function makeFact(overrides: Partial<Fact> & Pick<Fact, "id" | "text" | "kind">): Fact {
-  return {
-    subject: null,
-    value: null,
-    scope: "project",
-    source_type: "user",
-    source_ref: null,
-    captured_at: "2026-01-01T00:00:00.000Z",
-    anchor: null,
-    status: "active",
-    confidence: 1,
-    embedding: null,
-    ...overrides,
-  };
-}
+import { makeFact } from "../support/fact.js";
 
 let root: string;
 
