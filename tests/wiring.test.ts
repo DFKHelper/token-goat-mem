@@ -1776,13 +1776,14 @@ describe("regression: integration docs match the markdown mem init actually writ
     const written = JSON.parse(read(join(root, ".claude", "settings.json"))) as Record<string, unknown>;
 
     // Extract the hook structure from what was written, per event, with the STAMP_KEY stripped
-    const writtenHooks = written.hooks as Record<string, unknown>;
+    const writtenHooks = written["hooks"] as Record<string, unknown>;
     const events = Object.keys(writtenHooks).sort();
     expect(events).toEqual(["PreCompact", "SessionStart", "Stop", "UserPromptSubmit"]);
     function hookWithoutStamp(container: Record<string, unknown>, event: string): Record<string, unknown> {
       const groups = container[event] as Record<string, unknown>[];
       expect(groups, `${event} groups`).toHaveLength(1);
-      const hook = (groups[0] as Record<string, unknown>).hooks?.[0] as Record<string, unknown>;
+      const groupHooks = (groups[0] as Record<string, unknown>)["hooks"] as Record<string, unknown>[] | undefined;
+      const hook = groupHooks?.[0] as Record<string, unknown>;
       const { "__token_goat_mem": _, ...rest } = hook;
       return rest;
     }
@@ -1800,7 +1801,7 @@ describe("regression: integration docs match the markdown mem init actually writ
     }
 
     const docJson = docJsonBlock("claude-code") as Record<string, unknown>;
-    const docHooks = docJson.hooks as Record<string, unknown>;
+    const docHooks = docJson["hooks"] as Record<string, unknown>;
     expect(Object.keys(docHooks).sort()).toEqual(events);
 
     for (const event of events) {

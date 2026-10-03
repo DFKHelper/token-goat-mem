@@ -524,7 +524,7 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
     expect(result.promotedFromPending).toBe(true);
     expect(result.supersededPendingDuplicateCount).toBe(1);
 
-    const rows = db.prepare<[], { id: string; status: string }>("SELECT id, status FROM facts WHERE kind = ?").all("preference") as {
+    const rows = db.prepare<[string], { id: string; status: string }>("SELECT id, status FROM facts WHERE kind = ?").all("preference") as {
       id: string;
       status: string;
     }[];

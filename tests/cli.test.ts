@@ -1913,6 +1913,7 @@ interface ExportedFact {
   readonly captured_at: string;
   readonly last_surfaced_at: string | null;
   readonly prior_status: string | null;
+  readonly superseded_by?: string | null;
 }
 
 interface ExportEnvelope {
@@ -1987,7 +1988,7 @@ describe("mem export", () => {
     expect(exported.exitCode).toBe(0);
     const envelope = JSON.parse(exported.stdout) as { exportedAt: string; facts: readonly Record<string, unknown>[] };
     for (const fact of envelope.facts) {
-      expect(fact.status).not.toBe("superseded");
+      expect(fact["status"]).not.toBe("superseded");
       expect(Object.prototype.hasOwnProperty.call(fact, "superseded_by")).toBe(false);
     }
   });
@@ -2527,7 +2528,7 @@ describe("mem import --from-json (full-fidelity round-trip)", () => {
 
     const exported = await runCli(["export"]);
     expect(exported.exitCode).toBe(0);
-    const envelope = JSON.parse(exported.stdout) as ExportEnvelope & { facts: readonly (ExportedFact & { superseded_by?: string | null })[] };
+    const envelope = JSON.parse(exported.stdout) as ExportEnvelope;
     const loserExport = envelope.facts.find((fact) => fact.id === loserId);
     expect(loserExport?.superseded_by).toBe(winnerId);
 
@@ -6495,7 +6496,11 @@ describe("mem backup --list --json", () => {
     expect(parsed[0]).toHaveProperty("reason");
     expect(parsed[0]).toHaveProperty("size");
     // takenAt round-trips through Date unchanged, so it is canonical ISO 8601
-    expect(new Date(parsed[0].takenAt).toISOString()).toBe(parsed[0].takenAt);
+    const newest = parsed[0];
+    if (newest === undefined) {
+      throw new Error("expected at least one listed snapshot");
+    }
+    expect(new Date(newest.takenAt).toISOString()).toBe(newest.takenAt);
   });
 });
 

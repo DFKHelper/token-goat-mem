@@ -18,7 +18,7 @@ let priorBackupDir: string | undefined;
 beforeAll(() => {
   // Create isolated temp directory for tests
   tempDir = mkdtempSync(join(tmpdir(), "mem-test-"));
-  process.env.TOKEN_GOAT_MEM_HOME = tempDir;
+  process.env["TOKEN_GOAT_MEM_HOME"] = tempDir;
   priorRetrievalBudget = process.env[RETRIEVAL_BUDGET_ENV];
   process.env[RETRIEVAL_BUDGET_ENV] = NO_TRUNCATION_BUDGET_MS;
   priorBackupDir = process.env[BACKUP_DIR_ENV];

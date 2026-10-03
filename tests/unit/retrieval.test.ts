@@ -112,7 +112,7 @@ describe("computeBm25Scores", () => {
 
   it("a fact without a rationale scores the same as before", () => {
     const docWithNull = makeFact({ id: "a", text: "uses pnpm", kind: "preference", why: null });
-    const docWithUndefined = makeFact({ id: "a", text: "uses pnpm", kind: "preference", why: undefined });
+    const docWithUndefined = makeFact({ id: "a", text: "uses pnpm", kind: "preference" });
     const scoresWithNull = computeBm25Scores([docWithNull], "pnpm");
     const scoresWithUndefined = computeBm25Scores([docWithUndefined], "pnpm");
     expect(scoresWithNull.get("a")).toBe(scoresWithUndefined.get("a"));
@@ -877,10 +877,10 @@ describe("regression: superseded facts are excluded entirely from results, not e
       }),
     ];
 
-    const { results } = await retrieve(facts, { query: "chose", limit: 1 });
+    const { results } = await retrieve(facts, { query: "chose", root, limit: 1 });
     // With limit 1, only one result should come back, and it must be the active one
     expect(results).toHaveLength(1);
-    expect(results[0].fact.id).toBe("active-id");
+    expect(results[0]?.fact.id).toBe("active-id");
     // Verify the superseded fact is definitely not in the results
     expect(results.map((r) => r.fact.id)).not.toContain("superseded-id");
   });
@@ -1024,10 +1024,10 @@ describe("graphScores as a fourth RRF rank list", () => {
     makeFact({ id: "c", text: "unrelated note about cheese", kind: "fact", captured_at: "2026-01-01T00:00:00.000Z" }),
   ];
 
-  it("leaves ranking byte-identical when absent -- the default path every store without a caller-computed graph is on", async () => {
+  it("leaves ranking byte-identical when absent or empty -- the default path every store without a caller-computed graph is on", async () => {
     const withoutGraph = await retrieve(facts, { query: "deploy", root });
-    const withUndefinedGraph = await retrieve(facts, { query: "deploy", root, graphScores: undefined });
-    expect(withUndefinedGraph.results.map((r) => [r.fact.id, r.score])).toEqual(withoutGraph.results.map((r) => [r.fact.id, r.score]));
+    const withEmptyGraph = await retrieve(facts, { query: "deploy", root, graphScores: new Map() });
+    expect(withEmptyGraph.results.map((r) => [r.fact.id, r.score])).toEqual(withoutGraph.results.map((r) => [r.fact.id, r.score]));
   });
 
   it("reorders results toward a fact the graph connects to the query even though BM25 alone ranked it last", async () => {

@@ -1231,6 +1231,7 @@ describe("buildHintFormat", () => {
       anchor: null,
       status: "active",
       confidence: 1,
+      embedding: null,
     }));
     for (const query of ["", "what is the lint setup"]) {
       const { results } = await retrieve(facts, { query, root, hintFormat: true, limit: 100 });
@@ -1316,7 +1317,7 @@ describe("buildHintFormat", () => {
   });
 
   function bareFact(id: string, text: string, kind: Fact["kind"] = "fact"): Fact {
-    return { id, text, kind, subject: null, value: null, scope: "global", scopeRoot: null, source_type: "user", source_ref: null, captured_at: "2026-01-01T00:00:00.000Z", anchor: null, status: "active", confidence: 1 };
+    return { id, text, kind, subject: null, value: null, scope: "global", scopeRoot: null, source_type: "user", source_ref: null, captured_at: "2026-01-01T00:00:00.000Z", anchor: null, status: "active", confidence: 1, embedding: null };
   }
 
   it("negations are never stripped: a fact and a query that share only a negation word still score on it", async () => {

@@ -10,6 +10,12 @@ import { countEmbeddedFacts, getEmbeddingMeta, getFactById, insertFact, openStor
 import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
+import type { ImportOutcome } from "../src/import.js";
+
+/** The `reason` of a `skipped_error` outcome, or "" for any other outcome, so a `toContain` on it fails rather than reading a field the outcome does not carry. */
+function skipReason(outcome: ImportOutcome | undefined): string {
+  return outcome?.status === "skipped_error" ? outcome.reason : "";
+}
 
 // ─────────────────────────────────────────────────────────────────────────── planImportFromJson (dry-run, DB-free) ───────────────────────────────────────────────────────────────────────────
 
@@ -267,7 +273,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain("out-of-range");
+    expect(skipReason(result.outcomes[1])).toContain("out-of-range");
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -281,7 +287,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain("out-of-range");
+    expect(skipReason(result.outcomes[1])).toContain("out-of-range");
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -295,7 +301,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain("exceeds");
+    expect(skipReason(result.outcomes[1])).toContain("exceeds");
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -314,7 +320,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain("subject and value must be provided together");
+    expect(skipReason(result.outcomes[1])).toContain("subject and value must be provided together");
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -333,7 +339,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain("subject and value must be provided together");
+    expect(skipReason(result.outcomes[1])).toContain("subject and value must be provided together");
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -352,7 +358,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain('has scope "project" but no "scopeRoot" binding');
+    expect(skipReason(result.outcomes[1])).toContain('has scope "project" but no "scopeRoot" binding');
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -371,7 +377,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain('has scope "path" but no "scopeRoot" binding');
+    expect(skipReason(result.outcomes[1])).toContain('has scope "path" but no "scopeRoot" binding');
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -390,7 +396,7 @@ describe("importFromJson", () => {
     expect(result.outcomes).toHaveLength(2);
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(result.outcomes[1]?.status).toBe("skipped_error");
-    expect(result.outcomes[1]?.reason).toContain("not an absolute path");
+    expect(skipReason(result.outcomes[1])).toContain("not an absolute path");
 
     const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
     expect(count).toBe(1);
@@ -411,7 +417,7 @@ describe("importFromJson", () => {
       expect(result.outcomes).toHaveLength(2);
       expect(result.outcomes[0]?.status).toBe("imported");
       expect(result.outcomes[1]?.status).toBe("skipped_error");
-      expect(result.outcomes[1]?.reason).toContain("outside the import root");
+      expect(skipReason(result.outcomes[1])).toContain("outside the import root");
 
       const count = (db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number }).c;
       expect(count).toBe(1);

@@ -17,7 +17,7 @@ function makeFact(overrides: Partial<Fact> & Pick<Fact, "id">): Fact {
     subject: overrides.subject ?? null,
     value: overrides.value ?? null,
     scope: overrides.scope ?? "project",
-    scopeRoot: overrides.scopeRoot,
+    ...(overrides.scopeRoot !== undefined ? { scopeRoot: overrides.scopeRoot } : {}),
     source_type: overrides.source_type ?? "user",
     source_ref: overrides.source_ref ?? null,
     captured_at: overrides.captured_at ?? "2026-01-01T00:00:00.000Z",

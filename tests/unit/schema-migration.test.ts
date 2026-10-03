@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type Database from "better-sqlite3";
 
 import { insertFact, openStorage } from "../../src/storage.js";
-import type { Db } from "../../src/storage.js";
+
+type Db = Database.Database;
 
 let workDir: string;
 let counter = 0;
@@ -195,7 +197,10 @@ describe("CHECK constraints are frozen once a database exists", () => {
       .get() as { sql: string };
     const found: Record<string, string[]> = {};
     for (const [, column, values] of sql.matchAll(/(\w+)\s+TEXT[^,]*?CHECK\s*\(\s*\1\s+IN\s*\(([^)]*)\)/gi)) {
-      found[column] = [...(values as string).matchAll(/'([^']*)'/g)].map((match) => match[1] as string);
+      if (column === undefined || values === undefined) {
+        throw new Error(`CHECK constraint matched without its column or value list: ${sql}`);
+      }
+      found[column] = [...values.matchAll(/'([^']*)'/g)].map((match) => match[1] as string);
     }
     return found;
   }

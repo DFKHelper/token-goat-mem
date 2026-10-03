@@ -72,9 +72,9 @@ function remapFactRoots(facts: readonly EvalFact[], rootMap: ReadonlyMap<string,
     }
     const mappedRoot: string = rootMap.get(fact.scopeRoot) ?? fact.scopeRoot;
     // `captureRoot` has to move with `scopeRoot`, not just alongside it: `anchorRootFor` evaluates a `path` fact's anchor against `captureRoot` alone, so leaving it on the unresolvable fake path pointed every path-scoped anchor at a directory that does not exist.
-    const mappedCaptureRoot: string | null | undefined =
-      typeof fact.captureRoot === "string" ? (rootMap.get(fact.captureRoot) ?? fact.captureRoot) : fact.captureRoot;
-    return { ...fact, scopeRoot: mappedRoot, captureRoot: mappedCaptureRoot };
+    const mappedCaptureRoot: Pick<EvalFact, "captureRoot"> =
+      typeof fact.captureRoot === "string" ? { captureRoot: rootMap.get(fact.captureRoot) ?? fact.captureRoot } : {};
+    return { ...fact, scopeRoot: mappedRoot, ...mappedCaptureRoot };
   });
 }
 

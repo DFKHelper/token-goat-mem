@@ -263,7 +263,7 @@ describe("detectContradictions", () => {
       resolution: "resolved",
       winnerId: "user-older",
     });
-    expect(result.groups[0]?.factIds.sort()).toEqual(["derived-newer", "user-older"]);
+    expect([...(result.groups[0]?.factIds ?? [])].sort()).toEqual(["derived-newer", "user-older"]);
     expect(result.updates).toEqual([
       expect.objectContaining({
         factId: "derived-newer",
@@ -301,7 +301,7 @@ describe("detectContradictions", () => {
       resolution: "contested",
       winnerId: null,
     });
-    expect(result.groups[0]?.factIds.sort()).toEqual(["a", "b"]);
+    expect([...(result.groups[0]?.factIds ?? [])].sort()).toEqual(["a", "b"]);
     expect(result.updates).toHaveLength(2);
     for (const update of result.updates) {
       expect(update.nextStatus).toBe("contested");
@@ -363,7 +363,7 @@ describe("detectContradictions", () => {
       resolution: "contested",
       winnerId: null,
     });
-    expect(result.groups[0]?.factIds.sort()).toEqual(["a", "b", "c"]);
+    expect([...(result.groups[0]?.factIds ?? [])].sort()).toEqual(["a", "b", "c"]);
     expect(result.updates).toHaveLength(3);
     for (const update of result.updates) {
       expect(update.nextStatus).toBe("contested");
