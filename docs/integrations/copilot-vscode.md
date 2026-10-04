@@ -14,6 +14,8 @@ mem init copilot-vscode --dry-run       # preview without touching disk
 
 Safe to re-run: mem's own tasks/keybinding entries and `AGENTS.md` block are upgraded in place, never duplicated, and a pre-existing hand-written task/keybinding with the same label/key aborts the write with a conflict error instead of being overwritten. `--user` writes only the user-level `keybindings.json`, since the tasks file and the `AGENTS.md` block are project artifacts and `--user` has nowhere project-scoped to put them. `mem uninstall copilot-vscode` removes exactly those entries, preserving any other tasks/keybindings you've added. The rest of this doc is what `mem init copilot-vscode` writes, if you'd rather do it by hand.
 
+The user-level `keybindings.json` is shared by every project and by `--user`: each mem entry records which installs own it, and `mem uninstall copilot-vscode` removes the entries only when the last owner uninstalls. A project directory deleted without uninstalling keeps its claim, so run `mem uninstall copilot-vscode --root <that dir>` (or edit the entries' `__token_goat_mem` list) to release it.
+
 ## Shell invocation
 
 The simplest pattern. Open the VS Code terminal and invoke Mem directly. `--kind` is required on every `remember`:

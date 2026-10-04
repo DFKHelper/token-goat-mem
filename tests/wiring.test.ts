@@ -800,7 +800,7 @@ describe("copilotVscode wiring", () => {
     const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
     const keybindings = JSON.parse(read(keybindingsPath));
     expect(keybindings).toHaveLength(2);
-    expect(keybindings.every((k: { __token_goat_mem?: boolean }) => k.__token_goat_mem === true)).toBe(true);
+    expect(keybindings.every((k: { __token_goat_mem?: string[] }) => k.__token_goat_mem?.length === 1)).toBe(true);
 
     expect(read(join(root, "AGENTS.md"))).toContain("<!-- token-goat-mem:start tools=copilot-vscode -->");
   });
@@ -2059,5 +2059,33 @@ describe("regression: an old-shape orphan hook is adopted (both shapes recognise
     for (const event of ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]) {
       expect(afterUninstall.hooks[event]).toEqual([]);
     }
+  });
+});
+
+describe("copilot-vscode shared user keybindings", () => {
+  it("keeps the keybindings while another project still references them, and removes them after the last uninstall", () => {
+    const otherRoot = mkdtempSync(join(tmpdir(), "mem-wiring-root2-"));
+    try {
+      const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+      copilotVscode.install({ root, homeDir: home });
+      copilotVscode.install({ root: otherRoot, homeDir: home });
+      copilotVscode.uninstall({ root, homeDir: home });
+      expect(existsSync(join(root, ".vscode", "tasks.json"))).toBe(false);
+      expect(JSON.parse(read(keybindingsPath))).toHaveLength(2);
+      copilotVscode.uninstall({ root: otherRoot, homeDir: home });
+      expect(existsSync(keybindingsPath)).toBe(false);
+    } finally {
+      rmSync(otherRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps a --user install's keybindings when a project uninstalls, and a project's when --user uninstalls", () => {
+    const keybindingsPath = join(vscodeUserDir(home), "keybindings.json");
+    copilotVscode.install({ root, homeDir: home, user: true });
+    copilotVscode.install({ root, homeDir: home });
+    copilotVscode.uninstall({ root, homeDir: home });
+    expect(JSON.parse(read(keybindingsPath))).toHaveLength(2);
+    copilotVscode.uninstall({ root, homeDir: home, user: true });
+    expect(existsSync(keybindingsPath)).toBe(false);
   });
 });

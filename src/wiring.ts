@@ -515,7 +515,17 @@ function sharedMarkdownFile(path: string, tool: string, body: string): ManagedFi
 const STAMP_KEY = "__token_goat_mem";
 
 function isStamped(value: unknown): boolean {
-  return typeof value === "object" && value !== null && (value as Record<string, unknown>)[STAMP_KEY] === true;
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const stamp = (value as Record<string, unknown>)[STAMP_KEY];
+  return stamp === true || Array.isArray(stamp);
+}
+
+/** The owners recorded in an entry's stamp: the project roots (or `USER_OWNER`) whose install wrote or adopted it. A plain `true` stamp is an older install that recorded none. */
+function stampOwners(value: unknown): readonly string[] {
+  const stamp = typeof value === "object" && value !== null ? (value as Record<string, unknown>)[STAMP_KEY] : undefined;
+  return Array.isArray(stamp) ? stamp.filter((owner): owner is string => typeof owner === "string") : [];
 }
 
 /** True for `undefined` (file absent) or a file that exists but contains only whitespace -- neither has any hand-written content that could conflict, so both are treated identically to "start fresh" by every JSON/JSONC entry point below. */
@@ -1408,24 +1418,46 @@ const VSCODE_KEYBINDINGS: ReadonlyArray<Record<string, unknown>> = [
   },
 ];
 
-function installKeybindings(current: string | undefined, path: string): string | undefined {
+/** The owner recorded for a `--user` install, which no resolved project root can equal. */
+const USER_OWNER = "user";
+
+function installKeybindings(current: string | undefined, path: string, owner: string): string | undefined {
   const text = isBlank(current) ? "[]\n" : (current as string);
   // Guard the raw parsed value against a `?? []` coercion: a keybindings.json holding literally `null` parses to JS `null`, and `null ?? []` would silently masquerade as an empty array, slip past the array check, then reach jsonc-parser's `modify(text, [-1], ...)` on a `null` root -- which throws a raw "Can not add property to parent of type null" Error instead of the documented WiringConflictError contract. Every non-array root (null, number, string, boolean, object) must abort with WiringConflictError, matching how installTasksJson rejects a non-object root.
   const parsed: unknown = isBlank(current) ? [] : parseJsoncOrConflict(current as string, path);
   if (!Array.isArray(parsed)) {
     throw new WiringConflictError(`${path} does not contain a JSON array; refusing to modify a hand-edited config`);
   }
-  const next = upsertJsoncArrayEntries(text, [], parsed, VSCODE_KEYBINDINGS, "key", path, "keybinding");
+  // The keybindings file is shared by every project (and the --user install), so each entry's stamp lists its owners and uninstall only removes an entry once its last owner is gone.
+  const wanted = VSCODE_KEYBINDINGS.map((entry) => {
+    const found: unknown = parsed[findIndexByKey(parsed, "key", entry["key"])];
+    return { ...entry, [STAMP_KEY]: [...new Set([...stampOwners(found), owner])].sort() };
+  });
+  const next = upsertJsoncArrayEntries(text, [], parsed, wanted, "key", path, "keybinding");
   return next === current ? current : next;
 }
 
-function uninstallKeybindings(current: string | undefined, path: string): string | undefined {
+function uninstallKeybindings(current: string | undefined, path: string, owner: string): string | undefined {
   if (isBlank(current)) {
     return undefined;
   }
   const parsed = parseJsoncOrConflict(current as string, path);
   const existing = Array.isArray(parsed) ? parsed : [];
-  const { text, changed } = removeStampedJsoncArrayEntries(current as string, [], existing);
+  let text = current as string;
+  let changed = false;
+  for (let idx = existing.length - 1; idx >= 0; idx -= 1) {
+    const item: unknown = existing[idx];
+    if (!isStamped(item)) {
+      continue;
+    }
+    const owners = stampOwners(item);
+    if (owners.length > 0 && !owners.includes(owner)) {
+      continue;
+    }
+    const remaining = owners.filter((other) => other !== owner);
+    text = remaining.length > 0 ? surgicalJsoncEdit(text, [idx], { ...(item as Record<string, unknown>), [STAMP_KEY]: remaining }) : surgicalJsoncRemoveArrayEntry(text, [], idx);
+    changed = true;
+  }
   return changed ? text : current;
 }
 
@@ -1549,10 +1581,11 @@ export const opencode: ToolWiring = makeToolWiring(({ root, homeDir, user }) => 
 
 export const copilotVscode: ToolWiring = makeToolWiring(({ root, homeDir, user }) => {
   const keybindingsPath = join(vscodeUserDir(homeDir), "keybindings.json");
+  const owner = user ? USER_OWNER : resolvePath(root);
   const keybindingsEntry: ManagedFile = {
     path: keybindingsPath,
-    install: (current) => installKeybindings(current, keybindingsPath),
-    uninstall: (current) => uninstallKeybindings(current, keybindingsPath),
+    install: (current) => installKeybindings(current, keybindingsPath, owner),
+    uninstall: (current) => uninstallKeybindings(current, keybindingsPath, owner),
   };
   // Unlike the project-only tools, this one has somewhere real to put a user-level install: the keybindings live in VS Code's own user directory, so they are the whole of it. The tasks file and the AGENTS.md block are project artifacts, and writing them under --user would put mem into a repository the user asked only to configure their editor for.
   if (user) {
