@@ -1,12 +1,14 @@
 /** Storage layer: schema and typed CRUD for the `sources` table plus a write epoch, and typed CRUD for the `facts` table (design plan Section 3). Builds on src/db.ts rather than duplicating it: db.ts already owns opening the sqlite file, enabling WAL mode, and creating the `facts` table with its CHECK constraints (see db.ts's own header comment, which explicitly invites "a dedicated storage module" to extend its schema without conflicting with it). This module adds: - the `sources` table -- audit-only excerpts referenced by fact id ("raw excerpts ... for audit/provenance only -- never a primary retrieval tier", Section 3), foreign-keyed to `facts(id)` with `ON DELETE CASCADE` so a hard fact delete cannot leave orphaned sources rows; - a `meta` key/value table used only to track a monotonic write epoch (Section 4 / review S2: token-goat's optional fallback cache, if it is ever added on the caller side, is keyed on this so a `forget`/`edit` is never masked by a stale TTL); - the `fact_terms` table -- the structured facet layer (`src/facets.ts`): the identifier-shaped tokens BM25's stemmer would destroy, kept verbatim beside a normalized lookup key, so `mem recall --entity src/retrieval.ts` can find a fact the lexical index only knows as `src`/`retriev`/`ts`. Foreign-keyed with `ON DELETE CASCADE` like `sources`: orphaned term rows would silently skew every term statistic without ever failing a query; - typed CRUD for both tables, plus `openStorage`, the recommended connection entry point (`openDb` + this module's schema, in one call). mem is a short-lived, single-shot CLI process (db.ts's own header comment): there is no connection cache here either. Every `openStorage` call opens a fresh connection; callers close it when done. Every fact-table write (`insertFact`, `updateFact`, `setFactStatus`, `deleteFact`) bumps the epoch in the same transaction as the write, so the epoch is never observably out of sync with the data it describes. The same applies to writes that change what recall would return without touching the `facts` table itself (`replaceFactTerms`, `markRecallUsed`). Writes to `sources` do not bump it: `sources` is audit-only and never feeds the `--hint-format` seam output the epoch exists to guard (Section 4). */
 
 import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 import type { AnchorCacheStore, AnchorVerdict } from "./anchors.js";
 import { openDb, resolveDbPath, type OpenDbOptions } from "./db.js";
 import { getEpoch, writeEpoch } from "./epoch.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import { extractFacets, normalizeTermKey, type FactFacets } from "./facets.js";
 import { hashFactText, normalizeFactText } from "./factText.js";
+import { normalizePath } from "./pathUtils.js";
 import { runMigrations } from "./migrations.js";
 import type { Fact, FactFilter, FactLink, FactUpdate, NewFact, NewSource, Source, FactStatus } from "./types.js";
 
@@ -205,7 +207,12 @@ function scopeBindingMatchesCandidate(
   candidateScopeRoot: string | null,
   candidateScopeRepo: string | null
 ): boolean {
-  if ((fact.scopeRoot ?? null) === candidateScopeRoot) {
+  const factScopeRoot = fact.scopeRoot ?? null;
+  if (factScopeRoot !== null && candidateScopeRoot !== null) {
+    if (normalizePath(resolve(factScopeRoot)) === normalizePath(resolve(candidateScopeRoot))) {
+      return true;
+    }
+  } else if (factScopeRoot === candidateScopeRoot) {
     return true;
   }
   const factScopeRepo = fact.scopeRepo ?? null;

@@ -396,6 +396,22 @@ describe("regression: a reaffirmable fact inserted between the read and the writ
   });
 });
 
+describe("regression: different-case root paths reaffirm instead of creating duplicates", () => {
+  it.runIf(process.platform === "win32")("reaffirms a fact when root differs only in case", () => {
+    const upperRoot = join(root, "CaseProj");
+    const lowerRoot = join(root, "caseproj");
+    mkdirSync(upperRoot, { recursive: true });
+    mkdirSync(lowerRoot, { recursive: true });
+    const SENTENCE = { text: "case-folding test", kind: "preference" as const };
+    const result1 = captureExplicit(db, { ...SENTENCE, root: upperRoot, scope: "project" });
+    const result2 = captureExplicit(db, { ...SENTENCE, root: lowerRoot, scope: "project" });
+    expect(result2.reaffirmed).toBe(true);
+    expect(result2.fact.id).toBe(result1.fact.id);
+    const rows = db.prepare<[string], { id: string }>("SELECT id FROM facts WHERE text = ? AND status IN ('active', 'pinned')").all(SENTENCE.text);
+    expect(rows).toHaveLength(1);
+  });
+});
+
 describe("regression: stating a fact explicitly resolves the pending suggestion that proposed it", () => {
   /** `captureSuggested` files a pending suggestion; then `captureExplicit` restates the identical text/kind/scope/subject/value. Before the fix, `findReaffirmableFact` only queried `status IN ('active', 'pinned')`, so the pending row was invisible to it: the restatement wrote a second, active row and left the suggestion queued forever, waiting on a confirmation the user had already given by saying the thing outright. */
   it("promotes the matching pending suggestion to active instead of inserting a duplicate row", () => {
