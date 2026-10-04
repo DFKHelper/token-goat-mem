@@ -58,6 +58,10 @@ const WRAPPER_MARKERS: readonly string[] = [
   "<command-name>",
   "<command-message>",
   "<local-command-stdout>",
+  // Claude Code's `!cmd` bash mode: user-role entries with no isMeta/origin, so the command and its output would otherwise be filed as user speech.
+  "<bash-input>",
+  "<bash-stdout>",
+  "<bash-stderr>",
   // A subagent's report, relayed to the session under the user role. The sharpest case of all: without this, anything a spawned agent writes is indistinguishable from something the user said.
   "<task-notification>",
 ];

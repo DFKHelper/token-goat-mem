@@ -70,9 +70,9 @@ describe("userTurnText", () => {
     expect(userTurnText(entry)).toBe("please rebase");
   });
 
-  it("drops slash-command and task-notification wrappers, in array and bare-string content alike", () => {
+  it("drops slash-command, bash-mode and task-notification wrappers, in array and bare-string content alike", () => {
     // Bare-string content once returned early, exempting itself from every filter -- which is how a <local-command-stdout> dump kept producing candidates after the block path was hardened.
-    for (const marker of ["<command-name>", "<local-command-stdout>", "<task-notification>"]) {
+    for (const marker of ["<command-name>", "<local-command-stdout>", "<task-notification>", "<bash-input>", "<bash-stdout>", "<bash-stderr>"]) {
       const text = `${marker}\nAlways run the linter before pushing.`;
       expect(userTurnText({ type: "user", message: { content: [textBlock(text)] } }), marker).toBeUndefined();
       expect(userTurnText({ type: "user", message: { content: text } }), `${marker} (string)`).toBeUndefined();
