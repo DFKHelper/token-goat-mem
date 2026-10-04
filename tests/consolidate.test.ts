@@ -174,6 +174,14 @@ describe("findDuplicateClusters", () => {
     expect(findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD)).toEqual([]);
   });
 
+  it("clusters same-subject facts whose values differ only by case or whitespace -- `normalizeValue` treats them as one value, so they are restatements, not a contradiction", () => {
+    seed(db, "the package manager for this repo is yarn", { subject: "package-manager", value: "Yarn" });
+    seed(db, "package manager is yarn for this repo", { subject: "package-manager", value: "yarn " });
+    const clusters = findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]?.duplicates).toHaveLength(1);
+  });
+
   it("ignores facts that are not live: pending, contested, and already-superseded", () => {
     seed(db, PNPM_RESTATEMENTS[0]);
     seed(db, PNPM_RESTATEMENTS[1], { status: "pending" });
@@ -259,6 +267,20 @@ describe("findCrossScopeDuplicates", () => {
       scopeRoot: "/repo-a",
       subject: "default_branch",
       value: "main",
+    });
+    const duplicates = findCrossScopeDuplicates(db);
+    expect(duplicates).toHaveLength(1);
+    expect(duplicates[0]?.keep.id).toBe(globalFact.id);
+    expect(duplicates[0]?.duplicate.id).toBe(projectFact.id);
+  });
+
+  it("reports a same-subject pair whose values differ only by case or whitespace as a duplicate -- `normalizeValue` treats them as one value", () => {
+    const globalFact = seed(db, "the default branch name", { scope: "global", subject: "default_branch", value: "Main" });
+    const projectFact = seed(db, "the default branch name", {
+      scope: "project",
+      scopeRoot: "/repo-a",
+      subject: "default_branch",
+      value: "main ",
     });
     const duplicates = findCrossScopeDuplicates(db);
     expect(duplicates).toHaveLength(1);

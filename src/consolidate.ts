@@ -2,7 +2,7 @@
 
 import { computeContradictionBucketGroups, computeProjectIdentityGroups, sameContradictionBucket } from "./contradiction.js";
 import { neighbours } from "./factgraph.js";
-import { listFacts, listStaleUnsurfacedFacts, listTermsForFact, normalizeFactText } from "./storage.js";
+import { listFacts, listStaleUnsurfacedFacts, listTermsForFact, normalizeFactText, normalizeValue } from "./storage.js";
 import { daysAgoIso } from "./timeUtils.js";
 import type { Fact } from "./types.js";
 
@@ -95,8 +95,8 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
       if (assigned.has(candidate.id) || comparabilityKey(candidate, projectGroups) !== seedKey) {
         continue;
       }
-      // Same subject+scope, different value is a live contradiction, not a duplicate -- `detectContradictions` owns that resolution (provenance > newest, contested on a genuine tie). Clustering it here as a "duplicate" would let `preferenceOrder` (pinned > confidence > newest) override that outcome and silently resurrect a value the user already corrected.
-      if (sameContradictionBucket(seed, candidate, contradictionGroups) && seed.value !== candidate.value) {
+      // Same subject+scope, different value is a live contradiction, not a duplicate -- `detectContradictions` owns that resolution (provenance > newest, contested on a genuine tie). Clustering it here as a "duplicate" would let `preferenceOrder` (pinned > confidence > newest) override that outcome and silently resurrect a value the user already corrected. Values are compared through `normalizeValue` so "Yarn" and "yarn " count as one value, matching `detectContradictions`.
+      if (sameContradictionBucket(seed, candidate, contradictionGroups) && normalizedValueOf(seed) !== normalizedValueOf(candidate)) {
         continue;
       }
       const similarity = jaccard(seedTerms, terms.get(candidate.id) ?? new Set<string>());
@@ -145,7 +145,7 @@ export function findRelatedFactPairs(db: Db, upperThreshold: number = DEFAULT_DU
       if (right === undefined || comparabilityKey(right, projectGroups) !== leftKey) {
         continue;
       }
-      if (sameContradictionBucket(left, right, contradictionGroups) && left.value !== right.value) {
+      if (sameContradictionBucket(left, right, contradictionGroups) && normalizedValueOf(left) !== normalizedValueOf(right)) {
         continue;
       }
       const similarity = jaccard(leftTerms, terms.get(right.id) ?? new Set<string>());
@@ -158,6 +158,11 @@ export function findRelatedFactPairs(db: Db, upperThreshold: number = DEFAULT_DU
   return pairs;
 }
 
+/** A fact's value through `normalizeValue`, with `null` kept distinct from any string so a missing value never compares equal to an empty one. */
+function normalizedValueOf(fact: Fact): string | null {
+  return fact.value === null ? null : normalizeValue(fact.value);
+}
+
 function kindTextKey(fact: Fact): string {
   return `${fact.kind} ${normalizeFactText(fact.text)}`;
 }
@@ -167,7 +172,7 @@ function isCrossBoundaryKeyMismatch(a: Fact, b: Fact): boolean {
   if (a.subject === null || b.subject === null) {
     return false;
   }
-  return a.subject !== b.subject || a.value !== b.value;
+  return a.subject !== b.subject || normalizedValueOf(a) !== normalizedValueOf(b);
 }
 
 /** One project-scope fact whose text exactly duplicates a same-kind global fact -- `findCrossScopeDuplicates`'s report. */
