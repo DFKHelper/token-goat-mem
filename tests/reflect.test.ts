@@ -1,7 +1,7 @@
 /** End-to-end tests for `mem reflect`: the pending-suggestion worklist an agent resolves at the end of a session, update-before-create. `mem scan-session` files durable-sounding sentences as pending and stops there; nothing ever asks the agent that said them whether they restate, change, or add to what the store already knows. `mem reflect` lists each pending suggestion beside the live facts it most resembles and spells out the three resolutions. Driven through the real `run()` against a real database; the Stop-hook mode needs piped stdin and lives in tests/bundle/reflect-hook.test.ts. */
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { extractRememberedId, extractSuggestedId, runCli } from "./support/cli.js";
@@ -107,6 +107,22 @@ describe("mem reflect", () => {
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toContain("Never commit generated files to the repository.");
     expect(result.stdout).not.toContain(unrelated.slice(0, 8));
+  });
+
+  it("matches suggestions filed under an absolute transcript path when reflect is given the same transcript as a relative path", async () => {
+    // The Stop hook files a suggestion under the absolute transcript path; `mem reflect --transcript t.jsonl` given relatively must find it, not say "nothing to reflect on".
+    const transcript = writeTranscript("session.jsonl", ["Never commit generated files to the repository."]);
+    const filed = await runCli(["scan-session", "--transcript", transcript, "--root", root]);
+    expect(filed.exitCode, filed.stderr).toBe(0);
+
+    const pending = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = (JSON.parse(pending.stdout) as { facts: { id: string; text: string }[] }).facts;
+    expect(facts).toHaveLength(1);
+    const id = facts[0]?.id ?? "";
+
+    const result = await runCli(["reflect", "--transcript", relative(process.cwd(), transcript), "--root", root]);
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain(`${id.slice(0, 8)} [`);
   });
 
   it("exits 1 when --transcript names a file it cannot read, rather than reporting nothing to do", async () => {

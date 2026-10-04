@@ -1,6 +1,7 @@
 /** Files a session transcript's durable-statement candidates as pending suggestions -- the store side of `mem scan-session`, shared with `mem reflect`'s Stop hook so both file a transcript by exactly the same rules. {@link scanTranscript} decides what counts as a candidate (sessionScan.ts); this module decides what a candidate does to the store. */
 
 import type Database from "better-sqlite3";
+import { resolve } from "node:path";
 
 import { buildScreenedExcerpt, captureSuggested, CaptureValidationError, recordSighting, SecretDetectedError } from "./capture.js";
 import { isBoundToRoot } from "./projectIdentity.js";
@@ -8,9 +9,9 @@ import { scanTranscript } from "./sessionScan.js";
 import { factsByTextHash } from "./storage.js";
 import type { FactScope } from "./types.js";
 
-/** The `source_ref` prefix every suggestion filed from `transcriptPath` carries (`<path>#turn<n>`), so "which pending facts came from this transcript" is a prefix test against the same string the filer wrote rather than a second copy of its format. */
+/** The `source_ref` prefix every suggestion filed from `transcriptPath` carries (`<path>#turn<n>`), so "which pending facts came from this transcript" is a prefix test against the same string the filer wrote rather than a second copy of its format. Resolved to an absolute path first: the Stop hook files under the absolute path, so a caller that names the same transcript relatively must still match what was stored. */
 export function transcriptSourceRefPrefix(transcriptPath: string): string {
-  return `${transcriptPath}#turn`;
+  return `${resolve(transcriptPath)}#turn`;
 }
 
 export interface FileTranscriptOptions {
