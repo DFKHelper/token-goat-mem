@@ -100,6 +100,16 @@ describe("normalizeRemoteUrl", () => {
     expect(normalizeRemoteUrl("../upstream.git")).toBeNull();
     expect(normalizeRemoteUrl("./upstream.git")).toBeNull();
     expect(normalizeRemoteUrl("upstream.git")).toBeNull();
+    expect(normalizeRemoteUrl("..\\upstream.git")).toBeNull();
+    expect(normalizeRemoteUrl("..\\remotes/upstream.git")).toBeNull();
+    expect(normalizeRemoteUrl(".\\remotes/upstream.git")).toBeNull();
+  });
+
+  it("keeps a drive-letter path remote a local path rather than an scp host", () => {
+    expect(normalizeRemoteUrl("C:/repos/x.git")).toBe("c:/repos/x");
+    expect(normalizeRemoteUrl("C:\\repos\\x.git")).toBe("c:/repos/x");
+    expect(normalizeRemoteUrl("C:\\repos\\x.git\\")).toBe("c:/repos/x");
+    expect(normalizeRemoteUrl("git@c:repos/x.git")).toBe("c/repos/x");
   });
 });
 

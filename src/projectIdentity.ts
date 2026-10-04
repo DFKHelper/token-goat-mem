@@ -164,11 +164,14 @@ export function normalizeRemoteUrl(url: string): string | null {
   if (rest.length === 0) {
     return null;
   }
-  if (/^\.\.?\/|^[^/:]+$/.test(rest)) {
+  // A relative local path (`../upstream.git`, `.\x`, a bare `upstream.git`) names a different repository from every clone that resolves it, so it gives no identity.
+  if (/^\.\.?[\\/]|^[^/\\:]+$/u.test(rest)) {
     return null;
   }
+  // A drive-letter path (`C:/repos/x.git`, `C:\repos\x.git`) is a local path, not an scp host named `C`.
+  const isDrivePath = /^[a-z]:[\\/]/iu.test(rest);
   // scp-style `user@host:path` (no scheme, single colon, optionally followed by a slash for absolute paths).
-  const scp = /^(?:[^@/]+@)?([^/:]+):(.+)$/u.exec(rest);
+  const scp = isDrivePath ? null : /^(?:[^@/]+@)?([^/:]+):(.+)$/u.exec(rest);
   if (scp !== null && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(rest)) {
     const path = scp[2] ?? "";
     rest = path.startsWith("/") ? `${scp[1] ?? ""}${path}` : `${scp[1] ?? ""}/${path}`;
@@ -179,9 +182,9 @@ export function normalizeRemoteUrl(url: string): string | null {
     rest = rest.replace(/^[^@/]+@/u, "");
   }
   rest = rest
+    .replace(/\\/gu, "/")
     .replace(/\/+$/u, "")
     .replace(/\.git$/iu, "")
-    .replace(/\\/gu, "/")
     .toLowerCase();
   return rest.length > 0 ? rest : null;
 }
