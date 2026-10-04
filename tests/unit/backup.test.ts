@@ -265,6 +265,22 @@ describe("snapshot hygiene", () => {
     expect(listSnapshots(backupDir)).toHaveLength(1);
   });
 
+  it("leaves an old dot-temp file mem did not write alone while still clearing its own", () => {
+    writeFacts(1);
+    mkdirSync(backupDir, { recursive: true });
+    const foreign = join(backupDir, ".other.tmp");
+    const own = join(backupDir, ".mem-snapshot-1-1.tmp");
+    writeFileSync(foreign, "a user's file");
+    writeFileSync(own, "half a copy");
+    backdate(foreign, 2 * HOUR_MS);
+    backdate(own, 2 * HOUR_MS);
+
+    reopen();
+
+    expect(existsSync(foreign)).toBe(true);
+    expect(existsSync(own)).toBe(false);
+  });
+
   it("names a snapshot after the epoch of the copy itself, not a read taken before the copy", () => {
     writeFacts(2);
     const db = openStorage(dbPath, { autoSnapshot: false });

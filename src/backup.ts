@@ -195,7 +195,7 @@ function claimAutoSnapshot(dir: string): string | undefined {
 function removeAbandonedTemporaries(dir: string): void {
   for (const name of readdirSync(dir)) {
     const path = join(dir, name);
-    if (name.startsWith(".") && name.endsWith(".tmp") && isAbandoned(path)) {
+    if (name.startsWith(".mem-snapshot-") && name.endsWith(".tmp") && isAbandoned(path)) {
       rmSync(path, { force: true });
     }
   }
