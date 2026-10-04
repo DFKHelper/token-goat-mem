@@ -100,6 +100,26 @@ function commonDirOf(gitDir: string): string {
   return isAbsolute(pointer) ? resolve(pointer) : resolve(gitDir, pointer);
 }
 
+/** Reads a git-config value the way git does: double quotes group (and are dropped), a backslash escapes the next character inside them, and an unquoted `;` or `#` starts a comment that, with trailing whitespace, is not part of the value. */
+function stripConfigValue(raw: string): string {
+  let out = "";
+  let quoted = false;
+  for (let i = 0; i < raw.length; i += 1) {
+    const ch = raw[i] ?? "";
+    if (quoted && ch === "\\" && i + 1 < raw.length) {
+      i += 1;
+      out += raw[i] ?? "";
+    } else if (ch === '"') {
+      quoted = !quoted;
+    } else if (!quoted && (ch === ";" || ch === "#")) {
+      break;
+    } else {
+      out += ch;
+    }
+  }
+  return out.trim();
+}
+
 /** The remote URL to identify a repository by: `origin` when it exists, otherwise the only remote if there is exactly one. Several remotes with no `origin` is genuinely ambiguous -- picking one would make identity depend on config file ordering -- so that yields `null` and the caller falls back to the path binding. */
 function remoteUrlFrom(configText: string): string | null {
   const remotes = new Map<string, string>();
@@ -114,7 +134,8 @@ function remoteUrlFrom(configText: string): string | null {
     if (current === null) {
       continue;
     }
-    const url = /^url\s*=\s*(.+)$/u.exec(line)?.[1]?.trim();
+    const rawUrl = /^url\s*=\s*(.+)$/u.exec(line)?.[1];
+    const url = rawUrl === undefined ? undefined : stripConfigValue(rawUrl);
     // First `url` in a section wins, matching git's own "last one set" only loosely -- but a second url line in one remote section is a pushurl-style edge case, not something to guess at.
     if (url !== undefined && url.length > 0 && !remotes.has(current)) {
       remotes.set(current, url);
@@ -127,6 +148,16 @@ function remoteUrlFrom(configText: string): string | null {
   return remotes.size === 1 ? ([...remotes.values()][0] ?? null) : null;
 }
 
+/** `host[:port]/path` of a scheme URL, or `null` when `new URL` rejects it. */
+function hostAndPathOf(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.host}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
 /** Reduces a remote URL to a comparable host+path. `git@github.com:owner/repo.git`, `https://github.com/owner/repo`, and `ssh://git@github.com/owner/repo.git` are the same repository and must produce the same string. Case is folded because the hosts people actually use treat owner/repo case-insensitively, and an identity that changed with how a URL was typed would be worse than no identity at all. */
 export function normalizeRemoteUrl(url: string): string | null {
   let rest = url.trim();
@@ -137,8 +168,11 @@ export function normalizeRemoteUrl(url: string): string | null {
   const scp = /^(?:[^@/]+@)?([^/:]+):(?!\/)(.+)$/u.exec(rest);
   if (scp !== null && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(rest)) {
     rest = `${scp[1] ?? ""}/${scp[2] ?? ""}`;
+  } else if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(rest)) {
+    // A scheme URL is parsed so userinfo (a token, `user:pass@`), query and fragment never reach the identity, which is stored and exported.
+    rest = hostAndPathOf(rest) ?? rest.replace(/^[a-z][a-z0-9+.-]*:\/\//iu, "").replace(/^[^@/]+@/u, "");
   } else {
-    rest = rest.replace(/^[a-z][a-z0-9+.-]*:\/\//iu, "").replace(/^[^@/]+@/u, "");
+    rest = rest.replace(/^[^@/]+@/u, "");
   }
   rest = rest
     .replace(/\.git$/iu, "")

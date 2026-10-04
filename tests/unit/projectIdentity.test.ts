@@ -69,6 +69,23 @@ describe("normalizeRemoteUrl", () => {
     expect(normalizeRemoteUrl("https://github.com/acme/widget")).not.toBe(normalizeRemoteUrl("https://gitlab.com/acme/widget"));
   });
 
+  it("drops credentials, query and fragment so a token never reaches the identity", () => {
+    const expected = normalizeRemoteUrl("https://github.com/o/r.git");
+    for (const url of [
+      "https://user:tok@github.com/o/r.git",
+      "https://user:p@ss@github.com/o/r.git",
+      "https://github.com/o/r.git?access_token=SECRET",
+      "https://github.com/o/r.git#frag",
+    ]) {
+      const got = normalizeRemoteUrl(url) ?? "";
+      expect(got, url).toBe(expected);
+      for (const leak of ["tok", "ss@", "secret", "access_token"]) {
+        expect(got, url).not.toContain(leak);
+      }
+    }
+    expect(normalizeRemoteUrl("git@github.com:o/r.git")).toBe(expected);
+  });
+
   it("returns null for a URL with nothing left after normalization", () => {
     expect(normalizeRemoteUrl("")).toBeNull();
     expect(normalizeRemoteUrl("   ")).toBeNull();
@@ -124,6 +141,20 @@ describe("resolveProjectIdentity", () => {
     git(single, "remote", "add", "upstream", "https://github.com/acme/widget.git");
     clearProjectIdentityCache();
     expect(resolveProjectIdentity(single)).toBe("github.com/acme/widget#.");
+  });
+
+  it("resolves quoted url values and strips inline comments and credentials", () => {
+    const repo = makeRepo("commented", null);
+    const config = join(repo, ".git", "config");
+    for (const line of [
+      'url = "https://github.com/acme/widget.git" # the main remote',
+      "url = https://u:tok@github.com/acme/widget.git ; note",
+      'url = "https://github.com/acme/widget.git"',
+    ]) {
+      writeFileSync(config, `[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\t${line}\n`, "utf8");
+      clearProjectIdentityCache();
+      expect(resolveProjectIdentity(repo), line).toBe("github.com/acme/widget#.");
+    }
   });
 
   it("prefers origin when several remotes exist", () => {
