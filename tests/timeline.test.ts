@@ -159,6 +159,13 @@ describe("mem log", () => {
     expect(result.stderr).toBe(message);
   });
 
+  it("succeeds with a huge --age-days argument instead of throwing", async () => {
+    await remember("the build uses esbuild");
+    const result = await runCli(["log", "--age-days", "200000000"]);
+    expect(result.exitCode).toBe(0);
+    expect(entryLines(result.stdout).length).toBeGreaterThan(0);
+  });
+
   it("emits the same entries as JSON, full fact ids and prior wording included", async () => {
     const id = await remember("the build uses esbuild");
     expect((await runCli(["edit", id, "--text", "the build uses esbuild 0.25", "--force"])).exitCode).toBe(0);

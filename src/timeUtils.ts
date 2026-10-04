@@ -4,7 +4,8 @@ export const MS_PER_DAY = 86_400_000;
 
 /** The ISO-8601 instant `days` before `now` -- the cutoff a "older than N days" rule compares against. */
 export function daysAgoIso(days: number, now: Date): string {
-  return new Date(now.getTime() - days * MS_PER_DAY).toISOString();
+  const epochMs = Math.max(now.getTime() - days * MS_PER_DAY, -8.64e15);
+  return new Date(epochMs).toISOString();
 }
 
 /** Fractional days from `from` (an ISO timestamp or epoch milliseconds) to `now`. An unparseable timestamp yields `NaN`, which every caller already rejects with `Number.isFinite`. */

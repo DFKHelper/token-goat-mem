@@ -13,6 +13,13 @@ describe("daysAgoIso", () => {
   it("accepts fractional days", () => {
     expect(daysAgoIso(0.5, NOW)).toBe("2026-09-30T00:00:00.000Z");
   });
+
+  it("clamps a huge day count to the valid Date range instead of throwing", () => {
+    const result = daysAgoIso(200_000_000, NOW);
+    expect(result).toBeDefined();
+    expect(typeof result).toBe("string");
+    expect(result).toMatch(/T.*Z$/);
+  });
 });
 
 describe("ageInDays", () => {
