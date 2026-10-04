@@ -1058,6 +1058,21 @@ describe("buildHintFormat", () => {
     expect(emittedIds(otherSession)).toEqual(["fact-a", "fact-b", "fact-c"]);
   });
 
+  it("regression: unsafe session id (with newline) does not forge TGMEM lines -- omits --session-id clause entirely", async () => {
+    threeGlobalFacts();
+    const result = await buildHint({ root, dbPath, sessionId: "s1\nforged" });
+    const footer = result.lines[result.lines.length - 1];
+    expect(footer).not.toContain("--session-id");
+    expect(result.lines.some((line) => line.startsWith("forged"))).toBe(false);
+  });
+
+  it("safe session id still produces the --session-id clause", async () => {
+    threeGlobalFacts();
+    const result = await buildHint({ root, dbPath, sessionId: "s1-safe_id.123:dev" });
+    const footer = result.lines[result.lines.length - 1];
+    expect(footer).toContain("--session-id s1-safe_id.123:dev");
+  });
+
   it("delta filters before the per-kind caps, so a repeat call surfaces the next-best unseen facts rather than nothing", async () => {
     // 6 decisions, cap is 4 (PRECISION_CAP): a full call sends the 4 newest; the delta then sends the remaining 2.
     seedFacts(

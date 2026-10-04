@@ -75,7 +75,8 @@ function footerLineFor(counts: {
 
 /** Builds the `mem used ...` clause naming the session this response logs under and the fact ids it actually emitted, so the agent has something to copy rather than an id it was never shown a session for. `footer-text` is documented free prose outside the version-bump set (see the wire-grammar doc comment above `TGMEM_PROTOCOL_VERSION`) precisely so a clause like this can be added without bumping the version and orphaning every consumer that hasn't upgraded -- an unknown header version fails open to no hints at all, which would cost every fact-line to add one footer clause. */
 function usefulnessInvocation(sessionId: string, factIds: readonly string[]): string {
-  return `mem used ${factIds.join(" ")} --session-id ${sessionId} to mark what helped`;
+  const clause = isWireSafeId(sessionId) ? ` --session-id ${sessionId}` : "";
+  return `mem used ${factIds.join(" ")}${clause} to mark what helped`;
 }
 
 function tgmemHeaderFor(protocolVersion: number, delta = false): string {
