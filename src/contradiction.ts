@@ -1,9 +1,7 @@
 /** Deterministic subject+value contradiction detection (design plan P4, Section 6, review S5/S8). No embeddings, no NLP/NLI. Two facts with the same `subject` and `scope` but different `value` are a contradiction. Resolution is deterministic: - prefer higher provenance (user > derived), then newer `captured_at`; - the loser is marked `superseded` (kept for audit, not surfaced); - if precedence is genuinely tied (same provenance rank AND same `captured_at`), the entire subject+scope group is ambiguous and every fact in it is marked `contested` — withheld from ground truth entirely, left for a human to resolve via `mem review` (P4). Free-text facts without a `subject`/`value` key are not evaluated here (deferred per Section 5 / Open Question 2). `pending` and already-`superseded` facts do not participate: only `active` and `pinned` facts are live enough to contradict one another (pins are not exempt from this — S8). */
 
-import { sep } from "node:path";
-
 import { SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
-import { normalizePath } from "./pathUtils.js";
+import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
 import { normalizeValue } from "./storage.js";
 import type { Fact, FactScope, FactStatus } from "./types.js";
 
@@ -345,7 +343,7 @@ function isMoreSpecificScope(narrow: Fact, broad: Fact): boolean {
   }
   const narrowRoot = normalizePath(narrowRaw);
   const broadRoot = normalizePath(broadRaw);
-  return narrowRoot !== broadRoot && narrowRoot.startsWith(broadRoot + sep);
+  return narrowRoot !== broadRoot && isInsideOrEqual(narrowRoot, broadRoot);
 }
 
 /** Ids of facts a more specific in-scope fact overrides at recall: same `subject`, a *different* `value`, and a strictly narrower scope (the narrowest in-scope level wins, so a path fact beats a project fact beats a global one). The caller must pass only facts already in scope for the query; this cannot tell that a global fact is also wanted elsewhere, which is exactly why the result is a per-recall exclusion and never a status change -- the overridden fact stays `active` in the store and keeps surfacing in every project the override does not cover. Only `active`/`pinned` facts take part on either side: a `contested`/`pending` fact is already withheld and needs human attention, so it neither shadows nor is shadowed, and a pin does not exempt a fact (pinning expresses importance, not scope precedence). Facts without a subject or value, and a restatement with the same value, never conflict. `canOverride` vetoes a narrower fact the caller will withhold anyway (an anchor-contradicted override must not hide the broader fact along with itself); it is asked only for a fact that would otherwise shadow, so a caller can pass a costly check. */

@@ -174,7 +174,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/wiring.ts` | Integration | Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets | WiringOpts, WiringFileAction, WiringChange, WiringResult, WiringPlanEntry |
 | `src/factText.ts` | Support | The normalized-text key `storage.ts` and `migrations.ts` both need for fact deduplication | normalizeFactText, hashFactText |
 | `src/fileUtils.ts` | Support | Shared filesystem error handling for imports | MEM_HOME_MODE, MEM_DB_MODE, restrictPermissions, formatBytes, readFileWithErrorMapping |
-| `src/pathUtils.ts` | Support | Case-folds a path for comparison on filesystems that ignore case | normalizePath |
+| `src/pathUtils.ts` | Support | Case-folds a path for comparison on filesystems that ignore case | normalizePath, isInsideOrEqual |
 | `src/projectIdentity.ts` | Support | Repository-relative identity for a project root, so a project-scoped fact survives the path it was captured at | PROJECT_IDENTITY_ENV, clearProjectIdentityCache, normalizeRemoteUrl, resolveProjectIdentity, identityMatches |
 | `src/timeUtils.ts` | Support | Day arithmetic shared by every age-based rule in mem: recall's `--age-days` window, preference decay, pin reconfirmation | MS_PER_DAY, daysAgoIso, parseStrictIsoTimestamp, ageInDays, formatAge |
 | `src/types.ts` | Support | Shared domain types for token-goat-mem | FACT_KINDS, FactKind, factNounPhrase, FACT_SCOPES, FactScope |

@@ -1,11 +1,11 @@
 /** Hybrid retrieval (design plan Section 3 "Retrieval", P8, review S10). Pipeline: BM25 lexical search always runs (a small in-process implementation, no external search engine dependency). Embedding search is optional and pluggable — a caller may inject an `EmbeddingBackend` (or a lazy loader for one); if none is given, or the injected backend fails or times out, embedding search is skipped entirely and the BM25 ranking stands alone. When both signals are available they are fused via Reciprocal Rank Fusion (RRF). This module never imports or dynamically loads any concrete embedding package itself — mem is local-only and zero-network by default (P7, Section 3), so owning backend discovery here would risk a network-capable dependency being pulled in implicitly. Instead, `EmbeddingBackend` is a narrow interface a caller plugs in; this module only ever calls into an already-resolved (or explicitly lazy) backend under a hard timeout. src/embeddings.ts supplies mem's own backend, and builds one only when the user has explicitly configured an endpoint. After ranking, every candidate goes through a correctness gate (P1/P3/P4/P8) before it can be surfaced: 1. Contradiction re-check (contradiction.ts) — recomputed fresh against the live candidate pool, never trusting a possibly-stale `status` column alone. 2. Freshness re-check (anchors.ts) — the fact's anchor is re-evaluated against `root` right now. 3. Two-gate trust classification (P8) — relevance (from ranking) decides what is considered; trust (provenance x freshness x contradiction x, for preferences, age-decay) decides how it may be surfaced: ground-truth, hint-to-verify, or withheld. 4. A self-caveating `display` string is generated per fact so a consumer can never present a hint as unconditional truth by accident (S3) — the caveat travels with the payload. */
 
-import { resolve as resolvePath, sep } from "node:path";
+import { resolve as resolvePath } from "node:path";
 
 import { evaluateAnchor, type AnchorCacheStore, type AnchorVerdict } from "./anchors.js";
 import { screenForSecrets } from "./capture.js";
 import { resolveContradictions, scopeShadowedIds } from "./contradiction.js";
-import { normalizePath } from "./pathUtils.js";
+import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
 import { identityMatches, isBoundToRoot } from "./projectIdentity.js";
 import { ageInDays } from "./timeUtils.js";
 import type { Fact, FactKind, FactScope, FactStatus } from "./types.js";
@@ -694,7 +694,7 @@ export function anchorRootFor(fact: Fact, queryRoot: string): string | null {
     const captureRoot = normalizePath(resolvePath(fact.captureRoot));
     const normalizedQueryRoot = normalizePath(resolvePath(queryRoot));
     // The capture root itself, and any ancestor of it, can both evaluate this anchor honestly: the anchor's target was validated to sit inside `captureRoot` at capture time, and a caller standing at or above that directory has the very tree the predicate describes. This is the case the fix exists for -- `isBoundToRoot` widens a `path` fact to every ancestor of its binding precisely so a monorepo hook running at the repository root still sees a package's facts, and answering `unverified` there would caveat the fact forever on every prompt for the one user who most needs the anchor. Every other root is refused. A descendant may not contain the target at all, and an unrelated root (a second clone, another machine's checkout of the same layout) would have the anchor read ground truth off a tree the caller is not in -- the failure the `project` branch above uses `scopeRepo` identity to avoid, and `path` scope records no identity to avoid it with.
-    if (captureRoot === normalizedQueryRoot || captureRoot.startsWith(normalizedQueryRoot + sep)) {
+    if (isInsideOrEqual(captureRoot, normalizedQueryRoot)) {
       return fact.captureRoot;
     }
     return null;

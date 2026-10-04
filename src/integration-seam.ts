@@ -518,16 +518,25 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
   // scope === "path"
   if (contextFiles.length === 0) {
     // No caller has ever supplied context files here: every hook/command `mem init` installs calls `mem recall --hint-format --root <dir>` with no `--context-files`, so this branch was the only one ever exercised and it always excluded path-scoped facts -- structurally undeliverable to the one consumer that exists. Fall back to isBoundToRoot's rule (projectIdentity.ts): in scope when the fact's file sits at or under the caller's root. A caller that *does* pass context files keeps the narrower, more precise match below -- it told mem what it is looking at.
-    return scopeRoot === normalizePath(root) || scopeRoot.startsWith(normalizePath(root) + sep);
+    return isInsideOrEqual(scopeRoot, normalizePath(root));
   }
   return contextFiles.some((file) => {
     const normalizedFile = normalizePath(file);
-    return normalizedFile === scopeRoot || normalizedFile.startsWith(scopeRoot + sep);
+    return isInsideOrEqual(normalizedFile, scopeRoot);
   });
 }
 
 function normalizePath(path: string): string {
   return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+/** Checks whether `child` is located inside `root` or equals it, handling filesystem roots correctly. */
+function isInsideOrEqual(child: string, root: string): boolean {
+  if (child === root) {
+    return true;
+  }
+  const prefix = root.endsWith(sep) ? root : root + sep;
+  return child.startsWith(prefix);
 }
 
 /** Whether `id` can occupy the unquoted `id=` field without being able to forge a line. `display` is JSON-encoded, so a newline or quote inside it cannot break the consumer's parse. `id` cannot be given the same treatment: the consumer reads it back out as a bare token to hand to `mem show`, so quoting it would be a breaking change to the published TGMEM wire contract. The emitter guarantees the property structurally instead -- one run of characters containing no whitespace and no control character, which is exactly what "cannot forge a second line" means here. Every id mem itself writes is a `randomUUID`, and `import --from-json` validates imported ids against `ID_PREFIX_PATTERN`, so no supported path can produce an unsafe id. This is the emitter declining to trust a database it did not write: one from a pre-0.2.2 version, or edited by hand. Deliberately weaker than `ID_PREFIX_PATTERN`: addressability is storage's and import's boundary to enforce, and an id that is merely unusual should still surface rather than vanish silently. */

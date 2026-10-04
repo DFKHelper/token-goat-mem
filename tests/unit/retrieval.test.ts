@@ -1104,4 +1104,15 @@ describe("anchorRootsFor", () => {
     const facts: Fact[] = [makeFact({ id: "n", text: "no anchor", kind: "fact", scope: "global", scopeRoot: null, anchor: null })];
     expect(anchorRootsFor(facts, "/repo")).toEqual([]);
   });
+
+  it("regression: treats paths under filesystem root as inside when root is / or C:\\", () => {
+    // When root is the filesystem root itself (/ on POSIX or C:\ on Windows), a path captured inside it should still be recognized. The check `captureRoot.startsWith(queryRoot + sep)` fails because / + / = //, and C:\ + \ = C:\\, which are not valid prefixes. This manifests when captureRoot is a descendant like /etc/passwd and queryRoot is /.
+    const fsRoot = process.platform === "win32" ? "C:\\" : "/";
+    const childPath = process.platform === "win32" ? "C:\\Windows\\System32" : "/etc/passwd";
+    const facts: Fact[] = [
+      makeFact({ id: "f", text: "path fact under fs root", kind: "fact", scope: "path", captureRoot: childPath, anchor: "file-exists .gitignore" }),
+    ];
+    const roots = anchorRootsFor(facts, fsRoot);
+    expect(roots).toContain(childPath);
+  });
 });
