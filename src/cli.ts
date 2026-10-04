@@ -253,7 +253,7 @@ function guardUserFactEditOrThrow(fact: Fact, force: boolean | undefined): void 
 function undoEdit(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   const history = listAuditLogForFact(db, fact.id);
-  const last = history[history.length - 1];
+  const last = history.filter((r) => r.event !== "used" && !r.event.endsWith("_blocked_secret")).at(-1);
   if (last?.event !== "edit") {
     throw new UsageError(
       `fact ${fact.id}'s last recorded action was not an edit (last recorded action: ${last?.event ?? "none"}) -- ` +

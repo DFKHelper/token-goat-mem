@@ -6046,6 +6046,43 @@ describe("mem edit --undo", () => {
     expect(result.exitCode).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain("no recoverable prior value");
   });
+
+  it("skips the `used` event when finding the last edit to undo", async () => {
+    const remembered = await runCli(["remember", "we use async generators", "--kind", "decision"]);
+    const id = extractRememberedId(remembered);
+
+    await runCli(["edit", id, "--text", "we use async generators for streams", "--force"]);
+    await runCli(["recall", "async"]);
+
+    const undone = await runCli(["edit", id, "--undo"]);
+    expect(undone.exitCode).toBe(0);
+    expect(undone.stdout).toBe(`restored ${id}\n`);
+
+    const restored = await runCli(["show", id]);
+    expect(restored.stdout).toContain("text: we use async generators");
+  });
+
+  it("skips the refused-secret-edit event when finding the last edit to undo", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-undo-secret-"));
+    const secret = "AKIA1234567890EXAMPLE";
+    mkdirSync(join(root, ".mem"), { recursive: true });
+
+    const remembered = await runCli(["remember", "we rotate secrets monthly", "--kind", "fact", "--root", root]);
+    const id = extractRememberedId(remembered);
+
+    await runCli(["edit", id, "--text", "we rotate secrets weekly", "--force", "--root", root]);
+
+    expect((await runCli(["edit", id, "--text", `use secret ${secret} for backup`, "--force", "--root", root])).exitCode).toBe(1);
+    expect((await runCli(["edit", id, "--text", `another ${secret} backup`, "--force", "--root", root])).exitCode).toBe(1);
+
+    const undone = await runCli(["edit", id, "--undo", "--root", root]);
+    expect(undone.exitCode).toBe(0);
+    expect(undone.stdout).toBe(`restored ${id}\n`);
+
+    const restored = await runCli(["show", id, "--root", root]);
+    expect(restored.stdout).toContain("text: we rotate secrets monthly");
+    rmSync(root, { recursive: true, force: true });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── edit source_type=user guard ───────────────────────────────────────────────────────────────────────────
