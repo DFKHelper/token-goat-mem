@@ -373,6 +373,14 @@ describe("git-branch-is declines rather than guessing", () => {
     expect(evaluateAnchor("git-branch-is main", root)).toBe("unverified");
   });
 
+  it("is unverified on the reftable placeholder HEAD, which names no real branch", () => {
+    const gitDir = join(root, ".git");
+    mkdirSync(gitDir, { recursive: true });
+    writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/.invalid\n", "utf8");
+    expect(evaluateAnchor("git-branch-is main", root)).toBe("unverified");
+    expect(evaluateAnchor("git-branch-is .invalid", root)).toBe("unverified");
+  });
+
   it("is unverified when there is no .git at all", () => {
     expect(evaluateAnchor("git-branch-is main", root)).toBe("unverified");
   });

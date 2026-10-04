@@ -548,6 +548,10 @@ function evaluateGitBranchIs(root: string, branch: string): AnchorVerdict {
   if (currentBranch === undefined || currentBranch.length === 0) {
     return "unverified";
   }
+  // The reftable ref backend keeps the placeholder `ref: refs/heads/.invalid` in HEAD, and git forbids a real branch component starting with a dot, so such a name is never a branch.
+  if (currentBranch.startsWith(".") || currentBranch.includes("/.")) {
+    return "unverified";
+  }
   return currentBranch === branch ? "affirmed" : "contradicted";
 }
 
