@@ -209,6 +209,18 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("glob-exists src/**/*.spec.ts", root)).toBe("contradicted");
     });
 
+    it("is unverified, not contradicted, on a miss when a segment uses unsupported [ ] { } glob syntax", () => {
+      mkdirSync(join(root, "src"), { recursive: true });
+      writeFileSync(join(root, "src", "a.ts"), "x");
+      expect(evaluateAnchor("glob-exists src/{a,b}.ts", root)).toBe("unverified");
+      expect(evaluateAnchor("glob-exists src/[ab].ts", root)).toBe("unverified");
+    });
+
+    it("still affirms a literal directory whose name contains brackets", () => {
+      mkdirSync(join(root, "app", "[slug]"), { recursive: true });
+      expect(evaluateAnchor("glob-exists app/[slug]", root)).toBe("affirmed");
+    });
+
     it("rejects an absolute pattern as unverified", () => {
       expect(evaluateAnchor("glob-exists /etc/passwd", root)).toBe("unverified");
     });

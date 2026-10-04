@@ -470,7 +470,8 @@ function evaluateGlobExists(
     }
   }
 
-  if (budgetHit || skippedPotentialMatch) {
+  // `[ ]` and `{ }` are glob syntax this matcher does not implement, so a segment using them was matched literally: a miss then proves nothing about what the author meant, while a literal hit (a real `app/[slug]` directory) still affirmed above.
+  if (budgetHit || skippedPotentialMatch || segments.some((segment) => /[[\]{}]/u.test(segment))) {
     return "unverified";
   }
   return "contradicted";
