@@ -94,6 +94,26 @@ describe("planImportFromJson", () => {
     }
   });
 
+  it("rejects a fact with a future captured_at in both dry-run and real import", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-future-"));
+    const path = join(dir, "export.json");
+    const futureFact = { ...VALID_FACT, captured_at: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString() };
+    writeFileSync(path, envelope([futureFact]), "utf8");
+    const dbForImport = openStorage(join(dir, "mem.db"));
+    try {
+      const dryRun = planImportFromJson({ path });
+      expect(dryRun.outcomes[0]?.status).toBe("skipped_error");
+      expect(skipReason(dryRun.outcomes[0])).toMatch(/future/u);
+
+      const realImport = importFromJson(dbForImport, { path, dryRun: false });
+      expect(realImport.outcomes[0]?.status).toBe("skipped_error");
+      expect(skipReason(realImport.outcomes[0])).toMatch(/future/u);
+    } finally {
+      dbForImport.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("throws JsonImportError for a schemaVersion mismatch", () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-plan-"));
     const path = join(dir, "export.json");

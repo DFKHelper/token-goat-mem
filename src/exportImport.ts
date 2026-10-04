@@ -10,6 +10,7 @@ import type { EmbeddingMeta } from "./embeddings.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { identityMatches } from "./projectIdentity.js";
+import { MS_PER_DAY } from "./timeUtils.js";
 import { countEmbeddedFacts, getEmbeddingMeta, getFactById, ID_PREFIX_PATTERN, insertFact, setEmbeddingMeta } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
@@ -167,6 +168,10 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
     const roundTrip = new Date(capturedAtStr).toISOString();
     if (roundTrip !== capturedAtStr) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}: expected canonical form ${JSON.stringify(roundTrip)}`);
+    }
+    // A future captured_at would outrank every real fact as "newest" in contradiction resolution forever; one day of slack absorbs clock skew between machines.
+    if (Date.parse(capturedAtStr) > Date.now() + MS_PER_DAY) {
+      return fail(`facts[${index}] has "captured_at" in the future ${JSON.stringify(capturedAtStr)}`);
     }
   }
   if (obj["last_surfaced_at"] !== undefined && obj["last_surfaced_at"] !== null && typeof obj["last_surfaced_at"] !== "string") {
