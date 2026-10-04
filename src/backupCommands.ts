@@ -84,16 +84,17 @@ export function registerBackupCommands(program: Command): void {
         if (canonicalPath(source) === canonicalPath(dbPath)) {
           throw new UsageError(`restore: ${source} is the live store itself`);
         }
-        const { epoch, preRestore } = await restoreStore({ source, dbPath, backupDir: dir }).catch((error: unknown) => {
+        const { epoch, preRestore, unreadable } = await restoreStore({ source, dbPath, backupDir: dir }).catch((error: unknown) => {
           if (error instanceof UnusableSnapshotError) {
             throw new UsageError(`restore: ${source} is not a usable mem store (${error.message})`);
           }
           throw error;
         });
-        process.stdout.write(
-          `restored ${source}; epoch now ${String(epoch)}\n` +
-            `the replaced store is saved at ${preRestore.path} (\`mem restore ${preRestore.path}\` undoes this)\n`
-        );
+        const replaced =
+          unreadable === undefined
+            ? `the replaced store is saved at ${preRestore.path} (\`mem restore ${preRestore.path}\` undoes this)\n`
+            : `the live store was unreadable and was moved aside to ${unreadable} (not restorable by mem; inspect or delete it)\n`;
+        process.stdout.write(`restored ${source}; epoch now ${String(epoch)}\n${replaced}`);
       })
     );
 }

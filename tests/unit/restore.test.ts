@@ -1,6 +1,6 @@
 /** `restoreStore` (src/restore.ts): the swap that replaces the live store's rows with a validated, migrated copy of a snapshot, inside one transaction on the live connection. The CLI-level behaviour is covered end to end in tests/backup.test.ts; these tests reach the race that only a seam can reproduce -- another process writing between the pre-restore snapshot and the swap -- and the refusals that must leave the live store untouched. */
 import Database from "better-sqlite3";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -167,6 +167,30 @@ describe("restoreStore", () => {
     expect(texts(dbPath)).toEqual(["after the snapshot", "in the snapshot"]);
     expect(epochOf(dbPath)).toBe(epochBefore);
     expect(listSnapshots(backupDir).filter((snapshot) => snapshot.reason === "pre-restore")).toEqual([]);
+  });
+
+  it("recovers an unreadable live store by moving it aside and restoring into a fresh one", async () => {
+    const source = snapshotWith("in the snapshot");
+    writeFileSync(dbPath, Buffer.from("this is not a sqlite database, only garbage bytes ".repeat(40)));
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    const result = await restoreStore({ source, dbPath, backupDir });
+
+    expect(texts(dbPath)).toEqual(["in the snapshot"]);
+    expect(result.unreadable).toBeDefined();
+    expect(result.unreadable).toContain("mem.db.unreadable-");
+    expect(existsSync(result.unreadable ?? "")).toBe(true);
+    expect(readFileSync(result.unreadable ?? "", "utf8")).toContain("garbage bytes");
+  });
+
+  it("does not move a readable live store aside", async () => {
+    const source = snapshotWith("in the snapshot");
+
+    const result = await restoreStore({ source, dbPath, backupDir });
+
+    expect(result.unreadable).toBeUndefined();
+    expect(readdirSync(dirname(dbPath)).filter((name) => name.includes(".unreadable-"))).toEqual([]);
   });
 
   it("migrates an older snapshot before swapping it in", async () => {

@@ -1,7 +1,7 @@
-/** `mem restore`'s engine: replaces the live store's contents with a snapshot's, without ever handing the live file to anything but the live store's own connection. 1. **Stage.** The snapshot is copied (SQLite's online backup API) to a private file beside the live store, so neither the snapshot nor the live store is opened for writing while it is judged. 2. **Validate.** The copy must pass `integrity_check`, carry a schema version this mem can read, and hold a `facts` table with every column mem has always required -- a SQLite file that merely has a table called `facts` is not a mem store. 3. **Migrate.** The copy is brought up to the current schema, so a snapshot an older mem took restores into the columns this one reads. 4. **Swap.** The live store is snapshotted (`pre-restore`), then, in one immediate transaction on the live connection, every table is emptied and refilled from the attached copy and the epoch is moved past both stores. Readers see the old store or the new one, never a mix, and a writer that slipped in after the pre-restore snapshot is detected (the epoch or SQLite's `data_version` moved) and the swap retried, so that snapshot always holds exactly what the restore replaced. A failure in steps 1-3 is an {@link UnusableSnapshotError} and leaves the live store and the backup directory untouched. Opens skip the automatic snapshot (`autoSnapshot: false`): its pruning could otherwise delete the very auto snapshot being restored. */
+/** `mem restore`'s engine: replaces the live store's contents with a snapshot's, without ever handing the live file to anything but the live store's own connection. 1. **Stage.** The snapshot is copied (SQLite's online backup API) to a private file beside the live store, so neither the snapshot nor the live store is opened for writing while it is judged. 2. **Validate.** The copy must pass `integrity_check`, carry a schema version this mem can read, and hold a `facts` table with every column mem has always required -- a SQLite file that merely has a table called `facts` is not a mem store. 3. **Migrate.** The copy is brought up to the current schema, so a snapshot an older mem took restores into the columns this one reads. 4. **Swap.** The live store is snapshotted (`pre-restore`), then, in one immediate transaction on the live connection, every table is emptied and refilled from the attached copy and the epoch is moved past both stores. Readers see the old store or the new one, never a mix, and a writer that slipped in after the pre-restore snapshot is detected (the epoch or SQLite's `data_version` moved) and the swap retried, so that snapshot always holds exactly what the restore replaced. A live store that is not a readable database (SQLITE_NOTADB / SQLITE_CORRUPT) is first moved aside to `mem.db.unreadable-<timestamp>` and replaced by a fresh one, so a restore can recover exactly the store that cannot be opened. A failure in steps 1-3 is an {@link UnusableSnapshotError} and leaves the live store and the backup directory untouched. Opens skip the automatic snapshot (`autoSnapshot: false`): its pruning could otherwise delete the very auto snapshot being restored. */
 
 import Database from "better-sqlite3";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { takeSnapshot, type Snapshot } from "./backup.js";
@@ -31,6 +31,8 @@ export interface RestoreResult {
   epoch: number;
   /** The replaced store, restorable to undo this. */
   preRestore: Snapshot;
+  /** Where the live store went when it was unreadable and had to be moved aside; absent otherwise. `preRestore` is then a snapshot of the empty replacement, not of that file. */
+  unreadable?: string;
 }
 
 /** The `facts` columns every mem schema has had since the first: NOT NULL with no migration that adds them. A table missing any of them is someone else's `facts`. */
@@ -104,8 +106,28 @@ function validateStore(path: string): void {
   }
 }
 
+/** Opens the live store; when it is not a readable database (SQLITE_NOTADB / SQLITE_CORRUPT), moves it and its sidecars aside and opens a fresh one -- the one case a restore exists for. Any other error propagates. */
+function openLive(dbPath: string): { live: Database.Database; unreadable?: string } {
+  try {
+    return { live: openStorage(dbPath, { autoSnapshot: false }) };
+  } catch (error) {
+    const code = (error as { code?: unknown }).code;
+    if (code !== "SQLITE_NOTADB" && code !== "SQLITE_CORRUPT") {
+      throw error;
+    }
+    const unreadable = `${dbPath}.unreadable-${new Date().toISOString().replaceAll(":", "-")}`;
+    renameSync(dbPath, unreadable);
+    for (const suffix of ["-wal", "-shm"]) {
+      if (existsSync(`${dbPath}${suffix}`)) {
+        renameSync(`${dbPath}${suffix}`, `${unreadable}${suffix}`);
+      }
+    }
+    return { live: openStorage(dbPath, { autoSnapshot: false }), unreadable };
+  }
+}
+
 function swap(options: RestoreOptions, staged: string): RestoreResult {
-  const live = openStorage(options.dbPath, { autoSnapshot: false });
+  const { live, unreadable } = openLive(options.dbPath);
   try {
     live.prepare(`ATTACH DATABASE ? AS ${RESTORED_SCHEMA}`).run(staged);
     try {
@@ -123,7 +145,7 @@ function swap(options: RestoreOptions, staged: string): RestoreResult {
           throw error;
         }
         if (epoch !== undefined) {
-          return { epoch, preRestore };
+          return unreadable === undefined ? { epoch, preRestore } : { epoch, preRestore, unreadable };
         }
         // The store changed after the snapshot was taken: it no longer holds what would be replaced.
         rmSync(preRestore.path, { force: true });

@@ -1,6 +1,6 @@
 /** End-to-end tests for `mem backup` and `mem restore`, and the `backups:` line in `mem doctor`. The backup directory is deliberately outside the mem home -- a sibling of it by default -- so a store survives the deletion of `~/.mem` (or of `~/.claude`, which never held it). Driven through the real `run()` against a real database. */
 import Database from "better-sqlite3";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -116,6 +116,24 @@ describe("mem restore", () => {
     const undo = await runCli(["restore", preRestore[0]?.path ?? ""]);
     expect(undo.exitCode, undo.stderr).toBe(0);
     expect(await listedTexts()).toEqual(["kept across the restore", "written after the backup"]);
+  });
+
+  it("recovers a live store that is unreadable and says where the unreadable file went", async () => {
+    await remember("recoverable from the snapshot");
+    await runCli(["backup"]);
+    const snapshot = listSnapshots(backupDir).find((candidate) => candidate.reason === "manual");
+    const dbPath = resolveDbPath();
+    writeFileSync(dbPath, "garbage that is not sqlite ".repeat(80), "utf8");
+    rmSync(`${dbPath}-wal`, { force: true });
+    rmSync(`${dbPath}-shm`, { force: true });
+
+    const result = await runCli(["restore", basename(snapshot?.path ?? "")]);
+    expect(result.exitCode, result.stderr).toBe(0);
+
+    const moved = readdirSync(dirname(dbPath)).find((name) => name.startsWith("mem.db.unreadable-"));
+    expect(moved).toBeDefined();
+    expect(result.stdout).toContain(join(dirname(dbPath), moved ?? ""));
+    expect(await listedTexts()).toEqual(["recoverable from the snapshot"]);
   });
 
   it("refuses a file that is not a mem store and leaves the live store untouched", async () => {

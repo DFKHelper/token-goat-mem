@@ -105,7 +105,7 @@ mem keeps snapshots of the store in `~/.mem-backups` -- a sibling of the mem hom
 - **Automatic:** whenever mem opens an existing store, it takes a snapshot if the newest one is at least a day old and the store has changed since. The hooks `mem init` installs open the store every session, so that is roughly daily. The newest 14 automatic snapshots are kept.
 - **Before a schema upgrade:** a `pre-migration` snapshot, always.
 - **By hand:** `mem backup` takes one now; `mem backup --list` shows them all, newest first.
-- **Restore:** `mem restore <name-or-path>` checks the snapshot's integrity first, snapshots the store it replaces (`pre-restore`, so a restore can be undone), then moves the epoch forward.
+- **Restore:** `mem restore <name-or-path>` checks the snapshot's integrity first, snapshots the store it replaces (`pre-restore`, so a restore can be undone), then moves the epoch forward. If the live store is not a readable database, it is moved aside to `mem.db.unreadable-<timestamp>` (the output says where) and the snapshot is restored into a fresh store.
 
 Only automatic snapshots are pruned; manual, pre-migration and pre-restore ones stay until you delete them. A snapshot is a compacted `VACUUM INTO` copy with the same owner-only permissions as the store. A backup that cannot be written never blocks a command -- `mem doctor`'s `backups:` line is where it shows up.
 
