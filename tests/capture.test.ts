@@ -643,6 +643,17 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     expect(rows).toHaveLength(1);
   });
 
+  it("counts every repeat as one sighting and never writes an echo source row", () => {
+    const text = "always run migrations before deploy";
+    const { fact } = captureSuggested(db, { text, kind: "preference", root });
+    for (let i = 0; i < 3; i += 1) {
+      expect(captureSuggested(db, { text, kind: "preference", root }).sighted).toBe(true);
+    }
+    // `mem suggest <text>` never writes a source row: the text the caller typed already is the fact, so an excerpt would only echo it.
+    expect(sightingsOf(fact.id)).toBe(3);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM sources WHERE fact_id = ?").get(fact.id)).toEqual({ n: 0 });
+  });
+
   it("does not promote, change status, or raise confidence", () => {
     const { fact: first } = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", confidence: 0.4, root });
     const second = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", confidence: 0.99, root });

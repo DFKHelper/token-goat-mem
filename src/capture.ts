@@ -934,7 +934,10 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
   const boundMatches = factsByTextHash(db, text).filter((fact) => isBoundToRoot(fact, root));
   const pendingMatch = boundMatches.find((fact) => fact.status === "pending");
   if (pendingMatch !== undefined) {
-    recordSighting(db, pendingMatch.id, text, root, text);
+    // The caller's text already is the fact, so `recordSighting` would only write a source row echoing it (and dedup every repeat after the first away, under-counting); bump the counter alone, atomically, and report what was written.
+    db.transaction((): void => {
+      incrementSightings(db, pendingMatch.id);
+    }).immediate();
     return { fact: pendingMatch, sighted: true };
   }
   const knownMatch = boundMatches[0];

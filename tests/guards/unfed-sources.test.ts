@@ -63,6 +63,17 @@ describe("the sources table is fed from exactly the two derived-capture paths de
     ).toBe(false);
   });
 
+  it("never calls recordSighting from captureSuggested, whose sighting path must not write a source row", () => {
+    const captureText = readFileSync(join(REPO_ROOT, "src/capture.ts"), "utf8");
+    const fnStart = captureText.indexOf("export function captureSuggested");
+    expect(fnStart, "captureSuggested not found -- guard needs updating for a renamed function").toBeGreaterThan(-1);
+    const fnEnd = captureText.indexOf("\n}", fnStart);
+    expect(
+      captureText.slice(fnStart, fnEnd).includes("recordSighting("),
+      "captureSuggested calls recordSighting, which inserts a source row echoing the fact text -- use incrementSightings alone."
+    ).toBe(false);
+  });
+
   it("truncates and secret-screens every excerpt before it can be stored", () => {
     const captureText = readFileSync(join(REPO_ROOT, "src/capture.ts"), "utf8");
     expect(captureText).toMatch(/MAX_SOURCE_EXCERPT_LENGTH/u);
