@@ -143,6 +143,12 @@ describe("evaluateAnchor", () => {
       expect(evaluateAnchor("file-contains notes.txt there mars", root)).toBe("contradicted");
     });
 
+    it("is unverified for a non-UTF-8 (UTF-16LE with BOM) file in both forms", () => {
+      writeFileSync(join(root, "u16.txt"), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from("legacyMode", "utf16le")]));
+      expect(evaluateAnchor("file-not-contains u16.txt legacyMode", root)).toBe("unverified");
+      expect(evaluateAnchor("file-contains u16.txt legacyMode", root)).toBe("unverified");
+    });
+
     it("is unverified when the file is missing rather than treating a moved file as a denial", () => {
       // S1: a moved/renamed file is the proxy-anchor trap -- must not silently read as "contradicted".
       expect(evaluateAnchor("file-contains moved-away.txt pnpm", root)).toBe("unverified");

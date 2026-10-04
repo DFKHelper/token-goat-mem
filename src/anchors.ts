@@ -215,8 +215,12 @@ function evaluateFileContains(
   }
   let content: string;
   try {
-    content = readFileSync(path, "utf8");
+    content = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
   } catch {
+    return "unverified";
+  }
+  // A NUL character means a wide-encoded (e.g. UTF-16 without BOM) or binary file: a UTF-8 substring match would be meaningless either way, so mem can neither confirm nor deny the substring.
+  if (content.includes("\u0000")) {
     return "unverified";
   }
   const found = content.includes(substring);
