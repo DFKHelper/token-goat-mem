@@ -40,7 +40,8 @@ function main() {
     say(`TOKEN_GOAT_MEM_SKIP_HOOKS is set; skipped Claude Code hooks (${REMEDY})`);
     return;
   }
-  if (process.env["npm_config_global"] !== "true" || !existsSync(BUNDLE)) {
+  const isGlobal = process.env["npm_config_global"] === "true" || process.env["npm_config_location"] === "global";
+  if (!isGlobal || !existsSync(BUNDLE)) {
     return;
   }
   const foreign = foreignOwner();

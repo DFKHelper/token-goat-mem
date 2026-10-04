@@ -95,6 +95,12 @@ describe("postinstall", () => {
     expect((JSON.parse(first) as { theme?: string }).theme).toBe("dark");
   });
 
+  it("installs the hooks when npm marks a global install only through npm_config_location", () => {
+    const result = runPostinstall({ npm_config_global: "", npm_config_location: "global" });
+    expect(result.exitCode, result.output).toBe(0);
+    expect(hookCommands().some((command) => command.includes("mem recall"))).toBe(true);
+  });
+
   it("does nothing on a local (non-global) install", () => {
     const result = runPostinstall({ npm_config_global: "" });
     expect(result.exitCode).toBe(0);
