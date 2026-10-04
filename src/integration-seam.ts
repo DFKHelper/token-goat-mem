@@ -1,6 +1,6 @@
 /** The token-goat integration seam (design plan Section 4). A one-directional, pull-based, pure-CLI contract. This module never imports token-goat and never reads its state -- it only *shapes CLI output* for a caller like token-goat to consume via `mem recall --hint-format`. Context flows in only through the explicit function arguments a caller chooses to pass (`root`, `contextFiles`), never by reaching into another tool's files. The correctness gate itself (freshness re-validation, contradiction re-check, two-gate trust classification, self-caveating display strings) is owned by retrieval.ts (`retrieve()`) -- this module does not re-implement it. What this module owns, specific to the hint-format contract, is: - resolving which facts are in scope for the caller's `root` / `contextFiles` (retrieval.ts's `scope` filter is a single exact-match value; it has no notion of "which project/path does this root bind to", so pre-filtering the candidate pool by that binding before handing it to `retrieve()` happens here); - per-kind recall caps (design plan P6: preferences/corrections recalled aggressively, decisions/facts precision-biased) -- a seam-specific output-shaping policy, not a retrieval-ranking concern; - the versioned `TGMEM/<n>` wire format; - the self-imposed soft time budget and truncate-on-overrun behavior. Pre-filtering by root/contextFiles before calling `retrieve()` also keeps contradiction detection correctly scoped: `FactScope` is a 3-value enum ("global"/"project"/"path"), not root-aware by itself, so two facts with the same `subject` + `scope="project"` but bound to *different* project roots would otherwise look like the same contradiction bucket. Since this module only ever passes `retrieve()` the facts already bound to the caller's root/context-files, a same-subject fact from an unrelated project is never in the candidate pool at all. Every public entry point here is safe to call with zero setup and MUST NOT throw: any internal failure (missing DB, corrupt row, retrieval exception, malformed home directory, etc.) resolves to an empty, well-formed result so a caller's fail-open path never has to special-case a thrown exception (design plan review S2/S3; CLAUDE.md "Fail-open if binary missing, timeout, or parse error"). */
 
-import { resolve as resolvePath, sep } from "node:path";
+import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
 import { loadAllowlist } from "./capture.js";
@@ -22,6 +22,7 @@ import {
 import { resolveDbPath } from "./db.js";
 import { getGraphScoresForQuery } from "./factgraph.js";
 import { planEmbeddingRanking } from "./embeddings.js";
+import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
 import { identityMatches } from "./projectIdentity.js";
 import { anchorRootsFor, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
 import type { Fact, FactKind } from "./types.js";
@@ -525,19 +526,6 @@ function isInScope(fact: Fact, root: string, contextFiles: readonly string[]): b
     const normalizedFile = normalizePath(file);
     return isInsideOrEqual(normalizedFile, scopeRoot);
   });
-}
-
-function normalizePath(path: string): string {
-  return process.platform === "win32" ? path.toLowerCase() : path;
-}
-
-/** Checks whether `child` is located inside `root` or equals it, handling filesystem roots correctly. */
-function isInsideOrEqual(child: string, root: string): boolean {
-  if (child === root) {
-    return true;
-  }
-  const prefix = root.endsWith(sep) ? root : root + sep;
-  return child.startsWith(prefix);
 }
 
 /** Whether `id` can occupy the unquoted `id=` field without being able to forge a line. `display` is JSON-encoded, so a newline or quote inside it cannot break the consumer's parse. `id` cannot be given the same treatment: the consumer reads it back out as a bare token to hand to `mem show`, so quoting it would be a breaking change to the published TGMEM wire contract. The emitter guarantees the property structurally instead -- one run of characters containing no whitespace and no control character, which is exactly what "cannot forge a second line" means here. Every id mem itself writes is a `randomUUID`, and `import --from-json` validates imported ids against `ID_PREFIX_PATTERN`, so no supported path can produce an unsafe id. This is the emitter declining to trust a database it did not write: one from a pre-0.2.2 version, or edited by hand. Deliberately weaker than `ID_PREFIX_PATTERN`: addressability is storage's and import's boundary to enforce, and an id that is merely unusual should still surface rather than vanish silently. */

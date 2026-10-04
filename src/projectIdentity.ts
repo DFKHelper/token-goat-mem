@@ -2,7 +2,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { normalizePath } from "./pathUtils.js";
+import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
 import type { Fact } from "./types.js";
 
 /** Set to `path` to switch project binding back to absolute paths only, at both capture and recall. The case for it: two clones of one repository that are deliberately *not* the same project -- a fork kept for experiments, a customer-specific branch checkout -- where sharing decisions between them is wrong rather than convenient. Nothing else re-creates a path-only binding once identities are being written, so this is the opt-out rather than a tuning knob. */
@@ -252,5 +252,5 @@ export function isBoundToRoot(fact: Fact, root: string): boolean {
     return normalizedRoot === scopeRoot || identityMatches(fact.scopeRepo, root);
   }
   // scope === "path": bound when the target sits at or beneath the querying root.
-  return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot.endsWith(sep) ? normalizedRoot : normalizedRoot + sep);
+  return isInsideOrEqual(scopeRoot, normalizedRoot);
 }
