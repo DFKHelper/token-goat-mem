@@ -2,6 +2,21 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [0.5.2] - 2026-10-04
+
+### Fixed
+
+- **Project identity.** Credentials, query strings and inline config comments are stripped from a remote URL before it becomes an identity, so a token never reaches the store. Equivalent spellings of one remote (scp, `ssh://`, `https://`, trailing `/` or `.git`, case) reduce to the same identity. A relative local remote (`../upstream.git`, `.\x`) gives no identity, since it names a different repository from every clone that resolves it. A drive-letter remote (`C:\repos\x.git`) is read as a local path rather than an scp host named `C`. A path fact under a filesystem root (`C:\`, `/`) binds correctly.
+- **Import.** An imported `scopeRepo` keeps its identity intact (port, subpath and a `.git`-suffixed subpath included) and has any credential stripped, so it still matches the live project. Imported scope roots are normalized. A `captured_at` in the future is rejected, `captured_at` and `last_surfaced_at` go through a strict ISO-8601 parser that accepts a bare date and refuses malformed or extended-year values, duplicate ids are flagged in the `--dry-run` plan, and `superseded_by` edges whose id is not 36 characters are kept.
+- **Review and undo.** Undoing a rejection restores the fact's previous status, and undoing a rejection or an edit skips usage and refused-secret events rather than treating them as the change to undo.
+- **Capture.** `mem remember` on text that matches a pending suggestion promotes it with `source_type` user. A repeated `mem suggest` counts as a sighting without writing a source row that only echoes the fact. Sighting excerpts keep the fact's own sentence. `mem scan-session` no longer scans the output that `!cmd` bash-mode turns wrap in the user turn.
+- **Contradiction and consolidate.** A fact that agrees with the winner is never superseded, a pinned project fact is never superseded as a cross-scope duplicate, and `mem consolidate` compares normalized values, so two spellings of one value are not a conflict.
+- **Anchors.** `valid-until` dates are parsed strictly, `git-tracked` answers for the repository root, and a non-UTF-8 file under `file-contains`, a reftable `HEAD` placeholder, and unsupported glob syntax read as `unverified` instead of `contradicted`.
+- **Storage on Windows.** A `--root` that differs from the stored scope root only in case reaffirms the fact instead of missing it.
+- **Backup and restore.** `mem restore` recovers from a live store that is not a readable database by moving it aside to `mem.db.unreadable-<timestamp>` and naming that file in its output, and retries the swap when a concurrent write leaves the epoch unchanged. The stale-temp sweep only touches mem's own snapshot files.
+- **Wiring.** A project `mem init` run from the home directory keeps the user-level hooks, every duplicated shared `AGENTS.md` block is stripped and collapsed, shared Copilot keybindings survive until the last uninstall, and `mem uninstall --all --user` skips tools that have no user-level config. The postinstall script also treats `npm_config_location=global` as a global install.
+- **CLI.** Malformed numeric options are rejected rather than coerced, and `daysAgoIso` clamps to the valid `Date` range. The hint footer leaves out a session id that is not safe to pass back on a command line. `mem reflect` matches session suggestions by the resolved transcript path. The package entry points match the shipped bundle.
+
 ## [0.5.1] - 2026-10-03
 
 ### Changed
