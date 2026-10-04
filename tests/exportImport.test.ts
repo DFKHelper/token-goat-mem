@@ -114,6 +114,27 @@ describe("planImportFromJson", () => {
     }
   });
 
+  it("normalizes imported non-normalized scope roots", () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "mem-exportimport-scope-"));
+    const exportPath = join(projectRoot, "export.json");
+    const nonNormalizedRoot = `${projectRoot}/a/../b/`;
+    const normalizedRoot = resolve(projectRoot, "b");
+
+    const factWithRoot = { ...VALID_FACT, scope: "path" as const, scopeRoot: nonNormalizedRoot };
+    writeFileSync(exportPath, envelope([factWithRoot]), "utf8");
+    const dbForImport = openStorage(join(projectRoot, "mem.db"));
+    try {
+      const result = importFromJson(dbForImport, { path: exportPath, root: projectRoot, dryRun: false });
+      expect(result.outcomes[0]?.status).toBe("imported");
+
+      const fact = getFactById(dbForImport, VALID_FACT["id"] as string);
+      expect(fact?.scopeRoot).toBe(normalizedRoot);
+    } finally {
+      dbForImport.close();
+      rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it("throws JsonImportError for a schemaVersion mismatch", () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-plan-"));
     const path = join(dir, "export.json");

@@ -225,7 +225,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   } else if (rebindScopeRootTo !== null) {
     newFact.scopeRoot = rebindScopeRootTo;
   } else if (typeof obj["scopeRoot"] === "string") {
-    newFact.scopeRoot = obj["scopeRoot"];
+    newFact.scopeRoot = resolve(obj["scopeRoot"]);
   } else if (obj["scopeRoot"] === null) {
     newFact.scopeRoot = null;
   }
