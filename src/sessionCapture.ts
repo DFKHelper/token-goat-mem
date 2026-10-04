@@ -32,7 +32,7 @@ export function fileTranscriptSuggestions(db: Database.Database, options: FileTr
       // A restatement of a `pending` suggestion is evidence for `mem review`'s human reader (`recordSighting`'s own doc comment covers the screening/dedup/no-promotion contract) -- a match against anything else (active, superseded, ...) has no pending row to record a sighting against, and this candidate is simply already known, exactly as before.
       for (const fact of boundMatches) {
         if (fact.status === "pending") {
-          recordSighting(db, fact.id, candidate.context, root);
+          recordSighting(db, fact.id, candidate.context, root, candidate.text);
         }
       }
       continue;

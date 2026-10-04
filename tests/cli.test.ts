@@ -5137,6 +5137,22 @@ describe("scan-session", () => {
     }
   });
 
+  it("keeps the fact sentence in a sighting's source excerpt when the turn is longer than the excerpt limit", async () => {
+    const text = "Always run the linter before pushing.";
+    const filler = "We chatted about the weather and the office lunch menu for a while. ".repeat(13);
+    await runCli(["scan-session", "--transcript", writeTranscript([`${filler}First pass. ${text}`]), "--root", "."]);
+    await runCli(["scan-session", "--transcript", writeTranscript([`${filler}Second pass, said again. ${text}`]), "--root", "."]);
+
+    const review = await runCli(["list", "--status", "pending", "--json"]);
+    const facts = JSON.parse(review.stdout) as { facts: { id: string }[] };
+    expect(facts.facts).toHaveLength(1);
+    const shown = JSON.parse((await runCli(["show", facts.facts[0]?.id ?? "", "--json"])).stdout) as { sources: { excerpt: string }[] };
+    expect(shown.sources).toHaveLength(2);
+    for (const source of shown.sources) {
+      expect(source.excerpt).toContain(text);
+    }
+  });
+
   it("never promotes a pending fact to active by sighting it, however many times", async () => {
     const text = "Always run the linter before pushing.";
     for (let i = 0; i < 3; i += 1) {

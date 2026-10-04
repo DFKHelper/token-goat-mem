@@ -204,7 +204,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       // A restatement of a `pending` suggestion, re-imported from a later revision of the same file, is evidence for `mem review`'s human reader (`recordSighting`'s own doc comment); a match against anything else has no pending row to record a sighting against.
       for (const fact of boundMatches) {
         if (fact.status === "pending") {
-          recordSighting(db, fact.id, `${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root);
+          recordSighting(db, fact.id, `${relativePath}:${candidate.line}: ${candidate.rawLine}`, options.root, candidate.text);
         }
       }
       continue;

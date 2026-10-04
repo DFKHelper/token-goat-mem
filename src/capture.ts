@@ -800,8 +800,8 @@ function writeFact(
 }
 
 /** Records a repeat sighting of a `pending` fact: `mem scan-session`/`mem import --from-md` matched a candidate's text to `factId`, already queued and awaiting `mem review --promote`, instead of finding nothing and writing a second pending row. A restated preference is evidence a human reviewing the queue should see, not noise to drop with a bare `continue` -- which is what both callers did before this existed. Screens `raw` through `buildScreenedExcerpt` exactly like a first capture -- not optional here: a sighting is still raw session/file material, the same secret surface a first capture has, and "it's only a sighting" is not a reason to skip the check that content otherwise always gets. Returns `false`, writing nothing, in the two cases where under-counting is the safe direction: - `buildScreenedExcerpt` returns `null` (screened positive) -- there is no clean excerpt to write and, with no excerpt, no independent evidence to dedup a later real sighting against; - an identical excerpt is already stored for this fact. `sources` carries no locator column (`id, fact_id, excerpt, stored_at`) pointing back at which transcript position or file line produced it, so excerpt equality is the only key available to tell "the same statement, seen again by a second hook firing over the same transcript" (`mem scan-session` runs at both `Stop` and `PreCompact`) from "a genuine restatement" -- and a genuine restatement arrives with different surrounding context, so a different excerpt, every time. Never touches `status`: this function has no path that can promote, demote, or otherwise change a fact's state, however many times it is called. That invariant -- a `pending` fact promotes only through `mem review --promote`, never by time or repetition -- predates this function and nothing here weakens it. */
-export function recordSighting(db: Database.Database, factId: string, raw: string, root: string): boolean {
-  const excerpt = buildScreenedExcerpt(raw, root);
+export function recordSighting(db: Database.Database, factId: string, raw: string, root: string, factText?: string): boolean {
+  const excerpt = buildScreenedExcerpt(raw, root, factText);
   if (excerpt === null) {
     return false;
   }
@@ -933,7 +933,7 @@ export function captureSuggested(db: Database.Database, input: CaptureSuggestedI
   const boundMatches = factsByTextHash(db, text).filter((fact) => isBoundToRoot(fact, root));
   const pendingMatch = boundMatches.find((fact) => fact.status === "pending");
   if (pendingMatch !== undefined) {
-    recordSighting(db, pendingMatch.id, text, root);
+    recordSighting(db, pendingMatch.id, text, root, text);
     return { fact: pendingMatch, sighted: true };
   }
   const knownMatch = boundMatches[0];
