@@ -515,6 +515,42 @@ describe("codex, copilot-cli, and copilot-vscode wiring (shared, reference-count
     expect(agentsMd.split("## Memory").length - 1).toBe(1);
   });
 
+  it("uninstall strips every duplicated shared block, as a git merge of two installs can leave", () => {
+    const block = "<!-- token-goat-mem:start tools=codex -->\n## Memory\nbody\n<!-- token-goat-mem:end -->";
+    seed(join(root, "AGENTS.md"), `intro\n${block}\n${block}\n`);
+
+    codex.uninstall({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).not.toContain("token-goat-mem:start");
+    expect(agentsMd).not.toContain("token-goat-mem:end");
+    expect(agentsMd).toContain("intro");
+  });
+
+  it("uninstall drops a tool listed only in a later duplicate shared block", () => {
+    const first = "<!-- token-goat-mem:start tools=codex -->\n## Memory\nbody\n<!-- token-goat-mem:end -->";
+    const second = "<!-- token-goat-mem:start tools=codex,copilot-cli -->\n## Memory\nbody\n<!-- token-goat-mem:end -->";
+    seed(join(root, "AGENTS.md"), `${first}\n${second}\n`);
+
+    copilotCli.uninstall({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd).not.toContain("copilot-cli");
+    expect(agentsMd).toContain("tools=codex -->");
+  });
+
+  it("install collapses duplicated shared blocks into one that keeps every listed tool", () => {
+    const first = "<!-- token-goat-mem:start tools=codex -->\n## Memory\nbody\n<!-- token-goat-mem:end -->";
+    const second = "<!-- token-goat-mem:start tools=copilot-cli -->\n## Memory\nbody\n<!-- token-goat-mem:end -->";
+    seed(join(root, "AGENTS.md"), `${first}\n${second}\n`);
+
+    codex.install({ root, homeDir: home });
+
+    const agentsMd = read(join(root, "AGENTS.md"));
+    expect(agentsMd.split("token-goat-mem:start").length - 1).toBe(1);
+    expect(agentsMd).toContain("tools=codex,copilot-cli");
+  });
+
   it("installed shared AGENTS.md block tells the agent about --anchor, naming at least one real predicate", () => {
     // Same gap as the CLAUDE.md installer: an agent following this block literally never anchors a fact unless the block itself says how, so freshness can never move past "unverified".
     codex.install({ root, homeDir: home });

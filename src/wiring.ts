@@ -414,8 +414,8 @@ interface SharedBlockLocation {
 }
 
 /** Locates the shared marker block (if any) and parses its `tools=` list. `startLineEndIdx` is the index of the newline terminating the start-marker line, used to rewrite just that line without touching the body. Scans *every* `start` marker occurrence (not just the first) and returns the first one that resolves to a complete block (a matching `end` marker somewhere after it). This matters because a hand-edit, crashed write, or merge conflict can leave an orphaned/malformed start marker with no end marker earlier in the file; stopping at the first occurrence (as a non-global regex would) would make every later install/uninstall permanently blind to a perfectly valid block further down -- installs would keep appending duplicate blocks, and uninstall could never find the real one to strip. */
-function findSharedBlock(content: string): SharedBlockLocation | undefined {
-  SHARED_BLOCK_START_RE.lastIndex = 0;
+function findSharedBlock(content: string, from = 0): SharedBlockLocation | undefined {
+  SHARED_BLOCK_START_RE.lastIndex = from;
   const starts: Array<{ index: number; tools: readonly string[] }> = [];
   let match: RegExpExecArray | null;
   while ((match = SHARED_BLOCK_START_RE.exec(content)) !== null) {
@@ -449,8 +449,17 @@ function findSharedBlock(content: string): SharedBlockLocation | undefined {
 function upsertSharedMarkedBlock(content: string, tool: string, body: string): string {
   const found = findSharedBlock(content);
   if (found !== undefined) {
+    // A git merge of two installs can leave several complete blocks; they collapse into the first, which keeps every tool any of them listed so no tool's reference is lost.
+    const blocks: SharedBlockLocation[] = [];
+    for (let next: SharedBlockLocation | undefined = found; next !== undefined; next = findSharedBlock(content, next.endIdx + SHARED_BLOCK_END.length)) {
+      blocks.push(next);
+    }
+    const listed = [...new Set(blocks.flatMap((entry) => entry.tools))];
+    for (const extra of blocks.slice(1).reverse()) {
+      content = stripBlockSeparators(content, extra.startIdx, extra.endIdx + SHARED_BLOCK_END.length);
+    }
     // Rebuilt whole rather than rewriting just the `tools=` line. Returning early once the tool was already listed meant a body written by an older version of mem was never refreshed, so a reinstall upgraded the per-tool blocks and silently left this one stale. The body is generated from one constant shared by every tool that writes here, so regenerating it is the upgrade.
-    const tools = found.tools.includes(tool) ? found.tools : [...found.tools, tool];
+    const tools = listed.includes(tool) ? listed : [...listed, tool];
     const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
     const block = withEol(`${sharedMarkerStart(tools)}\n${body.trim()}\n${SHARED_BLOCK_END}`, detectEol(content));
     if (content.slice(found.startIdx, blockEnd) === block) {
@@ -465,19 +474,25 @@ function upsertSharedMarkedBlock(content: string, tool: string, body: string): s
 
 /** Removes `thisTool` from the shared block's `tools=` list. If other tools remain listed, rewrites only the marker line and leaves the block body in place. If `thisTool` was the only tool listed, removes the whole block plus the one separator newline install adds (same rule as `stripMarkedBlock`). No-op if the block doesn't exist or doesn't list `thisTool`. */
 function stripSharedMarkedBlock(content: string, tool: string): string {
-  const found = findSharedBlock(content);
-  if (found === undefined || !found.tools.includes(tool)) {
-    return content;
+  let out = content;
+  let from = 0;
+  for (let found = findSharedBlock(out, from); found !== undefined; found = findSharedBlock(out, from)) {
+    const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
+    if (!found.tools.includes(tool)) {
+      from = blockEnd;
+      continue;
+    }
+    const remaining = found.tools.filter((t) => t !== tool);
+    if (remaining.length > 0) {
+      const newStartLine = sharedMarkerStart(remaining);
+      out = out.slice(0, found.startIdx) + newStartLine + out.slice(found.startLineEndIdx);
+      from = blockEnd + newStartLine.length - (found.startLineEndIdx - found.startIdx);
+    } else {
+      out = stripBlockSeparators(out, found.startIdx, blockEnd);
+      from = Math.max(0, found.startIdx - 1);
+    }
   }
-
-  const remaining = found.tools.filter((t) => t !== tool);
-  if (remaining.length > 0) {
-    const newStartLine = sharedMarkerStart(remaining);
-    return content.slice(0, found.startIdx) + newStartLine + content.slice(found.startLineEndIdx);
-  }
-
-  const blockEnd = found.endIdx + SHARED_BLOCK_END.length;
-  return stripBlockSeparators(content, found.startIdx, blockEnd);
+  return out;
 }
 
 /** describe() detail override for the shared block: distinguishes "join existing shared block" from a plain create/update, and "leave shared block in place, drop <tool>" from "remove shared block entirely". Falls back to the generic wording (`undefined`) whenever no shared block is present yet. */
