@@ -989,7 +989,7 @@ const CONSOLIDATE_STALE_EVENT = "consolidate_stale";
 const CONSOLIDATE_GRAPH_STALE_EVENT = "consolidate_graph_stale";
 
 function parseThreshold(raw: string): number {
-  const value = Number.parseFloat(raw);
+  const value = raw.trim() === "" ? NaN : Number(raw);
   // `0` is rejected along with the out-of-range values: every pair of facts with any topics at all clears a threshold of 0, so it would not mean "loosest" -- it would mean "collapse the store".
   if (!Number.isFinite(value) || value <= 0 || value > 1) {
     throw new UsageError(`--threshold must be a number greater than 0 and at most 1 (got "${raw}")`);
@@ -998,7 +998,7 @@ function parseThreshold(raw: string): number {
 }
 
 function parseStaleDays(raw: string): number {
-  const value = Number.parseInt(raw, 10);
+  const value = /^\s*\d+\s*$/.test(raw) ? Number(raw) : NaN;
   if (!Number.isFinite(value) || value < 1) {
     throw new UsageError(`--stale-days must be a whole number of days, at least 1 (got "${raw}")`);
   }
@@ -1733,7 +1733,7 @@ export function buildProgram(): Command {
     .option("--hint-format", "Emit the TGMEM/2 wire format for the token-goat seam")
     .option("--context-files <files>", "Comma-separated file paths for scope=path matching (--hint-format only)")
     .option("--age-days <days>", "Only facts captured within this many days", (v) => parseInt(v, 10))
-    .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/contradicted facts are never subject to this cap)", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Limit non-withheld results (default 20; pending/contested/contradicted facts are never subject to this cap)", (v) => /^\s*\d+\s*$/.test(v) ? Number(v) : NaN)
     .option("--root <path>", "Project root (scopes which project's facts are returned; global facts always included) and root for anchor evaluation")
     .option("--stable", "Force deterministic id-sorted output ordering instead of relevance/recency order")
     .option(
@@ -1942,7 +1942,7 @@ export function buildProgram(): Command {
     .option("--status <status>", "Filter by status (comma-separated for multiple)")
     .option("--subject <key>", "Filter by subject")
     .option("--scope <scope>", "Filter by scope")
-    .option("--limit <n>", "Limit results (default 20)", (v) => parseInt(v, 10))
+    .option("--limit <n>", "Limit results (default 20)", (v) => /^\s*\d+\s*$/.test(v) ? Number(v) : NaN)
     .option(
       "--json",
       "Output machine-readable JSON (unstable, pre-1.0 -- shape may change; mem export is the stable machine-readable surface)"
@@ -2463,7 +2463,7 @@ export function buildProgram(): Command {
     .command("embed")
     .description("Compute and store embedding vectors for facts, using the endpoint named by TOKEN_GOAT_MEM_EMBED_URL")
     .option("--all", "Re-embed every fact, not just the ones missing a vector -- the model-migration path")
-    .option("--limit <n>", "Stop after this many facts", (value: string) => Number.parseInt(value, 10))
+    .option("--limit <n>", "Stop after this many facts", (value: string) => /^\s*\d+\s*$/.test(value) ? Number(value) : NaN)
     .action(
       guard(async (options: EmbedCliOptions) => {
         // Before the config read on purpose: a malformed flag is a mistake in the invocation itself, and reporting the environment problem first hides it behind an error the user cannot act on until they have already fixed this one.

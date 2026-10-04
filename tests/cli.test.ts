@@ -1564,6 +1564,13 @@ describe("default limits on mem list / mem recall (never hiding pending/conteste
     expect(result.stdout).toContain("showing 5 of 25 -- use --limit to see more");
   });
 
+  it("mem list rejects a malformed --limit argument", async () => {
+    seedManyActiveFacts(5);
+    const result = await runCli(["list", "--limit", "5x"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("--limit must be a positive integer");
+  });
+
   it("mem recall caps non-withheld results at the default limit and prints a trailer when truncated", async () => {
     seedManyActiveFacts(25);
     const result = await runCli(["recall"]);
