@@ -260,7 +260,7 @@ export function detectContradictions(facts: readonly Fact[]): ContradictionDetec
       });
     } else {
       for (const fact of bucket.facts) {
-        if (fact.id === best.id) {
+        if (fact.id === best.id || normalizedFactValue(fact.value) === normalizedFactValue(best.value)) {
           continue;
         }
         updates.push({

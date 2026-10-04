@@ -326,6 +326,21 @@ describe("detectContradictions", () => {
     ]);
   });
 
+  it("never supersedes a fact that agrees with the single winner, even when an outranked fact holds the same value", () => {
+    // A and C hold the SAME value; only B disagrees. C wins on recency, so A must not be superseded with the reason `value "pnpm" superseded by ... value "pnpm"` -- only B is in conflict with the winner.
+    const facts = [
+      makeFact({ id: "A", subject: "package-manager", value: "pnpm", status: "pinned", captured_at: "2026-01-01T00:00:00.000Z" }),
+      makeFact({ id: "B", subject: "package-manager", value: "npm", captured_at: "2026-02-01T00:00:00.000Z" }),
+      makeFact({ id: "C", subject: "package-manager", value: "pnpm", captured_at: "2026-03-01T00:00:00.000Z" }),
+    ];
+
+    const result = detectContradictions(facts);
+
+    expect(result.groups).toHaveLength(1);
+    expect(result.groups[0]).toMatchObject({ resolution: "resolved", winnerId: "C" });
+    expect(result.updates.map((u) => u.factId)).toEqual(["B"]);
+  });
+
   it("still marks the tied facts contested when 3+ facts are tied for top precedence and disagree on value", () => {
     const facts = [
       makeFact({ id: "a", subject: "test-framework", value: "vitest", captured_at: "2026-04-01T00:00:00.000Z" }),
