@@ -4,15 +4,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 
 import {
   clearProjectIdentityCache,
   identityMatches,
+  isBoundToRoot,
   normalizeRemoteUrl,
   PROJECT_IDENTITY_ENV,
   resolveProjectIdentity,
 } from "../../src/projectIdentity.js";
+import { makeFact } from "../support/fact.js";
 
 let dir: string;
 
@@ -185,5 +187,14 @@ describe("identityMatches", () => {
     expect(identityMatches(undefined, repo)).toBe(false);
     expect(identityMatches("", repo)).toBe(false);
     expect(identityMatches(identity, plain)).toBe(false);
+  });
+});
+
+describe("isBoundToRoot", () => {
+  it("binds a path fact under a filesystem root", () => {
+    const root = parse(process.cwd()).root;
+    const inside = makeFact({ id: "p1", scope: "path", scopeRoot: join(root, "some", "dir", "file.txt") });
+    expect(isBoundToRoot(inside, root)).toBe(true);
+    expect(isBoundToRoot(inside, join(root, "other"))).toBe(false);
   });
 });

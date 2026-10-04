@@ -248,5 +248,5 @@ export function isBoundToRoot(fact: Fact, root: string): boolean {
     return normalizedRoot === scopeRoot || identityMatches(fact.scopeRepo, root);
   }
   // scope === "path": bound when the target sits at or beneath the querying root.
-  return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot + sep);
+  return scopeRoot === normalizedRoot || scopeRoot.startsWith(normalizedRoot.endsWith(sep) ? normalizedRoot : normalizedRoot + sep);
 }
