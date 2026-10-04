@@ -3108,6 +3108,19 @@ describe("mem init/uninstall", () => {
     expect(existsSync(join(toolRoot, ".github"))).toBe(false);
   });
 
+  it("uninstall --all --user skips tools with no user-level config instead of failing", async () => {
+    const init1 = await runCli(["init", "claude-code", "--user", "--root", toolRoot]);
+    expect(init1.exitCode).toBe(0);
+    const init2 = await runCli(["init", "copilot-visual-studio", "--root", toolRoot]);
+    expect(init2.exitCode).toBe(0);
+
+    const uninstall = await runCli(["uninstall", "--all", "--user", "--root", toolRoot]);
+    expect(uninstall.exitCode).toBe(0);
+    expect(uninstall.stdout).toContain("claude-code:");
+    expect(uninstall.stdout).toContain("copilot-visual-studio: skipped");
+    expect(uninstall.stdout).not.toContain("failed");
+  });
+
   it("a pre-existing .github/copilot-instructions.md with hand-written content is preserved with a one-time .bak snapshot, and left with only its own content after uninstall", async () => {
     const instructionsPath = join(toolRoot, ".github", "copilot-instructions.md");
     mkdirSync(join(toolRoot, ".github"), { recursive: true });

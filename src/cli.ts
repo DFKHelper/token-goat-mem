@@ -103,6 +103,7 @@ import {
   describeHookGap,
   getToolWiring,
   TOOL_NAMES,
+  WiringUserUnsupportedError,
   type ClaudeHookHealth,
   type ToolName,
   type WiringOpts,
@@ -2709,8 +2710,12 @@ export function buildProgram(): Command {
             if (options.all !== true) {
               throw error;
             }
-            hadFailure = true;
-            lines.push(`${name}: failed -- ${extractErrorMessage(error)}`);
+            if (options.user && error instanceof WiringUserUnsupportedError) {
+              lines.push(`${name}: skipped (no user-level config for this tool)`);
+            } else {
+              hadFailure = true;
+              lines.push(`${name}: failed -- ${extractErrorMessage(error)}`);
+            }
           }
         }
         process.stdout.write(`${lines.join("\n")}\n`);
