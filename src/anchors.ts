@@ -717,6 +717,10 @@ function evaluateGitTrackedUncached(root: string, resolvedPath: string, gitDir: 
   }
   const { paths, complete } = index;
   const relPath = relative(root, resolvedPath).split(sep).join("/");
+  // The repo root has an empty relative path, which no index entry equals or prefixes, so it is answered from whether the index holds any entry at all.
+  if (relPath === "") {
+    return paths.size > 0 ? "affirmed" : complete ? "contradicted" : "unverified";
+  }
   if (pathTrackedIn(paths, relPath)) {
     return "affirmed";
   }

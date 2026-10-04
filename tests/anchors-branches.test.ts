@@ -255,6 +255,19 @@ describe("a well-formed .git/index is parsed, in each of the three entry shapes"
     expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("affirmed");
   });
 
+  it("answers git-tracked for the repo root from whether the index has any entries", () => {
+    writeIndex({ entries: [indexEntry("src/a.ts")] });
+    expect(evaluateAnchor("git-tracked .", root)).toBe("affirmed");
+  });
+
+  it("contradicts git-tracked for the repo root when the index is empty, and is unverified when the index is corrupt", () => {
+    writeIndex({ entries: [] });
+    expect(evaluateAnchor("git-tracked .", root)).toBe("contradicted");
+    _clearAnchorMemoForTests();
+    writeIndex({ magic: "XXXX" });
+    expect(evaluateAnchor("git-tracked .", root)).toBe("unverified");
+  });
+
   it("treats a repository with no index file as tracking nothing, rather than as an error", () => {
     mkdirSync(join(root, ".git"), { recursive: true });
     // A freshly-initialized repo has no index yet. "Nothing is tracked" is the true answer here, and it is a different answer from "I could not read the index".
