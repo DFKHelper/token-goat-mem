@@ -753,23 +753,36 @@ function foldedGitIndexPaths(gitDir: string, paths: ReadonlySet<string>): Readon
   return folded;
 }
 
-/** `valid-until <ISO date>` — affirmed while the date has not passed, contradicted once it has. The only predicate that reads no filesystem and no git state: some facts are true until a date rather than until a file changes ("until the v2 migration lands, keep the shim"), and without this they had no anchor at all and stayed permanently `unverified` — caveated forever, and never surfaced in `mem review` as something to resolve. A bare `YYYY-MM-DD` is read as the *end* of that day in the machine's own local time zone, rather than its midnight start or UTC end-of-day, so an anchor written `valid-until 2026-12-31` is still affirmed during 2026-12-31 wherever `mem` runs, instead of expiring the instant the day begins or flipping hours before local midnight for anyone west of UTC. Building the deadline from a `Z` literal instead would contradict a fact still true by the user's own clock (P3: expiring early destroys a fact the user was promised; expiring late merely caveats one a few hours longer, the harmless direction). A timestamp with an explicit time is taken exactly as written. An unparseable date is `unverified`, matching every other malformed-argument path here: a typo must not silently read as "this fact has expired" and suppress a true fact. */
-function evaluateValidUntil(raw: string): AnchorVerdict {
+/** Strictly parses a `valid-until` argument into a deadline in epoch ms: `YYYY-MM-DD` (end of that local day) or a full ISO 8601 date-time with `T` and a time; null for anything else, including a year-only or bare-number string and an invalid calendar date. */
+export function parseValidUntilDeadline(raw: string): number | null {
   const dateOnlyMatch = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(raw);
-  let deadline: number;
   if (dateOnlyMatch) {
     const [, yearStr, monthStr, dayStr] = dateOnlyMatch;
     // Local-time Date constructor overload (year, monthIndex, day, ...), not the UTC `Z`-literal parse: this is what makes "end of day" mean the user's own local day rather than UTC's.
     const local = new Date(Number(yearStr), Number(monthStr) - 1, Number(dayStr), 23, 59, 59, 999);
-    deadline = local.getTime();
     // Guards against an out-of-range calendar date (e.g. 2026-13-45) that `Date` would otherwise silently roll into a neighboring month/day instead of rejecting.
     if (local.getMonth() !== Number(monthStr) - 1 || local.getDate() !== Number(dayStr)) {
-      return "unverified";
+      return null;
     }
-  } else {
-    deadline = new Date(raw).getTime();
+    return local.getTime();
   }
-  if (Number.isNaN(deadline)) {
+  const dateTimeMatch = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$/u.exec(raw);
+  if (!dateTimeMatch) {
+    return null;
+  }
+  const [, yearStr, monthStr, dayStr, hourStr, minuteStr, secondStr] = dateTimeMatch;
+  const calendar = new Date(Date.UTC(Number(yearStr), Number(monthStr) - 1, Number(dayStr)));
+  if (calendar.getUTCMonth() !== Number(monthStr) - 1 || calendar.getUTCDate() !== Number(dayStr) || Number(hourStr) > 23 || Number(minuteStr) > 59 || Number(secondStr ?? "0") > 59) {
+    return null;
+  }
+  const deadline = new Date(raw).getTime();
+  return Number.isNaN(deadline) ? null : deadline;
+}
+
+/** `valid-until <ISO date>` — affirmed while the date has not passed, contradicted once it has. The only predicate that reads no filesystem and no git state: some facts are true until a date rather than until a file changes ("until the v2 migration lands, keep the shim"), and without this they had no anchor at all and stayed permanently `unverified` — caveated forever, and never surfaced in `mem review` as something to resolve. A bare `YYYY-MM-DD` is read as the *end* of that day in the machine's own local time zone, rather than its midnight start or UTC end-of-day, so an anchor written `valid-until 2026-12-31` is still affirmed during 2026-12-31 wherever `mem` runs, instead of expiring the instant the day begins or flipping hours before local midnight for anyone west of UTC. Building the deadline from a `Z` literal instead would contradict a fact still true by the user's own clock (P3: expiring early destroys a fact the user was promised; expiring late merely caveats one a few hours longer, the harmless direction). A timestamp with an explicit time is taken exactly as written. An unparseable date is `unverified`, matching every other malformed-argument path here: a typo must not silently read as "this fact has expired" and suppress a true fact. */
+function evaluateValidUntil(raw: string): AnchorVerdict {
+  const deadline = parseValidUntilDeadline(raw);
+  if (deadline === null) {
     return "unverified";
   }
   return Date.now() <= deadline ? "affirmed" : "contradicted";

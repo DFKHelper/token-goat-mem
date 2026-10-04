@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { _clearAnchorMemoForTests, clearAnchorCaches, evaluateAnchor, isGenuineAbsence } from "../../src/anchors.js";
+import { validateAnchorSyntax } from "../../src/capture.js";
 
 let root: string;
 
@@ -335,6 +336,18 @@ describe("valid-until", () => {
     expect(evaluateAnchor("valid-until next friday", root)).toBe("unverified");
     expect(evaluateAnchor("valid-until 2026-13-45", root)).toBe("unverified");
     expect(evaluateAnchor("valid-until", root)).toBe("unverified");
+  });
+
+  it("rejects a year-only or bare-number date at capture time", () => {
+    expect(() => validateAnchorSyntax("valid-until 2026")).toThrow();
+    expect(() => validateAnchorSyntax("valid-until 1")).toThrow();
+    expect(() => validateAnchorSyntax("valid-until 2026-02-30")).toThrow();
+    expect(() => validateAnchorSyntax("valid-until 2026-12-31")).not.toThrow();
+    expect(() => validateAnchorSyntax("valid-until 2026-12-31T10:00:00Z")).not.toThrow();
+  });
+
+  it("is not contradicted by a non-zero-padded date, which is not a strict ISO date", () => {
+    expect(evaluateAnchor("valid-until 2026-1-5", root)).not.toBe("contradicted");
   });
 
   it("reads no filesystem state at all", () => {

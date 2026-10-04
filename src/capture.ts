@@ -4,7 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
-import { anchorPathWithinRoot } from "./anchors.js";
+import { anchorPathWithinRoot, parseValidUntilDeadline } from "./anchors.js";
 import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
 import { isBoundToRoot } from "./projectIdentity.js";
@@ -437,8 +437,8 @@ export function validateAnchorSyntax(anchor: string): void {
   // `valid-until` is the one predicate whose argument is neither a path nor a free string, and a typo in it is silent in the worst direction: anchors.ts reads an unparseable date as `unverified`, so `valid-untill 2026-12-31` (or `valid-until next friday`) would store cleanly and then caveat the fact forever, which is the exact rot this whole gate exists to prevent.
   if (predicate === "valid-until") {
     const [rawDate] = args;
-    if (rawDate === undefined || Number.isNaN(new Date(rawDate).getTime())) {
-      throw new InvalidAnchorError(anchor, `"${rawDate ?? ""}" is not an ISO 8601 date (e.g. 2026-12-31)`);
+    if (rawDate === undefined || parseValidUntilDeadline(rawDate) === null) {
+      throw new InvalidAnchorError(anchor, `"${rawDate ?? ""}" is not a YYYY-MM-DD date or a full ISO 8601 date-time (e.g. 2026-12-31)`);
     }
   }
   // Reject a path argument that can never affirm: one that escapes whatever root it will later be evaluated against (`../x`) or names an absolute location (`/etc/passwd`, `C:\Windows\...`). `resolveWithinRoot`/`anchorPathWithinRoot` would return `null` for these at every future evaluation, forever `unverified` -- tell the user now, at capture time, instead of letting the fact rot silently.
