@@ -1,4 +1,4 @@
-/** Library entry point. Re-exports the public surface of every domain module so a consumer can `import { ... } from "token-goat-mem"` instead of reaching into `src/*.js` directly -- e.g. a test, or a future in-process embedding of mem's retrieval pipeline. `src/main.ts` (the CLI executable) does not import this file; it goes straight to `./cli.js`'s `run()`. This module only re-exports -- it defines no new behavior of its own. */
+/** Library entry point. Re-exports the public surface of every domain module for in-repo consumers that want one import path instead of reaching into `src/*.js` directly. It is not built or published: the package ships only the CLI bundle (`bin`), which runs on import, so `package.json` has no `main` and `import "token-goat-mem"` is unsupported. `src/main.ts` (the CLI executable) does not import this file; it goes straight to `./cli.js`'s `run()`. This module only re-exports -- it defines no new behavior of its own. */
 
 export type {
   Fact,
