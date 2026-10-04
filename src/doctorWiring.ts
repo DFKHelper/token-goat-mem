@@ -9,6 +9,7 @@ import {
   installedClaudeHookCommands,
   parseHookBundlePath,
   parseHookCommandSpec,
+  projectSettingsIsUserSettings,
   timeMemLaunch,
   TOOL_NAMES,
   WiringUserUnsupportedError,
@@ -37,7 +38,8 @@ function planFor(tool: ToolName, scope: Scope, opts: WiringOpts): WiringPlan | n
       return plan;
     }
     const root = resolve(opts.root ?? process.cwd());
-    return { entries: plan.entries.filter((entry) => insideRoot(entry.path, root)) };
+    const sameAsUserSettings = projectSettingsIsUserSettings(opts);
+    return { entries: plan.entries.filter((entry) => insideRoot(entry.path, root) && !(sameAsUserSettings && tool === "claude-code" && entry.path.endsWith("settings.json"))) };
   } catch (error) {
     if (error instanceof WiringUserUnsupportedError) {
       return null;
@@ -107,6 +109,9 @@ function normalisedInvocation(command: string): string {
 
 /** Claude Code merges project and user hooks and skips a duplicate only when its command text is identical, so mem installed at both levels is `ok` only when every event's command matches byte for byte. Different invocations mean inconsistent recall; the same invocation through a different launcher (the Windows user hook's `node <bundle>` against a project's `mem`) means every event runs twice. Either way the fix is a project `mem init claude-code`, which drops the project hooks once user hooks exist; `mem uninstall claude-code` would also strip the CLAUDE.md block. Silent when only one level has hooks. */
 export function describeHookDivergence(opts: WiringOpts): Finding[] {
+  if (projectSettingsIsUserSettings(opts)) {
+    return [];
+  }
   const project = installedClaudeHookCommands({ ...opts, user: false });
   const user = installedClaudeHookCommands({ ...opts, user: true });
   if (project.length === 0 || user.length === 0) {
@@ -153,7 +158,8 @@ function launchesBundleDirectly(command: string): boolean {
 
 /** One warning when launching `mem` through the shell shim a plain hook uses is slower than `LAUNCH_TIME_WARN_MS`; silent when it is fast, cannot be measured, or the measurement throws, so a doctor run never fails on it. Nothing is measured when no installed hook would launch the PATH `mem` (none installed, or every one a direct launch of an existing bundle). On Windows the remedy is the direct-node user hook, which skips npm's shim. */
 export function describeLaunchTime(opts: WiringOpts, measure: () => number | null = timeMemLaunch, platform: NodeJS.Platform = process.platform): Finding[] {
-  const commands = [...installedClaudeHookCommands({ ...opts, user: false }), ...installedClaudeHookCommands({ ...opts, user: true })].map((hook) => hook.command);
+  const projectHooks = projectSettingsIsUserSettings(opts) ? [] : installedClaudeHookCommands({ ...opts, user: false });
+  const commands = [...projectHooks, ...installedClaudeHookCommands({ ...opts, user: true })].map((hook) => hook.command);
   if (commands.every(launchesBundleDirectly)) {
     return [];
   }

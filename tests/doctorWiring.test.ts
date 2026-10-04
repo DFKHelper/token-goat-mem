@@ -150,4 +150,13 @@ describe("mem doctor project-vs-user hook divergence", () => {
     await init("claude-code");
     expect(await doctorFindings("hook-divergence")).toEqual([]);
   });
+
+  it("does not report the user settings file as a stale project file when the root is the home directory", async () => {
+    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolRoot;
+    await init("claude-code", "--user");
+    const wiring = await doctorFindings("wiring");
+    expect(wiring.filter((entry) => entry.status !== "ok")).toEqual([]);
+    expect(wiring.some((entry) => entry.message.includes("stale"))).toBe(false);
+    expect(await doctorFindings("hook-divergence")).toEqual([]);
+  });
 });

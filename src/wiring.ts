@@ -1521,10 +1521,18 @@ export function vscodeUserDir(homeDir: string): string {
   }
 }
 
+/** True when the project-level Claude Code settings file and the user-level one are the same file, which happens when the root is the home directory; compared case-insensitively on win32. */
+export function projectSettingsIsUserSettings(opts?: WiringOpts): boolean {
+  const { root, homeDir } = resolveWiringOpts(opts);
+  const project = resolvePath(join(root, ".claude", "settings.json"));
+  const userFile = resolvePath(join(homeDir, ".claude", "settings.json"));
+  return process.platform === "win32" ? project.toLowerCase() === userFile.toLowerCase() : project === userFile;
+}
+
 export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user, hookEvents }) => {
   const settingsPath = user ? join(homeDir, ".claude", "settings.json") : join(root, ".claude", "settings.json");
   // Claude Code runs project and user hooks both and skips a duplicate only when the command text matches, which the Windows user hook's direct launcher never does, so once user hooks exist a project install drops its own instead of adding a second set.
-  const coveredByUserHooks = !user && installedClaudeHookCommands({ root, homeDir, user: true }).length > 0;
+  const coveredByUserHooks = !user && !projectSettingsIsUserSettings({ root, homeDir }) && installedClaudeHookCommands({ root, homeDir, user: true }).length > 0;
   const settingsEntry: ManagedFile = coveredByUserHooks
     ? {
         path: settingsPath,

@@ -475,6 +475,17 @@ describe("claudeCode wiring", () => {
 
     expect(read(settingsPath)).toBe(original);
   });
+
+  it("a project install rooted at the home directory keeps the user-level hooks instead of deleting them", () => {
+    claudeCode.install({ root: home, homeDir: home, user: true });
+    const settingsPath = join(home, ".claude", "settings.json");
+    const before = read(settingsPath);
+    expect(before).toContain("__token_goat_mem");
+
+    claudeCode.install({ root: home, homeDir: home });
+    expect(existsSync(settingsPath)).toBe(true);
+    expect(read(settingsPath)).toBe(before);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── codex / copilot-cli AGENTS.md shared block ───────────────────────────────────────────────────────────────────────────
