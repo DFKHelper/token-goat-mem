@@ -383,11 +383,20 @@ export function planImportFromJson(options: { readonly path: string; readonly ro
   const { filePath, entries } = parseJsonFacts(options.path, root);
   const allowlist = loadAllowlist(root);
   const candidates = entries.map((entry) => entry.candidate);
+  const seenIds = new Set<string>();
   const outcomes: ImportOutcome[] = entries.map((entry) => {
     if (entry.newFact === null) {
       return { status: "skipped_error", candidate: entry.candidate, reason: entry.reason ?? "invalid fact" };
     }
-    // Secret screening is pure (fact text plus the on-disk allowlist, no database), so the dry run can reproduce the real import's refusal reason verbatim. Duplicate-id detection is the one check it cannot reproduce -- that needs the store -- and `formatImportResult` says so rather than letting a clean-looking plan imply there is nothing left to find.
+    if (seenIds.has(entry.newFact.id)) {
+      return {
+        status: "skipped_error",
+        candidate: entry.candidate,
+        reason: `duplicate id within import file: ${entry.newFact.id}`,
+      };
+    }
+    seenIds.add(entry.newFact.id);
+    // Secret screening is pure (fact text plus the on-disk allowlist, no database), so the dry run can reproduce the real import's refusal reason verbatim. A duplicate id within the file is caught above exactly as the real import catches it; a duplicate against the store is the one check it cannot reproduce -- that needs the store -- and `formatImportResult` says so rather than letting a clean-looking plan imply there is nothing left to find.
     const matches = screenFactFields({ ...entry.newFact, sourceRef: entry.newFact.source_ref }, allowlist);
     if (matches.length > 0) {
       return {

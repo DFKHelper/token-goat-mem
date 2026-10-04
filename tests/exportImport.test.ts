@@ -78,6 +78,22 @@ describe("planImportFromJson", () => {
     }
   });
 
+  it("reports duplicate ids within the same file as skipped_error", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-plan-"));
+    const path = join(dir, "export.json");
+    const duplicate = { ...VALID_FACT, text: "different text" };
+    writeFileSync(path, envelope([VALID_FACT, duplicate]), "utf8");
+    try {
+      const result = planImportFromJson({ path });
+      expect(result.outcomes).toHaveLength(2);
+      expect(result.outcomes[0]?.status).toBe("dry_run");
+      expect(result.outcomes[1]?.status).toBe("skipped_error");
+      expect(skipReason(result.outcomes[1])).toMatch(/duplicate id within import file/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("throws JsonImportError for a schemaVersion mismatch", () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-exportimport-plan-"));
     const path = join(dir, "export.json");
