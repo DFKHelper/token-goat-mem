@@ -10,6 +10,7 @@ import {
   clearProjectIdentityCache,
   identityMatches,
   isBoundToRoot,
+  normalizeProjectIdentity,
   normalizeRemoteUrl,
   PROJECT_IDENTITY_ENV,
   resolveProjectIdentity,
@@ -103,6 +104,17 @@ describe("normalizeRemoteUrl", () => {
     expect(normalizeRemoteUrl("..\\upstream.git")).toBeNull();
     expect(normalizeRemoteUrl("..\\remotes/upstream.git")).toBeNull();
     expect(normalizeRemoteUrl(".\\remotes/upstream.git")).toBeNull();
+  });
+
+  it("normalizeProjectIdentity is idempotent on every identity a remote and subpath produce", () => {
+    for (const remote of ["https://github.com/O/R.git", "ssh://git@host:2222/o/r.git", "git@github.com:o/r.git", "C:/repos/x.git", "file:///C:/repos/x.git"]) {
+      for (const subpath of [".", "packages/app", "docs.git"]) {
+        const identity = `${normalizeRemoteUrl(remote) ?? ""}#${subpath}`;
+        expect(normalizeProjectIdentity(identity), identity).toBe(identity);
+      }
+    }
+    expect(normalizeProjectIdentity("")).toBeNull();
+    expect(normalizeProjectIdentity("#.")).toBeNull();
   });
 
   it("keeps a drive-letter path remote a local path rather than an scp host", () => {

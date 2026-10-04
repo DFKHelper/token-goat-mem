@@ -204,6 +204,18 @@ export function resolveProjectIdentity(root: string): string | null {
   return identity;
 }
 
+/** Normalizes a stored or imported project identity (`<remote>#<subpath>`, as `computeProjectIdentity` builds it) without re-running `normalizeRemoteUrl` over an already normalized remote, which would read a port (`host:2222/o/r`) as an scp path and strip a `.git` subpath. Only a raw remote (one with a scheme or `user@`) is normalized, which also drops any token in it; a value with no `#` names the repository root. */
+export function normalizeProjectIdentity(value: string): string | null {
+  const hash = value.indexOf("#");
+  const remote = (hash === -1 ? value : value.slice(0, hash)).trim();
+  const subpath = hash === -1 ? "." : value.slice(hash + 1).trim();
+  const host = /^[a-z][a-z0-9+.-]*:\/\/|^[^@/]+@/iu.test(remote) ? normalizeRemoteUrl(remote) : remote.toLowerCase();
+  if (host === null || host.length === 0) {
+    return null;
+  }
+  return `${host}#${subpath.length === 0 ? "." : subpath.toLowerCase()}`;
+}
+
 function computeProjectIdentity(root: string): string | null {
   const tree = findWorkingTree(root);
   if (tree === null) {
