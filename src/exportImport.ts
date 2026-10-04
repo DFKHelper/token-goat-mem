@@ -10,7 +10,7 @@ import type { EmbeddingMeta } from "./embeddings.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
 import { identityMatches } from "./projectIdentity.js";
-import { MS_PER_DAY } from "./timeUtils.js";
+import { MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
 import { countEmbeddedFacts, getEmbeddingMeta, getFactById, ID_PREFIX_PATTERN, insertFact, setEmbeddingMeta } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
 import type { Fact, FactKind, FactScope, FactSourceType, FactStatus, NewFact } from "./types.js";
@@ -161,7 +161,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   }
   if (obj["captured_at"] !== undefined && typeof obj["captured_at"] === "string") {
     const capturedAtStr = obj["captured_at"];
-    if (capturedAtStr.length === 0 || isNaN(Date.parse(capturedAtStr))) {
+    if (parseStrictIsoTimestamp(capturedAtStr) === null) {
       return fail(`facts[${index}] has an invalid ISO-8601 "captured_at" ${JSON.stringify(capturedAtStr)}`);
     }
     // Stricter validation: ensure the string round-trips back to the exact canonical ISO-8601 form produced by `new Date().toISOString()` (the only form this codebase ever writes for captured_at — see capture.ts/storage.ts). This catches JavaScript's lenient Date.parse behavior (e.g., "2026/07/14" or "July 14 2026" parse but are not ISO-8601) while still guaranteeing captured_at remains lexicographically comparable for chronological ordering (design principle: contradiction-resolution, GC cutoff).

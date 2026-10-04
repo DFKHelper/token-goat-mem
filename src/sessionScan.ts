@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 
 import { normalizeFactText } from "./storage.js";
+import { parseStrictIsoTimestamp } from "./timeUtils.js";
 import type { FactKind } from "./types.js";
 
 /** A sentence shape that marks a durable statement, and the kind it implies. Anchored at the start of a sentence on purpose. "never" mid-sentence is usually narration ("it should never have shipped"); "Never commit secrets" as an opener is an instruction. Anchoring trades recall for precision, which is the right trade when every hit costs a human a review decision and the cost of a miss is that the user types `mem remember` as they always have. */
@@ -199,15 +200,15 @@ function extractTimestampFromEntry(entry: unknown): string | undefined {
   }
   // Validate the timestamp by parsing it. A future-dated, malformed, or otherwise invalid timestamp falls back to undefined (treat it as "now" in the capture logic).
   try {
-    const parsed = new Date(timestamp);
-    if (Number.isNaN(parsed.getTime())) {
+    const parsedMs = parseStrictIsoTimestamp(timestamp);
+    if (parsedMs === null) {
       return undefined;
     }
     // Reject future-dated entries silently (treat as malformed for this purpose).
-    if (parsed.getTime() > Date.now()) {
+    if (parsedMs > Date.now()) {
       return undefined;
     }
-    return parsed.toISOString();
+    return new Date(parsedMs).toISOString();
   } catch {
     return undefined;
   }

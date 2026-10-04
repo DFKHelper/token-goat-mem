@@ -238,6 +238,24 @@ describe("scanTranscript", () => {
     }
   });
 
+  it("falls back to no timestamp for a lenient-only or malformed timestamp and keeps a strict ISO one", () => {
+    // `new Date("hello 5")` is 2001-05-01 and `new Date("-000001-01-01T00:00:00Z")` is a valid year -1: either would back-date the fact instead of falling back to now.
+    const entryAt = (timestamp: string): string =>
+      JSON.stringify({ type: "user", timestamp, message: { content: [textBlock("never commit the lockfile by hand")] } });
+    const path = writeTranscript([entryAt("hello 5")]);
+    const second = join(dir, "second.jsonl");
+    writeFileSync(second, [entryAt("-000001-01-01T00:00:00Z"), entryAt("2026-02-30T00:00:00Z")].join("\n"), "utf8");
+    const third = join(dir, "third.jsonl");
+    writeFileSync(third, entryAt("2026-01-02T03:04:05.000Z"), "utf8");
+    try {
+      expect(scanTranscript(path)[0]?.capturedAt).toBeUndefined();
+      expect(scanTranscript(second).map((candidate) => candidate.capturedAt)).toEqual([undefined]);
+      expect(scanTranscript(third)[0]?.capturedAt).toBe("2026-01-02T03:04:05.000Z");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("skips a malformed line without abandoning the rest of the file", () => {
     // A transcript being appended to as we read can legitimately end mid-line.
     const path = writeTranscript(["{not json", userEntry([textBlock("never commit the lockfile by hand")]), '{"truncated":'])

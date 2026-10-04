@@ -1,8 +1,38 @@
 import { describe, expect, it } from "vitest";
 
-import { ageInDays, daysAgoIso, formatAge, MS_PER_DAY } from "../../src/timeUtils.js";
+import { ageInDays, daysAgoIso, formatAge, MS_PER_DAY, parseStrictIsoTimestamp } from "../../src/timeUtils.js";
 
 const NOW = new Date("2026-09-30T12:00:00.000Z");
+
+describe("parseStrictIsoTimestamp", () => {
+  it("accepts a full ISO-8601 timestamp with Z or a numeric offset and a bare calendar date", () => {
+    expect(parseStrictIsoTimestamp("2026-01-02T03:04:05.000Z")).toBe(Date.UTC(2026, 0, 2, 3, 4, 5));
+    expect(parseStrictIsoTimestamp("2026-01-02T03:04Z")).toBe(Date.UTC(2026, 0, 2, 3, 4));
+    expect(parseStrictIsoTimestamp("2026-01-02T05:04:05+02:00")).toBe(Date.UTC(2026, 0, 2, 3, 4, 5));
+    expect(parseStrictIsoTimestamp("2026-01-02")).toBe(Date.UTC(2026, 0, 2));
+  });
+
+  it("rejects what Date parses leniently or into a different instant", () => {
+    for (const raw of [
+      "hello 5",
+      "Release 3",
+      "last tuesday",
+      "",
+      "-000001-01-01T00:00:00Z",
+      "26-01-02T03:04:05Z",
+      "2026-01-02T03:04:05",
+      "2026-02-30T00:00:00Z",
+      "2026-02-30",
+      "2026-13-01T00:00:00Z",
+      "2026-01-02T24:00:00Z",
+      "2026-01-02T03:60:00Z",
+      "2026-01-02T03:04:05+25:00",
+      "2026/01/02",
+    ]) {
+      expect(parseStrictIsoTimestamp(raw), raw).toBeNull();
+    }
+  });
+});
 
 describe("daysAgoIso", () => {
   it("returns the ISO instant exactly N days before now", () => {

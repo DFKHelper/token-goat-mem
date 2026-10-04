@@ -5713,6 +5713,12 @@ describe("import --from-md --captured-at", () => {
     expect(listed.facts[0]?.captured_at).toMatch(/^2023-04-05T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u);
   });
 
+  it("refuses a lenient-only timestamp such as \"Release 3\" instead of back-dating the fact", async () => {
+    const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "Release 3"]);
+    expect(result.exitCode).toBe(1);
+    expect(`${result.stdout}${result.stderr}`).toContain("capturedAt");
+  });
+
   it("refuses an unparseable timestamp rather than silently falling back to now", async () => {
     // A malformed flag is a usage error, so it must fail once with a nonzero exit -- not once per candidate with exit 0, which a script reading $? would take for a successful import.
     const result = await runCli(["import", "--from-md", writeMarkdown(), "--root", ".", "--captured-at", "last tuesday"]);

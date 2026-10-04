@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, parseValidUntilDeadline } from "./anchors.js";
+import { parseStrictIsoTimestamp } from "./timeUtils.js";
 import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
 import { isBoundToRoot } from "./projectIdentity.js";
@@ -696,16 +697,16 @@ function refuseSecretsOrThrow(
 /** Validates a caller-supplied `capturedAt` and returns it in the canonical ISO form the column stores, so a legal-but-differently-spelled timestamp (`2024-01-02`, an offset other than Z) does not break the lexical comparability `captured_at` is documented to have (types.ts). A future timestamp is refused rather than clamped: it would win every contradiction-precedence comparison and sit permanently at the top of any recency ordering, and silently rewriting the value a caller asked for would hide that they got something other than what they requested. */
 export function parseCapturedAtOrThrow(raw: string): string {
   const trimmed = raw.trim();
-  const parsed = new Date(trimmed);
-  if (trimmed.length === 0 || Number.isNaN(parsed.getTime())) {
+  const parsedMs = parseStrictIsoTimestamp(trimmed);
+  if (parsedMs === null) {
     throw new CaptureValidationError(`invalid capturedAt ${JSON.stringify(raw)}: expected an ISO 8601 timestamp`);
   }
-  if (parsed.getTime() > Date.now()) {
+  if (parsedMs > Date.now()) {
     throw new CaptureValidationError(
       `capturedAt ${JSON.stringify(raw)} is in the future; captured_at drives time-decay and contradiction precedence, so a future date would outrank every real fact`
     );
   }
-  return parsed.toISOString();
+  return new Date(parsedMs).toISOString();
 }
 
 /** What a restatement carries onto the fact it reaffirms, and the audit phrase for each field it actually changed. The user's latest statement wins: an anchor, source ref, or why on the restatement replaces the stored one, and a field the restatement omits says nothing new and leaves the stored value alone. Shared by both of `captureExplicit`'s reaffirm paths (a live fact, and a pending one the restatement promotes) so they cannot disagree about which fields that covers. */
