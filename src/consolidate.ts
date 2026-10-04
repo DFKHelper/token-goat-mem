@@ -192,7 +192,7 @@ export function findCrossScopeDuplicates(db: Db): CrossScopeDuplicate[] {
   }
   const duplicates: CrossScopeDuplicate[] = [];
   for (const fact of facts) {
-    if (fact.scope !== "project") {
+    if (fact.scope !== "project" || fact.status === "pinned") {
       continue;
     }
     const keep = globalByKey.get(kindTextKey(fact));

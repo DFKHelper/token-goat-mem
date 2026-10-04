@@ -278,6 +278,14 @@ describe("findCrossScopeDuplicates", () => {
     seed(db, text, { scope: "project", scopeRoot: "/repo-a", status: "pending" });
     expect(findCrossScopeDuplicates(db)).toEqual([]);
   });
+
+  it("never reports a pinned project fact as the duplicate of an unpinned global copy", () => {
+    // A pinned project fact is a deliberate, user-protected decision: `findDuplicateClusters` never touches a pinned fact, so the cross-scope pass must not supersede one in favour of a plain global restatement either.
+    const text = "always use two-space indentation";
+    seed(db, text, { scope: "global" });
+    seed(db, text, { scope: "project", scopeRoot: "/repo-a", status: "pinned" });
+    expect(findCrossScopeDuplicates(db)).toEqual([]);
+  });
 });
 
 describe("findCrossProjectDuplicates", () => {
