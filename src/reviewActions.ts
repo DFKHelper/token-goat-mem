@@ -3,7 +3,7 @@ import type Database from "better-sqlite3";
 
 import { resolveIdArgOrThrow, UsageError } from "./cliRuntime.js";
 import { detectContradictions, type FactStatusUpdate } from "./contradiction.js";
-import { insertAuditLog, listAuditLogForFact, SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
+import { insertAuditLog, lastStateChangingAuditRow, SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import { listFacts, setFactStatus, updateFact } from "./storage.js";
 import type { FactStatus } from "./types.js";
 
@@ -167,8 +167,7 @@ export function undoReject(db: Database.Database, id: string, reason?: string): 
   if (fact.status !== "superseded") {
     throw new UsageError(`fact ${fact.id} is not rejected (status=${fact.status}) -- there is nothing to undo`);
   }
-  const history = listAuditLogForFact(db, fact.id);
-  const last = history.filter((r) => r.event !== "used" && !r.event.endsWith("_blocked_secret")).at(-1);
+  const last = lastStateChangingAuditRow(db, fact.id);
   if (last?.event !== REVIEW_REJECT_EVENT) {
     throw new UsageError(
       `fact ${fact.id} was not rejected through review (last recorded action: ${last?.event ?? "none"}) -- ` +

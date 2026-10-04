@@ -251,6 +251,13 @@ export function listAuditLogForFact(db: Database.Database, factId: string): Audi
   return listAuditLog(db, { factId });
 }
 
+/** A fact's most recent audit row that changed it, skipping `used` marks and refused-secret rows, which record no change -- what an `--undo` checks to name the action it would reverse. */
+export function lastStateChangingAuditRow(db: Database.Database, factId: string): AuditLogRow | undefined {
+  return listAuditLogForFact(db, factId)
+    .filter((row) => row.event !== "used" && !row.event.endsWith("_blocked_secret"))
+    .at(-1);
+}
+
 /** The distinct fact ids the audit log names that start with `prefix`. `gc` hard-deletes superseded facts after 90 days but keeps their audit rows for 180, so for that window the log is the only place a fact id still resolves -- and "what happened to the fact I forgot?" is exactly the question asked about a fact that no longer exists. */
 export function listAuditLogFactIdsByPrefix(db: Database.Database, prefix: string): string[] {
   return db

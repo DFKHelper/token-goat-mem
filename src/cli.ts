@@ -82,6 +82,7 @@ import {
 import {
   findSupersedingFactId,
   insertAuditLog,
+  lastStateChangingAuditRow,
   listAuditLogForFact,
   SUPERSEDED_AS_DUPLICATE_PREFIX,
   SUPERSEDED_BY_FACT_PREFIX,
@@ -253,8 +254,7 @@ function guardUserFactEditOrThrow(fact: Fact, force: boolean | undefined): void 
 /** Reverses the most recent `mem edit` on a fact, restoring every field that edit touched to the value `buildEditPriorPayload` recorded for it -- `mem review --undo`'s `undoReject` pattern applied to `mem edit`, which had no equivalent: an edit overwrote a fact in place with no way to walk it back through the CLI, only by hand-editing the database. Refuses on anything other than the fact's own last audit row being a recoverable `edit`: a fact whose last action was a `pin`/`forget`/earlier `edit_undo` names that action instead of guessing, and a fact whose last edit predates the `prior_json` column (or was itself an `edit_undo`, which never records one) refuses cleanly rather than restoring nothing and reporting success. */
 function undoEdit(db: Database.Database, id: string): string {
   const fact = resolveIdArgOrThrow(db, id);
-  const history = listAuditLogForFact(db, fact.id);
-  const last = history.filter((r) => r.event !== "used" && !r.event.endsWith("_blocked_secret")).at(-1);
+  const last = lastStateChangingAuditRow(db, fact.id);
   if (last?.event !== "edit") {
     throw new UsageError(
       `fact ${fact.id}'s last recorded action was not an edit (last recorded action: ${last?.event ?? "none"}) -- ` +
