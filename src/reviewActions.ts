@@ -164,7 +164,7 @@ export function undoReject(db: Database.Database, id: string, reason?: string): 
     throw new UsageError(`fact ${fact.id} is not rejected (status=${fact.status}) -- there is nothing to undo`);
   }
   const history = listAuditLogForFact(db, fact.id);
-  const last = history[history.length - 1];
+  const last = history.filter((r) => r.event !== "used" && !r.event.endsWith("_blocked_secret")).at(-1);
   if (last?.event !== REVIEW_REJECT_EVENT) {
     throw new UsageError(
       `fact ${fact.id} was not rejected through review (last recorded action: ${last?.event ?? "none"}) -- ` +

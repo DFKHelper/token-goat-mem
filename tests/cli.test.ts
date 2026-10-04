@@ -6177,6 +6177,16 @@ describe("mem review --undo", () => {
     expect(await statusOf(id)).toBe("pending");
   });
 
+  it("still undoes a rejection after a later `used` audit event", async () => {
+    const id = await pendingId("we cache the lint output");
+    await runCli(["review", "--reject", id]);
+    expect((await runCli(["used", id, "--session-id", "sess-1"])).exitCode).toBe(0);
+
+    const undone = await runCli(["review", "--undo", id]);
+    expect(undone.exitCode).toBe(0);
+    expect(await statusOf(id)).toBe("pending");
+  });
+
   it("refuses a fact that reached superseded some other way", async () => {
     // Scoped to rejections on purpose: `mem forget` is a considered decision about a fact the user chose to keep, and reversing that is a different question from correcting a review slip.
     const remembered = await runCli(["remember", "we deploy nightly", "--kind", "decision", "--scope", "global"]);
