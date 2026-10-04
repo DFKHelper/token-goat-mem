@@ -702,6 +702,32 @@ describe("importFromJson", () => {
     expect(count).toBe(1);
   });
 
+  it.each(["", "hello 5", "2026/07/14", "2026-02-30T00:00:00.000Z", "-000001-01-01T00:00:00.000Z"])(
+    "an imported fact with last_surfaced_at %j is skipped with a per-item error",
+    (lastSurfacedAt) => {
+      const bad = { ...VALID_FACT, id: "13131313-1313-1313-1313-131313131313", last_surfaced_at: lastSurfacedAt };
+      writeFileSync(jsonPath, envelope([VALID_FACT, bad]), "utf8");
+
+      const result = importFromJson(db, { path: jsonPath, root });
+      expect(result.outcomes[0]?.status).toBe("imported");
+      expect(result.outcomes[1]?.status).toBe("skipped_error");
+      if (result.outcomes[1]?.status === "skipped_error") {
+        expect(result.outcomes[1].reason).toContain("invalid ISO-8601");
+        expect(result.outcomes[1].reason).toContain("last_surfaced_at");
+      }
+    }
+  );
+
+  it("an imported fact with a canonical last_surfaced_at keeps it", () => {
+    const surfaced = { ...VALID_FACT, id: "14141414-1414-1414-1414-141414141414", last_surfaced_at: "2026-01-15T12:34:56.789Z" };
+    writeFileSync(jsonPath, envelope([surfaced]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes[0]?.status).toBe("imported");
+    const row = db.prepare("SELECT last_surfaced_at FROM facts WHERE id = ?").get(surfaced.id) as { last_surfaced_at: string | null };
+    expect(row.last_surfaced_at).toBe("2026-01-15T12:34:56.789Z");
+  });
+
   it("an imported fact with a valid ISO-8601 captured_at still imports successfully", () => {
     const validIsoDates = [
       { ...VALID_FACT, id: "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", captured_at: "2026-01-15T12:34:56.789Z" },

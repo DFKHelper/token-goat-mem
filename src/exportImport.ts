@@ -179,7 +179,7 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   }
   if (typeof obj["last_surfaced_at"] === "string") {
     const lastSurfacedAtStr = obj["last_surfaced_at"];
-    if (lastSurfacedAtStr.length === 0 || isNaN(Date.parse(lastSurfacedAtStr))) {
+    if (parseStrictIsoTimestamp(lastSurfacedAtStr) === null) {
       return fail(`facts[${index}] has an invalid ISO-8601 "last_surfaced_at" ${JSON.stringify(lastSurfacedAtStr)}`);
     }
     // Same canonical-form check as `captured_at` above, for the same reason: `last_surfaced_at` is compared lexicographically (storage.ts's `markFactsSurfaced` MAXes it against itself), so a non-canonical but Date.parse-able string would silently corrupt that comparison.
