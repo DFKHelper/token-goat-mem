@@ -796,6 +796,16 @@ describe("importFromJson restores a superseded fact's superseded_by edge", () =>
     expect(result.outcomes[0]?.status).toBe("imported");
     expect(findSupersedingFactId(db, loser.id)).toBeNull();
   });
+
+  it("keeps the edge when the winner's id is shorter than a 36-char uuid", () => {
+    const winner = { ...VALID_FACT, id: "abc123", subject: "db", value: "mysql" };
+    const loser = { ...VALID_FACT, id: "def456", subject: "db", value: "postgres", status: "superseded", superseded_by: winner.id };
+    writeFileSync(jsonPath, envelope([winner, loser]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes.every((o) => o.status === "imported")).toBe(true);
+    expect(findSupersedingFactId(db, loser.id)).toBe(winner.id);
+  });
 });
 
 describe("embedding provenance on import", () => {

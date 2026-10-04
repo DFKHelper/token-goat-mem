@@ -150,7 +150,7 @@ export const SUPERSEDED_BY_FACT_PREFIX = "Superseded by fact ";
 export const SUPERSEDED_AS_DUPLICATE_PREFIX = "superseded as a duplicate of ";
 
 const SUPERSEDING_ID_PATTERN = new RegExp(
-  `(?:${SUPERSEDED_BY_FACT_PREFIX}|${SUPERSEDED_AS_DUPLICATE_PREFIX})([0-9a-fA-F-]{36})`
+  `(?:${SUPERSEDED_BY_FACT_PREFIX}|${SUPERSEDED_AS_DUPLICATE_PREFIX})([0-9a-fA-F-]{1,128})`
 );
 
 /** The id of the fact that superseded `factId`, or `null` if nothing did or the reason names no winner. Reads the most recent audit row for the fact, not the first: a fact can be superseded, restored, and superseded again by a different winner, and the current edge is the last one written. `rowid` breaks ties because `created_at` is an ISO string at millisecond resolution and two rows written inside one transaction can share it exactly. Returns an id, never a fact: the winner may itself have been superseded, or pruned by `mem gc`, and the caller is the one positioned to decide how to present either case. */
