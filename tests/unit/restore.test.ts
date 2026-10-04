@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listSnapshots, takeSnapshot } from "../../src/backup.js";
 import { LATEST_SCHEMA_VERSION } from "../../src/migrations.js";
 import { restoreStore, UnusableSnapshotError } from "../../src/restore.js";
-import { getEpoch, insertFact, listFacts, openStorage } from "../../src/storage.js";
+import { getEpoch, insertFact, insertRecallLog, listFacts, openStorage } from "../../src/storage.js";
 
 let root: string;
 let dbPath: string;
@@ -98,6 +98,34 @@ describe("restoreStore", () => {
     expect(preRestore).toHaveLength(1);
     expect(preRestore[0]?.path).toBe(result.preRestore.path);
     expect(texts(result.preRestore.path)).toContain("written during the restore");
+    expect(result.epoch).toBeGreaterThan(result.preRestore.epoch);
+    expect(texts(dbPath)).toEqual(["in the snapshot"]);
+  });
+
+  it("retries when another connection writes something that does not move the epoch", async () => {
+    const source = snapshotWith("in the snapshot");
+    let calls = 0;
+
+    const result = await restoreStore({
+      source,
+      dbPath,
+      backupDir,
+      afterPreRestoreSnapshot: () => {
+        calls += 1;
+        if (calls === 1) {
+          const other = openStorage(dbPath, { autoSnapshot: false });
+          try {
+            const [fact] = listFacts(other);
+            insertRecallLog(other, "session-1", [fact?.id ?? ""], new Date().toISOString());
+          } finally {
+            other.close();
+          }
+        }
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(listSnapshots(backupDir).filter((snapshot) => snapshot.reason === "pre-restore")).toHaveLength(1);
     expect(result.epoch).toBeGreaterThan(result.preRestore.epoch);
     expect(texts(dbPath)).toEqual(["in the snapshot"]);
   });

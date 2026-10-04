@@ -1,4 +1,4 @@
-/** `mem restore`'s engine: replaces the live store's contents with a snapshot's, without ever handing the live file to anything but the live store's own connection. 1. **Stage.** The snapshot is copied (SQLite's online backup API) to a private file beside the live store, so neither the snapshot nor the live store is opened for writing while it is judged. 2. **Validate.** The copy must pass `integrity_check`, carry a schema version this mem can read, and hold a `facts` table with every column mem has always required -- a SQLite file that merely has a table called `facts` is not a mem store. 3. **Migrate.** The copy is brought up to the current schema, so a snapshot an older mem took restores into the columns this one reads. 4. **Swap.** The live store is snapshotted (`pre-restore`), then, in one immediate transaction on the live connection, every table is emptied and refilled from the attached copy and the epoch is moved past both stores. Readers see the old store or the new one, never a mix, and a writer that slipped in after the pre-restore snapshot is detected (the epoch moved) and the swap retried, so that snapshot always holds exactly what the restore replaced. A failure in steps 1-3 is an {@link UnusableSnapshotError} and leaves the live store and the backup directory untouched. Opens skip the automatic snapshot (`autoSnapshot: false`): its pruning could otherwise delete the very auto snapshot being restored. */
+/** `mem restore`'s engine: replaces the live store's contents with a snapshot's, without ever handing the live file to anything but the live store's own connection. 1. **Stage.** The snapshot is copied (SQLite's online backup API) to a private file beside the live store, so neither the snapshot nor the live store is opened for writing while it is judged. 2. **Validate.** The copy must pass `integrity_check`, carry a schema version this mem can read, and hold a `facts` table with every column mem has always required -- a SQLite file that merely has a table called `facts` is not a mem store. 3. **Migrate.** The copy is brought up to the current schema, so a snapshot an older mem took restores into the columns this one reads. 4. **Swap.** The live store is snapshotted (`pre-restore`), then, in one immediate transaction on the live connection, every table is emptied and refilled from the attached copy and the epoch is moved past both stores. Readers see the old store or the new one, never a mix, and a writer that slipped in after the pre-restore snapshot is detected (the epoch or SQLite's `data_version` moved) and the swap retried, so that snapshot always holds exactly what the restore replaced. A failure in steps 1-3 is an {@link UnusableSnapshotError} and leaves the live store and the backup directory untouched. Opens skip the automatic snapshot (`autoSnapshot: false`): its pruning could otherwise delete the very auto snapshot being restored. */
 
 import Database from "better-sqlite3";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -110,12 +110,13 @@ function swap(options: RestoreOptions, staged: string): RestoreResult {
     live.prepare(`ATTACH DATABASE ? AS ${RESTORED_SCHEMA}`).run(staged);
     try {
       for (let attempt = 0; attempt < SWAP_ATTEMPTS; attempt += 1) {
+        const dataVersion = readDataVersion(live);
         const preRestore = takeSnapshot(live, options.backupDir, "pre-restore");
         options.afterPreRestoreSnapshot?.();
         let epoch: number | undefined;
         try {
           epoch = live
-            .transaction(() => (getEpoch(live) === preRestore.epoch ? replaceContents(live, preRestore.epoch) : undefined))
+            .transaction(() => (getEpoch(live) === preRestore.epoch && readDataVersion(live) === dataVersion ? replaceContents(live, preRestore.epoch) : undefined))
             .immediate();
         } catch (error) {
           rmSync(preRestore.path, { force: true });
@@ -138,6 +139,11 @@ function swap(options: RestoreOptions, staged: string): RestoreResult {
   } finally {
     live.close();
   }
+}
+
+/** SQLite's `data_version`: it moves only when another connection commits a write, which is exactly a concurrent writer that may not have bumped the epoch (a recall-log row, say). */
+function readDataVersion(live: Database.Database): number {
+  return live.pragma("data_version", { simple: true }) as number;
 }
 
 /** Empties every live table and refills it from the attached copy, then moves the epoch past both stores. Runs inside the caller's transaction; foreign keys are checked at its commit, so tables can be filled in any order. */
