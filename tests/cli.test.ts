@@ -3465,6 +3465,20 @@ describe("regression: `contested` is escapable (it used to be excluded from the 
     expect((await runCli(["show", idA])).stdout).toContain("status: contested");
   });
 
+  it("`review --undo` of a rejected contested fact that was pinned before it was contested restores the pin once its rival is gone", async () => {
+    const [idA, idB] = await seedTiedPair();
+    await runCli(["pin", idA]);
+    await runCli(["epoch", "--gc"]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: contested");
+
+    await runCli(["review", "--reject", idA]);
+    await runCli(["review", "--undo", idA]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: contested");
+
+    await runCli(["forget", idB]);
+    expect((await runCli(["show", idA])).stdout).toContain("status: pinned");
+  });
+
   it("`review --promote` resolves a tied pair `mem review` already shows as contested, before any `epoch --gc` persists the status", async () => {
     const [idA, idB] = await seedTiedPair();
 

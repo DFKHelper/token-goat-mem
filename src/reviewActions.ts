@@ -13,10 +13,11 @@ export function setStatusWithAudit(
   factId: string,
   nextStatus: FactStatus,
   event: string,
-  detail: string
+  detail: string,
+  options: { readonly priorStatus?: FactStatus | null } = {}
 ): void {
   const tx = db.transaction((): void => {
-    setFactStatus(db, factId, nextStatus);
+    setFactStatus(db, factId, nextStatus, options);
     insertAuditLog(db, { event, factId, detail });
   });
   // BEGIN IMMEDIATE: `setFactStatus` reads the current status and epoch before writing, and once this outer transaction is open it degrades to a savepoint -- so the outer variant is what decides whether the read-then-write pair survives a concurrent writer under WAL. See storage.insertFact for the SQLITE_BUSY_SNAPSHOT rationale.
@@ -146,7 +147,7 @@ export function rejectPending(db: Database.Database, id: string, reason?: string
     fact.id,
     "superseded",
     "review_reject",
-    withReason(`rejected ${fact.status} fact (superseded) via explicit review`, reason)
+    withReason(`rejected ${fact.status} fact (was status=${fact.status} prior_status=${fact.prior_status ?? "none"}) (superseded) via explicit review`, reason)
   );
   if (isContested) {
     reconcileContradictions(db, "review_reject");
@@ -156,6 +157,9 @@ export function rejectPending(db: Database.Database, id: string, reason?: string
 
 /** The audit event `rejectPending` writes. An undo is only offered for a rejection, so this is the marker that identifies one. */
 const REVIEW_REJECT_EVENT = "review_reject";
+
+/** The pre-reject `status` and `prior_status` that `rejectPending` records in its audit detail, so an undo restores the pair (a pinned-then-contested fact keeps its pin) rather than only `prior_status`. Rows written before this marker existed do not match and fall back to `prior_status`. */
+const PRE_REJECT_STATE_PATTERN = /\(was status=(\w+) prior_status=(\w+)\)/u;
 
 /** `mem review --undo <id>`: put a fact rejected through review back where it was. Review is a two-key decision made one key at a time, and `--reject` was the only irreversible one: it marks the fact `superseded`, and `--promote` refuses anything that is not `pending` or `contested`, so a mis-typed id or a rejection the user changed their mind about could not be walked back through the CLI at all -- only by hand-editing the database or round-tripping a `mem export`. A review queue whose reject key is unrecoverable is one users are right to hesitate over, which defeats the queue. Restores `prior_status` (`pending` when the column predates this fact), so a rejected `contested` fact returns to `contested` rather than being quietly upgraded to `pending` by the undo. Deliberately scoped to rejections, not a general un-forget: `mem forget` is a considered decision about a fact the user chose to keep, and reversing that is a different question from correcting a slip in a review queue. A superseded fact that got there any other way is refused by name, so the error says which mechanism claimed it rather than silently doing nothing. */
 export function undoReject(db: Database.Database, id: string, reason?: string): string {
@@ -171,13 +175,16 @@ export function undoReject(db: Database.Database, id: string, reason?: string): 
         `--undo reverses \`mem review --reject\` only`
     );
   }
-  const restored = fact.prior_status ?? "pending";
+  const recorded = PRE_REJECT_STATE_PATTERN.exec(last.detail ?? "");
+  const restored = recorded !== null ? (recorded[1] as FactStatus) : (fact.prior_status ?? "pending");
+  const restoredPrior = recorded !== null ? (recorded[2] === "none" ? null : (recorded[2] as FactStatus)) : undefined;
   setStatusWithAudit(
     db,
     fact.id,
     restored,
     "review_undo",
-    withReason(`undid review rejection, restored to ${restored}`, reason)
+    withReason(`undid review rejection, restored to ${restored}`, reason),
+    restoredPrior !== undefined ? { priorStatus: restoredPrior } : {}
   );
   if (restored === "contested") {
     reconcileContradictions(db, "review_undo");

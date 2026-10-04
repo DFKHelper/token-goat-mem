@@ -614,7 +614,7 @@ export function updateFact(db: Db, id: string, patch: FactUpdate): Fact | undefi
 }
 
 /** Sets a fact's `status` directly -- the common case for pin/unpin, forget (soft delete via `status = 'superseded'`, kept for audit per design plan Section 3), and persisting contradiction-resolution outcomes (design plan P4; `src/contradiction.ts`'s `detectContradictions` is pure and returns the status transitions to apply, this is where a caller applies them). Narrower and more obviously named than routing a status-only change through `updateFact`. Returns the updated fact, or `undefined` if `id` does not exist. */
-export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | undefined {
+export function setFactStatus(db: Db, id: string, status: FactStatus, options: { readonly priorStatus?: FactStatus | null } = {}): Fact | undefined {
   const tx = db.transaction((): void => {
     const current = db
       .prepare<[string], { status: string; prior_status: string | null }>("SELECT status, prior_status FROM facts WHERE id = ?")
@@ -623,7 +623,7 @@ export function setFactStatus(db: Db, id: string, status: FactStatus): Fact | un
       return;
     }
     // `status_changed_at` advances on every call, including a no-op re-write of the status a fact already holds -- that is exactly what `mem pin` on an already-pinned fact means, and it is how the six-month re-confirmation nudge gets cleared. `prior_status`, by contrast, only moves on a genuine transition, so re-pinning cannot erase the pre-pin status a later contradiction reinstatement needs to restore.
-    const priorStatus = current.status === status ? current.prior_status : current.status;
+    const priorStatus = options.priorStatus !== undefined ? options.priorStatus : current.status === status ? current.prior_status : current.status;
     const next = getEpoch(db) + 1;
     const result = db
       .prepare("UPDATE facts SET status = ?, prior_status = ?, status_changed_at = ?, epoch = ? WHERE id = ?")
