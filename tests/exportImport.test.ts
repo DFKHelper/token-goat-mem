@@ -7,7 +7,7 @@ import type Database from "better-sqlite3";
 
 import { findSupersedingFactId } from "../src/db.js";
 import { countEmbeddedFacts, getEmbeddingMeta, getFactById, insertFact, openStorage, setEmbeddingMeta } from "../src/storage.js";
-import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
+import { clearProjectIdentityCache, normalizeRemoteUrl, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
 import type { ImportOutcome } from "../src/import.js";
@@ -553,6 +553,25 @@ describe("importFromJson", () => {
       rmSync(cloneB, { recursive: true, force: true });
       rmSync(unrelated, { recursive: true, force: true });
     }
+  });
+
+  it("stores an imported project fact's scopeRepo normalized, so it matches the live repository identity", () => {
+    const rawUrl = "https://github.com/Org/Repo.git";
+    const unnormalizedRepo = {
+      ...VALID_FACT,
+      id: "24242424-2424-2424-2424-242424242424",
+      scope: "project",
+      scopeRoot: root,
+      scopeRepo: rawUrl,
+    };
+    writeFileSync(jsonPath, envelope([unnormalizedRepo]), "utf8");
+
+    const result = importFromJson(db, { path: jsonPath, root });
+    expect(result.outcomes).toHaveLength(1);
+    expect(result.outcomes[0]?.status).toBe("imported");
+
+    const stored = db.prepare("SELECT scope_repo FROM facts WHERE id = ?").get(unnormalizedRepo.id) as { scope_repo: string | null };
+    expect(stored.scope_repo).toBe(normalizeRemoteUrl(rawUrl));
   });
 
   it("normalizes a global fact's non-empty scopeRoot to null instead of failing", () => {

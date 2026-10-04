@@ -9,7 +9,7 @@ import { insertAuditLog, SUPERSEDED_BY_FACT_PREFIX } from "./db.js";
 import type { EmbeddingMeta } from "./embeddings.js";
 import type { ImportCandidate, ImportOutcome, ImportResult } from "./import.js";
 import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.js";
-import { identityMatches } from "./projectIdentity.js";
+import { identityMatches, normalizeRemoteUrl } from "./projectIdentity.js";
 import { MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
 import { countEmbeddedFacts, getEmbeddingMeta, getFactById, ID_PREFIX_PATTERN, insertFact, setEmbeddingMeta } from "./storage.js";
 import { FACT_KINDS, FACT_SCOPES, FACT_STATUSES } from "./types.js";
@@ -241,7 +241,8 @@ function validateJsonFact(raw: unknown, index: number, root: string | undefined)
   if (newFact.scope !== "project") {
     newFact.scopeRepo = null;
   } else if (typeof obj["scopeRepo"] === "string") {
-    newFact.scopeRepo = obj["scopeRepo"];
+    // Normalize like the capture path does (resolveScopeRepo -> normalizeRemoteUrl), or an imported `https://github.com/Org/Repo.git` never matches the live repository identity and the fact is never recalled.
+    newFact.scopeRepo = normalizeRemoteUrl(obj["scopeRepo"]);
   } else if (obj["scopeRepo"] === null) {
     newFact.scopeRepo = null;
   }
