@@ -33,6 +33,19 @@ afterEach(() => {
 
 // ─────────────────────────────────────────────────────────────────────────── happy path ───────────────────────────────────────────────────────────────────────────
 
+describe("regression: remember that promotes a pending suggestion", () => {
+  it("recalls the newer user statement over an older user fact for the same subject", async () => {
+    const subject = ["--kind", "fact", "--scope", "global", "--subject", "deploy-target"];
+    expect((await runCli(["remember", "Deploy target is prod", ...subject, "--value", "prod"])).exitCode).toBe(0);
+    expect((await runCli(["suggest", "Deploy target is staging", ...subject, "--value", "staging"])).exitCode).toBe(0);
+    const promoted = await runCli(["remember", "Deploy target is staging", ...subject, "--value", "staging"]);
+    expect(promoted.exitCode, promoted.stderr).toBe(0);
+    const recalled = await runCli(["recall", "deploy target"]);
+    expect(recalled.stdout).toContain("Deploy target is staging");
+    expect(recalled.stdout).not.toContain("Deploy target is prod");
+  });
+});
+
 describe("mem CLI happy path", () => {
   it("remember -> list -> show -> recall -> edit -> pin -> forget round-trips through a single fact", async () => {
     const remembered = await runCli([

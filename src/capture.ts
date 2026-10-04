@@ -856,7 +856,8 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
     const [primary, ...duplicates] = findReaffirmablePendingFacts(db, newFact);
     if (primary !== undefined) {
       const restated = restatementUpdates(newFact, primary);
-      const refreshed = reaffirmFact(db, primary.id, new Date(), restated.updates);
+      // Explicit capture is always source_type "user"; a promoted suggestion was filed as "derived" and would otherwise lose contradiction precedence to an older user fact.
+      const refreshed = reaffirmFact(db, primary.id, new Date(), { ...restated.updates, sourceType: "user" });
       if (refreshed === undefined) {
         throw new CaptureValidationError(`fact ${primary.id} vanished while being reaffirmed`);
       }
@@ -877,7 +878,7 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
             "sentence, superseded when the primary was promoted via explicit restatement.",
         });
       }
-      const refreshedFields = ["captured_at and confidence refreshed", "promoted from pending to active", ...restated.changed];
+      const refreshedFields = ["captured_at and confidence refreshed", "promoted from pending to active", ...(primary.source_type === "user" ? [] : [`source_type ${primary.source_type} -> user`]), ...restated.changed];
       if (duplicates.length > 0) {
         refreshedFields.push(`${duplicates.length} duplicate pending suggestion${duplicates.length === 1 ? "" : "s"} superseded`);
       }

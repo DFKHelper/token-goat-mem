@@ -217,6 +217,7 @@ export interface RestatementUpdates {
   readonly anchor?: string;
   readonly sourceRef?: string;
   readonly why?: string;
+  readonly sourceType?: Fact["source_type"];
 }
 
 /** Restarts a fact's clock: `captured_at` moves to now and confidence is restored to full. `captured_at` is what time-decay measures age against and what contradiction resolution breaks ties on, so this is the whole substance of a reaffirmation -- the fact was true then and is true again now, and it should rank and decay as though it had just been stated. Narrow on purpose rather than a `captured_at` field on {@link FactUpdate}: that clock decides decay and precedence, and `mem edit` has no business moving it. Also applies `updates.anchor`/`updates.sourceRef`/`updates.why` when the caller restates the same fact carrying a new one. The user's latest statement wins, for the same reason `captured_at` and `confidence` already refresh here: `mem remember "uses pnpm"` followed by `mem remember "uses pnpm" --anchor "file-exists pnpm-lock.yaml"` used to print "reaffirmed" while silently discarding the anchor, leaving the fact caveated `unverified` forever with no way to ever reach `contradicted`. An `updates` field left `undefined` means the incoming capture carried nothing for that field -- the existing value (including an existing anchor) is left untouched, never cleared. */
@@ -241,6 +242,10 @@ export function reaffirmFact(
     if (updates.why !== undefined) {
       sets.push("why = ?");
       params.push(updates.why);
+    }
+    if (updates.sourceType !== undefined) {
+      sets.push("source_type = ?");
+      params.push(updates.sourceType);
     }
     params.push(id);
     const changed = db.prepare(`UPDATE facts SET ${sets.join(", ")} WHERE id = ?`).run(...params).changes;

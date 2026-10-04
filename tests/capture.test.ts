@@ -423,6 +423,8 @@ describe("regression: stating a fact explicitly resolves the pending suggestion 
     const rows = db.prepare<[], { id: string; status: string }>("SELECT id, status FROM facts").all();
     expect(rows).toHaveLength(1);
     expect(rows[0]?.status).toBe("active");
+    // Explicit capture is always user-stated: the promoted row must carry source_type "user", not the "derived" the suggestion was filed with, or contradiction precedence (provenance before recency) lets an older user fact beat it.
+    expect(factRow(suggested.fact.id).source_type).toBe("user");
 
     expect(auditEvents(suggested.fact.id)).toContain("capture_reaffirmed_pending_promoted");
   });
