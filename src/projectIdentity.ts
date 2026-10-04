@@ -164,10 +164,14 @@ export function normalizeRemoteUrl(url: string): string | null {
   if (rest.length === 0) {
     return null;
   }
-  // scp-style `user@host:path` (no scheme, single colon before a non-numeric path).
-  const scp = /^(?:[^@/]+@)?([^/:]+):(?!\/)(.+)$/u.exec(rest);
+  if (/^\.\.?\/|^[^/:]+$/.test(rest)) {
+    return null;
+  }
+  // scp-style `user@host:path` (no scheme, single colon, optionally followed by a slash for absolute paths).
+  const scp = /^(?:[^@/]+@)?([^/:]+):(.+)$/u.exec(rest);
   if (scp !== null && !/^[a-z][a-z0-9+.-]*:\/\//iu.test(rest)) {
-    rest = `${scp[1] ?? ""}/${scp[2] ?? ""}`;
+    const path = scp[2] ?? "";
+    rest = path.startsWith("/") ? `${scp[1] ?? ""}${path}` : `${scp[1] ?? ""}/${path}`;
   } else if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(rest)) {
     // A scheme URL is parsed so userinfo (a token, `user:pass@`), query and fragment never reach the identity, which is stored and exported.
     rest = hostAndPathOf(rest) ?? rest.replace(/^[a-z][a-z0-9+.-]*:\/\//iu, "").replace(/^[^@/]+@/u, "");
@@ -175,8 +179,8 @@ export function normalizeRemoteUrl(url: string): string | null {
     rest = rest.replace(/^[^@/]+@/u, "");
   }
   rest = rest
-    .replace(/\.git$/iu, "")
     .replace(/\/+$/u, "")
+    .replace(/\.git$/iu, "")
     .replace(/\\/gu, "/")
     .toLowerCase();
   return rest.length > 0 ? rest : null;

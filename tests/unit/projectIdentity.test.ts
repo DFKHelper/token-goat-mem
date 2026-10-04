@@ -61,6 +61,8 @@ describe("normalizeRemoteUrl", () => {
       "ssh://git@github.com/acme/widget.git",
       "https://github.com/ACME/Widget.git",
       "https://github.com/acme/widget/",
+      "https://github.com/acme/widget.git/",
+      "git@github.com:/acme/widget.git",
     ]) {
       expect(normalizeRemoteUrl(url), url).toBe(expected);
     }
@@ -92,6 +94,12 @@ describe("normalizeRemoteUrl", () => {
     expect(normalizeRemoteUrl("")).toBeNull();
     expect(normalizeRemoteUrl("   ")).toBeNull();
     expect(normalizeRemoteUrl(".git")).toBeNull();
+  });
+
+  it("returns null for relative local-path remotes", () => {
+    expect(normalizeRemoteUrl("../upstream.git")).toBeNull();
+    expect(normalizeRemoteUrl("./upstream.git")).toBeNull();
+    expect(normalizeRemoteUrl("upstream.git")).toBeNull();
   });
 });
 
@@ -143,6 +151,17 @@ describe("resolveProjectIdentity", () => {
     git(single, "remote", "add", "upstream", "https://github.com/acme/widget.git");
     clearProjectIdentityCache();
     expect(resolveProjectIdentity(single)).toBe("github.com/acme/widget#.");
+  });
+
+  it("returns null for relative local-path remotes and does not share identity across them", () => {
+    const repo1 = makeRepo("repo1", "../upstream.git");
+    const repo2 = makeRepo("repo2", "../upstream.git");
+    clearProjectIdentityCache();
+    const id1 = resolveProjectIdentity(repo1);
+    clearProjectIdentityCache();
+    const id2 = resolveProjectIdentity(repo2);
+    expect(id1).toBeNull();
+    expect(id2).toBeNull();
   });
 
   it("resolves quoted url values and strips inline comments and credentials", () => {
