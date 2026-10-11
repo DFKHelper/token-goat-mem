@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -336,11 +337,13 @@ function resolveCuratedMigrations(curatedGone, renameMap, discoveredSet) {
 
 // --------------------------------------------------------------------------- Core sync ---------------------------------------------------------------------------
 
+const REAL_GIT = { ensureRepo: ensureGitRepo, listComponents, detectRenames };
+
 /** Runs the full compute-and-optionally-write pass. Never throws for expected failure modes -- returns `exitCode` 2 for config/usage/marker errors instead. */
-function runSync(repoRoot, { mode, format, strictCurated }) {
+function runSync(repoRoot, { mode, format, strictCurated, git = REAL_GIT }) {
   let config;
   try {
-    ensureGitRepo(repoRoot);
+    git.ensureRepo(repoRoot);
     config = loadConfig(repoRoot);
   } catch (error) {
     return { exitCode: 2, stderr: [error.message], changed: false, jsonPayload: null };
@@ -355,7 +358,7 @@ function runSync(repoRoot, { mode, format, strictCurated }) {
   let markers;
   const docTextOriginal = readFileSync(docPath, "utf8");
   try {
-    discovered = listComponents(repoRoot, config.patterns, config.exclude);
+    discovered = git.listComponents(repoRoot, config.patterns, config.exclude);
     markers = locateMarkers(docTextOriginal);
   } catch (error) {
     return { exitCode: 2, stderr: [error.message], changed: false, jsonPayload: null };
@@ -386,7 +389,7 @@ function runSync(repoRoot, { mode, format, strictCurated }) {
     }
   }
 
-  const renameMap = detectRenames(repoRoot);
+  const renameMap = git.detectRenames(repoRoot);
   const { curatedRoles: migrated, events } = resolveCuratedMigrations(curatedGone, renameMap, discoveredSet);
   for (const [target, role] of migrated) curatedRoles.set(target, role);
 
@@ -442,6 +445,32 @@ function runSync(repoRoot, { mode, format, strictCurated }) {
 
 // --------------------------------------------------------------------------- Self-test ---------------------------------------------------------------------------
 
+function makeTempDir() {
+  return mkdtempSync(join(tmpdir(), "arch-sync-selftest-"));
+}
+
+/** In-process stand-in for the git queries, used by cases whose subject is doc splicing rather than git discovery; every file under the dir (bar `.git`) counts as tracked and nothing is renamed. */
+const fsGit = {
+  ensureRepo() {},
+  listComponents(repoRoot, patterns, excludePatterns) {
+    const regexes = patterns.map(globToRegExp);
+    const found = [];
+    const walk = (rel) => {
+      for (const entry of readdirSync(join(repoRoot, rel), { withFileTypes: true })) {
+        const next = rel === "" ? entry.name : `${rel}/${entry.name}`;
+        if (entry.isDirectory()) {
+          if (entry.name !== ".git") walk(next);
+        } else if (regexes.some((r) => r.test(next))) {
+          found.push(next);
+        }
+      }
+    };
+    walk("");
+    return applyExclude(found.sort(), excludePatterns);
+  },
+  detectRenames: () => new Map(),
+};
+
 function makeTempRepo() {
   const dir = mkdtempSync(join(tmpdir(), "arch-sync-selftest-"));
   spawnSync("git", ["init", "-q"], { cwd: dir });
@@ -484,15 +513,14 @@ function selfTest() {
 
   // Case 1: idempotency -- --write twice on an unchanged tree is byte-identical.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/**\n * Alpha module role sentence.\n */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      const first = runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      const first = runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const textFirst = readDoc(dir);
-      const second = runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      const second = runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const textSecond = readDoc(dir);
       check("Case 1: --write twice is byte-identical", first.exitCode === 0 && second.exitCode === 0 && textFirst === textSecond, `first=${first.exitCode} second=${second.exitCode} equal=${textFirst === textSecond}`);
     } finally {
@@ -502,13 +530,12 @@ function selfTest() {
 
   // Case 2: missing marker pair -> exit 2.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), "# No markers here\n", "utf8");
-      gitCommitAll(dir, "init");
-      const result = runSync(dir, { mode: "check", format: "text", strictCurated: false });
+      const result = runSync(dir, { git: fsGit, mode: "check", format: "text", strictCurated: false });
       check("Case 2: missing marker -> exit 2", result.exitCode === 2, `exitCode=${result.exitCode}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -517,14 +544,13 @@ function selfTest() {
 
   // Case 3: duplicated marker -> exit 2.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       const doc = ["# Doc", "", START_MARKER, END_MARKER, "", START_MARKER, END_MARKER, ""].join("\n");
       writeFileSync(join(dir, "ARCHITECTURE.md"), doc, "utf8");
-      gitCommitAll(dir, "init");
-      const result = runSync(dir, { mode: "check", format: "text", strictCurated: false });
+      const result = runSync(dir, { git: fsGit, mode: "check", format: "text", strictCurated: false });
       check("Case 3: duplicated marker -> exit 2", result.exitCode === 2, `exitCode=${result.exitCode}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -533,14 +559,13 @@ function selfTest() {
 
   // Case 4: inverted markers (END before START) -> exit 2.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       const doc = ["# Doc", "", END_MARKER, START_MARKER, ""].join("\n");
       writeFileSync(join(dir, "ARCHITECTURE.md"), doc, "utf8");
-      gitCommitAll(dir, "init");
-      const result = runSync(dir, { mode: "check", format: "text", strictCurated: false });
+      const result = runSync(dir, { git: fsGit, mode: "check", format: "text", strictCurated: false });
       check("Case 4: inverted markers -> exit 2", result.exitCode === 2, `exitCode=${result.exitCode}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -549,13 +574,12 @@ function selfTest() {
 
   // Case 5: CRLF preservation.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\r\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const text = readDoc(dir);
       const hasCRLF = text.includes("\r\n");
       const hasBareLF = /(?<!\r)\n/u.test(text);
@@ -567,14 +591,13 @@ function selfTest() {
 
   // Case 6: trailing-newline preservation (content after END marker untouched).
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       const doc = `# Doc\n\n${START_MARKER}\n${END_MARKER}\n\n## Trailer\nNo trailing newline here.`;
       writeFileSync(join(dir, "ARCHITECTURE.md"), doc, "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const text = readDoc(dir);
       check("Case 6: bytes after END marker preserved exactly", text.endsWith("No trailing newline here."), JSON.stringify(text.slice(-40)));
     } finally {
@@ -584,7 +607,7 @@ function selfTest() {
 
   // Case 7: bytewise sort stability (uppercase sorts before lowercase, unlike locale collation).
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "Zeta.ts", "/** Zeta. */\nexport function zeta() {}\n");
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
@@ -595,8 +618,7 @@ function selfTest() {
         exclude: [],
       });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const text = readDoc(dir);
       check("Case 7: bytewise sort puts src/Zeta.ts before src/alpha.ts", text.indexOf("src/Zeta.ts") < text.indexOf("src/alpha.ts"), text);
     } finally {
@@ -606,18 +628,16 @@ function selfTest() {
 
   // Case 8: curated Role survives a write.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       let text = readDoc(dir);
       text = text.replace(/\| Alpha \|/u, "| Hand-curated prose. |");
       writeFileSync(join(dir, "ARCHITECTURE.md"), text, "utf8");
-      gitCommitAll(dir, "curate");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const after = readDoc(dir);
       check("Case 8: curated Role preserved verbatim across --write", after.includes("Hand-curated prose."), after);
     } finally {
@@ -632,8 +652,7 @@ function selfTest() {
       writeSrc(dir, "old.ts", "/** Old module. */\nexport function old() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/old.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       let text = readDoc(dir);
       text = text.replace(/\| Old module \|/u, "| CURATED ROLE TEXT |");
       writeFileSync(join(dir, "ARCHITECTURE.md"), text, "utf8");
@@ -660,8 +679,7 @@ function selfTest() {
       writeSrc(dir, "old.ts", "/** Old module. */\nexport function old() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/old.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       let text = readDoc(dir);
       text = text.replace(/\| Old module \|/u, "| CURATED SPLIT TEXT |");
       writeFileSync(join(dir, "ARCHITECTURE.md"), text, "utf8");
@@ -689,7 +707,7 @@ function selfTest() {
 
   // Case 11: layer order follows config declaration order, not alphabetical.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "zeta.ts", "/** Zeta. */\nexport function zeta() {}\n");
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
@@ -703,8 +721,7 @@ function selfTest() {
         exclude: [],
       });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const text = readDoc(dir);
       check("Case 11: declared layer order wins over alphabetical", text.indexOf("Zeta Layer") < text.indexOf("Alpha Layer"), text);
     } finally {
@@ -714,13 +731,12 @@ function selfTest() {
 
   // Case 12: an Uncategorized member is reported as drift.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "orphan.ts", "/** Orphan. */\nexport function orphan() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", []]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      const result = runSync(dir, { mode: "check", format: "json", strictCurated: false });
+      const result = runSync(dir, { git: fsGit, mode: "check", format: "json", strictCurated: false });
       const flagged = result.exitCode === 1 && result.jsonPayload.uncategorized.includes("src/orphan.ts");
       check("Case 12: Uncategorized member fails --check", flagged, JSON.stringify(result.jsonPayload));
     } finally {
@@ -730,14 +746,13 @@ function selfTest() {
 
   // Case 13: Role truncation at 120 chars.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       const longSentence = "A".repeat(200);
       writeSrc(dir, "long.ts", `/** ${longSentence} without an early period */\nexport function longFn() {}\n`);
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/long.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const text = readDoc(dir);
       const rowMatch = /\| `src\/long\.ts` \| Core \| (.*?) \| [^|]*\|/u.exec(text);
       const role = rowMatch ? rowMatch[1] : "";
@@ -749,13 +764,12 @@ function selfTest() {
 
   // Case 14: pipe escaping in a Role.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       writeSrc(dir, "piped.ts", "/** Reads a `key|value` pair from stdin. */\nexport function piped() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/piped.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       const text = readDoc(dir);
       const rowLine = text.split("\n").find((l) => l.includes("src/piped.ts"));
       const escaped = Boolean(rowLine) && rowLine.includes("key\\|value") && parseRowLine(rowLine)?.length === 4;
@@ -772,8 +786,8 @@ function selfTest() {
       writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
       writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
+      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
       gitCommitAll(dir, "init");
-      runSync(dir, { mode: "write", format: "text", strictCurated: false });
       const result = runSync(dir, { mode: "check", format: "text", strictCurated: false });
       check("Case 15: synchronized tree exits 0 with empty stderr", result.exitCode === 0 && result.stderr.length === 0, `exitCode=${result.exitCode} stderr=${JSON.stringify(result.stderr)}`);
     } finally {
