@@ -12,10 +12,13 @@ import {
   findCrossProjectDuplicates,
   findCrossScopeDuplicates,
   findDuplicateClusters,
+  findDuplicateReport,
   findGraphStaleFacts,
   findRelatedFactPairs,
   findStaleFacts,
   jaccard,
+  polaritySignature,
+  signaturesConflict,
   staleCutoff,
 } from "../src/consolidate.js";
 import {
@@ -205,6 +208,86 @@ describe("findDuplicateClusters", () => {
     expect(second.map((c) => [c.keep.id, ...c.duplicates.map((d) => d.fact.id)])).toEqual(
       first.map((c) => [c.keep.id, ...c.duplicates.map((d) => d.fact.id)])
     );
+  });
+
+  it("refuses to cluster an always/never pair over the same topic set and reports it as refused", () => {
+    const always = seed(db, "Always run the linter before committing", { capturedAt: daysAgo(2) });
+    const never = seed(db, "Never run the linter before committing", { capturedAt: daysAgo(1) });
+    const report = findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(report.clusters).toEqual([]);
+    expect(report.refusedPairs.map((pair) => [pair.keep.id, pair.candidate.id].sort())).toEqual([[always.id, never.id].sort()]);
+    expect(report.refusedPairs[0]?.similarity).toBeGreaterThanOrEqual(DEFAULT_DUPLICATE_THRESHOLD);
+  });
+
+  it("refuses to cluster a pair whose two terms swap roles (pnpm over npm / npm over pnpm)", () => {
+    seed(db, "Use pnpm over npm");
+    seed(db, "Use npm over pnpm");
+    const report = findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(report.clusters).toEqual([]);
+    expect(report.refusedPairs).toHaveLength(1);
+  });
+
+  it("keeps a refused candidate free to join a cluster of its own", () => {
+    seed(db, "Use pnpm over npm", { capturedAt: daysAgo(3) });
+    seed(db, "Use npm over pnpm", { capturedAt: daysAgo(2) });
+    const twin = seed(db, "Prefer npm over pnpm", { capturedAt: daysAgo(1) });
+    const report = findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(report.refusedPairs.length).toBeGreaterThan(0);
+    expect(report.clusters.flatMap((cluster) => [cluster.keep.id, ...cluster.duplicates.map((member) => member.fact.id)])).toContain(twin.id);
+  });
+
+  it("still clusters restatements with the same polarity and the same roles", () => {
+    seed(db, "never commit secrets");
+    seed(db, "do not commit secrets");
+    seed(db, "Use pnpm over npm for installs");
+    seed(db, "Prefer pnpm instead of npm for installs");
+    const report = findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(report.refusedPairs).toEqual([]);
+    expect(report.clusters).toHaveLength(2);
+  });
+
+  it("does not let the guard change the plain array API's clusters", () => {
+    for (const text of PNPM_RESTATEMENTS) {
+      seed(db, text);
+    }
+    const clusters = findDuplicateClusters(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(clusters).toEqual(findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD).clusters);
+    expect(clusters).toHaveLength(1);
+    expect([clusters[0]?.keep.text, ...(clusters[0]?.duplicates.map((member) => member.fact.text) ?? [])].sort()).toEqual([...PNPM_RESTATEMENTS].sort());
+  });
+
+  it("never lets a signature-poor seed pull two mutually conflicting facts into one cluster", () => {
+    seed(db, "Use pnpm for installs", { capturedAt: daysAgo(1) });
+    const pnpmFirst = seed(db, "Use pnpm over npm for installs", { capturedAt: daysAgo(2) });
+    const npmFirst = seed(db, "Use npm over pnpm for installs", { capturedAt: daysAgo(3) });
+    const report = findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD);
+    // Joining the seed's cluster proves the first role-bearing fact cleared the threshold against the seed; the refused pair carries the Jaccard of the conflicting pair itself.
+    expect(report.clusters).toHaveLength(1);
+    expect(report.clusters[0]?.duplicates.map((member) => member.fact.id)).toEqual([pnpmFirst.id]);
+    expect(report.refusedPairs).toHaveLength(1);
+    expect(report.refusedPairs[0]?.keep.id).toBe(pnpmFirst.id);
+    expect(report.refusedPairs[0]?.candidate.id).toBe(npmFirst.id);
+    expect(report.refusedPairs[0]?.similarity).toBeGreaterThanOrEqual(DEFAULT_DUPLICATE_THRESHOLD);
+  });
+});
+
+describe("polaritySignature", () => {
+  it("separates negation, exception markers and ordered preference roles", () => {
+    expect(polaritySignature("never commit secrets").negated).toBe(true);
+    expect(polaritySignature("Always commit small changes").negated).toBe(false);
+    expect(polaritySignature("we don't use yarn").negated).toBe(true);
+    expect(polaritySignature("run tests unless CI is down").exception).toBe(true);
+    expect([...polaritySignature("use pnpm rather than npm").preferences]).toEqual(["pnpm>npm"]);
+    expect([...polaritySignature("not npm but pnpm").preferences]).toEqual(["pnpm>npm"]);
+    expect(polaritySignature("use pnpm not npm")).toEqual({ negated: false, exception: false, preferences: new Set(["pnpm>npm"]) });
+  });
+
+  it("treats opposite polarity and swapped roles as a conflict, and a restatement as none", () => {
+    expect(signaturesConflict(polaritySignature("always lint"), polaritySignature("never lint"))).toBe(true);
+    expect(signaturesConflict(polaritySignature("use pnpm over npm"), polaritySignature("use npm over pnpm"))).toBe(true);
+    expect(signaturesConflict(polaritySignature("use pnpm over npm"), polaritySignature("use pnpm instead of npm"))).toBe(false);
+    expect(signaturesConflict(polaritySignature("use pnpm over npm"), polaritySignature("use pnpm"))).toBe(false);
+    expect(signaturesConflict(polaritySignature("never commit secrets"), polaritySignature("do not ever commit secrets"))).toBe(false);
   });
 });
 
@@ -564,6 +647,28 @@ describe("mem consolidate (end to end)", () => {
     }
     // The whole reversibility claim: nothing was deleted.
     expect(withStore((db) => db.prepare("SELECT COUNT(*) AS c FROM facts").get())).toEqual({ c: 3 });
+  });
+
+  it("prints a contradiction hint for a refused pair, and --apply leaves both facts active", async () => {
+    const ids = withStore((db) => [seed(db, "Always run the linter before committing").id, seed(db, "Never run the linter before committing").id]);
+
+    const dryRun = await runCli(["consolidate"]);
+    expect(dryRun.exitCode).toBe(0);
+    expect(dryRun.stdout).toContain("no duplicate clusters at Jaccard >= 0.50 over topic terms");
+    expect(dryRun.stdout).toContain("these look like a contradiction, not a duplicate");
+    expect(dryRun.stdout).toContain("--subject/--value");
+    for (const id of ids) {
+      expect(dryRun.stdout).toContain(`mem edit ${id} --subject <subject> --value <value> --force`);
+    }
+
+    const applied = await runCli(["consolidate", "--apply"]);
+    expect(applied.exitCode).toBe(0);
+    expect(applied.stdout).toContain("these look like a contradiction, not a duplicate");
+    expect(applied.stdout).not.toContain("superseded 1 fact");
+    for (const id of ids) {
+      expect(statusOf(id)).toBe("active");
+      expect(auditFor(id).map((row) => row.event)).not.toContain("consolidate_duplicate");
+    }
   });
 
   it("a second --apply run has nothing left to do", async () => {

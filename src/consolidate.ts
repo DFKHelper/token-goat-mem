@@ -73,12 +73,114 @@ function topicKeys(db: Db, factId: string): Set<string> {
   );
 }
 
-/** Groups the store's live facts (`active` and `pinned`) into near-duplicate clusters at `threshold`. Seeded, not agglomerative: facts are walked in `preferenceOrder`, each unassigned fact opens a cluster, and every later unassigned comparable fact joins it if it clears the threshold *against that seed*. Single-link agglomeration would chain -- A near B, B near C, A nothing like C, all one cluster -- and the reported "similarity to keep" would then be a number below the threshold the user asked for. Seeding costs nothing here and makes every printed similarity mean exactly what it says. A cluster whose only other members are pinned is dropped: there is nothing to propose. */
+/** Words that carry no role on their own, skipped when finding the term on either side of a preference connective. */
+const ROLE_FILLERS: ReadonlySet<string> = new Set(["the", "a", "an", "of", "to", "for", "with", "using", "your", "our", "this", "that", "in", "on"]);
+
+/** Words that may stand directly before a bare `not` without it being an "X not Y" contrast: auxiliaries, modals and adverbs, so "do not ever commit" and "should not run" stay plain negations. */
+const NEGATION_LEADERS: ReadonlySet<string> = new Set([
+  "do", "does", "did", "is", "are", "was", "were", "be", "been", "should", "must", "will", "would", "can", "could", "may", "might", "shall", "has", "have", "had", "always", "ever", "just", "also", "really", "simply", "only",
+]);
+
+/** Single-token negators; contractions ending in `n't` are matched separately in `polaritySignature`. */
+const NEGATORS: ReadonlySet<string> = new Set(["not", "no", "never", "without", "avoid", "cannot"]);
+
+/** The part of a fact's meaning the topic-term set throws away: whether it is negated, whether it carries an exception, and which term is preferred over which. */
+export interface PolaritySignature {
+  /** Any negator (not, no, never, don't, without, avoid) outside a preference contrast. "always" and "never" differ here: only "never" negates. */
+  readonly negated: boolean;
+  /** An exception marker (unless, except) is present. */
+  readonly exception: boolean;
+  /** Ordered `preferred>rejected` role pairs from "X over Y", "X instead of Y", "X rather than Y", "X not Y" and "not X but Y". */
+  readonly preferences: ReadonlySet<string>;
+}
+
+/** The nearest non-filler token in `direction` from `index`, or `undefined` at the edge of the text. */
+function roleTermAt(tokens: readonly string[], index: number, direction: 1 | -1): string | undefined {
+  for (let i = index + direction; i >= 0 && i < tokens.length; i += direction) {
+    const token = tokens[i];
+    if (token !== undefined && !ROLE_FILLERS.has(token)) {
+      return token;
+    }
+  }
+  return undefined;
+}
+
+/** Builds a fact's `PolaritySignature` from its raw text with a local, order-preserving tokenizer. Local on purpose: `retrieval.ts`'s `tokenize` drops negation stopwords and feeds recall ranking, so it must not change for this. Deterministic, no model. */
+export function polaritySignature(text: string): PolaritySignature {
+  const tokens: string[] = text.toLowerCase().replace(/’/gu, "'").match(/[a-z0-9]+(?:'[a-z0-9]+)*/gu) ?? [];
+  const preferences = new Set<string>();
+  const consumedNegators = new Set<number>();
+  const addPreference = (preferred: string | undefined, rejected: string | undefined): void => {
+    if (preferred !== undefined && rejected !== undefined && preferred !== rejected) {
+      preferences.add(`${preferred}>${rejected}`);
+    }
+  };
+  tokens.forEach((token, i) => {
+    if (token === "over") {
+      addPreference(roleTermAt(tokens, i, -1), roleTermAt(tokens, i, 1));
+    } else if ((token === "instead" && tokens[i + 1] === "of") || (token === "rather" && tokens[i + 1] === "than")) {
+      addPreference(roleTermAt(tokens, i, -1), roleTermAt(tokens, i + 1, 1));
+    } else if (token === "not") {
+      const but = tokens.indexOf("but", i + 1);
+      if (but !== -1 && but - i <= 4) {
+        addPreference(roleTermAt(tokens, but, 1), roleTermAt(tokens, i, 1));
+        consumedNegators.add(i);
+        return;
+      }
+      const previous = tokens[i - 1];
+      if (previous !== undefined && !NEGATION_LEADERS.has(previous) && !NEGATORS.has(previous) && !ROLE_FILLERS.has(previous)) {
+        addPreference(previous, roleTermAt(tokens, i, 1));
+        consumedNegators.add(i);
+      }
+    }
+  });
+  const negated = tokens.some((token, i) => !consumedNegators.has(i) && (NEGATORS.has(token) || token.endsWith("n't")));
+  const exception = tokens.some((token) => token === "unless" || token === "except");
+  return { negated, exception, preferences };
+}
+
+/** Whether two signatures say opposite things: opposite polarity, one carrying an exception the other lacks, or the same pair of terms in swapped roles. A pair that merely differs in how much role detail it states does not conflict. */
+export function signaturesConflict(a: PolaritySignature, b: PolaritySignature): boolean {
+  if (a.negated !== b.negated || a.exception !== b.exception) {
+    return true;
+  }
+  for (const pair of a.preferences) {
+    const [preferred, rejected] = pair.split(">");
+    if (b.preferences.has(`${rejected}>${preferred}`)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A pair the duplicate pass would have clustered on topic terms alone but refused because the two facts' signatures conflict: a likely contradiction, not a duplicate. */
+export interface RefusedPair {
+  /** The cluster member (the seed or an earlier joiner) the candidate conflicts with. */
+  readonly keep: Fact;
+  readonly candidate: Fact;
+  /** Jaccard similarity of the two, at least the threshold the pass ran at. */
+  readonly similarity: number;
+}
+
+/** What one duplicate pass found: the clusters it proposes and the pairs it declined to cluster. */
+export interface DuplicateReport {
+  readonly clusters: readonly DuplicateCluster[];
+  readonly refusedPairs: readonly RefusedPair[];
+}
+
+/** `findDuplicateReport`'s clusters alone, for callers that have no use for the refused pairs. */
 export function findDuplicateClusters(db: Db, threshold: number): DuplicateCluster[] {
+  return [...findDuplicateReport(db, threshold).clusters];
+}
+
+/** Groups the store's live facts (`active` and `pinned`) into near-duplicate clusters at `threshold`, and reports the pairs it refused to cluster because their polarity or preference roles conflict (`signaturesConflict`) -- two facts with the same topic set but opposite meaning ("always run the linter" / "never run the linter", "use pnpm over npm" / "use npm over pnpm") are a contradiction for the user to key with `--subject`/`--value`, never a duplicate for `--apply` to collapse. A refused candidate stays unassigned, free to seed or join another cluster. Seeded, not agglomerative: facts are walked in `preferenceOrder`, each unassigned fact opens a cluster, and every later unassigned comparable fact joins it if it clears the threshold *against that seed*. Single-link agglomeration would chain -- A near B, B near C, A nothing like C, all one cluster -- and the reported "similarity to keep" would then be a number below the threshold the user asked for. Seeding costs nothing here and makes every printed similarity mean exactly what it says. A cluster whose only other members are pinned is dropped: there is nothing to propose. */
+export function findDuplicateReport(db: Db, threshold: number): DuplicateReport {
   const facts = [...listFacts(db, { status: ["active", "pinned"] })].sort(preferenceOrder);
   const terms = new Map<string, Set<string>>(facts.map((fact) => [fact.id, topicKeys(db, fact.id)]));
   const assigned = new Set<string>();
   const clusters: DuplicateCluster[] = [];
+  const refusedPairs: RefusedPair[] = [];
+  const signatures = new Map<string, PolaritySignature>(facts.map((fact) => [fact.id, polaritySignature(fact.text)]));
   // Computed once over the whole pool, not per pair: both are connected-component passes, and `comparabilityKey`/`sameContradictionBucket` below turn into cheap map lookups against them.
   const projectGroups = computeProjectIdentityGroups(facts, (fact) => fact.scope);
   const contradictionGroups = computeContradictionBucketGroups(facts);
@@ -101,6 +203,16 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
       }
       const similarity = jaccard(seedTerms, terms.get(candidate.id) ?? new Set<string>());
       if (similarity >= threshold) {
+        const candidateSignature = signatures.get(candidate.id);
+        // The candidate must agree with every fact already in the cluster, not only the seed: a signature-poor seed clears two facts that contradict each other, and `--apply` would then supersede both.
+        const clash = [{ fact: seed }, ...members].find((member) => {
+          const memberSignature = signatures.get(member.fact.id);
+          return memberSignature !== undefined && candidateSignature !== undefined && signaturesConflict(memberSignature, candidateSignature);
+        });
+        if (clash !== undefined) {
+          refusedPairs.push({ keep: clash.fact, candidate, similarity: jaccard(terms.get(clash.fact.id) ?? new Set<string>(), terms.get(candidate.id) ?? new Set<string>()) });
+          continue;
+        }
         assigned.add(candidate.id);
         members.push({ fact: candidate, similarity });
       }
@@ -116,7 +228,7 @@ export function findDuplicateClusters(db: Db, threshold: number): DuplicateClust
     });
   }
 
-  return clusters;
+  return { clusters, refusedPairs };
 }
 
 /** One discovered relation between two facts, below the duplicate threshold that would merge them -- `findRelatedFactPairs`'s report. Canonical order: `a.id <= b.id`, matching `storage.upsertFactLink`'s own ordering, so a pair is reported (and later persisted) once regardless of which fact this pass reaches first. */

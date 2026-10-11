@@ -68,14 +68,15 @@ import {
   DEFAULT_STALE_AGE_DAYS,
   findCrossProjectDuplicates,
   findCrossScopeDuplicates,
-  findDuplicateClusters,
+  findDuplicateReport,
   findGraphStaleFacts,
   findRelatedFactPairs,
   findStaleFacts,
   staleCutoff,
   type CrossProjectDuplicateGroup,
   type CrossScopeDuplicate,
-  type DuplicateCluster,
+  type DuplicateReport,
+  type RefusedPair,
   type GraphStaleFact,
   type RelatedFactPair,
 } from "./consolidate.js";
@@ -1010,10 +1011,24 @@ const CONSOLIDATE_REVERSIBLE_NOTE =
   "superseded facts stay in the store -- `mem list --status superseded`, `mem show <id>`, " +
   "`mem export --status superseded` -- and every change is in the audit log";
 
-function formatDuplicateClusters(clusters: readonly DuplicateCluster[], threshold: number, applied: boolean): string {
+/** One hint per pair the duplicate pass refused to cluster: the two facts share a topic set but disagree in polarity or preference roles, so they are a contradiction to key with `--subject`/`--value`, never a duplicate for `--apply` to collapse. */
+function formatRefusedPairs(refusedPairs: readonly RefusedPair[]): string[] {
+  const editLine = (fact: Fact): string => `    mem edit ${fact.id} --subject <subject> --value <value>${fact.source_type === "user" ? " --force" : ""}`;
+  return refusedPairs.flatMap(({ keep, candidate }) => [
+    "",
+    "not clustered -- these look like a contradiction, not a duplicate:",
+    `  ${formatFactSummary(keep)}`,
+    `  ${formatFactSummary(candidate)}`,
+    "  key both with --subject/--value so contradiction resolution handles them; --apply never supersedes across this pair:",
+    editLine(keep),
+    editLine(candidate),
+  ]);
+}
+
+function formatDuplicateClusters({ clusters, refusedPairs }: DuplicateReport, threshold: number, applied: boolean): string {
   const floor = threshold.toFixed(2);
   if (clusters.length === 0) {
-    return `no duplicate clusters at Jaccard >= ${floor} over topic terms`;
+    return [`no duplicate clusters at Jaccard >= ${floor} over topic terms`, ...formatRefusedPairs(refusedPairs)].join("\n");
   }
   const lines: string[] = [];
   const total = clusters.reduce((sum, cluster) => sum + cluster.duplicates.length, 0);
@@ -1033,6 +1048,7 @@ function formatDuplicateClusters(clusters: readonly DuplicateCluster[], threshol
       lines.push(`  pinned  ${formatFactSummary(pinned)}  (left alone)`);
     }
   });
+  lines.push(...formatRefusedPairs(refusedPairs));
   lines.push("");
   lines.push(
     applied
@@ -1246,7 +1262,8 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
   }
 
   const threshold = options.threshold !== undefined ? parseThreshold(options.threshold) : DEFAULT_DUPLICATE_THRESHOLD;
-  const clusters = findDuplicateClusters(db, threshold);
+  const report = findDuplicateReport(db, threshold);
+  const { clusters } = report;
   // Run alongside `findDuplicateClusters`, not inside it: exact-text global/project duplicates are a shape that pass's own `comparabilityKey` cannot see by design (see `findCrossScopeDuplicates`'s doc comment), so this is a second, narrower pass over the same live pool rather than a change to the first one's comparability rule.
   const crossScope = findCrossScopeDuplicates(db);
   if (applied) {
@@ -1271,7 +1288,7 @@ function runConsolidate(db: Database.Database, options: ConsolidateCliOptions, n
       );
     }
   }
-  return [formatDuplicateClusters(clusters, threshold, applied), formatCrossScopeDuplicates(crossScope, applied)]
+  return [formatDuplicateClusters(report, threshold, applied), formatCrossScopeDuplicates(crossScope, applied)]
     .filter((section) => section.length > 0)
     .join("\n\n");
 }
