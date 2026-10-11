@@ -12,7 +12,7 @@ import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } f
 import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, createHttpEmbeddingBackend, type EmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
-import { formatAge } from "./timeUtils.js";
+import { formatAge, MS_PER_DAY } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
 import { describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
 import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, type WiringOpts } from "./wiring.js";
@@ -60,7 +60,10 @@ function describeWhyCoverage(withWhy: number, total: number): Finding[] {
     : [finding("why", "ok", line)];
 }
 
-/** `mem doctor`'s last-surfacing line: when recall last put a fact in front of a session, a lower bound only -- a recall that surfaced nothing, or took a path that does not log, leaves no record. Silent hook death (every hook exiting 0 with empty output) is otherwise invisible; a store full of facts with no recent surfacing is the symptom. Only "active facts, none ever surfaced" warns: how old is too old is a policy nobody has set. */
+/** The age past which the last recorded surfacing counts as stale: doctor warns about it only while recallable facts exist, so an empty store stays quiet. */
+export const LAST_SURFACED_WARN_AFTER_MS = 7 * MS_PER_DAY;
+
+/** `mem doctor`'s last-surfacing line: when recall last put a fact in front of a session, a lower bound only -- a recall that surfaced nothing, or took a path that does not log, leaves no record. Silent hook death (every hook exiting 0 with empty output) is otherwise invisible; a store full of facts with no recent surfacing is the symptom. It warns when active or pinned facts exist and either nothing was ever surfaced or the last surfacing is older than LAST_SURFACED_WARN_AFTER_MS (7 days); a timestamp in the future (clock skew) is reported as such and stays ok. */
 export function describeLastSurfaced(latest: string | null, recallableFacts: number, now: Date): Finding[] {
   const at = latest === null ? Number.NaN : Date.parse(latest);
   if (!Number.isFinite(at)) {
@@ -75,7 +78,22 @@ export function describeLastSurfaced(latest: string | null, recallableFacts: num
           ),
         ];
   }
-  return [finding("store", "ok", `recall: last fact surfaced ${new Date(at).toISOString()} (${formatAge(now.getTime() - at)} ago; recalls that surfaced nothing leave no record)`)];
+  const iso = new Date(at).toISOString();
+  const elapsed = now.getTime() - at;
+  if (elapsed < 0) {
+    return [finding("store", "ok", `recall: last fact surfaced ${iso} (recorded in the future; check the system clock)`)];
+  }
+  if (elapsed > LAST_SURFACED_WARN_AFTER_MS && recallableFacts > 0) {
+    return [
+      finding(
+        "store",
+        "warn",
+        `recall: last fact surfaced ${iso} (${formatAge(elapsed)} ago), though the store has active or pinned facts (the recall hooks may not be running; run mem init claude-code)`,
+        "mem init claude-code"
+      ),
+    ];
+  }
+  return [finding("store", "ok", `recall: last fact surfaced ${iso} (${formatAge(elapsed)} ago; recalls that surfaced nothing leave no record)`)];
 }
 
 /** `mem doctor`'s hint-budget line: how much of what a store holds can actually reach a session. Worth a line because the ceiling is otherwise invisible from every command a user has. `mem list` shows every fact, `mem doctor`'s own status counts show how many are active, and neither hints that a single `--hint-format` block carries at most `HINT_LINE_CEILING` of them -- so a store that has grown past the cap looks healthy right until someone notices a fact they can plainly see in `mem list` is never in context. The fix is not a bigger cap (the cap is what keeps the block from becoming filler); it is pinning the handful that must always arrive, so the remediation named here is `mem pin`. Pins are reported against the reserve rather than the ceiling because over-pinning is the failure on the other side: past `HINT_PINNED_RESERVE`, extra pins compete on relevance like anything else, so a store with twenty pins has not bought twenty guaranteed slots and should not believe it has. */

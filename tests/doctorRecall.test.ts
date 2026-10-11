@@ -111,4 +111,31 @@ describe("describeLastSurfaced", () => {
     expect(describeLastSurfaced(null, 2, now)[0]?.status).toBe("warn");
     expect(describeLastSurfaced(null, 0, now)[0]?.status).toBe("ok");
   });
+
+  it("warns with the remedy when the last surfacing is 8 days old and facts are recallable", () => {
+    const entry = describeLastSurfaced("2026-10-03T12:00:00.000Z", 3, now)[0];
+    expect(entry?.status).toBe("warn");
+    expect(entry?.remedy).toBe("mem init claude-code");
+    expect(entry?.message).toContain("mem init claude-code");
+  });
+
+  it("stays ok for an 8-day-old surfacing when no fact is recallable", () => {
+    expect(describeLastSurfaced("2026-10-03T12:00:00.000Z", 0, now)[0]?.status).toBe("ok");
+  });
+
+  it("stays ok for a 6-day-old surfacing with recallable facts", () => {
+    expect(describeLastSurfaced("2026-10-05T12:00:00.000Z", 3, now)[0]?.status).toBe("ok");
+  });
+
+  it("reports a future timestamp as recorded in the future, ok, and never as under a minute", () => {
+    const entry = describeLastSurfaced("2026-10-11T12:05:00.000Z", 3, now)[0];
+    expect(entry?.status).toBe("ok");
+    expect(entry?.message).toContain("recorded in the future");
+    expect(entry?.message).not.toContain("<1m");
+  });
+
+  it("stays ok at exactly 7 days and warns one millisecond later", () => {
+    expect(describeLastSurfaced("2026-10-04T12:00:00.000Z", 3, now)[0]?.status).toBe("ok");
+    expect(describeLastSurfaced("2026-10-04T11:59:59.999Z", 3, now)[0]?.status).toBe("warn");
+  });
 });
