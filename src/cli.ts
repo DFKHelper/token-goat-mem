@@ -8,10 +8,11 @@ import {
   captureExplicit,
   captureSuggested,
   loadAllowlist,
+  mergedFactScreenContext,
   parseCapturedAtOrThrow,
   resolveScopeRepo,
   screenForSecrets,
-  screenInputOrThrow,
+  screenMergedFactOrThrow,
   screenReviewReasonOrThrow,
   validateFactEditOrThrow,
   validateFactFieldsOrThrow,
@@ -210,12 +211,13 @@ const REDACTED_PRIOR_VALUE_PREFIX = "[redacted: possible secret -- ";
 function redactPriorValueIfSecret(
   field: EditableFactField,
   value: string | number | null | undefined,
-  allowlist: readonly string[]
+  allowlist: readonly string[],
+  screenContext: string
 ): string | number | null | undefined {
   if (!AUDIT_SCREENED_FIELDS.has(field) || typeof value !== "string" || value.length === 0) {
     return value;
   }
-  const matches = screenForSecrets({ [field]: value }, allowlist);
+  const matches = screenForSecrets({ [field]: value }, allowlist, screenContext);
   if (matches.length === 0) {
     return value;
   }
@@ -223,7 +225,7 @@ function redactPriorValueIfSecret(
 }
 
 /** Audit detail for `mem edit`, recording what each edited field said *before*. The previous wording recorded only which field names changed, so the audit log could say a fact's text was edited but never what it used to say -- and since `mem edit` overwrites in place, that made the prior value unrecoverable from the store at all. A fact's whole value is that it can be trusted, and "it says X now, it said Y before, and Y is gone" is the one question an audit trail of an edit exists to answer. Deliberately a `detail` string rather than a version chain: a full history table is a schema migration and a retention policy bought for a question the audit log can already answer. The *prior* value is recorded whole; only the new one is previewed. Truncating both was a defect measured against the built bundle: editing a 223-character fact left 103 characters recorded nowhere in the store, while AGENTS.md promised "an edited fact's previous text is recorded there and nowhere else" -- so the log kept a prefix of the one value it exists to preserve. The asymmetry is the whole point of the trade the previous wording tried to make: the new value is never lost (it is the fact's current text, one column away in the same row), so previewing it costs nothing, and the growth this bounds is at most one prior value per changed field. */
-function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: readonly string[]): string {
+function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: readonly string[], screenContext: string): string {
   const changes = Object.keys(patch)
     .map((field) => {
       if (!isEditableFactField(field)) {
@@ -234,18 +236,18 @@ function describeEdit(before: Fact, after: Fact, patch: FactUpdate, allowlist: r
       // A field named in the patch whose value did not actually move is still worth recording as touched, but without a misleading "X -> X" arrow. Compared before redaction: redacting `old` but not `now` would otherwise make an unchanged secret-bearing field look "changed".
       return old === now
         ? `${field} (unchanged)`
-        : `${field}: ${auditValueWhole(redactPriorValueIfSecret(field, old, allowlist))} -> ${auditValuePreview(now)}`;
+        : `${field}: ${auditValueWhole(redactPriorValueIfSecret(field, old, allowlist, screenContext))} -> ${auditValuePreview(now)}`;
     })
     .join("; ");
   return `edited ${changes}`;
 }
 
 /** The reversal payload `mem edit --undo` needs: a JSON object of only the fields `patch` actually touched, each mapped to the value `before` held for it. Scoped to the touched fields rather than every editable field on the fact so an edit that only ever set `--text` cannot be undone into clobbering a `--scope` no one asked to change back. */
-function buildEditPriorPayload(before: Fact, patch: FactUpdate, allowlist: readonly string[]): string {
+function buildEditPriorPayload(before: Fact, patch: FactUpdate, allowlist: readonly string[], screenContext: string): string {
   const prior: Partial<Record<EditableFactField, unknown>> = {};
   for (const field of EDITABLE_FACT_FIELDS) {
     if (field in patch) {
-      prior[field] = redactPriorValueIfSecret(field, before[field], allowlist);
+      prior[field] = redactPriorValueIfSecret(field, before[field], allowlist, screenContext);
     }
   }
   return JSON.stringify(prior);
@@ -262,7 +264,7 @@ function guardUserFactEditOrThrow(fact: Fact, force: boolean | undefined): void 
 }
 
 /** Reverses the most recent `mem edit` on a fact, restoring every field that edit touched to the value `buildEditPriorPayload` recorded for it -- `mem review --undo`'s `undoReject` pattern applied to `mem edit`, which had no equivalent: an edit overwrote a fact in place with no way to walk it back through the CLI, only by hand-editing the database. Refuses on anything other than the fact's own last audit row being a recoverable `edit`: a fact whose last action was a `pin`/`forget`/earlier `edit_undo` names that action instead of guessing, and a fact whose last edit predates the `prior_json` column (or was itself an `edit_undo`, which never records one) refuses cleanly rather than restoring nothing and reporting success. */
-function undoEdit(db: Database.Database, id: string): string {
+function undoEdit(db: Database.Database, id: string, root: string): string {
   const fact = resolveIdArgOrThrow(db, id);
   const last = lastStateChangingAuditRow(db, fact.id);
   if (last?.event !== "edit") {
@@ -285,6 +287,8 @@ function undoEdit(db: Database.Database, id: string): string {
         "redacted rather than recorded, so there is nothing safe to restore -- set the field explicitly with `mem edit`"
     );
   }
+  // The restored state is screened like a forward edit, so an allowlist entry removed since the edit, or context added to the fact since, is honoured before anything is written.
+  screenMergedFactOrThrow(db, fact, patch, root, "edit_undo");
   const tx = db.transaction((): Fact => {
     const restored = updateFact(db, fact.id, patch);
     if (restored === undefined) {
@@ -1555,6 +1559,8 @@ export function buildProgram(): Command {
           ...(options.value !== undefined ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+          // A reference the caller typed is a statement about the fact, so it is read for credential keywords; the ref `scan-session` and `import` stamp themselves is not.
+          ...(options.sourceRef !== undefined ? { screenContext: options.sourceRef } : {}),
           ...(options.why !== undefined ? { why: options.why } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
@@ -1609,6 +1615,8 @@ export function buildProgram(): Command {
           ...(options.value !== undefined ? { value: options.value } : {}),
           ...(options.anchor !== undefined ? { anchor: options.anchor } : {}),
           ...(options.sourceRef !== undefined ? { sourceRef: options.sourceRef } : {}),
+          // A reference the caller typed is a statement about the fact, so it is read for credential keywords; the ref `scan-session` and `import` stamp themselves is not.
+          ...(options.sourceRef !== undefined ? { screenContext: options.sourceRef } : {}),
           ...(options.why !== undefined ? { why: options.why } : {}),
           ...(options.path !== undefined ? { path: options.path } : {}),
         };
@@ -1731,7 +1739,7 @@ export function buildProgram(): Command {
         const scope = options.scope !== undefined ? parseFactScope(options.scope) : undefined;
         const kind = options.kind !== undefined ? parseFactKind(options.kind) : undefined;
         const result = dryRun
-          ? planImportFromMarkdown({ path: fromMd })
+          ? planImportFromMarkdown({ path: fromMd, root })
           : await withDb((db) =>
               importFromMarkdown(db, {
                 path: fromMd,
@@ -2277,7 +2285,7 @@ export function buildProgram(): Command {
           if (fieldOptionsUsed.length > 0) {
             throw new UsageError(`--undo cannot be used together with --${fieldOptionsUsed.join(", --")}`);
           }
-          const restored = await withDb((db) => undoEdit(db, id));
+          const restored = await withDb((db) => undoEdit(db, id, resolveRoot(options.root)));
           process.stdout.write(`restored ${restored}\n`);
           return;
         }
@@ -2322,22 +2330,10 @@ export function buildProgram(): Command {
         const updated = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
           guardUserFactEditOrThrow(existing, options.force);
-          screenInputOrThrow(
-            db,
-            {
-              text: patch.text ?? "",
-              kind: "fact",
-              subject: patch.subject,
-              value: patch.value,
-              anchor: patch.anchor,
-              why: patch.why,
-              root,
-            } as CaptureExplicitInput,
-            root,
-            "edit",
-            existing.id
-          );
+          screenMergedFactOrThrow(db, existing, patch, root, "edit");
           const allowlist = loadAllowlist(root);
+          // The merged fact is the keyword context for the prior value too: a prior UUID that read as a plain identifier stops reading that way once the edit adds a credential word beside it.
+          const priorScreenContext = mergedFactScreenContext(db, existing, patch);
           const tx = db.transaction((): Fact => {
             const fact = updateFact(db, existing.id, patch);
             if (fact === undefined) {
@@ -2345,13 +2341,13 @@ export function buildProgram(): Command {
             }
             const detail =
               existing.source_type === "user"
-                ? `${describeEdit(existing, fact, patch, allowlist)} (--force override of a source_type=user fact)`
-                : describeEdit(existing, fact, patch, allowlist);
+                ? `${describeEdit(existing, fact, patch, allowlist, priorScreenContext)} (--force override of a source_type=user fact)`
+                : describeEdit(existing, fact, patch, allowlist, priorScreenContext);
             insertAuditLog(db, {
               event: "edit",
               factId: existing.id,
               detail,
-              priorJson: buildEditPriorPayload(existing, patch, allowlist),
+              priorJson: buildEditPriorPayload(existing, patch, allowlist, priorScreenContext),
             });
             return fact;
           });
@@ -2387,8 +2383,17 @@ export function buildProgram(): Command {
           throw new UsageError("--reason requires --promote, --reject, or --undo");
         }
         const reasonText = options.reason;
-        const screenedReason = (db: Database.Database): string | undefined =>
-          reasonText === undefined ? undefined : screenReviewReasonOrThrow(db, reasonText, resolveRoot(options.root));
+        const screenedReason = (db: Database.Database, id: string): string | undefined => {
+          if (reasonText === undefined) {
+            return undefined;
+          }
+          const root = resolveRoot(options.root);
+          const fact = resolveIdArgOrThrow(db, id);
+          const reason = screenReviewReasonOrThrow(db, reasonText, root, mergedFactScreenContext(db, fact));
+          // The reason is keyword context for the fact it is recorded on, so a credential word in it vetoes a UUID the fact already holds, as on promote.
+          screenMergedFactOrThrow(db, fact, {}, root, "review", reasonText);
+          return reason;
+        };
 
         const { subject, value } = options;
         if ((subject !== undefined || value !== undefined) && options.promote === undefined) {
@@ -2405,15 +2410,14 @@ export function buildProgram(): Command {
         if (options.promote !== undefined) {
           const id = options.promote;
           const outcome = await withDb((db) => {
-            const reason = screenedReason(db);
-            if (key === undefined) {
-              return promotePending(db, id, reason);
-            }
-            // Screened like `mem edit`'s fields: the key is persisted, so a secret in it is refused before anything is written, and the refusal is attributed to the fact.
-            const factId = resolveIdArgOrThrow(db, id).id;
+            // The fact as it will be stored (its own fields, the key, the reason) is the keyword context for both screens below, so a field the promotion did not touch still counts.
+            const fact = resolveIdArgOrThrow(db, id);
             const root = resolveRoot(options.root);
-            screenInputOrThrow(db, { text: "", kind: "fact", ...key, root }, root, "review_promote", factId);
-            return promotePending(db, factId, reason, key);
+            const screenContext = [mergedFactScreenContext(db, fact, key ?? {}), reasonText].filter((part) => part !== undefined).join("\n");
+            const reason = reasonText === undefined ? undefined : screenReviewReasonOrThrow(db, reasonText, root, screenContext);
+            // Screened like `mem edit`: the fact as it will be stored, key included, with the reason as keyword context, refused before anything is written and attributed to the fact.
+            screenMergedFactOrThrow(db, fact, key ?? {}, root, "review_promote", reasonText ?? "");
+            return key === undefined ? promotePending(db, fact.id, reason) : promotePending(db, fact.id, reason, key);
           });
           process.stdout.write(`promoted ${outcome.id}\n`);
           if (outcome.note !== undefined) {
@@ -2423,13 +2427,13 @@ export function buildProgram(): Command {
         }
         if (options.reject !== undefined) {
           const id = options.reject;
-          const resolved = await withDb((db) => rejectPending(db, id, screenedReason(db)));
+          const resolved = await withDb((db) => rejectPending(db, id, screenedReason(db, id)));
           process.stdout.write(`rejected ${resolved}\n`);
           return;
         }
         if (options.undo !== undefined) {
           const id = options.undo;
-          const resolved = await withDb((db) => undoReject(db, id, screenedReason(db)));
+          const resolved = await withDb((db) => undoReject(db, id, screenedReason(db, id)));
           process.stdout.write(`restored ${resolved}\n`);
           return;
         }

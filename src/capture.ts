@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, parseValidUntilDeadline } from "./anchors.js";
 import { parseStrictIsoTimestamp } from "./timeUtils.js";
-import { insertAuditLog, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
+import { insertAuditLog, listAuditLogForFact, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
 import { isBoundToRoot } from "./projectIdentity.js";
 import {
@@ -140,6 +140,116 @@ const CANONICAL_HEX_HASH_LENGTHS: ReadonlySet<number> = new Set([32, 40, 64]);
 function isCanonicalHexHash(token: string): boolean {
   return HEX_ONLY.test(token) && CANONICAL_HEX_HASH_LENGTHS.has(token.length);
 }
+
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Words that make a neighbouring value look like a credential; a word matches when it starts or ends with one (`Authorization`, `api_key`, `X-Api-Key`), so the check fails closed. */
+const UUID_CREDENTIAL_KEYWORDS: readonly string[] = ["key", "token", "secret", "password", "passwd", "auth", "api", "cred", "bearer", "license", "licence", "private", "subscription", "access", "login", "passphrase", "cookie", "recovery", "webhook", "activation", "connection", "passcode", "totp", "mfa", "unlock", "hmac", "jwt", "salt", "nonce", "passwort", "contrasena", "clave", "senha", "kennwort", "geheim", "mdp", "psk", "mnemonic", "vault", "sekret", "reset", "invite", "pairing", "ssh", "seed"];
+
+/** Credential phrases of several words, matched against the folded words of a text joined by single spaces, so line breaks, tabs and repeated spaces inside the phrase do not hide it. */
+const UUID_CREDENTIAL_PHRASES: readonly string[] = ["mot de passe", "seed phrase"];
+
+/** Short credential words matched only as a whole word, so `passed`, `spin` and `signal` are not hits. */
+const UUID_CREDENTIAL_EXACT_WORDS: ReadonlySet<string> = new Set(["pwd", "pass", "pin", "sas", "sig", "pw", "otp", "conn"]);
+
+/** Whole words that name a UUID as an identifier; one must directly label the UUID (see `isLabelledByIdentifierWord`) for the UUID to be exempt from the generic entropy check. */
+const UUID_IDENTIFIER_WORDS: ReadonlySet<string> = new Set([
+  "id", "ids", "uuid", "uuids", "guid", "guids", "identifier", "session", "request", "trace", "span", "correlation", "run", "job", "build", "workflow", "instance", "tenant", "project", "ticket", "issue", "record", "fact", "event", "message", "transcript", "conversation", "device", "container", "deployment",
+]);
+
+/** Zero-width characters and the soft hyphen, which render as nothing and so can split a keyword (`pass` + U+200B + `word`) without changing what a reader sees. */
+const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
+
+/** The text as it reads to a person: invisible characters removed, compatibility forms folded (fullwidth letters), and diacritics stripped (`contrase\u00F1a` reads as `contrasena`). */
+function foldForKeywords(text: string): string {
+  return text.replace(INVISIBLE_CHARACTERS, "").normalize("NFKC").normalize("NFD").replace(/\p{M}/gu, "");
+}
+
+/** The lowercase words of `text` after folding, split on non-alphanumerics and on camelCase lower-to-upper boundaries (`sessionId` gives session, id). */
+function splitWords(text: string): string[] {
+  return foldForKeywords(text)
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((word) => word.length > 0);
+}
+
+/** Whether `text` carries a credential keyword as a word, a word prefix, or a word suffix, or an exact-word keyword, case-insensitively. */
+function hasCredentialKeyword(text: string): boolean {
+  const words = splitWords(text);
+  const spaced = ` ${words.join(" ")} `;
+  return (
+    UUID_CREDENTIAL_PHRASES.some((phrase) => spaced.includes(` ${phrase} `)) ||
+    words.some((word) => UUID_CREDENTIAL_EXACT_WORDS.has(word) || UUID_CREDENTIAL_KEYWORDS.some((keyword) => word.startsWith(keyword) || word.endsWith(keyword)))
+  );
+}
+
+/** An anchor's arguments with its predicate name dropped (`file-contains password.txt x` gives `password.txt x`): the arguments say what the fact is about, the predicate name is fixed vocabulary. */
+function anchorArguments(anchor: string): string {
+  const trimmed = anchor.trim();
+  const split = trimmed.search(/\s/u);
+  return split === -1 ? "" : trimmed.slice(split);
+}
+
+/** Whether any content field of a capture, the arguments of its anchor, or any extra context text the caller holds for the fact as it will be stored, carries a credential keyword; `sourceRef` is skipped, since the pointer a capture path stamps itself (a transcript or file path) is not a statement about the fact, and a reference the user typed arrives through `extraContext`. */
+function hasCredentialContext(fields: Readonly<Record<string, string | null | undefined>>, extraContext: string): boolean {
+  return (
+    hasCredentialKeyword(extraContext) ||
+    Object.entries(fields).some(([field, value]) => {
+      if (typeof value !== "string") {
+        return false;
+      }
+      return field === "anchor" ? hasCredentialKeyword(anchorArguments(value)) : !GENERIC_ENTROPY_EXEMPT_FIELDS.has(field) && hasCredentialKeyword(value);
+    })
+  );
+}
+/** Characters trimmed from the front of a whitespace-delimited token before it is compared with the UUID. */
+const UUID_LEADING_WRAPPERS = /^[([{"'`]+/;
+
+/** Characters trimmed from the back of a whitespace-delimited token before it is compared with the UUID. */
+const UUID_TRAILING_WRAPPERS = /[)\]}"'`.,;:!?]+$/;
+
+/** Whether the whitespace-delimited token enclosing the span `[start, end)`, minus wrapping punctuation, is exactly the span's text. */
+function isStandaloneToken(value: string, start: number, end: number): boolean {
+  let tokenStart = start;
+  while (tokenStart > 0 && !/\s/.test(value[tokenStart - 1] ?? "")) {
+    tokenStart -= 1;
+  }
+  let tokenEnd = end;
+  while (tokenEnd < value.length && !/\s/.test(value[tokenEnd] ?? "")) {
+    tokenEnd += 1;
+  }
+  const trimmed = value.slice(tokenStart, tokenEnd).replace(UUID_LEADING_WRAPPERS, "").replace(UUID_TRAILING_WRAPPERS, "");
+  return trimmed === value.slice(start, end);
+}
+
+/** Characters that may wrap a UUID directly after its label (`id: (<uuid>)`), trimmed from the end of the text before it. */
+const UUID_OPENING_WRAPPERS = /[([{"'`]+$/;
+
+/** Whether the text just before a UUID ends in an identifier word that labels it: `<idword> [id|ids] [is|:|=|#] <uuid>`, on one line, so `the session job is done; <uuid>` (an identifier word nearby, but not labelling it) is not a label. */
+function isLabelledByIdentifierWord(value: string, index: number): boolean {
+  const head = value
+    .slice(0, index)
+    .normalize("NFKC")
+    .replace(UUID_OPENING_WRAPPERS, "")
+    .replace(/[^\S\n]+$/, "")
+    .replace(/(?:[:=#]|(?:^|[^\S\n])is)$/i, "")
+    .replace(/[^\S\n]+$/, "");
+  const label = /[A-Za-z0-9_-]+$/.exec(head);
+  if (label === null) {
+    return false;
+  }
+  const words = splitWords(label[0]);
+  return UUID_IDENTIFIER_WORDS.has(words.at(-1) ?? "");
+}
+
+/** Whether a canonical 8-4-4-4-12 UUID (either case) stands alone as its own token, an identifier word directly labels it, and the capture and everything known about the fact as stored has no credential keyword, so a record, session, or fact id is not refused as a secret while `token=<uuid>`, `user:<uuid>@host` and `the session job is done; <uuid>` still are. */
+function isCanonicalUuid(token: string, value: string, index: number, credentialContext: boolean): boolean {
+  if (credentialContext || !CANONICAL_UUID.test(token)) {
+    return false;
+  }
+  return isStandaloneToken(value, index, index + token.length) && isLabelledByIdentifierWord(value, index);
+}
 const GENERIC_ENTROPY_THRESHOLD = 3.8;
 
 function shannonEntropy(value: string): number {
@@ -186,7 +296,7 @@ function isProseShapedToken(token: string): boolean {
   return words.length >= 2 && words.every((word) => PROSE_WORD.test(word) && word.length <= MAX_UNBROKEN_SEGMENT_RUN);
 }
 
-function scanField(field: string, value: string): SecretMatch[] {
+function scanField(field: string, value: string, credentialContext: boolean): SecretMatch[] {
   const matches: SecretMatch[] = [];
 
   for (const pattern of SECRET_PATTERNS) {
@@ -213,6 +323,7 @@ function scanField(field: string, value: string): SecretMatch[] {
       !isPathShapedToken(token) &&
       !isProseShapedToken(token) &&
       !isCanonicalHexHash(token) &&
+      !(!exemptField && isCanonicalUuid(token, genericValue, g.index, credentialContext)) &&
       !DIGITS_ONLY.test(token) &&
       shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD
     ) {
@@ -235,15 +346,17 @@ function redactPreview(matched: string): string {
 /** Scans a set of named fields against the secret-pattern and entropy heuristics, dropping any match whose exact text is covered by `allowlist`. Exported so a `mem doctor` / `review` command can reuse the same screening logic to audit already-stored allowlist entries. */
 export function screenForSecrets(
   fields: Readonly<Record<string, string | null | undefined>>,
-  allowlist: readonly string[]
+  allowlist: readonly string[],
+  extraContext = ""
 ): SecretMatch[] {
   const allowed = new Set(allowlist);
   const matches: SecretMatch[] = [];
+  const credentialContext = hasCredentialContext(fields, extraContext);
   for (const [field, value] of Object.entries(fields)) {
     if (value === null || value === undefined || value.length === 0) {
       continue;
     }
-    for (const match of scanField(field, value)) {
+    for (const match of scanField(field, value, credentialContext)) {
       if (!allowed.has(match.matched)) {
         matches.push(match);
       }
@@ -266,9 +379,9 @@ export function loadAllowlist(root: string): string[] {
 }
 
 /** Builds a `sources.excerpt` for a derived-capture fact (scan-session, `mem import --from-md`), or `null` when `raw` carries a secret the extracted fact text did not -- the raw material (a whole user turn, a whole file line) is a larger surface than the sentence pulled from it, so screening the sentence alone (already done by `screenInputOrThrow`) is not enough to trust the excerpt. Screened against the *untruncated* text so a secret sitting past `MAX_SOURCE_EXCERPT_LENGTH` cannot slip through by being cut off before the check runs; only a confirmed-clean excerpt is then truncated for storage. Never called for `mem remember`/`mem suggest`: there the user's own text *is* the fact, and a source row echoing it back would be provenance noise, not evidence. When `factText` is provided, the excerpt is windowed around the first occurrence of the fact text in `raw` (matched through `normalizeFactText` to ignore whitespace/case/trailing-period differences), ensuring the source excerpt actually contains the evidence. If the fact text is not found in raw, falls back to head truncation as a safe default. If `factText` is omitted, always truncates from the head (today's behavior). */
-export function buildScreenedExcerpt(raw: string, root: string, factText?: string): string | null {
+export function buildScreenedExcerpt(raw: string, root: string, factText?: string, screenContext = ""): string | null {
   const allowlist = loadAllowlist(root);
-  if (screenForSecrets({ excerpt: raw }, allowlist).length > 0) {
+  if (screenForSecrets({ excerpt: raw }, allowlist, screenContext).length > 0) {
     return null;
   }
 
@@ -471,9 +584,9 @@ function validateRationaleOrThrow(label: "why" | "reason", rationale: string | n
 }
 
 /** Validates and secret-screens a `mem review --reason`, returning it trimmed. The reason is stored in the audit log, which is as durable as the fact table, so it gets the same deny-by-default screening (and the same `.mem/allowlist` escape hatch) a fact's own text does. */
-export function screenReviewReasonOrThrow(db: Database.Database, reason: string, root: string): string {
+export function screenReviewReasonOrThrow(db: Database.Database, reason: string, root: string, screenContext = ""): string {
   validateRationaleOrThrow("reason", reason);
-  refuseSecretsOrThrow(db, screenForSecrets({ reason }, loadAllowlist(root)), "review");
+  refuseSecretsOrThrow(db, screenForSecrets({ reason }, loadAllowlist(root), screenContext), "review");
   return reason.trim();
 }
 
@@ -485,6 +598,10 @@ export interface ScreenableFactFields {
   readonly anchor?: string | null | undefined;
   readonly sourceRef?: string | null | undefined;
   readonly why?: string | null | undefined;
+  /** The provenance excerpt stored with the fact, if any; scanned like a content field and part of the credential-keyword context. */
+  readonly sourceExcerpt?: string | null | undefined;
+  /** Further text that belongs to the fact as it will be stored (the rest of a merged edit, the whole turn or section a candidate came from); read for credential keywords only, never scanned or stored. */
+  readonly screenContext?: string | null | undefined;
 }
 
 export function screenFactFields(fields: ScreenableFactFields, allowlist: readonly string[]): SecretMatch[] {
@@ -496,9 +613,88 @@ export function screenFactFields(fields: ScreenableFactFields, allowlist: readon
       anchor: fields.anchor,
       sourceRef: fields.sourceRef,
       why: fields.why,
+      sourceExcerpt: fields.sourceExcerpt,
     },
-    allowlist
+    allowlist,
+    fields.screenContext ?? ""
   );
+}
+
+/** The marker `mem scan-session` stamps between a transcript path and its turn number in a `source_ref` (`<path>#turn<n>`); sessionCapture.ts writes it and {@link storedSourceRefContext} recognises it, so the format has one definition. */
+export const TRANSCRIPT_TURN_MARKER = "#turn";
+
+const STAMPED_TRANSCRIPT_REF = new RegExp(`^(?:[A-Za-z]:|/).*${TRANSCRIPT_TURN_MARKER}\\d+$`, "su");
+
+/** Written after a creation audit row's detail when the capture stored a stamped transcript ref together with its source excerpt, followed by that exact ref: the binding {@link storedSourceRefContext} checks. */
+const STAMPED_REF_DETAIL_MARKER = " [stamped_ref=";
+
+/** A fact's stored `source_ref` as keyword context, or `null` when it is the pointer `mem scan-session` stamped itself: the stamp's shape (an absolute transcript path plus a turn) AND the fact's own creation audit row recording that exact ref, which `writeFact` writes only for a capture that stored the ref with a source excerpt in one transaction. A typed ref, a restatement's overwritten ref, and a sighting's later source row therefore never match, and a `mem gc` that pruned the audit row makes a genuine stamp read as typed, which fails closed. */
+function storedSourceRefContext(db: Database.Database, fact: Fact): string | null {
+  const ref = fact.source_ref;
+  if (typeof ref !== "string") {
+    return null;
+  }
+  const boundToCapture = STAMPED_TRANSCRIPT_REF.test(ref) && listAuditLogForFact(db, fact.id).some((row) => row.event === "capture_suggested" && row.detail.endsWith(`${STAMPED_REF_DETAIL_MARKER}${ref}]`));
+  return boundToCapture ? null : ref;
+}
+
+/** The text of a stored fact as it will read after `patch` is applied (a `null` in the patch clears that field), plus its stored source excerpts and any typed source ref: the keyword context `mem edit` and `mem review --promote` hand to screening, so a field the edit did not touch still counts as context for the one it did. */
+export function mergedFactScreenContext(
+  db: Database.Database,
+  fact: Fact,
+  patch: FactScreenPatch = {}
+): string {
+  const anchor = patchedOrStored(patch.anchor, fact.anchor);
+  const sources = listSourcesForFact(db, fact.id);
+  return [
+    patchedOrStored(patch.text, fact.text),
+    patchedOrStored(patch.subject, fact.subject),
+    patchedOrStored(patch.value, fact.value),
+    patchedOrStored(patch.why, fact.why),
+    typeof anchor === "string" ? anchorArguments(anchor) : null,
+    storedSourceRefContext(db, fact),
+    ...sources.map((source) => source.excerpt),
+  ]
+    .filter((part): part is string => typeof part === "string")
+    .join("\n");
+}
+
+/** The fields of a stored fact a `mem edit` or `mem review --promote` may change; `undefined` leaves the stored value in place and `null` clears it. */
+export interface FactScreenPatch {
+  readonly text?: string | null | undefined;
+  readonly subject?: string | null | undefined;
+  readonly value?: string | null | undefined;
+  readonly anchor?: string | null | undefined;
+  readonly why?: string | null | undefined;
+}
+
+function patchedOrStored(patched: string | null | undefined, stored: string | null | undefined): string | null | undefined {
+  return patched === undefined ? stored : patched;
+}
+
+/** Screens the fact as it will read once `patch` is applied: every stored content field and its source excerpts, not only the fields the patch names, so a credential word added to one field also vetoes a UUID an untouched field already holds. `extraContext` (a review reason) is read for credential keywords only. A refusal is recorded against the fact and happens before anything is written. */
+export function screenMergedFactOrThrow(
+  db: Database.Database,
+  fact: Fact,
+  patch: FactScreenPatch,
+  root: string,
+  auditEvent: string,
+  extraContext = ""
+): void {
+  const excerpts = listSourcesForFact(db, fact.id).map((source) => source.excerpt);
+  const matches = screenFactFields(
+    {
+      text: patchedOrStored(patch.text, fact.text) ?? "",
+      subject: patchedOrStored(patch.subject, fact.subject),
+      value: patchedOrStored(patch.value, fact.value),
+      anchor: patchedOrStored(patch.anchor, fact.anchor),
+      why: patchedOrStored(patch.why, fact.why),
+      sourceExcerpt: excerpts.length > 0 ? excerpts.join("\n") : null,
+      screenContext: [extraContext, storedSourceRefContext(db, fact)].filter((part): part is string => typeof part === "string" && part.length > 0).join("\n"),
+    },
+    loadAllowlist(root)
+  );
+  refuseSecretsOrThrow(db, matches, auditEvent, fact.id);
 }
 
 /** Applies the field-level guards `mem remember`/`captureExplicit` enforce (length limits, emptiness, subject/value pairing) to a patch of fact fields, WITHOUT the CLI-facing anchor-syntax arity check (see `validateAnchorSyntax`). Only validates fields actually present in the patch; a `null` clears the field and is not validated (clearing is always safe). Deliberately anchor-syntax-agnostic: this is the shared base used both by `validateFactEditOrThrow` (which adds the arity check back on top, since `mem edit` takes CLI-string input just like `mem remember`) and by JSON import (which must NOT apply the arity check -- a JSON `anchor` field is structured data, not a CLI-parsed string, so there is no parsing ambiguity for a multi-word `file-contains`/`file-not-contains` substring to create). Anchor *correctness* for callers that skip the arity check is still guaranteed: `anchors.ts`'s `evaluateAnchor` never throws on a malformed or unrecognized anchor string regardless of arity -- it just returns `"unverified"`. */
@@ -584,6 +780,8 @@ export interface CaptureExplicitInput {
   readonly root: string;
   /** File (or directory) this fact is bound to, required when `scope === "path"` and rejected otherwise. Resolved against `root` -- never against ambient `process.cwd()` -- and stored as `scopeRoot`. Without this, `scope: "path"` had no way to bind to anything narrower than `root` itself, which made a "path" fact behave exactly like a "project" fact (isInScope/isBoundToRoot both resolve `scope="path"`'s binding the same way `scope="project"` resolves its own). */
   readonly path?: string;
+  /** Further text that belongs to the fact as it will be stored and is read for credential keywords only (never scanned for secrets, never stored): the whole turn or document section a derived candidate was pulled from, or the rest of a fact being edited. */
+  readonly screenContext?: string;
 }
 
 export interface CaptureSuggestedInput extends CaptureExplicitInput {
@@ -666,7 +864,7 @@ function validateCommonInput(input: CaptureExplicitInput): { text: string; root:
 
 export function screenInputOrThrow(
   db: Database.Database,
-  input: CaptureExplicitInput,
+  input: CaptureExplicitInput & Pick<CaptureSuggestedInput, "sourceExcerpt">,
   root: string,
   auditEvent: string,
   factId: string | null = null
@@ -790,7 +988,8 @@ function writeFact(
 ): Fact {
   const tx = db.transaction((): Fact => {
     const fact = storageInsertFact(db, newFact);
-    insertAuditLog(db, { event: auditEvent, factId: fact.id, detail: detail(fact) });
+    const stampedRef = sourceExcerpt !== undefined && typeof fact.source_ref === "string" && STAMPED_TRANSCRIPT_REF.test(fact.source_ref) ? fact.source_ref : null;
+    insertAuditLog(db, { event: auditEvent, factId: fact.id, detail: detail(fact) + (stampedRef !== null ? `${STAMPED_REF_DETAIL_MARKER}${stampedRef}]` : "") });
     if (sourceExcerpt !== undefined) {
       insertSource(db, { factId: fact.id, excerpt: sourceExcerpt });
     }
@@ -801,8 +1000,8 @@ function writeFact(
 }
 
 /** Records a repeat sighting of a `pending` fact: `mem scan-session`/`mem import --from-md` matched a candidate's text to `factId`, already queued and awaiting `mem review --promote`, instead of finding nothing and writing a second pending row. A restated preference is evidence a human reviewing the queue should see, not noise to drop with a bare `continue` -- which is what both callers did before this existed. Screens `raw` through `buildScreenedExcerpt` exactly like a first capture -- not optional here: a sighting is still raw session/file material, the same secret surface a first capture has, and "it's only a sighting" is not a reason to skip the check that content otherwise always gets. Returns `false`, writing nothing, in the two cases where under-counting is the safe direction: - `buildScreenedExcerpt` returns `null` (screened positive) -- there is no clean excerpt to write and, with no excerpt, no independent evidence to dedup a later real sighting against; - an identical excerpt is already stored for this fact. `sources` carries no locator column (`id, fact_id, excerpt, stored_at`) pointing back at which transcript position or file line produced it, so excerpt equality is the only key available to tell "the same statement, seen again by a second hook firing over the same transcript" (`mem scan-session` runs at both `Stop` and `PreCompact`) from "a genuine restatement" -- and a genuine restatement arrives with different surrounding context, so a different excerpt, every time. Never touches `status`: this function has no path that can promote, demote, or otherwise change a fact's state, however many times it is called. That invariant -- a `pending` fact promotes only through `mem review --promote`, never by time or repetition -- predates this function and nothing here weakens it. */
-export function recordSighting(db: Database.Database, factId: string, raw: string, root: string, factText?: string): boolean {
-  const excerpt = buildScreenedExcerpt(raw, root, factText);
+export function recordSighting(db: Database.Database, factId: string, raw: string, root: string, factText?: string, screenContext = ""): boolean {
+  const excerpt = buildScreenedExcerpt(raw, root, factText, screenContext);
   if (excerpt === null) {
     return false;
   }

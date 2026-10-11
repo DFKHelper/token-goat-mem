@@ -865,3 +865,130 @@ describe("regression: screenForSecrets catches a hex secret sitting next to its 
     expect(screenForSecrets({ text: "sts key is ASIAIOSFODNN7EXAMPLE1234" }, [])).not.toHaveLength(0);
   });
 });
+
+describe("screenForSecrets: a canonical UUID is an id, not a secret, only beside an identifier word and with no credential keyword in the capture", () => {
+  const UUID = "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b";
+  const GENERIC = "generic-high-entropy-token";
+  const names = (text: string): string[] => screenForSecrets({ text }, []).map((match) => match.patternName);
+
+  it("captures a fact that mentions a bare UUID in prose", () => {
+    expect(screenForSecrets({ text: `fact ${UUID} is the canonical one` }, [])).toHaveLength(0);
+    expect(screenForSecrets({ text: "fact 1f688dda-8d93-4403-af68-622addbedcc6 is the canonical one" }, [])).toHaveLength(0);
+  });
+
+  it("treats an uppercase UUID as canonical, since UUID hex digits are case-insensitive", () => {
+    expect(screenForSecrets({ text: `fact ${UUID.toUpperCase()} is the canonical one` }, [])).toHaveLength(0);
+  });
+
+  it.each([
+    ["1 before", `token ${UUID} is the canonical one`],
+    ["1 before, glued", `token=${UUID} is the canonical one`],
+    ["3 before", `Bearer one two ${UUID} is the canonical one`],
+    ["1 before, X-Api-Key header", `X-Api-Key: ${UUID}`],
+    ["1 after", `the id ${UUID} Authorization`],
+    ["5 before", `the password for the staging box is ${UUID}`],
+    ["4 before", `credentials for prod service are: ${UUID}`],
+    ["after: is the key", `${UUID} is the key`],
+    ["after: is the staging password", `${UUID} is the staging password`],
+    ["after: is the prod token", `${UUID} is the prod token`],
+    ["after: use for the api", `use ${UUID} for the api`],
+    ["key then newline", `key:\n${UUID}`],
+    ["key=", `key=${UUID}`],
+    ["json apiKey", `"apiKey":"${UUID}"`],
+    ["Authorization Bearer", `Authorization: Bearer ${UUID}`],
+    ["client_secret", `client_secret ${UUID}`],
+    ["sig=", `sig=${UUID}`],
+    ["api token", `api token ${UUID}`],
+    ["pwd", `pwd ${UUID}`],
+    ["pass:", `pass: ${UUID}`],
+    ["pwd far before", `my pwd for the box is ${UUID}`],
+    ["pin", `pin ${UUID}`],
+    ["license", `license ${UUID}`],
+    ["access", `access ${UUID}`],
+    ["sas", `sas ${UUID}`],
+    ["login far before", `the deploy login is admin and ${UUID}`],
+  ])("still refuses a UUID with a credential keyword in its sentence: %s", (_label, text) => {
+    expect(names(text)).toContain(GENERIC);
+  });
+
+  it.each([
+    ["URL userinfo", `https://user:${UUID}@h.example.com/x`],
+    ["before an at-host", `${UUID}@host`],
+    ["glued to a prefix", `x${UUID}`],
+    ["id assignment", `id=${UUID}`],
+  ])("refuses a UUID that is not a standalone token: %s", (_label, text) => {
+    expect(names(text)).toContain(GENERIC);
+  });
+
+  it.each([
+    ["session id", `the session id is ${UUID}`],
+    ["request id", `request id: ${UUID}`],
+    ["trace failed", `trace ${UUID} failed`],
+    ["superseded", `fact ${UUID} was superseded`],
+    ["trailing period", `see record ${UUID}.`],
+    ["parenthesised", `record (${UUID})`],
+    ["backticked", `record \`${UUID}\``],
+    ["exact word passed", `fact ${UUID} passed review`],
+  ])("stores a standalone UUID with an identifier word in its sentence and no credential keyword: %s", (_label, text) => {
+    expect(names(text)).not.toContain(GENERIC);
+  });
+
+  it.each([
+    ["bare", UUID],
+    ["parenthesised without an identifier word", `(${UUID})`],
+    ["spin up", `spin up ${UUID}`],
+    ["identifier word in the previous sentence", `The session ended. ${UUID} was it`],
+    ["glued camelCase assignment", `sessionId=${UUID}`],
+    ["Password. then the uuid", `Password. ${UUID}`],
+    ["password, blank line, uuid", `password\n\n${UUID}`],
+    ["Secret!", `Secret! ${UUID}`],
+    ["The password. newline uuid", `The password.\n${UUID}`],
+    ["question", `What is the password? ${UUID}`],
+    ["ellipsis", `the password... ${UUID}`],
+    ["next sentence", `Here is the db password. It is ${UUID}`],
+    ["passphrase", `passphrase ${UUID}`],
+    ["pw", `pw ${UUID}`],
+    ["otp", `otp ${UUID}`],
+    ["connection string", `connection string ${UUID}`],
+    ["conn string", `conn string ${UUID}`],
+    ["session cookie", `session cookie ${UUID}`],
+    ["recovery code", `recovery code ${UUID}`],
+    ["activation", `activation ${UUID}`],
+    ["webhook", `webhook ${UUID}`],
+    ["fullwidth password", `ｐａｓｓｗｏｒｄ ${UUID}`],
+    ["camelCase keyword", `the sessionId and apiKey are ${UUID}`],
+    ["keyword in an earlier sentence", `The token is rotated weekly. Fact ${UUID} is the canonical one`],
+    ["keyword in a later sentence", `Fact ${UUID} is the canonical one. The token is rotated weekly`],
+    ["keyword after a blank line", `The token is rotated weekly\n\nFact ${UUID} is the canonical one`],
+  ])("refuses a UUID without an identifier word in its sentence, or with a credential keyword anywhere in the field: %s", (_label, text) => {
+    expect(names(text)).toContain(GENERIC);
+  });
+
+  it("refuses a UUID when a credential keyword is in another content field of the same capture", () => {
+    const refused = (fields: Record<string, string>): boolean => screenForSecrets(fields, []).some((match) => match.patternName === GENERIC);
+    expect(refused({ text: UUID, subject: "password" })).toBe(true);
+    expect(refused({ text: "the db credential is set", subject: "password", value: UUID })).toBe(true);
+    expect(refused({ text: UUID, why: "this is the password" })).toBe(true);
+    expect(refused({ text: `the session id is ${UUID}`, subject: "password" })).toBe(true);
+    expect(refused({ text: `the session id is ${UUID}`, value: "ｐａｓｓｗｏｒｄ" })).toBe(true);
+  });
+
+  it("stores an identifier UUID whose other content fields carry no credential keyword", () => {
+    expect(screenForSecrets({ text: `run ${UUID} finished`, subject: "ci", value: "green" }, [])).toHaveLength(0);
+  });
+
+  it.each([
+    ["Windows", `C:\\Users\\x\\.claude\\projects\\C--Projects-token-goat-mem\\${UUID}.jsonl#turn3`],
+    ["POSIX", `/home/x/.claude/projects/C--Projects-token-goat-mem/${UUID}.jsonl#turn3`],
+  ])("stores a session-id fact whose %s transcript sourceRef sits under a token-goat-mem directory", (_label, sourceRef) => {
+    expect(screenForSecrets({ text: `the session id is ${UUID}`, sourceRef }, [])).toHaveLength(0);
+  });
+
+  it.each([
+    ["wrong group lengths", `${UUID}aa`],
+    ["a non-hex digit", `${UUID.slice(0, -1)}z`],
+    ["glued to other characters in one token", `session_${UUID}`],
+  ])("keeps flagging a non-canonical shape: %s", (_label, token) => {
+    expect(names(`fact ${token} is the canonical one`)).toContain(GENERIC);
+  });
+});

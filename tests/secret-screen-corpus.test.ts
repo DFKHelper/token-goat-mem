@@ -10,6 +10,8 @@ function patternNamesFor(text: string): string[] {
 describe("secret-screen corpus: benign shapes must pass", () => {
   it.each([
     { name: "uuid inside a path", text: "~/.claude/projects/foo/3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b.jsonl" },
+    { name: "session id sentence", text: "the session id is 3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b" },
+    { name: "request id label", text: "request id: 3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b" },
     { name: "lowercase kebab id", text: "feature-flag-new-checkout-flow-experiment-variant-b" },
     { name: "git sha", text: "fixed in commit 3f9a1c7e2b8d04f65a93ce17b2408df6e5c1a97b" },
     { name: "semver", text: "released as v0.5.2" },
@@ -29,10 +31,28 @@ describe("secret-screen corpus: secret shapes must be flagged", () => {
   });
 });
 
-describe("secret-screen corpus: known limitation, benign but kept flagged", () => {
-  // Kebab ids with digit segments stay flagged on purpose (tests/capture.test.ts pins the same catch as desired); a bare UUID is a candidate screener bug pending a policy call on an anchored 8-4-4-4-12 exemption.
+describe("secret-screen corpus: a uuid next to a credential keyword stays flagged", () => {
+  const UUID = "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b";
+
   it.each([
-    { name: "bare uuid (candidate bug, no exemption matches it)", text: "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b" },
+    { name: "api key label", text: `api key: ${UUID}` },
+    { name: "token assignment", text: `token=${UUID}` },
+    { name: "bearer scheme", text: `Bearer ${UUID}` },
+    { name: "long-gap sentence", text: `the password for the staging box is ${UUID}` },
+    { name: "keyword after the uuid", text: `${UUID} is the staging password` },
+    { name: "url userinfo uuid", text: `https://user:${UUID}@h.example.com/x` },
+    { name: "pwd label", text: `pwd ${UUID}` },
+    { name: "bare uuid with no identifier word", text: UUID },
+    { name: "keyword just across a sentence boundary", text: `Password. ${UUID}` },
+    { name: "passphrase label", text: `passphrase ${UUID}` },
+  ])("flags $name", ({ text }) => {
+    expect(screenForSecrets({ text }, [])).not.toHaveLength(0);
+  });
+});
+
+describe("secret-screen corpus: known limitation, benign but kept flagged", () => {
+  // Kebab ids with digit segments stay flagged on purpose (tests/capture.test.ts pins the same catch as desired).
+  it.each([
     { name: "kebab id with a digit segment", text: "feature-flag-new-checkout-flow-experiment-variant-v2" },
     { name: "kebab deploy id with digit segments", text: "deploy-prod-eu-west-1-blue-green-release-candidate-2" },
   ])("keeps $name flagged as generic-high-entropy-token", ({ text }) => {

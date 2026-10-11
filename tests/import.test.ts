@@ -345,6 +345,17 @@ describe("importFromMarkdown", () => {
     ]);
   });
 
+  it("does not file a UUID bullet that names no identifier, and files one under a session-id bullet", () => {
+    const uuid = "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b";
+    writeFileSync(mdPath, ["## Prod DB password", "", `- Always use ${uuid} for prod`].join("\n"), "utf8");
+    const refused = importFromMarkdown(db, { path: mdPath, root });
+    expect(refused.outcomes.filter((o) => o.status === "imported")).toHaveLength(0);
+
+    writeFileSync(mdPath, ["## Session ids", "", `- Always note that the session id is ${uuid}`].join("\n"), "utf8");
+    const filed = importFromMarkdown(db, { path: mdPath, root });
+    expect(filed.outcomes.filter((o) => o.status === "imported")).toHaveLength(1);
+  });
+
   it("skips non-bullet content and fenced/nested-structural bullets (only 2 candidates from the fixture)", () => {
     const result = importFromMarkdown(db, { path: mdPath, root, dryRun: true });
     expect(result.candidates).toHaveLength(2);
