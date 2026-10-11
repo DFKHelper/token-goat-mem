@@ -1,4 +1,5 @@
 /** End-to-end tests for `mem doctor`'s last-surfacing line: the latest recorded time a fact reached a session, taken from the later of `facts.last_surfaced_at` (never rotated) and `recall_log.surfaced_at` (rotated by `mem epoch --gc`). Driven through the real `run()` against a real database; the pure `describeLastSurfaced` is tested with a fixed clock. */
+import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openDb, resolveDbPath } from "../src/db.js";
 import { describeLastSurfaced } from "../src/doctor.js";
+import { MIGRATIONS } from "../src/migrations.js";
 import { runCli } from "./support/cli.js";
 
 let home: string;
@@ -137,5 +139,43 @@ describe("describeLastSurfaced", () => {
   it("stays ok at exactly 7 days and warns one millisecond later", () => {
     expect(describeLastSurfaced("2026-10-04T12:00:00.000Z", 3, now)[0]?.status).toBe("ok");
     expect(describeLastSurfaced("2026-10-04T11:59:59.999Z", 3, now)[0]?.status).toBe("warn");
+  });
+});
+
+describe("mem doctor on a store behind the newest schema", () => {
+  const highest = MIGRATIONS[MIGRATIONS.length - 1]?.version ?? 0;
+
+  it.each([
+    { userVersion: 0, pending: highest },
+    { userVersion: 3, pending: highest - 3 },
+    { userVersion: highest - 1, pending: 1 },
+  ])("reports $pending pending migration(s) at user_version $userVersion as a warn that --strict does not count, and does not migrate", async ({ userVersion, pending }) => {
+    await runCli(["remember", "a fact stored before the newest schema", "--kind", "fact", "--scope", "global"]);
+    rewriteSurfacing(`PRAGMA user_version = ${String(userVersion)}`);
+    const result = await runCli(["doctor", "--json", "--strict"]);
+    const report = JSON.parse(result.stdout) as { findings: RecallFinding[] };
+    const failed = report.findings.filter((entry) => entry.status === "fail");
+    const schemaEntries = report.findings.filter((entry) => entry.check === "schema");
+    expect(schemaEntries, "exactly one schema finding names the pending migrations").toHaveLength(1);
+    const schema = schemaEntries[0];
+    expect(schema?.status, "pending migrations are a warn, not a fail").toBe("warn");
+    expect(failed.includes(schema as RecallFinding), "the pending-migration finding is not among the findings --strict fails on").toBe(false);
+    // Only fail findings set the --strict exit, so a slow machine tripping some other check does not make this row fail.
+    expect(result.exitCode, `--strict exits 1 exactly when a finding fails: ${JSON.stringify(failed)}`).toBe(failed.length > 0 ? 1 : 0);
+    expect(schema?.message).toBe(`schema: ${String(pending)} migration${pending === 1 ? "" : "s"} pending (the next write applies them)`);
+    const raw = new Database(resolveDbPath(), { readonly: true, fileMustExist: true });
+    try {
+      expect(raw.pragma("user_version", { simple: true }), "doctor is read-only and must leave the store un-migrated").toBe(userVersion);
+    } finally {
+      raw.close();
+    }
+  });
+
+  it("emits no schema finding for a store at the newest schema", async () => {
+    await runCli(["remember", "a fact stored at the newest schema", "--kind", "fact", "--scope", "global"]);
+    const result = await runCli(["doctor", "--json"]);
+    const report = JSON.parse(result.stdout) as { findings: RecallFinding[] };
+    expect(report.findings.some((entry) => entry.check === "integrity" && entry.status === "ok"), "the report did inspect the store").toBe(true);
+    expect(report.findings.some((entry) => entry.check === "schema")).toBe(false);
   });
 });
