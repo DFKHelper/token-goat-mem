@@ -200,6 +200,8 @@ describe("with no embedding configuration, behaviour is what it was before the f
     const recall = await runCli(["recall", "vitest", "--root", root]);
 
     expect(embed.exitCode).not.toBe(0);
+    expect(recall.exitCode).toBe(0);
+    expect(recall.stdout.split("\n")[0]).toMatch(/uses vitest for tests/u);
     for (const output of [embed.stdout, embed.stderr, recall.stdout, recall.stderr]) {
       expect(output).not.toContain("hunter2");
       expect(output).not.toContain("user:");

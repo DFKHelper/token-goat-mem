@@ -6509,6 +6509,18 @@ describe("mem dream", () => {
     expect(`${result.stdout}${result.stderr}`).toContain(MODEL_ENV);
   });
 
+  it("never prints URL userinfo from an unparseable endpoint", async () => {
+    process.env[URL_ENV] = "http://user:hunter2@host:99999";
+    process.env[MODEL_ENV] = "m";
+    const result = await runCli(["dream"]);
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain("is not a valid URL");
+    for (const output of [result.stdout, result.stderr]) {
+      expect(output).not.toContain("hunter2");
+      expect(output).not.toContain("user:");
+    }
+  });
+
   it("rejects a --timeout that is not a positive number", async () => {
     process.env[URL_ENV] = "http://127.0.0.1:1/v1/chat/completions";
     process.env[MODEL_ENV] = "m";

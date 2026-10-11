@@ -67,8 +67,8 @@ export function readDreamConfig(env: NodeJS.ProcessEnv = process.env): DreamConf
   try {
     parsed = new URL(url);
   } catch {
-    // Echoed because it is an endpoint the user typed, not a credential.
-    throw new DreamConfigError(`${DREAM_URL_ENV} is not a valid URL: ${url}`);
+    // The raw value can carry userinfo, which is a credential, so the error names a safe label and never the value.
+    throw new DreamConfigError(`${DREAM_URL_ENV} is not a valid URL: ${dreamEndpointLabel(url)}`);
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new DreamConfigError(`${DREAM_URL_ENV} must be an http(s) URL, got ${parsed.protocol}//`);
