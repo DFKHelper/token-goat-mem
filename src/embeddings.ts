@@ -60,8 +60,8 @@ export function readEmbeddingConfig(env: NodeJS.ProcessEnv = process.env): Embed
   try {
     parsed = new URL(url);
   } catch {
-    // The offending value is echoed because it is an endpoint the user typed, not a credential.
-    throw new EmbeddingConfigError(`${EMBED_URL_ENV} is not a valid URL: ${url}`);
+    // Only the host-only label is echoed: the raw value can carry userinfo, which is a credential.
+    throw new EmbeddingConfigError(`${EMBED_URL_ENV} is not a valid URL (${endpointLabelFor(url)})`);
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new EmbeddingConfigError(`${EMBED_URL_ENV} must be an http(s) URL, got ${parsed.protocol}//`);
