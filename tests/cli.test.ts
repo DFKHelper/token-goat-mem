@@ -1,6 +1,6 @@
 /** End-to-end tests for src/cli.ts, driven through `run()` (the same entry point src/main.ts calls) rather than by calling the underlying domain modules directly -- these tests exercise the actual argv parsing, CLI-boundary validation, output formatting, and DB lifecycle wiring `cli.ts` owns. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), matching the isolation discipline tests/setup/isolate-home.ts already establishes at the file level, but re-applied per-test here so facts written by one test can never leak into another within this file. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,6 +18,9 @@ import { getEpoch } from "../src/epoch.js";
 import { captureSuggested,MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
 import { _clearAnchorMemoForTests } from "../src/anchors.js";
+
+// Process launches on this machine take 1-10 s, past the 4000 ms probe budget in wiring.ts; the floor keeps capability tests from timing out on launch latency.
+vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
 
 let home: string;
 
@@ -3238,7 +3241,8 @@ describe("mem init/uninstall", () => {
     expect(readFileSync(instructionsPath, "utf8")).toBe(original);
   });
 
-  describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", () => {
+  // Each init or doctor runs the PATH-capability probe through cmd.exe and node, 1-10 s a launch on this machine, so the 30 s default is spent on launches.
+  describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", { timeout: 300_000 }, () => {
     // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session` hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older build that rejects those flags -- every hook then fails, silently, because nothing compared the write against the binary that would actually run it. These tests replace the always- capable fake `mem` this describe block's `beforeEach` puts on PATH with a deliberately incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
 
     function installOldMemShim(dir: string): void {

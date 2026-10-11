@@ -1,9 +1,12 @@
 /** Unit-level tests for src/wiring.ts's install/uninstall/describe behavior across all four tools, plus direct coverage of the low-level building blocks (marker insert/replace/strip, JSON/JSONC stamping, atomic-write retry). Every test uses an isolated `mkdtempSync` fixture for both the project root and the "home" directory -- never the real `~/.claude`, real VS Code config, or real project files. */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+
+// Process launches on this machine take 1-10 s, past the 4000 ms probe budget in wiring.ts; the floor keeps capability tests from timing out on launch latency.
+vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
 
 import {
   checkClaudeHookHealth,
@@ -1950,7 +1953,8 @@ describe("resolveBinaryOnPath", () => {
   });
 });
 
-describe("checkHookCapability / checkClaudeHookHealth / resolveMemBinary (against real subprocesses)", () => {
+// Each health check launches the fake mem once per hook through cmd.exe and node, 1-10 s a launch on this machine, so the 30 s default is spent on launches before any assertion runs.
+describe("checkHookCapability / checkClaudeHookHealth / resolveMemBinary (against real subprocesses)", { timeout: 300_000 }, () => {
   let dir: string;
   const isWindows = process.platform === "win32";
 

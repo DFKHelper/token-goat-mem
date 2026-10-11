@@ -467,12 +467,9 @@ describe("regression: the seam's row mapper projects every column retrieval depe
       function makeRepo(name: string): string {
         const repo = join(work, name);
         mkdirSync(repo, { recursive: true });
+        // Few git launches on purpose: each costs 1-10 s on a scanned Windows machine, so identity goes in per-command `-c` flags and the commit is empty rather than a config + add + commit chain.
         git(repo, "init", "-q");
-        git(repo, "config", "user.email", "t@example.com");
-        git(repo, "config", "user.name", "t");
-        writeFileSync(join(repo, "file.txt"), "x", "utf8");
-        git(repo, "add", "-A");
-        git(repo, "commit", "-qm", "init");
+        git(repo, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
         git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
         return repo;
       }
@@ -503,7 +500,7 @@ describe("regression: the seam's row mapper projects every column retrieval depe
       clearProjectIdentityCache();
       rmSync(work, { recursive: true, force: true });
     }
-  });
+  }, 180_000);
 });
 
 describe("entity ranking on the hint-format path", () => {
