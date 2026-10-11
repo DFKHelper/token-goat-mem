@@ -174,9 +174,11 @@ describe("extractMarkdownBullets", () => {
     expect(bullets.map((b) => b.text)).toEqual(["between the markers", "after the block"]);
   });
 
-  it("imports the bullets after a mem block start whose fence is never closed", () => {
-    const bullets = extractMarkdownBullets(["- before", markerStart("claude-code"), "- after the start", "```", markerEnd("claude-code")].join("\n"));
-    expect(bullets.map((b) => b.text)).toEqual(["before", "after the start"]);
+  it("ends a mem block at its end marker even when an unclosed fence sits inside it", () => {
+    const bullets = extractMarkdownBullets(
+      ["- before", markerStart("claude-code"), "- after the start", "```", markerEnd("claude-code"), "- after the end"].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["before", "after the end"]);
   });
 
   it("handles CRLF input: skips a mem block and still joins a wrapped bullet", () => {
@@ -240,6 +242,30 @@ describe("extractMarkdownBullets", () => {
   it("keeps a heading indented 4+ spaces as a continuation line", () => {
     const bullets = extractMarkdownBullets(["- run npm test", "    ## literal text"].join("\n"));
     expect(bullets.map((b) => b.text)).toEqual(["run npm test ## literal text"]);
+  });
+
+  it("imports the bullets after a backtick fence that is never closed", () => {
+    const bullets = extractMarkdownBullets(["- a", "```", "- b", "- c"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["a", "b", "c"]);
+  });
+
+  it("imports the bullets outside a tilde fence that is never closed, and still skips the closed backtick fence after it", () => {
+    const bullets = extractMarkdownBullets(
+      ["- outside one", "~~~", "- outside two", "```", "- inside backtick", "```", "- outside after"].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["outside one", "outside two", "outside after"]);
+  });
+
+  it("skips the bullets inside a closed fence and imports the bullets after a later fence that is never closed", () => {
+    const bullets = extractMarkdownBullets(["```", "- inside closed", "```", "- between", "```", "- after unclosed"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["between", "after unclosed"]);
+  });
+
+  it("ends a mem block at its end marker when a fence inside it is never closed", () => {
+    const bullets = extractMarkdownBullets(
+      ["- before the block", sharedMarkerStart(["codex"]), "- inside block", "```", SHARED_BLOCK_END, "- after block"].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["before the block", "after block"]);
   });
 });
 
@@ -354,6 +380,12 @@ describe("importFromMarkdown", () => {
     writeFileSync(mdPath, ["## Session ids", "", `- Always note that the session id is ${uuid}`].join("\n"), "utf8");
     const filed = importFromMarkdown(db, { path: mdPath, root });
     expect(filed.outcomes.filter((o) => o.status === "imported")).toHaveLength(1);
+  });
+
+  it("imports the bullets after a fence that is never closed as candidates", () => {
+    writeFileSync(mdPath, ["## Preferences", "```", "- Always run the linter before committing.", "- Prefer small commits."].join("\n"), "utf8");
+    const result = importFromMarkdown(db, { path: mdPath, root, dryRun: true });
+    expect(result.candidates.map((c) => c.text)).toEqual(["Always run the linter before committing.", "Prefer small commits."]);
   });
 
   it("skips non-bullet content and fenced/nested-structural bullets (only 2 candidates from the fixture)", () => {

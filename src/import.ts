@@ -48,19 +48,38 @@ const NUMBERED_ITEM_RE = /^\s+\d+[.)]\s/u;
 /** Headings whose *nested* bullets describe file/directory layout or system structure rather than a preference or decision a human stated -- not a general topic blocklist, and only excludes nested (indented) bullets under one of these headings. Top-level bullets and bullets under any other heading are still candidates; per this module's doc comment, the review gate (not this list) is the actual safety boundary. */
 const NON_PREFERENCE_HEADING_RE = /\b(architecture|file structure|file organization|directory structure)\b/iu;
 
+/** True when a fence line using `marker` appears at or after line index `from` -- a fence opener with no such close later is ordinary text, so an unclosed fence never swallows the rest of the file. */
+function fenceClosesLater(lines: readonly string[], from: number, marker: string): boolean {
+  for (let j = from; j < lines.length; j++) {
+    const fence = FENCE_RE.exec(lines[j] ?? "");
+    if (fence !== null && (fence[1] ?? "").charAt(0) === marker) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** The fence character open after line index `index`, given the one open before it: a fence line opens a fence only when `fenceClosesLater` finds its close, closes the open fence only on the same marker, and any other line leaves the state unchanged. */
+function fenceStateAfter(lines: readonly string[], index: number, openFence: string | null): string | null {
+  const fence = FENCE_RE.exec(lines[index] ?? "");
+  if (fence === null) {
+    return openFence;
+  }
+  const marker = (fence[1] ?? "").charAt(0);
+  if (openFence === null) {
+    return fenceClosesLater(lines, index + 1, marker) ? marker : null;
+  }
+  return marker === openFence ? null : openFence;
+}
+
 /** True when `endMarker` appears at or after line index `from`, outside a fenced code block, before any other block start marker -- the reader's mirror of the writer treating a start with no end of its own as not a block, so an orphan start never swallows the rest of the file. */
 function blockClosesLater(lines: readonly string[], from: number, endMarker: string): boolean {
   let fenceChar: string | null = null;
   for (let j = from; j < lines.length; j++) {
     const line = lines[j] ?? "";
-    const fence = FENCE_RE.exec(line);
-    if (fence !== null) {
-      const marker = (fence[1] ?? "").charAt(0);
-      if (fenceChar === null) {
-        fenceChar = marker;
-      } else if (marker === fenceChar) {
-        fenceChar = null;
-      }
+    const fenceAfter = fenceStateAfter(lines, j, fenceChar);
+    if (fenceAfter !== fenceChar) {
+      fenceChar = fenceAfter;
       continue;
     }
     if (fenceChar !== null) {
@@ -94,29 +113,18 @@ export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
     const line = lines[i] ?? "";
 
     if (skipUntil !== null) {
-      const skipFence = FENCE_RE.exec(line);
-      if (skipFence !== null) {
-        const marker = (skipFence[1] ?? "").charAt(0);
-        if (skipFenceChar === null) {
-          skipFenceChar = marker;
-        } else if (marker === skipFenceChar) {
-          skipFenceChar = null;
-        }
+      const skipFenceAfter = fenceStateAfter(lines, i, skipFenceChar);
+      if (skipFenceAfter !== skipFenceChar) {
+        skipFenceChar = skipFenceAfter;
       } else if (skipFenceChar === null && line.includes(skipUntil)) {
         skipUntil = null;
       }
       continue;
     }
 
-    const fence = FENCE_RE.exec(line);
-    if (fence !== null) {
-      const marker = (fence[1] ?? "").charAt(0);
-      if (fenceChar === null) {
-        fenceChar = marker;
-      } else if (marker === fenceChar) {
-        fenceChar = null;
-      }
-      // A fence line using the non-matching marker while already inside a fence is just ordinary content of that fence (e.g. a `~~~` line inside a ``` block) -- fall through to the `inFence` check below rather than treating it as a close/reopen.
+    if (FENCE_RE.test(line)) {
+      fenceChar = fenceStateAfter(lines, i, fenceChar);
+      // A fence line using the non-matching marker while already inside a fence is just ordinary content of that fence (e.g. a `~~~` line inside a ``` block) -- it neither closes nor reopens the fence, and the line is consumed here.
       open = null;
       continue;
     }
