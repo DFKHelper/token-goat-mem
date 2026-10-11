@@ -60,6 +60,24 @@ function describeWhyCoverage(withWhy: number, total: number): Finding[] {
     : [finding("why", "ok", line)];
 }
 
+/** `mem doctor`'s last-surfacing line: when recall last put a fact in front of a session, a lower bound only -- a recall that surfaced nothing, or took a path that does not log, leaves no record. Silent hook death (every hook exiting 0 with empty output) is otherwise invisible; a store full of facts with no recent surfacing is the symptom. Only "active facts, none ever surfaced" warns: how old is too old is a policy nobody has set. */
+export function describeLastSurfaced(latest: string | null, recallableFacts: number, now: Date): Finding[] {
+  const at = latest === null ? Number.NaN : Date.parse(latest);
+  if (!Number.isFinite(at)) {
+    return recallableFacts === 0
+      ? [finding("store", "ok", "recall: no fact has been surfaced yet (the store has no active or pinned facts)")]
+      : [
+          finding(
+            "store",
+            "warn",
+            "recall: no fact has been surfaced yet, though the store has active or pinned facts (the recall hooks may not be running; see the hooks lines above or run `mem init claude-code`)",
+            "mem init claude-code"
+          ),
+        ];
+  }
+  return [finding("store", "ok", `recall: last fact surfaced ${new Date(at).toISOString()} (${formatAge(now.getTime() - at)} ago; recalls that surfaced nothing leave no record)`)];
+}
+
 /** `mem doctor`'s hint-budget line: how much of what a store holds can actually reach a session. Worth a line because the ceiling is otherwise invisible from every command a user has. `mem list` shows every fact, `mem doctor`'s own status counts show how many are active, and neither hints that a single `--hint-format` block carries at most `HINT_LINE_CEILING` of them -- so a store that has grown past the cap looks healthy right until someone notices a fact they can plainly see in `mem list` is never in context. The fix is not a bigger cap (the cap is what keeps the block from becoming filler); it is pinning the handful that must always arrive, so the remediation named here is `mem pin`. Pins are reported against the reserve rather than the ceiling because over-pinning is the failure on the other side: past `HINT_PINNED_RESERVE`, extra pins compete on relevance like anything else, so a store with twenty pins has not bought twenty guaranteed slots and should not believe it has. */
 function describeHintBudget(recallable: number, pinned: number): Finding[] {
   const line = `hint budget: ${recallable} recallable fact${recallable === 1 ? "" : "s"}, at most ${HINT_LINE_CEILING} per recall; ${pinned} pinned of ${HINT_PINNED_RESERVE} reserved slots`;
@@ -393,6 +411,13 @@ export function registerDoctorCommand(program: Command): void {
           // The same status pair the hint-format recall pool loads (see `--hint-format`'s `listFacts` call): anything else is withheld, so counting it here would overstate what a session can actually receive.
           const pinnedFacts = countFacts(db, { status: "pinned" });
           const recallableFacts = countFacts(db, { status: "active" }) + pinnedFacts;
+          // `last_surfaced_at` outlives the `recall_log` rotation and the log can hold a row a pre-column fact lacks, so the later of the two is the latest recorded surfacing; ISO timestamps compare lexicographically, and the aggregate over both maxima skips a NULL on either side (the scalar two-argument `MAX` would return NULL).
+          const latestSurfacing =
+            db
+              .prepare<[], { latest: string | null }>(
+                "SELECT MAX(at) AS latest FROM (SELECT MAX(last_surfaced_at) AS at FROM facts UNION ALL SELECT MAX(surfaced_at) AS at FROM recall_log)"
+              )
+              .get()?.latest ?? null;
           // Grouped by root so one renamed directory holding forty facts reports as one missing root, not forty -- and so each root is stat'd once however many facts hang off it.
           const scopedRoots = db
             .prepare<[], { scope_root: string; scope_repo: string | null; c: number }>(
@@ -422,6 +447,7 @@ export function registerDoctorCommand(program: Command): void {
             trailing: [
               ...describeFacets(countFactsWithTerms(db), totalFacts),
               ...describeWhyCoverage(rationale.withWhy, rationale.total),
+              ...describeLastSurfaced(latestSurfacing, recallableFacts, new Date()),
               ...describeHintBudget(recallableFacts, pinnedFacts),
               ...describeScopePlacement(
                 unreachable.length,
