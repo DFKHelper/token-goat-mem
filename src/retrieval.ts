@@ -109,6 +109,8 @@ export const AGGRESSIVE_RECALL_BOOST = 1.15;
 const BM25_K1 = 1.5;
 const BM25_B = 0.75;
 const RRF_K = 60;
+/** Pseudo-surfacings added to the denominator of the usefulness ratio, so a fact surfaced once and used once does not outrank one used 9 of 10 times on a thin sample. */
+const USEFULNESS_PRIOR_SURFACINGS = 2;
 
 // ───────────────────────────────────────────────────────────────────────────────────────────── Porter stemmer (M.F. Porter, "An algorithm for suffix stripping", 1980). Applied inside `tokenize` itself, so it runs identically at index time (`computeBm25Scores` building document term frequencies) and query time (the same function scoring the query) -- there is no separate index to go stale, since BM25 here recomputes term statistics fresh over the candidate pool on every `retrieve()` call. Without stemming, "commits" and "commit", or "test" and "testing", shared no token and could not match each other at all. Written inline rather than taken as a dependency: the algorithm is fully specified by Porter's paper and is small (five steps), and this project deliberately removed `zod` and `sqlite-vec` for being unreachable weight -- a dependency for ~150 lines of well-specified, testable logic isn't a good trade. Only ASCII-lowercase alphabetic tokens are stemmed; a token containing a digit (already produced by `tokenize`'s split, e.g. "es6") passes through unchanged, since the algorithm's vowel/consonant rules are meaningless applied to digits. ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -477,7 +479,7 @@ function graphScoreRanking(candidates: readonly Fact[], graphScores: RetrievalOp
   return scored.map((entry) => entry.fact.id);
 }
 
-/** Orders candidates by how well their past surfacings paid off, for fusion as a third RRF list. Only facts with at least one confirmed-useful recall are ranked. A fact nobody has ever been shown has no evidence either way, and putting it at the bottom of this list would punish every newly captured fact for the crime of being new -- a feedback loop where unseen facts stay unseen. Leaving it out makes it contribute nothing, which is what `reciprocalRankFusion` already does with a missing id. Surfaced-but-never-confirmed is the same non-claim: `mem used` is opt-in, so a zero used count means "nobody said either way", not "someone said no". Excluding zero-used facts is also what keeps this list *empty* -- and therefore keeps fusion off entirely -- on every store nobody has run `mem used` against. That is load-bearing rather than incidental: integration-seam.ts's `--delta` filter distinguishes a query match from filler by testing `score !== 0`, and RRF never emits 0, so a list that went non-empty the moment any recall had ever been logged would silently disable delta suppression for every install. See the note on the `usefulness` option passed from that file for the residual case once feedback does exist. Used count descending, then *lower* surfaced count wins: a fact used 2 of 2 times is a stronger signal than one used 2 of 50, where the other 48 surfacings say the opposite. `captured_at` descending settles the remainder so the list is a total order and the fused scores are stable across runs -- without it, two equally-useful facts would swap places on `Array.prototype.sort`'s implementation-defined ordering and make recall output non-reproducible. */
+/** Orders candidates by how well their past surfacings paid off, for fusion as a third RRF list. Only facts with at least one confirmed-useful recall are ranked. A fact nobody has ever been shown has no evidence either way, and putting it at the bottom of this list would punish every newly captured fact for the crime of being new -- a feedback loop where unseen facts stay unseen. Leaving it out makes it contribute nothing, which is what `reciprocalRankFusion` already does with a missing id. Surfaced-but-never-confirmed is the same non-claim: `mem used` is opt-in, so a zero used count means "nobody said either way", not "someone said no". Excluding zero-used facts is also what keeps this list *empty* -- and therefore keeps fusion off entirely -- on every store nobody has run `mem used` against. That is load-bearing rather than incidental: integration-seam.ts's `--delta` filter distinguishes a query match from filler by testing `score !== 0`, and RRF never emits 0, so a list that went non-empty the moment any recall had ever been logged would silently disable delta suppression for every install. See the note on the `usefulness` option passed from that file for the residual case once feedback does exist. Ranked on `used / (surfaced + USEFULNESS_PRIOR_SURFACINGS)` descending, not on a raw used count: a fact used 2 of 2 times is a stronger signal than one used 2 of 10, where the other 8 surfacings say the opposite, and a raw count would let a fact that is merely surfaced often crowd out the rest. Higher used count, then lower surfaced count, break a tied ratio. `captured_at` descending settles the remainder so the list is a total order and the fused scores are stable across runs -- without it, two equally-useful facts would swap places on `Array.prototype.sort`'s implementation-defined ordering and make recall output non-reproducible. */
 function usefulnessRanking(candidates: readonly Fact[], usefulness: RetrievalOptions["usefulness"]): string[] {
   if (usefulness === undefined) {
     return [];
@@ -485,7 +487,12 @@ function usefulnessRanking(candidates: readonly Fact[], usefulness: RetrievalOpt
   const scored = candidates
     .map((fact) => ({ fact, counts: usefulness.get(fact.id) }))
     .filter((entry): entry is { fact: Fact; counts: { surfaced: number; used: number } } => entry.counts !== undefined && entry.counts.used > 0);
+  const ratio = (counts: { surfaced: number; used: number }): number => counts.used / (counts.surfaced + USEFULNESS_PRIOR_SURFACINGS);
   scored.sort((a, b) => {
+    const byRatio = ratio(b.counts) - ratio(a.counts);
+    if (byRatio !== 0) {
+      return byRatio;
+    }
     const byUsed = b.counts.used - a.counts.used;
     if (byUsed !== 0) {
       return byUsed;

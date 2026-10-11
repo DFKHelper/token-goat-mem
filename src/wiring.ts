@@ -1506,10 +1506,11 @@ git-branch-is, git-tracked, package-version, valid-until, newest-of.
 The anchor path must stay inside --root (no "..", no absolute path).
 
 When a fact you recalled actually informed the work, mark it: a recall's
-footer line carries a ready-to-run \`mem used ... --session-id ...\`
-invocation naming exactly the facts and session that recall logged under --
-run that line verbatim rather than composing your own. Recall ranks partly
-on this signal, and nothing else produces it.`;
+footer line carries a \`mem used ... --session-id ...\` invocation naming every
+fact that recall surfaced and the session it logged under. Those ids are
+candidates, not a verdict: run it with only the ids that actually informed the
+work (and the same --session-id), not the whole list. Recall ranks partly on
+this signal, and nothing else produces it.`;
 
 /** Canonical "## Memory" prose shared by every tool that writes into `AGENTS.md` via the reference-counted shared block (`codex`, `copilot-cli`, and `copilot-vscode`). */
 const AGENTS_MD_SHARED_BODY = `## Memory

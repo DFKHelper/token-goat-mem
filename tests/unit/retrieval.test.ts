@@ -976,6 +976,16 @@ describe("usefulness as a third RRF rank list", () => {
     expect(ranked).toEqual(["c", "b"]);
   });
 
+  it("ranks on used over surfaced, so a fact surfaced often does not crowd out one surfaced rarely", async () => {
+    const ranking = async (counts: ReadonlyArray<readonly [string, { surfaced: number; used: number }]>): Promise<string[]> => {
+      const outcome = await retrieve(facts, { query: "", root, usefulness: new Map(counts) });
+      return outcome.results.map((r) => r.fact.id).filter((id) => id === "b" || id === "c");
+    };
+    // `b` is newer and has the higher raw used count in the second case, so neither the recency tie-break nor a raw count can produce the expected order.
+    expect(await ranking([["b", { surfaced: 10, used: 2 }], ["c", { surfaced: 2, used: 2 }]])).toEqual(["c", "b"]);
+    expect(await ranking([["b", { surfaced: 10, used: 3 }], ["c", { surfaced: 2, used: 2 }]])).toEqual(["c", "b"]);
+  });
+
   it("ignores a surfaced-but-never-confirmed fact rather than demoting it", async () => {
     // Zero used counts must leave the rank list empty. If they did not, every store that had ever logged a recall would switch retrieval into RRF -- and RRF never emits a 0 score, which is the single predicate integration-seam.ts's `--delta` filter uses to tell a match from filler.
     const baseline = await retrieve(facts, { query: "deploy", root });

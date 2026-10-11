@@ -183,7 +183,7 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
 
     const footer = footerOf(result.stdout);
     expect(footer).toBeDefined();
-    const invocation = /mem used (.+) --session-id (\S+) to mark what helped/u.exec(footer ?? "");
+    const invocation = /mark only the facts that informed the work: mem used (.+) --session-id (\S+)$/u.exec(footer ?? "");
     expect(invocation).not.toBeNull();
     const [, idList, sessionId] = invocation ?? [];
     expect(idList?.split(" ")).toEqual([id]);

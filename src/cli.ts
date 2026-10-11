@@ -154,6 +154,7 @@ import {
   listEntityCounts,
   listFacts,
   listFactsNeedingEmbedding,
+  listRecallSets,
   listFactsNeedingTerms,
   listSourcesForFact,
   listTermsForFact,
@@ -174,6 +175,9 @@ import type { Fact, FactFilter, FactKind, FactScope, FactStatus, FactUpdate, Sou
 
 /** Longest a single before/after value is allowed to be in an audit `detail` line. Long enough to identify the change, short enough that an edited 500-character fact does not turn one audit row into a second copy of the store. */
 const AUDIT_VALUE_PREVIEW_LENGTH = 120;
+
+/** Smallest recall set whose complete confirmation `mem used` refuses without `--all`; with one or two surfaced facts, naming them all is plausibly honest. */
+const RUBBER_STAMP_MIN_FACTS = 3;
 
 /** Renders a value for an audit `detail` line without truncating it -- for the side of an edit the store is about to forget. */
 function auditValueWhole(value: string | number | null | undefined): string {
@@ -1481,6 +1485,7 @@ interface EpochCliOptions {
 
 interface UsedCliOptions {
   readonly sessionId?: string;
+  readonly all?: boolean;
 }
 
 interface InitCliOptions {
@@ -2196,6 +2201,7 @@ export function buildProgram(): Command {
     .command("used <id...>")
     .description("Record that facts recalled in a session were actually useful, feeding recall ranking")
     .option("--session-id <id>", "Session whose recall to mark (the same session id the facts were surfaced under)")
+    .option("--all", "Confirm every fact one recall surfaced (3 or more) actually helped, instead of being refused as a rubber stamp")
     .action(
       guard(async (ids: string[], options: UsedCliOptions) => {
         // Required rather than defaulted. `recall_log` rows are keyed on the session they were surfaced under and mem holds no notion of a "current" session (it is a short-lived single-shot process with no daemon and no state between invocations), so any default here would be an invented session id matching no row -- reporting "0 marked" for every correct invocation, which reads as a broken command rather than a missing flag.
@@ -2207,6 +2213,12 @@ export function buildProgram(): Command {
           // Resolve every id before writing anything: a typo in the third of three ids should not leave the first two marked, and prefix resolution is exactly where a typo shows up.
           const facts = ids.map((id) => resolveIdArgOrThrow(db, id));
           const factIds = [...new Set(facts.map((fact) => fact.id))];
+          // Refused before any write when the named ids equal one recall's whole set (the footer pasted verbatim, which would make "used" mean "surfaced" and feed the ranking's rich-get-richer loop); exact equality, not coverage, so an honest superset of a small later recall is accepted. One or two surfaced facts are not worth the friction.
+          if (options.all !== true && listRecallSets(db, session).some((set) => set.length >= RUBBER_STAMP_MIN_FACTS && set.length === factIds.length && set.every((id) => factIds.includes(id)))) {
+            throw new UsageError(
+              `these ids are exactly the facts one recall surfaced in session ${session}; pass only the facts that actually helped, or add --all to confirm they all did`
+            );
+          }
           const surfacedCount = db.prepare<[string, string], { c: number }>(
             "SELECT COUNT(*) AS c FROM recall_log WHERE session_id = ? AND fact_id = ?"
           );

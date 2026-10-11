@@ -100,6 +100,23 @@ describe("claudeCode wiring", () => {
     expect(claudeMd).toMatch(/file-exists|file-absent|file-newer-than|glob-exists|git-tracked|newest-of/);
   });
 
+  it("installed CLAUDE.md block tells the agent to run mem used with only the ids that helped, not the footer verbatim", () => {
+    claudeCode.install({ root, homeDir: home });
+    const claudeMd = read(join(root, "CLAUDE.md"));
+    expect(claudeMd).toContain("only the ids that actually informed the");
+    expect(claudeMd).not.toContain("verbatim");
+  });
+
+  it("re-running install replaces a stale mem used instruction left by an older version", () => {
+    claudeCode.install({ root, homeDir: home });
+    const path = join(root, "CLAUDE.md");
+    writeFileSync(path, read(path).replace("candidates, not a verdict", "run that line verbatim"), "utf8");
+    expect(read(path)).toContain("run that line verbatim");
+    claudeCode.install({ root, homeDir: home });
+    expect(read(path)).not.toContain("run that line verbatim");
+    expect(read(path)).toContain("candidates, not a verdict");
+  });
+
   it("installs a hook command that cannot exit nonzero when mem is missing from PATH, and reports a failure when mem is present but broken", () => {
     claudeCode.install({ root, homeDir: home });
     const settingsPath = join(root, ".claude", "settings.json");

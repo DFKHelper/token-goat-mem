@@ -1025,7 +1025,7 @@ describe("buildHintFormat", () => {
     expect(second.header).toBe(`${TGMEM_HEADER}  delta=1`);
     expect(emittedIds(second)).toEqual(["fact-d"]);
     // Not TGMEM_FOOTER_LINE verbatim: this call is logged under a session, so the footer also carries the `mem used` invocation naming it and the one fact this call emitted.
-    expect(second.lines[second.lines.length - 1]).toBe("footer  mem show <id> for detail; mem used fact-d --session-id sess-1 to mark what helped");
+    expect(second.lines[second.lines.length - 1]).toBe("footer  mem show <id> for detail; mark only the facts that informed the work: mem used fact-d --session-id sess-1");
 
     // The delta itself is logged, so a third delta call has nothing left: header only, no footer.
     const third = await buildHint({ root, dbPath, sessionId: "sess-1", delta: true });

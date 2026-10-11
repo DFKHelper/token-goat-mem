@@ -4866,6 +4866,99 @@ describe("mem used (usefulness feedback)", () => {
     expect(usedAtRows().every((row) => row.used_at === null)).toBe(true);
   });
 
+  describe("refuses to rubber-stamp a whole recall", () => {
+    async function rememberFacts(count: number): Promise<string[]> {
+      const ids: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        ids.push(extractRememberedId(await runCli(["remember", `deploy runbook note number ${["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"][i] ?? "golf"}`, "--kind", "fact", "--scope", "global"])));
+      }
+      return ids;
+    }
+
+    it("refuses every fact of a 3-fact recall with exit 1 and writes no rows", async () => {
+      const ids = await rememberFacts(3);
+      await surfaceAll("session-alpha");
+
+      const refused = await runCli(["used", ...ids, "--session-id", "session-alpha"]);
+
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain("--all");
+      expect(refused.stderr).toContain("only the facts that actually helped");
+      expect(usedAtRows().every((row) => row.used_at === null)).toBe(true);
+      const db = openStorage(resolveDbPath());
+      const usedEvents = (db.prepare("SELECT COUNT(*) AS c FROM audit_log WHERE event = 'used'").get() as { c: number }).c;
+      db.close();
+      expect(usedEvents).toBe(0);
+    });
+
+    describe("with a small later recall nested inside a big one", () => {
+      async function seedNestedRecalls(): Promise<string[]> {
+        const ids = await rememberFacts(6);
+        const db = openStorage(resolveDbPath());
+        try {
+          const insert = db.prepare("INSERT INTO recall_log (fact_id, session_id, surfaced_at) VALUES (?, ?, ?)");
+          for (const id of ids) {
+            insert.run(id, "session-alpha", "2026-01-01T00:00:00.000Z");
+          }
+          for (const id of ids.slice(0, 3)) {
+            insert.run(id, "session-alpha", "2026-01-01T00:05:00.000Z");
+          }
+        } finally {
+          db.close();
+        }
+        return ids;
+      }
+
+      it("accepts the nested 3-fact set plus one more fact from the big recall", async () => {
+        const ids = await seedNestedRecalls();
+
+        const accepted = await runCli(["used", ...ids.slice(0, 4), "--session-id", "session-alpha"]);
+
+        expect(accepted.exitCode).toBe(0);
+        expect(usedAtRows().filter((row) => row.used_at !== null).length).toBeGreaterThanOrEqual(4);
+      });
+
+      it("still refuses naming exactly the nested 3-fact set", async () => {
+        const ids = await seedNestedRecalls();
+
+        const refused = await runCli(["used", ...ids.slice(0, 3), "--session-id", "session-alpha"]);
+
+        expect(refused.exitCode).toBe(1);
+        expect(usedAtRows().every((row) => row.used_at === null)).toBe(true);
+      });
+    });
+
+    it("accepts the whole set with --all", async () => {
+      const ids = await rememberFacts(3);
+      await surfaceAll("session-alpha");
+
+      const accepted = await runCli(["used", ...ids, "--session-id", "session-alpha", "--all"]);
+
+      expect(accepted.exitCode).toBe(0);
+      expect(usedAtRows().every((row) => row.used_at !== null)).toBe(true);
+    });
+
+    it("accepts a subset of a 3-fact recall", async () => {
+      const ids = await rememberFacts(3);
+      await surfaceAll("session-alpha");
+
+      const accepted = await runCli(["used", ...ids.slice(0, 2), "--session-id", "session-alpha"]);
+
+      expect(accepted.exitCode).toBe(0);
+      expect(usedAtRows().filter((row) => row.used_at !== null)).toHaveLength(2);
+    });
+
+    it("accepts the whole set when the recall surfaced only 2 facts", async () => {
+      const ids = await rememberFacts(2);
+      await surfaceAll("session-alpha");
+
+      const accepted = await runCli(["used", ...ids, "--session-id", "session-alpha"]);
+
+      expect(accepted.exitCode).toBe(0);
+      expect(usedAtRows().every((row) => row.used_at !== null)).toBe(true);
+    });
+  });
+
   it("feeds the ranking: a confirmed-useful fact outranks one that merely ties it on BM25", async () => {
     // Both facts contain "deploy" exactly once in the same-length text, so BM25 ties them and the default recency ordering puts the newer (`second`) first. Confirming the older one useful is the only thing that can flip that, which is what makes this a test of the wiring rather than of the ordering that was already there.
     const first = extractRememberedId(await runCli(["remember", "deploy runbook alpha", "--kind", "fact", "--scope", "global"]));

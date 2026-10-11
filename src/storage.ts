@@ -774,6 +774,20 @@ export function listSurfacedFactIds(db: Db, sessionId: string): Set<string> {
   return new Set(rows.map((row) => row.fact_id));
 }
 
+/** The fact-id set each logged recall surfaced under `sessionId`. `recall_log` has no recall id, but `insertRecallLog` writes one recall's rows in a single call sharing one `surfaced_at`, so that timestamp is the grouping key; two recalls of one session landing on the same millisecond would merge into one set. */
+export function listRecallSets(db: Db, sessionId: string): string[][] {
+  const rows = db
+    .prepare<[string], { surfaced_at: string; fact_id: string }>("SELECT surfaced_at, fact_id FROM recall_log WHERE session_id = ? ORDER BY surfaced_at, rowid")
+    .all(sessionId);
+  const sets = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const set = sets.get(row.surfaced_at) ?? new Set<string>();
+    set.add(row.fact_id);
+    sets.set(row.surfaced_at, set);
+  }
+  return [...sets.values()].map((set) => [...set]);
+}
+
 /** Marks the recall of `factIds` in `sessionId` as having actually been *useful*, stamping `used_at`. Returns the number of rows updated -- which is how the caller learns that an id it named was never surfaced in that session at all (0 rows for that id), rather than silently accepting the claim. `used_at IS NULL` in the WHERE clause makes a repeat `mem used` on the same ids a no-op instead of a re-stamp. That is not just tidiness: `getUsefulnessCounts` counts rows, so without the guard a user confirming the same fact twice would inflate its used count above its surfaced count and rank it ahead of a fact genuinely used on every surfacing. It also keeps the *first* confirmation's timestamp, which is the one that says how quickly the fact proved out. One transaction, invoked `.immediate()`: the statement reads (`used_at IS NULL`) before it writes, so under WAL a deferred BEGIN could lose its snapshot to a concurrent writer and fail with SQLITE_BUSY_SNAPSHOT, which `busy_timeout` does not retry. See `insertFact` for the same rationale. Bumps the write epoch when it actually stamps a row. The epoch exists so a token-goat-side cache can never serve recall output the store has already moved past, and a usefulness stamp feeds the usefulness rank list -- so a cached response computed before the stamp is stale in the only sense the epoch is meant to catch, even though no fact's text, status, or freshness changed. */
 export function markRecallUsed(db: Db, factIds: readonly string[], sessionId: string, atIso: string): number {
   if (factIds.length === 0) {
