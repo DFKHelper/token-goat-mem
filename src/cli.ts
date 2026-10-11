@@ -465,14 +465,19 @@ function formatSupersessionLine(fact: Fact, edge: SupersessionEdge | null): stri
   return `superseded_by: ${edge.winnerId} (${edge.winner.status}): ${edge.winner.text}`;
 }
 
+/** The optional sections `mem show` adds below a fact's core fields: its audit history, related facts, and the forget reason of a retired fact. */
+interface FactDetailOptions {
+  readonly history?: readonly AuditLogRow[];
+  readonly related?: readonly RelatedFact[] | null;
+  readonly forgetReason?: ForgetReason | null;
+}
+
 function formatFactDetail(
   fact: Fact,
   freshness: AnchorVerdict,
   sources: readonly Source[],
   edge: SupersessionEdge | null,
-  history: readonly AuditLogRow[] = [],
-  related: readonly RelatedFact[] | null = null,
-  forgetReason: ForgetReason | null = null
+  { history = [], related = null, forgetReason = null }: FactDetailOptions = {}
 ): string {
   const scopeRoot = fact.scopeRoot ?? null;
   const confidenceLine = (() => {
@@ -2086,7 +2091,7 @@ export function buildProgram(): Command {
             };
             return formatJson(envelope);
           }
-          return formatFactDetail(fact, freshness, sources, edge, history, related, forgetReason);
+          return formatFactDetail(fact, freshness, sources, edge, { history, related, forgetReason });
         });
         process.stdout.write(`${output}\n`);
       })

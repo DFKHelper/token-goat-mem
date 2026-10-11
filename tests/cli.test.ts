@@ -1316,6 +1316,18 @@ describe("mem forget --reason records why a fact was retired", () => {
     expect(envelope).not.toHaveProperty("forgetReason");
     expect((await runCli(["log"])).stdout).toContain("forget: forgot fact (was active)\n");
   });
+
+  it("keeps the forget reason on show when a state-changing audit row follows the forget", async () => {
+    const id = await rememberFact("the metrics exporter is pinned to port nine");
+    expect((await runCli(["forget", id, "--reason", "wrong"])).exitCode).toBe(0);
+    const db = openStorage(resolveDbPath());
+    try {
+      insertAuditLog(db, { event: "edit", factId: id, detail: "edited after the forget" });
+    } finally {
+      db.close();
+    }
+    expect((await runCli(["show", id])).stdout).toContain("forget_reason: wrong");
+  });
 });
 
 describe("mem forget --by <winner> records the supersession edge", () => {

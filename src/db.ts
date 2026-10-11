@@ -188,13 +188,9 @@ export function parseForgetReason(detail: string): ForgetReason | null {
 
 /** The reason on the most recent `forget` audit row for `factId`, or `null`; the latest row, so a fact forgotten, restored and forgotten again reports its current retirement. */
 export function findForgetReason(db: Database.Database, factId: string): ForgetReason | null {
-  const row = db
-    .prepare<[string], { detail: string }>(
-      `SELECT detail FROM audit_log
-       WHERE fact_id = ? AND event = 'forget'
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`
-    )
-    .get(factId);
+  const row = listAuditLogForFact(db, factId)
+    .filter((entry) => entry.event === "forget")
+    .at(-1);
   return row === undefined ? null : parseForgetReason(row.detail);
 }
 
