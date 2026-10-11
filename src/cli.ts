@@ -81,8 +81,13 @@ import {
   type RelatedFactPair,
 } from "./consolidate.js";
 import {
+  findForgetReason,
   findSupersedingFactId,
+  FORGET_REASON_MARKER,
+  FORGET_REASONS,
+  type ForgetReason,
   insertAuditLog,
+  isForgetReason,
   lastStateChangingAuditRow,
   listAuditLogForFact,
   SUPERSEDED_AS_DUPLICATE_PREFIX,
@@ -458,7 +463,8 @@ function formatFactDetail(
   sources: readonly Source[],
   edge: SupersessionEdge | null,
   history: readonly AuditLogRow[] = [],
-  related: readonly RelatedFact[] | null = null
+  related: readonly RelatedFact[] | null = null,
+  forgetReason: ForgetReason | null = null
 ): string {
   const scopeRoot = fact.scopeRoot ?? null;
   const confidenceLine = (() => {
@@ -494,6 +500,9 @@ function formatFactDetail(
   const supersession = formatSupersessionLine(fact, edge);
   if (supersession !== null) {
     lines.push(supersession);
+  }
+  if (forgetReason !== null) {
+    lines.push(`forget_reason: ${forgetReason}`);
   }
   if (sources.length > 0) {
     lines.push("sources:");
@@ -2031,6 +2040,8 @@ export function buildProgram(): Command {
           const winnerId = fact.status === "superseded" ? findSupersedingFactId(db, fact.id) : null;
           const edge: SupersessionEdge | null =
             winnerId === null ? null : { winnerId, winner: getFactById(db, winnerId) };
+          // Same scoping as winnerId: a forget reason only means something on a superseded fact, and an active fact's latest audit row is not a forget row.
+          const forgetReason = fact.status === "superseded" ? findForgetReason(db, fact.id) : null;
           const related = options.related === true ? findRelatedFacts(db, fact, root) : null;
           if (options.json === true) {
             const envelope = {
@@ -2045,6 +2056,7 @@ export function buildProgram(): Command {
                 edge === null
                   ? null
                   : { id: edge.winnerId, status: edge.winner?.status ?? null, text: edge.winner?.text ?? null },
+              ...(forgetReason !== null ? { forgetReason } : {}),
               ...(related !== null
                 ? {
                     related: related.map(({ fact: candidate, score }) => ({
@@ -2061,7 +2073,7 @@ export function buildProgram(): Command {
             };
             return formatJson(envelope);
           }
-          return formatFactDetail(fact, freshness, sources, edge, history, related);
+          return formatFactDetail(fact, freshness, sources, edge, history, related, forgetReason);
         });
         process.stdout.write(`${output}\n`);
       })
@@ -2113,8 +2125,19 @@ export function buildProgram(): Command {
       "--by <winner-id>",
       "Record the live fact (active or pinned; id or unique prefix) that replaces this one, so mem show and mem export report superseded_by instead of an unknown edge"
     )
+    .option(
+      "--reason <reason>",
+      `Why the fact is retired, recorded in its audit row: ${FORGET_REASONS.join(", ")} (optional)`
+    )
     .action(
-      guard(async (id: string, options: { readonly by?: string }) => {
+      guard(async (id: string, options: { readonly by?: string; readonly reason?: string }) => {
+        let reason: ForgetReason | undefined;
+        if (options.reason !== undefined) {
+          if (!isForgetReason(options.reason)) {
+            throw new UsageError(`--reason must be one of ${FORGET_REASONS.join(", ")} (got "${options.reason}")`);
+          }
+          reason = options.reason;
+        }
         const resolved = await withDb((db) => {
           const existing = resolveIdArgOrThrow(db, id);
           const wasContested = existing.status === "contested";
@@ -2132,6 +2155,9 @@ export function buildProgram(): Command {
             }
             // Same `<prefix><id>: <reason>` shape reviewActions writes, so findSupersedingFactId reads it back for `mem show` and `mem export`. Status is already `superseded`, as for every other path that names a winner.
             detail = `${SUPERSEDED_BY_FACT_PREFIX}${winner.id}: ${detail}`;
+          }
+          if (reason !== undefined) {
+            detail = `${detail}${FORGET_REASON_MARKER}${reason}`;
           }
           setStatusWithAudit(db, existing.id, "superseded", "forget", detail);
           if (wasContested) {

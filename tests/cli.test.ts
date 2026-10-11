@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 import { CAPABLE_MEM_SHIM, OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
 import { extractRememberedId, extractSuggestedId, runCli, type CliResult } from "./support/cli.js";
-import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
+import { findSupersedingFactId, insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, getFactById, insertFact, listSourcesForFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 import { DOCTOR_CHECKS } from "../src/doctor.js";
 import { getEpoch } from "../src/epoch.js";
@@ -1234,6 +1234,86 @@ describe("review shows a pending fact's newest source excerpt", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────── forget --by ───────────────────────────────────────────────────────────────────────────
+
+describe("mem forget --reason records why a fact was retired", () => {
+  const rememberFact = async (text: string): Promise<string> =>
+    extractRememberedId(await runCli(["remember", text, "--kind", "fact"]));
+
+  const forgetDetails = (factId: string): string[] => {
+    const db = openStorage(resolveDbPath());
+    try {
+      return (
+        db.prepare("SELECT detail FROM audit_log WHERE fact_id = ? AND event = 'forget' ORDER BY rowid").all(factId) as {
+          detail: string;
+        }[]
+      ).map((row) => row.detail);
+    } finally {
+      db.close();
+    }
+  };
+
+  it.each(["wrong", "outdated", "duplicate", "unwanted"])("accepts --reason %s and records it on the audit row and in show", async (reason) => {
+    const id = await rememberFact(`the ${reason} retirement fact`);
+    const forgotten = await runCli(["forget", id, "--reason", reason]);
+    expect(forgotten.exitCode).toBe(0);
+    expect(forgotten.stdout).toBe(`forgot ${id}\n`);
+    expect(forgetDetails(id)).toEqual([`forgot fact (was active); reason=${reason}`]);
+    expect((await runCli(["show", id])).stdout).toContain(`forget_reason: ${reason}`);
+  });
+
+  it("refuses an unknown reason with a usage error and leaves the fact and audit log untouched", async () => {
+    const id = await rememberFact("the staging database is read only");
+    const refused = await runCli(["forget", id, "--reason", "bogus"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("--reason must be one of wrong, outdated, duplicate, unwanted");
+    expect(forgetDetails(id)).toEqual([]);
+    expect((await runCli(["show", id])).stdout).toContain("status: active");
+  });
+
+  it("keeps the winner resolvable when --by and --reason are given together", async () => {
+    const loserId = await rememberFact("the deploy target is the blue cluster");
+    const winnerId = await rememberFact("zebra quartz mango pipeline runs nightly");
+    const forgotten = await runCli(["forget", loserId, "--by", winnerId, "--reason", "duplicate"]);
+    expect(forgotten.exitCode).toBe(0);
+    expect(forgetDetails(loserId)).toEqual([`Superseded by fact ${winnerId}: forgot fact (was active); reason=duplicate`]);
+
+    const db = openStorage(resolveDbPath());
+    try {
+      expect(findSupersedingFactId(db, loserId)).toBe(winnerId);
+    } finally {
+      db.close();
+    }
+    const envelope = JSON.parse((await runCli(["show", loserId, "--json"])).stdout) as {
+      supersededBy: { id: string } | null;
+      forgetReason?: string;
+    };
+    expect(envelope.supersededBy?.id).toBe(winnerId);
+    expect(envelope.forgetReason).toBe("duplicate");
+    const shown = await runCli(["show", loserId]);
+    expect(shown.stdout).toContain(`superseded_by: ${winnerId} (active)`);
+    expect(shown.stdout).toContain("forget_reason: duplicate");
+  });
+
+  it("shows the reason on the timeline's forget entry", async () => {
+    const id = await rememberFact("the nightly backup runs at two");
+    expect((await runCli(["forget", id, "--reason", "outdated"])).exitCode).toBe(0);
+    const log = await runCli(["log"]);
+    expect(log.exitCode).toBe(0);
+    expect(log.stdout).toContain("forget: forgot fact (was active); reason=outdated");
+  });
+
+  it("leaves show, show --json and the timeline unchanged when no reason is given", async () => {
+    const id = await rememberFact("the on-call rota rotates weekly");
+    expect((await runCli(["forget", id])).stdout).toBe(`forgot ${id}\n`);
+    expect(forgetDetails(id)).toEqual(["forgot fact (was active)"]);
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).not.toContain("forget_reason");
+    expect(shown.stdout).toContain("superseded_by: unknown");
+    const envelope = JSON.parse((await runCli(["show", id, "--json"])).stdout) as Record<string, unknown>;
+    expect(envelope).not.toHaveProperty("forgetReason");
+    expect((await runCli(["log"])).stdout).toContain("forget: forgot fact (was active)\n");
+  });
+});
 
 describe("mem forget --by <winner> records the supersession edge", () => {
   const rememberFact = async (text: string): Promise<string> =>

@@ -148,6 +148,11 @@ export function openDbReadOnly(dbPath: string = resolveDbPath()): Database.Datab
 /** The two audit-detail phrasings that name the fact a supersession went *to*. They are constants, and the parser below sits beside them, because the audit log is the only record of that edge -- there is no `superseded_by` column, deliberately: an edge stored as a column has to be invalidated whenever either fact changes, a cost mem avoids by recomputing contradictions at recall. That makes these strings load-bearing rather than cosmetic, so a reworded producer and a stale reader must not be able to drift apart in separate modules. Not every supersession names a winner: `forget`, `review_reject`, and consolidate's stale pass retire a fact without one. Those legitimately yield `null` below. */
 export const SUPERSEDED_BY_FACT_PREFIX = "Superseded by fact ";
 export const SUPERSEDED_AS_DUPLICATE_PREFIX = "superseded as a duplicate of ";
+/** The four reasons `mem forget --reason` accepts; the producer in cli.ts and the reader below share this vocabulary, so they cannot drift. */
+export const FORGET_REASONS = ["wrong", "outdated", "duplicate", "unwanted"] as const;
+export type ForgetReason = (typeof FORGET_REASONS)[number];
+/** The suffix that carries a forget reason at the end of its audit detail; a reworded marker here would silently orphan every recorded reason. */
+export const FORGET_REASON_MARKER = "; reason=";
 
 const SUPERSEDING_ID_PATTERN = new RegExp(
   `(?:${SUPERSEDED_BY_FACT_PREFIX}|${SUPERSEDED_AS_DUPLICATE_PREFIX})([0-9a-fA-F-]{1,128})`
@@ -164,6 +169,33 @@ export function findSupersedingFactId(db: Database.Database, factId: string): st
     )
     .get(factId, `${SUPERSEDED_BY_FACT_PREFIX}%`, `${SUPERSEDED_AS_DUPLICATE_PREFIX}%`);
   return row === undefined ? null : (SUPERSEDING_ID_PATTERN.exec(row.detail)?.[1] ?? null);
+}
+
+/** Whether `value` is one of the `FORGET_REASONS`, for validating `--reason` at the CLI boundary. */
+export function isForgetReason(value: string): value is ForgetReason {
+  return (FORGET_REASONS as readonly string[]).includes(value);
+}
+
+/** The reason recorded in a forget audit `detail`, or `null` when none was given or the suffix names no known reason. */
+export function parseForgetReason(detail: string): ForgetReason | null {
+  const index = detail.lastIndexOf(FORGET_REASON_MARKER);
+  if (index === -1) {
+    return null;
+  }
+  const value = detail.slice(index + FORGET_REASON_MARKER.length);
+  return isForgetReason(value) ? value : null;
+}
+
+/** The reason on the most recent `forget` audit row for `factId`, or `null`; the latest row, so a fact forgotten, restored and forgotten again reports its current retirement. */
+export function findForgetReason(db: Database.Database, factId: string): ForgetReason | null {
+  const row = db
+    .prepare<[string], { detail: string }>(
+      `SELECT detail FROM audit_log
+       WHERE fact_id = ? AND event = 'forget'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`
+    )
+    .get(factId);
+  return row === undefined ? null : parseForgetReason(row.detail);
 }
 
 export interface AuditLogEntry {
