@@ -246,6 +246,22 @@ describe("findDuplicateClusters", () => {
     expect(report.clusters).toHaveLength(2);
   });
 
+  it.each([
+    { label: "both negated", a: "Never run the linter before committing", b: "Do not run the linter before committing" },
+    { label: "both carrying an exception marker", a: "Run the linter before committing unless CI is down", b: "Run the linter before committing except when CI is down" },
+    { label: "the same roles worded as over / rather than", a: "Use pnpm over npm for installs", b: "Use pnpm rather than npm for installs" },
+    { label: "the same roles worded as instead of / not", a: "Use pnpm instead of npm for installs", b: "Use pnpm not npm for installs" },
+    { label: "the same roles worded as not-but / over", a: "Use not npm but pnpm for installs", b: "Use pnpm over npm for installs" },
+  ])("clusters near-duplicates that agree on polarity, exception and roles: $label", ({ a, b }) => {
+    const first = seed(db, a, { capturedAt: daysAgo(2) });
+    const second = seed(db, b, { capturedAt: daysAgo(1) });
+    const report = findDuplicateReport(db, DEFAULT_DUPLICATE_THRESHOLD);
+    expect(report.refusedPairs, "agreeing signatures must not be refused").toEqual([]);
+    expect(report.clusters, "the pair must form exactly one cluster").toHaveLength(1);
+    const ids = [report.clusters[0]?.keep.id, ...(report.clusters[0]?.duplicates.map((member) => member.fact.id) ?? [])].sort();
+    expect(ids, "both facts are members of the cluster").toEqual([first.id, second.id].sort());
+  });
+
   it("does not let the guard change the plain array API's clusters", () => {
     for (const text of PNPM_RESTATEMENTS) {
       seed(db, text);

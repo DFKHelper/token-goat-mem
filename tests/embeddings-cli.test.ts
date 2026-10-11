@@ -657,3 +657,82 @@ describe("dimension and model safety at recall", () => {
     }
   });
 });
+
+describe("recall --hint-format footer against a live embedding endpoint", () => {
+  const BUDGET_ENV = "TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS";
+  const DEGRADED_CLAUSE = "embedding backend unavailable; ranked by text match only";
+  let priorBudget: string | undefined;
+
+  beforeEach(() => {
+    priorBudget = process.env[BUDGET_ENV];
+    process.env[BUDGET_ENV] = String(NO_TRUNCATION_BUDGET_MS);
+  });
+
+  afterEach(() => {
+    if (priorBudget === undefined) {
+      delete process.env[BUDGET_ENV];
+    } else {
+      process.env[BUDGET_ENV] = priorBudget;
+    }
+  });
+
+  async function embeddedStore(): Promise<void> {
+    await seed(2);
+    await configureEmbeddings({ apiKey: "sk-live-secret-key" });
+    expect((await runCli(["embed"])).exitCode).toBe(0);
+    await openServers.pop()?.close();
+  }
+
+  async function hintRecall(): Promise<{ stdout: string; stderr: string; exitCode: number | undefined }> {
+    const result = await runCli(["recall", "vitest", "--hint-format", "--root", root]);
+    expect(result.exitCode).toBe(0);
+    // Non-firing guard: a fact was really emitted, so the footer under test belongs to a populated response.
+    expect(result.stdout).toContain("uses vitest for tests");
+    return result;
+  }
+
+  it("a healthy endpoint leaves the footer free of the degraded-ranking clause, and the query vector was fetched", async () => {
+    await seed(2);
+    const server = await configureEmbeddings();
+    expect((await runCli(["embed"])).exitCode).toBe(0);
+    const requestsAfterBackfill = server.requests.length;
+
+    const result = await hintRecall();
+
+    expect(server.requests.length, "the endpoint was reached for the query vector").toBe(requestsAfterBackfill + 1);
+    expect(result.stdout).not.toContain(DEGRADED_CLAUSE);
+    expect(result.stdout).not.toContain("ranked by text match only");
+  });
+
+  it("an endpoint answering 503 gets the degraded-ranking footer, and no URL or credential reaches the output", async () => {
+    await embeddedStore();
+    const failing = await configureEmbeddings({ status: 503, apiKey: "sk-live-secret-key" });
+
+    const result = await hintRecall();
+
+    expect(failing.requests.length, "the failing endpoint was really asked").toBeGreaterThan(0);
+    expect(result.stdout).toContain(DEGRADED_CLAUSE);
+    for (const output of [result.stdout, result.stderr]) {
+      expect(output).not.toContain(failing.url);
+      expect(output).not.toContain("sk-live-secret-key");
+    }
+  });
+
+  it("a user:pass@ endpoint URL that fails still gets the degraded-ranking footer and never echoes the userinfo or host", async () => {
+    await embeddedStore();
+    const failing = await configureEmbeddings({ status: 503 });
+    const credentialed = new URL(failing.url);
+    credentialed.username = "mem-user";
+    credentialed.password = "hunter2-pass";
+    process.env[EMBED_URL_ENV] = credentialed.toString();
+
+    const result = await hintRecall();
+
+    expect(result.stdout).toContain(DEGRADED_CLAUSE);
+    for (const output of [result.stdout, result.stderr]) {
+      expect(output).not.toContain("hunter2-pass");
+      expect(output).not.toContain("mem-user");
+      expect(output).not.toContain(credentialed.host);
+    }
+  });
+});
