@@ -458,7 +458,7 @@ describe("regression: the seam's row mapper projects every column retrieval depe
   });
 
   it("surfaces a project fact captured in one checkout from a second checkout of the same repository", async () => {
-    // Mirrors the git fixture in tests/cli.test.ts's "project identity" describe block. Without `scope_repo` in the SELECT, `toFact` leaves `scopeRepo` undefined, `isInScope` calls `identityMatches(undefined, root)`, which is always false, and the fact never surfaces from checkout `b` even though it is the exact case `mem init`'s SessionStart/UserPromptSubmit hooks (the only unprompted consumer of this path) are meant to cover.
+    // Mirrors the git fixture in tests/cli-scope-anchors.test.ts's "project identity" describe block. Without `scope_repo` in the SELECT, `toFact` leaves `scopeRepo` undefined, `isInScope` calls `identityMatches(undefined, root)`, which is always false, and the fact never surfaces from checkout `b` even though it is the exact case `mem init`'s SessionStart/UserPromptSubmit hooks (the only unprompted consumer of this path) are meant to cover.
     const work = mkdtempSync(join(tmpdir(), "mem-seam-worktree-"));
     try {
       function git(cwd: string, ...args: string[]): void {

@@ -131,7 +131,7 @@ describe("mem recall --entity: the query BM25 cannot answer", () => {
     ]);
     const idB = extractRememberedId(rival);
 
-    // Tie captured_at so precedence is genuinely ambiguous and the pair is contested rather than superseded -- the same determinism fix tests/cli.test.ts applies to its contested pair.
+    // Tie captured_at so precedence is genuinely ambiguous and the pair is contested rather than superseded -- the same determinism fix tests/cli-capture-review.test.ts applies to its contested pair.
     const db = openDb(resolveDbPath());
     db.prepare("UPDATE facts SET captured_at = ? WHERE id IN (?, ?)").run("2026-01-01T00:00:00.000Z", idA, idB);
     db.close();
