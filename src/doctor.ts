@@ -9,7 +9,7 @@ import { EXIT_USER_ERROR, extractErrorMessage, guard, writeOutput } from "./cliR
 import { openDbReadOnly, resolveBackupDir, resolveDbPath } from "./db.js";
 import { MIGRATIONS } from "./migrations.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
-import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, type EmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
+import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, createHttpEmbeddingBackend, type EmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { formatAge } from "./timeUtils.js";
@@ -174,6 +174,29 @@ interface EmbeddingCounts {
   readonly recorded: EmbeddingMeta | null;
   readonly embeddedFacts: number;
   readonly totalFacts: number;
+}
+
+/** The fixed input of the opt-in embeddings probe: one tiny string, so the request costs the endpoint nothing and carries no user text. */
+const EMBEDDING_PROBE_INPUT = "mem doctor probe";
+
+/** The `--probe-embeddings` finding: ONE real embed request against the configured backend, reported as ok or as a failure with the error message; skipped, with no request, when no backend is configured. Only runs when the flag asks for it, so plain `mem doctor` stays free of network calls. */
+async function probeEmbeddings(): Promise<Finding> {
+  let config: EmbeddingConfig | null;
+  try {
+    config = readEmbeddingConfig();
+  } catch (error) {
+    return finding("embeddings", "fail", `embedding probe: not run, the embeddings configuration is unusable -- ${extractErrorMessage(error)}`);
+  }
+  if (config === null) {
+    return finding("embeddings", "ok", "embedding probe: skipped, no embedding backend is configured");
+  }
+  const backend = createHttpEmbeddingBackend(config);
+  try {
+    const vector = await backend.embed(EMBEDDING_PROBE_INPUT);
+    return finding("embeddings", "ok", `embedding probe: ok, ${backend.endpointLabel} answered with a ${vector.length}-dim vector`);
+  } catch (error) {
+    return finding("embeddings", "fail", `embedding probe: failed -- ${extractErrorMessage(error)}`, "recall is ranking by text match only until the endpoint answers");
+  }
 }
 
 /** The embedding lines of `mem doctor`'s report. `counts` is `null` when the store could not be read, and then only the endpoint line prints. Unconfigured is a healthy state and reads like one -- "off", with the two variables that would turn it on -- because the overwhelming majority of installs never configure an endpoint and a health check that flags the default as a problem trains people to ignore it. The API key is reported as configured or absent and never printed, echoed, or hinted at by length. So is the endpoint: only its host reaches stdout, so a URL carrying userinfo cannot leak through a health check someone pastes into an issue. */
@@ -342,8 +365,9 @@ export function registerDoctorCommand(program: Command): void {
     .option("--json", "Output the findings as machine-readable JSON: { findings: [{ check, status, message, remedy? }], epoch } (unstable, pre-1.0)")
     .option("--root <dir>", "Project root whose Claude Code hooks and tool config files doctor inspects (default: the current directory)")
     .option("--strict", "Exit 1 when any finding has status fail (an installed hook that cannot run, an unreadable store); without it doctor always exits 0 so a warning never breaks a script")
+    .option("--probe-embeddings", "Make ONE real embed request with a tiny fixed input to the configured embeddings endpoint and report whether it answered (off by default: without this flag doctor makes no network call)")
     .action(
-      guard((options: { json?: boolean; strict?: boolean; root?: string }) => {
+      guard(async (options: { json?: boolean; strict?: boolean; root?: string; probeEmbeddings?: boolean }) => {
         const homeDir = wiringHomeFromEnv();
         const wiringOpts: WiringOpts = { ...(options.root === undefined ? {} : { root: options.root }), ...(homeDir === undefined ? {} : { homeDir }) };
         const dbPath = resolveDbPath();
@@ -409,9 +433,11 @@ export function registerDoctorCommand(program: Command): void {
             epoch,
           };
         });
+        const probe = options.probeEmbeddings === true ? [await probeEmbeddings()] : [];
         const findings: Finding[] = [
           ...inspection.before,
           ...inspection.embeddings,
+          ...probe,
           ...dream,
           ...inspection.trailing,
           checkBackups(resolveBackupDir(), inspection.epoch, new Date()),

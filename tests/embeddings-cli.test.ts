@@ -109,6 +109,113 @@ describe("with no embedding configuration, behaviour is what it was before the f
     expect(result.stdout).not.toMatch(/error|fail|misconfigured/iu);
   });
 
+  it("doctor without --probe-embeddings makes no request to a configured endpoint", async () => {
+    const server = await configureEmbeddings();
+
+    const result = await runCli(["doctor"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).not.toMatch(/embedding probe/u);
+    expect(server.requests).toHaveLength(0);
+  });
+
+  it("doctor --probe-embeddings makes one request and reports ok against a working endpoint", async () => {
+    const server = await configureEmbeddings();
+
+    const result = await runCli(["doctor", "--probe-embeddings"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/embedding probe: ok/u);
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("doctor --probe-embeddings reports the failure against a failing endpoint, and fails under --strict", async () => {
+    const server = await configureEmbeddings({ status: 503 });
+
+    const result = await runCli(["doctor", "--probe-embeddings", "--strict"]);
+
+    expect(result.stdout).toMatch(/embedding probe: failed -- .*HTTP 503/u);
+    expect(result.exitCode).toBe(1);
+    expect(server.requests).toHaveLength(1);
+  });
+
+  it("doctor --probe-embeddings says the probe was skipped when no backend is configured", async () => {
+    const result = await runCli(["doctor", "--probe-embeddings"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/embedding probe: skipped, no embedding backend is configured/u);
+  });
+
+  it("the hint footer names a failed embedding backend, and says nothing when the backend answered or is absent", async () => {
+    await seed(2);
+    await configureEmbeddings();
+    expect((await runCli(["embed"])).exitCode).toBe(0);
+    const hintFooter = async (): Promise<string> => {
+      const hint = await buildHintFormat({ root, query: "vitest", dbPath: join(home, "mem.db"), retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+      return hint.lines.filter((line) => line.startsWith("footer")).join(" ");
+    };
+    const clause = "embedding backend unavailable; ranked by text match only";
+
+    expect(await hintFooter()).not.toContain(clause);
+
+    await openServers.pop()?.close();
+    await configureEmbeddings({ status: 503 });
+    expect(await hintFooter()).toContain(clause);
+  });
+
+  it("the hint footer names the model mismatch when the store was embedded under another model", async () => {
+    await seed(2);
+    await configureEmbeddings({ model: "model-a" });
+    expect((await runCli(["embed"])).exitCode).toBe(0);
+    process.env[EMBED_MODEL_ENV] = "model-b";
+
+    const hint = await buildHintFormat({ root, query: "vitest", dbPath: join(home, "mem.db"), retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+
+    expect(hint.lines.filter((line) => line.startsWith("footer")).join(" ")).toContain("different or unrecorded model; run mem embed --all; ranked by text match only");
+  });
+
+  it("doctor --probe-embeddings reports a configuration error as a failure, makes no request, and never prints the URL userinfo", async () => {
+    const server = await configureEmbeddings();
+    delete process.env[EMBED_MODEL_ENV];
+
+    const result = await runCli(["doctor", "--probe-embeddings", "--strict"]);
+
+    expect(result.stdout).toMatch(/embedding probe: not run, the embeddings configuration is unusable/u);
+    expect(result.stdout).not.toMatch(/embedding probe: skipped/u);
+    expect(result.exitCode).toBe(1);
+    expect(server.requests).toHaveLength(0);
+
+    process.env[EMBED_URL_ENV] = "not a url://user:hunter2@host";
+    const bad = await runCli(["doctor", "--probe-embeddings"]);
+    expect(bad.stdout).toMatch(/embedding probe: not run/u);
+    expect(bad.stdout).not.toContain("hunter2");
+  });
+
+  it("never prints URL userinfo from an unparseable endpoint, on embed or recall", async () => {
+    await seed(1);
+    process.env[EMBED_URL_ENV] = "http://user:hunter2@host:99999";
+    process.env[EMBED_MODEL_ENV] = "m";
+
+    const embed = await runCli(["embed"]);
+    const recall = await runCli(["recall", "vitest", "--root", root]);
+
+    expect(embed.exitCode).not.toBe(0);
+    for (const output of [embed.stdout, embed.stderr, recall.stdout, recall.stderr]) {
+      expect(output).not.toContain("hunter2");
+      expect(output).not.toContain("user:");
+    }
+    expect(embed.stderr).toContain("is not a valid URL");
+  });
+
+  it("is not degraded when a backend is configured but no fact has a vector", async () => {
+    await seed(1);
+    const server = await configureEmbeddings();
+    const hint = await buildHintFormat({ root, query: "vitest", dbPath: join(home, "mem.db"), retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+
+    expect(hint.lines.filter((line) => line.startsWith("footer")).join(" ")).not.toContain("ranked by text match only");
+    expect(server.requests).toHaveLength(0);
+  });
+
   it("rejects a malformed --limit ahead of the configuration error, so the fixable mistake is the one reported", async () => {
     // The flag used to be parsed with a bare parseInt and filtered downstream by Number.isFinite, so `--limit abc` silently embedded everything instead of erroring -- while `mem recall --limit` rejected the identical input. Unconfigured here on purpose: the usage error has to win, or the user fixes their environment first and only then discovers the flag never applied.
     for (const bad of ["abc", "0", "-3"]) {

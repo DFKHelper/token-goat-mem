@@ -575,6 +575,48 @@ describe("retrieve", () => {
     expect(results[0]?.fact.id).toBe("1");
   });
 
+  describe("RetrieveOutcome.embeddingDegraded", () => {
+    const embedded = (): Fact[] => [makeFact({ id: "1", text: "uses pnpm not npm", kind: "preference", embedding: new Float32Array([1, 0]) })];
+
+    it("is true when a configured backend throws while embedding the query", async () => {
+      const backend: EmbeddingBackend = {
+        embed: () => {
+          throw new Error("connection refused");
+        },
+      };
+      const outcome = await retrieve(embedded(), { query: "pnpm", root, embeddingBackend: backend });
+      expect(outcome.embeddingDegraded).toBe(true);
+    });
+
+    it("is true when a backend loader throws", async () => {
+      const outcome = await retrieve(embedded(), {
+        query: "pnpm",
+        root,
+        embeddingBackend: () => {
+          throw new Error("loader failed");
+        },
+      });
+      expect(outcome.embeddingDegraded).toBe(true);
+    });
+
+    it("is false when no backend is configured, and when a loader reports none", async () => {
+      expect((await retrieve(embedded(), { query: "pnpm", root })).embeddingDegraded).toBe(false);
+      expect((await retrieve(embedded(), { query: "pnpm", root, embeddingBackend: () => null })).embeddingDegraded).toBe(false);
+    });
+
+    it("is true when no stored vector has the query vector's length", async () => {
+      const backend: EmbeddingBackend = { embed: () => new Float32Array([1, 0, 0]) };
+      const outcome = await retrieve(embedded(), { query: "pnpm", root, embeddingBackend: backend });
+      expect(outcome.embeddingDegraded).toBe(true);
+    });
+
+    it("is false when the backend answers", async () => {
+      const backend: EmbeddingBackend = { embed: () => new Float32Array([1, 0]) };
+      const outcome = await retrieve(embedded(), { query: "pnpm", root, embeddingBackend: backend });
+      expect(outcome.embeddingDegraded).toBe(false);
+    });
+  });
+
   it("regression: an all-zero BM25 list does not vote, so a lexically-unmatched query ranks on embeddings rather than recency", async () => {
     // The defect this pins, found by dogfooding against a real 768-dim endpoint rather than by the suite: when nothing matches lexically, every BM25 score is zero and `bm25Ranked`'s sort falls through to its `captured_at` tie-break -- so the list handed to RRF is pure recency order. Fusing it let recency vote on relevance at equal weight with the embedding signal, and it did the most damage on exactly the queries embeddings exist to answer. "deployments use blue-green" ranked third for "how do we roll out new versions", behind two newer, unrelated facts. Every prior ranking test used a query that did match lexically, so the zero case never reached fusion at all. Here "quantum" matches no fact text, and the semantically-correct fact is also the OLDEST -- so recency and the embedding signal disagree, and only one of them can be driving the result.
     const facts = [

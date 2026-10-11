@@ -54,6 +54,10 @@ function footerLineFor(counts: {
   readonly usefulness?: string;
   /** True when this response carries a non-empty query that matched nothing -- no lexical hit, no embedding or usefulness signal either -- so every fact-line it does carry is filler the caps swept in by recency, not an answer to the query. Deliberately not derived from `matchedQuery` at this layer: that field is read off the pre-fusion BM25 map alone (`retrieve`, src/ retrieval.ts), so it reads `false` on every result of a query genuinely answered by embedding signal, and asserting "nothing matched" there would be false. `retrieve`'s own `zeroSignal` -- threaded out as `RetrieveOutcome.zeroSignal` -- is the only field that actually says "there was no signal to match against at all", which is what this clause needs to stay true. */
   readonly noQuerySignal?: boolean;
+  /** True when a configured embedding backend failed during this retrieve, so the ranking below is text match alone; see `RetrieveOutcome.embeddingDegraded`. */
+  readonly embeddingDegraded?: boolean;
+  /** True when a backend is configured but the stored vectors were made by a different (or unrecorded) model, so embedding ranking was skipped for this non-empty query; see `planEmbeddingRanking`. */
+  readonly embeddingVectorsIncomparable?: boolean;
 }): string | undefined {
   const clauses: string[] = [];
   if (counts.facts > 0) {
@@ -70,6 +74,12 @@ function footerLineFor(counts: {
   }
   if (counts.noQuerySignal === true) {
     clauses.push("no match for this query -- showing recent facts instead");
+  }
+  if (counts.embeddingDegraded === true) {
+    clauses.push("embedding backend unavailable; ranked by text match only");
+  }
+  if (counts.embeddingVectorsIncomparable === true) {
+    clauses.push("stored embedding vectors come from a different or unrecorded model; run mem embed --all; ranked by text match only");
   }
   return clauses.length > 0 ? `${FOOTER_PREFIX}${clauses.join("; ")}` : undefined;
 }
@@ -266,14 +276,16 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // Decided before the fact query, not after, because it decides the query's row shape: an embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget for a signal that is switched off on every install without a configured endpoint is exactly the kind of cost that turns a healthy response into a truncated one. The share-of-remaining-budget rule is EMBEDDING_BUDGET_SHARE's; below MIN_EMBEDDING_BUDGET_MS there is no longer enough time for a round trip and the backend is not wired at all.
   const embeddingBudgetMs = Math.min(DEFAULT_EMBEDDING_TIMEOUT_MS, Math.floor((budgetMs - (Date.now() - start)) * EMBEDDING_BUDGET_SHARE));
   let embeddingBackend: EmbeddingBackend | null;
+  let embeddingVectorsIncomparable: boolean;
   try {
     // Silent either way: a stale-model store or an unreachable endpoint is a ranking-quality matter, and this seam's contract is to fail open rather than editorialize on a wire protocol. The unrecorded-vector check is passed here too, not skipped for budget: `mem recall` and this path must reach the same ranking decision about the same store, and this seam's hand-maintained divergences from the rest of the CLI are exactly how three columns went missing from its SELECT. The cost is one `SELECT COUNT(*)` on the connection already open, and only when no model is recorded at all -- cheaper than `getUsefulnessCounts` a few lines below, which this budget already affords.
     const recordedMeta = getEmbeddingMeta(db) ?? null;
-    embeddingBackend =
+    const embeddingPlan =
       embeddingBudgetMs >= MIN_EMBEDDING_BUDGET_MS
         ? planEmbeddingRanking(recordedMeta, process.env, { timeoutMs: embeddingBudgetMs }, recordedMeta === null && countEmbeddedFacts(db) > 0)
-            .backend
         : null;
+    embeddingBackend = embeddingPlan?.backend ?? null;
+    embeddingVectorsIncomparable = embeddingPlan !== null && embeddingPlan.incomparable !== null;
     allFacts = queryAllFacts(db, embeddingBackend !== null);
     // One grouped query on the connection already open, not a second `openStorage`: this path runs inside a ~150ms hard budget and a second WAL open plus schema migration is the kind of cost that turns a healthy response into a truncated one.
     usefulness = getUsefulnessCounts(db);
@@ -296,7 +308,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
 
   const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
-  const { results, withheldCount, zeroSignal } = await retrieve(scoped, {
+  const { results, withheldCount, zeroSignal, embeddingDegraded } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
     poolIsInScope: true,
@@ -376,6 +388,8 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
           withheld: withheldCount,
           ...(usefulnessClause !== undefined ? { usefulness: usefulnessClause } : {}),
           ...(noQuerySignal ? { noQuerySignal } : {}),
+          ...(embeddingDegraded ? { embeddingDegraded } : {}),
+          ...(embeddingVectorsIncomparable && (options.query ?? "").trim().length > 0 ? { embeddingVectorsIncomparable } : {}),
         })
       : undefined;
   if (footer !== undefined) {

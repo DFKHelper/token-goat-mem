@@ -532,18 +532,19 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   });
 }
 
+/** A loader that returns null means "no backend configured" (not a failure); a loader that throws or times out means a configured backend could not be loaded (`failed`). */
 async function resolveEmbeddingBackend(
   source: EmbeddingBackend | EmbeddingBackendLoader | undefined,
   timeoutMs: number,
-): Promise<EmbeddingBackend | null> {
+): Promise<{ readonly backend: EmbeddingBackend | null; readonly failed: boolean }> {
   if (source === undefined) {
-    return null;
+    return { backend: null, failed: false };
   }
   try {
     const resolved = typeof source === "function" ? await withTimeout(Promise.resolve(source()), timeoutMs) : source;
-    return resolved ?? null;
+    return { backend: resolved ?? null, failed: false };
   } catch {
-    return null;
+    return { backend: null, failed: true };
   }
 }
 
@@ -795,6 +796,8 @@ export interface RetrieveOutcome {
   readonly withheldCount: number;
   /** True when no rank list existed for this call at all -- no lexical match, no embedding signal, no usefulness signal (for a non-empty query, usefulness counts only on facts the query has evidence for) -- so every fact tied at zero and `results` is ordered by recency (a pin, where present) rather than relevance. Distinct from asking whether any individual result "matched": `matchedQuery` (`RetrievedFact`) is read off the pre-fusion BM25 map alone, so it is `false` for every result of a query answered purely by embedding signal, even though that query unambiguously matched something. This field is the only reliable way to ask "was there nothing to match against at all" -- see `retrieve`'s own `zeroSignal` local, which this carries out to callers that need to say so (the seam's recall footer) without recomputing it from `results`. */
   readonly zeroSignal: boolean;
+  /** True only when a backend was configured, the dense step ran for a non-empty query, and it contributed no rank list: loading it or embedding the query failed, or no candidate vector matched the query vector's length. False when none is configured, when the backend answered, and when the caller's budget was too small to try (a deliberate choice, not a degradation); a store whose vectors came from another model is flagged by the seam (`planEmbeddingRanking`), not here. */
+  readonly embeddingDegraded: boolean;
 }
 
 /** The correctness gate `retrieve()` applies before ranking, extracted so another consumer of the live store -- today only `mem dream`'s premise pool -- can filter to facts mem would actually assert without reimplementing contradiction resolution and freshness evaluation by hand. `facts` may be the full store contents (this does its own status filtering, same as `retrieve()`). Excludes: `superseded`, `pending`, `contested`, and contradiction losers (mirrors `contradictionFromStatus`'s "withheld" outcomes), plus anything anchor-`contradicted` against `root`. `unverified` is not grounds for exclusion here either -- only `contradicted` is. */
@@ -835,7 +838,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const filtered = pool.filter((fact) => !shadowed.has(fact.id) && matchesFilters(fact, options, now));
   if (filtered.length === 0) {
     // `zeroSignal: false` here, not `true`: this is an empty candidate pool (nothing survived scope/status filtering, possibly an empty store), not a real pool that no rank list could match against. The seam's "nothing matched this query" footer clause keys off `zeroSignal` specifically to describe the latter -- asserting it here would fire that clause for an empty store, which has nothing to do with the query at all.
-    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0, withheldCount: 0, zeroSignal: false };
+    return { results: [], totalNonWithheld: 0, shownNonWithheld: 0, anchorBudgetHits: 0, withheldCount: 0, zeroSignal: false, embeddingDegraded: false };
   }
 
   const bm25Scores = computeBm25Scores(filtered, options.query);
@@ -847,18 +850,22 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const bm25RankIds = bm25Ranked.filter((fact) => (bm25Scores.get(fact.id) ?? 0) > 0).map((fact) => fact.id);
 
   let embeddingRankIds: string[] = [];
+  let embeddingDegraded = false;
   // A query that trips secret screening is never handed to the embedding endpoint -- BM25 still ranks it (nothing here narrows `filtered` or skips the lexical pass), only the outbound call is skipped, mirroring the capture-side invariant that screened-out text is never sent off-machine.
   const queryTripsScreening =
     options.query.trim().length > 0 && screenForSecrets({ query: options.query }, options.secretAllowlist ?? []).length > 0;
   if (options.query.trim().length > 0 && !queryTripsScreening) {
-    const backend = await resolveEmbeddingBackend(options.embeddingBackend, options.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
+    const { backend, failed: backendLoadFailed } = await resolveEmbeddingBackend(options.embeddingBackend, options.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
+    embeddingDegraded = backendLoadFailed;
     if (backend !== null) {
       const embeddable = filtered.filter((fact): fact is Fact & { embedding: Float32Array } => fact.embedding !== null);
       if (embeddable.length > 0) {
         const queryVector = await embedQuery(backend, options.query, options.embeddingTimeoutMs ?? DEFAULT_EMBEDDING_TIMEOUT_MS);
+        embeddingDegraded = queryVector === null;
         if (queryVector !== null) {
           // Vectors of a different length than the query's are dropped rather than compared. `cosineSimilarity` would happily compare them over `Math.min` of the two lengths and return a confident number about two vector spaces that share no axes -- a wrong ranking with no error and no log. The store-wide version of this (a model swap) is caught earlier by `planEmbeddingRanking` in embeddings.ts; this is the per-fact backstop for a store that is mid-migration or was written by more than one backend.
           const comparable = embeddable.filter((fact) => fact.embedding.length === queryVector.length);
+          embeddingDegraded = comparable.length === 0;
           const similarity = new Map<string, number>(comparable.map((fact) => [fact.id, cosineSimilarity(queryVector, fact.embedding)]));
           embeddingRankIds = [...comparable].sort((a, b) => (similarity.get(b.id) ?? -1) - (similarity.get(a.id) ?? -1)).map((fact) => fact.id);
         }
@@ -957,5 +964,6 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
     anchorBudgetHits,
     withheldCount,
     zeroSignal,
+    embeddingDegraded,
   };
 }
