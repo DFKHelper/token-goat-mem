@@ -7,6 +7,7 @@ import type Database from "better-sqlite3";
 import { captureExplicit, captureSuggested } from "../src/capture.js";
 import { getFactById, listSourcesForFact, openStorage } from "../src/storage.js";
 import { extractMarkdownBullets, importFromMarkdown, MarkdownImportError, planImportFromMarkdown } from "../src/import.js";
+import { markerEnd, markerStart, SHARED_BLOCK_END, sharedMarkerStart } from "../src/wiring.js";
 
 // ─────────────────────────────────────────────────────────────────────────── extractMarkdownBullets (pure, no disk) ───────────────────────────────────────────────────────────────────────────
 
@@ -80,6 +81,165 @@ describe("extractMarkdownBullets", () => {
       ].join("\n")
     );
     expect(bullets.map((b) => b.text)).toEqual(["real bullet before", "real bullet between fences", "real bullet after"]);
+  });
+
+  it("skips a shared mem integration block (start through end marker) and keeps bullets outside it", () => {
+    const bullets = extractMarkdownBullets(
+      [
+        "- before the block",
+        sharedMarkerStart(["codex", "opencode"]),
+        "## Memory",
+        "- run `mem remember` whenever a preference is stated",
+        "```",
+        "- fenced bullet inside the block",
+        "```",
+        SHARED_BLOCK_END,
+        "- after the block",
+      ].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["before the block", "after the block"]);
+  });
+
+  it("skips a per-tool mem integration block, ending only at that tool's own end marker", () => {
+    const bullets = extractMarkdownBullets(
+      [markerStart("claude-code"), "- inside the per-tool block", markerEnd("claude-code"), "- after the block"].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["after the block"]);
+  });
+
+  it("does not start a skip for mem markers inside a fenced code block", () => {
+    const bullets = extractMarkdownBullets(
+      ["```", sharedMarkerStart(["codex"]), "- fence content", "```", "- real bullet after the fence", "```", SHARED_BLOCK_END, "```", "- last bullet"].join(
+        "\n"
+      )
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["real bullet after the fence", "last bullet"]);
+  });
+
+  it("joins indented continuation lines into the bullet, keeping the first line number", () => {
+    const bullets = extractMarkdownBullets(
+      ["# Rules", "- always run the linter", "  before every commit,", "    including docs-only ones.", "- next bullet"].join("\n")
+    );
+    expect(bullets).toEqual([
+      {
+        text: "always run the linter before every commit, including docs-only ones.",
+        line: 2,
+        rawLine: "- always run the linter before every commit, including docs-only ones.",
+      },
+      { text: "next bullet", line: 5, rawLine: "- next bullet" },
+    ]);
+  });
+
+  it("does not join a non-indented line, or an indented line after a blank line, a heading or a fence", () => {
+    const bullets = extractMarkdownBullets(
+      [
+        "- first bullet",
+        "not indented prose",
+        "- second bullet",
+        "",
+        "  indented after a blank line",
+        "- third bullet",
+        "## Heading",
+        "  indented after a heading",
+        "- fourth bullet",
+        "```",
+        "```",
+        "  indented after a fence",
+      ].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["first bullet", "second bullet", "third bullet", "fourth bullet"]);
+  });
+
+  it("ends the open bullet at an indented numbered-list line instead of joining it", () => {
+    const bullets = extractMarkdownBullets(["- install steps", "  1. run the installer", "  2) restart the shell", "  and then verify"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["install steps"]);
+  });
+
+  it("keeps importing after an orphan mem block start marker with no end marker", () => {
+    const bullets = extractMarkdownBullets(["- before", sharedMarkerStart(["codex"]), "- after the orphan", "- also after"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["before", "after the orphan", "also after"]);
+  });
+
+  it("imports the bullets between an orphan start and a later complete block, and still skips that block", () => {
+    const bullets = extractMarkdownBullets(
+      [
+        sharedMarkerStart(["codex"]),
+        "- between the markers",
+        sharedMarkerStart(["codex", "opencode"]),
+        "- inside the real block",
+        SHARED_BLOCK_END,
+        "- after the block",
+      ].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["between the markers", "after the block"]);
+  });
+
+  it("imports the bullets after a mem block start whose fence is never closed", () => {
+    const bullets = extractMarkdownBullets(["- before", markerStart("claude-code"), "- after the start", "```", markerEnd("claude-code")].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["before", "after the start"]);
+  });
+
+  it("handles CRLF input: skips a mem block and still joins a wrapped bullet", () => {
+    const bullets = extractMarkdownBullets(
+      ["- wrapped bullet", "  continues here", markerStart("claude-code"), "- inside", markerEnd("claude-code"), "- after"].join("\r\n")
+    );
+    expect(bullets).toEqual([
+      { text: "wrapped bullet continues here", line: 1, rawLine: "- wrapped bullet continues here" },
+      { text: "after", line: 6, rawLine: "- after" },
+    ]);
+  });
+
+  it("imports bullets after a shared mem block that opens and closes on one line", () => {
+    const bullets = extractMarkdownBullets([`${sharedMarkerStart(["codex"])}${SHARED_BLOCK_END}`, "- real rule"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["real rule"]);
+  });
+
+  it("imports bullets after a per-tool mem block that opens and closes on one line", () => {
+    const bullets = extractMarkdownBullets([`${markerStart("claude-code")}${markerEnd("claude-code")}`, "- real rule"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["real rule"]);
+  });
+
+  it("handles CRLF input: a one-line mem block does not swallow the bullets after it", () => {
+    const bullets = extractMarkdownBullets([`${sharedMarkerStart(["codex"])}${SHARED_BLOCK_END}`, "- real rule"].join("\r\n"));
+    expect(bullets).toEqual([{ text: "real rule", line: 2, rawLine: "- real rule" }]);
+  });
+
+  it("does not end a mem block at an end marker inside a fenced example within it", () => {
+    const bullets = extractMarkdownBullets(
+      [
+        "- before",
+        sharedMarkerStart(["codex"]),
+        "```",
+        SHARED_BLOCK_END,
+        "```",
+        "- still inside the block",
+        SHARED_BLOCK_END,
+        "- after",
+      ].join("\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["before", "after"]);
+  });
+
+  it("handles CRLF input: a fenced end marker inside a mem block does not end the block", () => {
+    const bullets = extractMarkdownBullets(
+      [markerStart("claude-code"), "~~~", markerEnd("claude-code"), "~~~", "- still inside", markerEnd("claude-code"), "- after"].join("\r\n")
+    );
+    expect(bullets.map((b) => b.text)).toEqual(["after"]);
+  });
+
+  it("ends the open bullet at an indented heading instead of gluing the heading onto it", () => {
+    const bullets = extractMarkdownBullets(["- run npm test", "  ## Deployment", "  deploy on Fridays"].join("\n"));
+    expect(bullets).toEqual([{ text: "run npm test", line: 1, rawLine: "- run npm test" }]);
+  });
+
+  it("still ends the open bullet at a column-0 heading and tracks it for the structural-heading rule", () => {
+    const bullets = extractMarkdownBullets(["- run npm test", "## Architecture", "  - nested layout note", "- top-level rule"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["run npm test", "top-level rule"]);
+  });
+
+  it("keeps a heading indented 4+ spaces as a continuation line", () => {
+    const bullets = extractMarkdownBullets(["- run npm test", "    ## literal text"].join("\n"));
+    expect(bullets.map((b) => b.text)).toEqual(["run npm test ## literal text"]);
   });
 });
 
@@ -188,6 +348,41 @@ describe("importFromMarkdown", () => {
   it("skips non-bullet content and fenced/nested-structural bullets (only 2 candidates from the fixture)", () => {
     const result = importFromMarkdown(db, { path: mdPath, root, dryRun: true });
     expect(result.candidates).toHaveLength(2);
+  });
+
+  it("imports a hard-wrapped bullet as one fact with the full text, sourced at its first line, and skips mem's own block", () => {
+    writeFileSync(
+      mdPath,
+      [
+        "- Always run the full suite",
+        "  before tagging a release.",
+        sharedMarkerStart(["codex"]),
+        "- run `mem remember` when a preference is stated",
+        SHARED_BLOCK_END,
+      ].join("\n"),
+      "utf8"
+    );
+    const result = importFromMarkdown(db, { path: mdPath, root });
+
+    const imported = result.outcomes.filter((o) => o.status === "imported");
+    expect(imported).toHaveLength(1);
+    const outcome = imported[0];
+    if (outcome?.status !== "imported") {
+      throw new Error("expected an imported outcome");
+    }
+    expect(outcome.fact.text).toBe("Always run the full suite before tagging a release.");
+    expect(outcome.fact.source_ref).toBe(`${resolve(mdPath)}:1`);
+    expect(listSourcesForFact(db, outcome.fact.id)[0]?.excerpt).toContain("Always run the full suite before tagging a release.");
+  });
+
+  it("reports a wrapped bullet whose joined text exceeds the capture length limit as skipped_error, not imported truncated", () => {
+    writeFileSync(mdPath, [`- ${"a".repeat(300)}`, `  ${"b".repeat(300)}`].join("\n"), "utf8");
+    const result = importFromMarkdown(db, { path: mdPath, root });
+
+    expect(result.candidates[0]?.text).toHaveLength(601);
+    expect(result.outcomes.map((o) => o.status)).toEqual(["skipped_error"]);
+    const count = db.prepare("SELECT COUNT(*) AS c FROM facts").get() as { c: number };
+    expect(count.c).toBe(0);
   });
 
   it("--dry-run reports candidates but writes nothing", () => {

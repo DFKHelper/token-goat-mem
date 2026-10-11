@@ -291,11 +291,11 @@ function makeToolWiring(filesFor: (resolved: { root: string; homeDir: string; us
 
 // ─────────────────────────────────────────────────────────────────────────── Markdown marker blocks ───────────────────────────────────────────────────────────────────────────
 
-function markerStart(tool: string): string {
+export function markerStart(tool: string): string {
   return `<!-- token-goat-mem:${tool}:start -->`;
 }
 
-function markerEnd(tool: string): string {
+export function markerEnd(tool: string): string {
   return `<!-- token-goat-mem:${tool}:end -->`;
 }
 
@@ -395,15 +395,26 @@ function markdownFile(path: string, tool: string, body: string): ManagedFile {
 // ─────────────────────────────────────────────────────────────────────────── Markdown shared, reference-counted marker block ───────────────────────────────────────────────────────────────────────────
 
 const SHARED_BLOCK_START_RE = /<!-- token-goat-mem:start tools=([a-z0-9,-]+) -->/g;
-const SHARED_BLOCK_END = "<!-- token-goat-mem:end -->";
+export const SHARED_BLOCK_END = "<!-- token-goat-mem:end -->";
 
 /** Sorted, deduplicated, comma-joined `tools=` attribute value, for deterministic marker output (and thus deterministic tests/diffs) regardless of install order. */
 function sortedToolsAttr(tools: readonly string[]): string {
   return Array.from(new Set(tools)).sort().join(",");
 }
 
-function sharedMarkerStart(tools: readonly string[]): string {
+export function sharedMarkerStart(tools: readonly string[]): string {
   return `<!-- token-goat-mem:start tools=${sortedToolsAttr(tools)} -->`;
+}
+
+const ANY_BLOCK_START_RE = /^\s*<!-- token-goat-mem:(?:([a-z0-9-]+):)?start\b/u;
+
+/** When `line` opens a mem integration block (the shared form or a per-tool form), returns the end marker that closes it; otherwise `null`. For readers of a markdown file that must skip mem's own block. */
+export function endMarkerForBlockStart(line: string): string | null {
+  const match = ANY_BLOCK_START_RE.exec(line);
+  if (match === null) {
+    return null;
+  }
+  return match[1] === undefined ? SHARED_BLOCK_END : markerEnd(match[1]);
 }
 
 interface SharedBlockLocation {

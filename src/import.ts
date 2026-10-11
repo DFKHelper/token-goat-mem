@@ -16,6 +16,7 @@ import { readFileWithErrorMapping, statFileWithErrorMapping } from "./fileUtils.
 import { isBoundToRoot } from "./projectIdentity.js";
 import { factsByTextHash, listFacts } from "./storage.js";
 import type { Fact, FactKind, FactScope } from "./types.js";
+import { endMarkerForBlockStart } from "./wiring.js";
 
 /** Thrown for a file-read problem (missing file, permission denied, etc.) -- distinct from per-bullet candidate problems which are reported as `skipped_error` outcomes instead. Registered in `cli.ts`'s `exitCodeForError` as a user error (exit 1): a missing `--from-md` file is bad input, not an internal bug. */
 export class MarkdownImportError extends Error {
@@ -32,27 +33,80 @@ export interface MarkdownBullet {
   readonly text: string;
   /** 1-based line number within the source file, for provenance (`source_ref`). */
   readonly line: number;
-  /** The untouched source line, marker and whitespace intact -- the raw material for this bullet's `sources` excerpt. */
+  /** The untouched first source line, marker and whitespace intact, followed by each continuation line trimmed and joined with a single space -- the raw material for this bullet's `sources` excerpt. */
   readonly rawLine: string;
 }
 
 const HEADING_RE = /^(#{1,6})\s+(.*)$/u;
+/** A heading indented 0-3 spaces: ends the open bullet instead of being glued onto it as a continuation line. */
+const INDENTED_HEADING_RE = /^ {0,3}#{1,6}(\s|$)/u;
 const BULLET_RE = /^(\s*)[-*]\s+(.+)$/u;
 const FENCE_RE = /^\s*(```|~~~)/u;
+/** An indented numbered-list item, which starts a new list entry rather than continuing a bullet. */
+const NUMBERED_ITEM_RE = /^\s+\d+[.)]\s/u;
 
 /** Headings whose *nested* bullets describe file/directory layout or system structure rather than a preference or decision a human stated -- not a general topic blocklist, and only excludes nested (indented) bullets under one of these headings. Top-level bullets and bullets under any other heading are still candidates; per this module's doc comment, the review gate (not this list) is the actual safety boundary. */
 const NON_PREFERENCE_HEADING_RE = /\b(architecture|file structure|file organization|directory structure)\b/iu;
 
+/** True when `endMarker` appears at or after line index `from`, outside a fenced code block, before any other block start marker -- the reader's mirror of the writer treating a start with no end of its own as not a block, so an orphan start never swallows the rest of the file. */
+function blockClosesLater(lines: readonly string[], from: number, endMarker: string): boolean {
+  let fenceChar: string | null = null;
+  for (let j = from; j < lines.length; j++) {
+    const line = lines[j] ?? "";
+    const fence = FENCE_RE.exec(line);
+    if (fence !== null) {
+      const marker = (fence[1] ?? "").charAt(0);
+      if (fenceChar === null) {
+        fenceChar = marker;
+      } else if (marker === fenceChar) {
+        fenceChar = null;
+      }
+      continue;
+    }
+    if (fenceChar !== null) {
+      continue;
+    }
+    if (line.includes(endMarker)) {
+      return true;
+    }
+    if (endMarkerForBlockStart(line) !== null) {
+      return false;
+    }
+  }
+  return false;
+}
+
 /** Extracts candidate bullets from raw markdown text. Pure and file-IO-free so it can be unit-tested against synthetic fixtures without touching disk. */
 export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
   const lines = markdown.split(/\r?\n/u);
-  const bullets: MarkdownBullet[] = [];
+  const bullets: { text: string; line: number; rawLine: string }[] = [];
   /** The fence character (`` ` `` or `~`) that opened the current fence, or `null` when not inside one. Per CommonMark/GFM, a backtick fence can only be closed by a backtick fence and a tilde fence only by a tilde fence -- the two marker types don't close each other. */
   let fenceChar: string | null = null;
   let currentHeading = "";
+  /** The end marker that closes the mem integration block being skipped, or `null` when not inside one. */
+  let skipUntil: string | null = null;
+  /** The fence character of a fence opened inside the skipped block, or `null`; an end marker inside such a fence is fence content, not the block's end. */
+  let skipFenceChar: string | null = null;
+  /** The bullet the next indented prose line continues, or `null` when no bullet is open. */
+  let open: { text: string; line: number; rawLine: string } | null = null;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
+
+    if (skipUntil !== null) {
+      const skipFence = FENCE_RE.exec(line);
+      if (skipFence !== null) {
+        const marker = (skipFence[1] ?? "").charAt(0);
+        if (skipFenceChar === null) {
+          skipFenceChar = marker;
+        } else if (marker === skipFenceChar) {
+          skipFenceChar = null;
+        }
+      } else if (skipFenceChar === null && line.includes(skipUntil)) {
+        skipUntil = null;
+      }
+      continue;
+    }
 
     const fence = FENCE_RE.exec(line);
     if (fence !== null) {
@@ -63,22 +117,45 @@ export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
         fenceChar = null;
       }
       // A fence line using the non-matching marker while already inside a fence is just ordinary content of that fence (e.g. a `~~~` line inside a ``` block) -- fall through to the `inFence` check below rather than treating it as a close/reopen.
+      open = null;
       continue;
     }
     if (fenceChar !== null) {
       continue;
     }
 
+    const blockEnd = endMarkerForBlockStart(line);
+    if (blockEnd !== null) {
+      open = null;
+      if (!line.includes(blockEnd) && blockClosesLater(lines, i + 1, blockEnd)) {
+        skipUntil = blockEnd;
+        skipFenceChar = null;
+      }
+      continue;
+    }
+
     const heading = HEADING_RE.exec(line);
     if (heading !== null) {
       currentHeading = (heading[2] ?? "").trim();
+      open = null;
+      continue;
+    }
+    if (INDENTED_HEADING_RE.test(line)) {
+      open = null;
       continue;
     }
 
     const bullet = BULLET_RE.exec(line);
     if (bullet === null) {
+      if (open !== null && /^\s+\S/u.test(line) && !NUMBERED_ITEM_RE.test(line)) {
+        open.text = `${open.text} ${line.trim()}`;
+        open.rawLine = `${open.rawLine} ${line.trim()}`;
+      } else {
+        open = null;
+      }
       continue;
     }
+    open = null;
     const indent = (bullet[1] ?? "").length;
     const text = (bullet[2] ?? "").trim();
     if (text.length === 0) {
@@ -87,7 +164,8 @@ export function extractMarkdownBullets(markdown: string): MarkdownBullet[] {
     if (indent > 0 && NON_PREFERENCE_HEADING_RE.test(currentHeading)) {
       continue;
     }
-    bullets.push({ text, line: i + 1, rawLine: line });
+    open = { text, line: i + 1, rawLine: line };
+    bullets.push(open);
   }
 
   return bullets;
