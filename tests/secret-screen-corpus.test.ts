@@ -67,6 +67,10 @@ describe("secret-screen corpus: random-looking hyphenated tokens stay flagged", 
     { name: "lowercase hex groups", text: "3f9a-1c7e-2b8d-04f6-5a93-ce17-b240-9d1f-77aa" },
     { name: "lowercase letter-digit groups", text: "a8f3k2-9xq7m1-p4z6w0-h2j5n8-c1v3b7-t9y4u6" },
     { name: "digits glued into words", text: "subagent-git2-discard-prohibition9-and-more-words" },
+    { name: "random letter groups joined by four-digit numbers", text: "the token is xqztkmvb-4821-mbvwhjkd-9034-hjkdnqrs-7765-pqlzxcvb" },
+    { name: "long consonant-heavy groups joined by a non-year number", text: "token zzqkxmwvbnhydlrtpgfsczqx-1234-abcdefghijklmnopqrstuvwx-5" },
+    { name: "vowel-less letter groups joined by ordinals", text: "xqztkmvb-12-mbvwhjkd-34-hjkdnqrs" },
+    { name: "more than two number segments", text: "feature-flag-1-rollout-2-for-search-3-ranking-quality" },
   ])("flags $name as generic-high-entropy-token", ({ text }) => {
     expect(patternNamesFor(text)).toContain(GENERIC);
   });
