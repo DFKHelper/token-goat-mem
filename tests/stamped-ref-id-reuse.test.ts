@@ -55,17 +55,17 @@ async function shownRef(id: string): Promise<string> {
 }
 
 /** Files one pending suggestion through `mem scan-session` from a transcript under a directory named for a password, so the stamped ref is credential context unless the stamp binding exempts it. */
-async function scanSentence(sentence: string): Promise<void> {
+async function scanSentence(sentence: string, root = "."): Promise<void> {
   transcriptCount += 1;
   const directory = join(base, "admin password", `n${String(transcriptCount)}`);
   mkdirSync(directory, { recursive: true });
   const transcript = join(directory, "transcript.jsonl");
   writeFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: sentence }] } }), "utf8");
-  await ok(["scan-session", "--transcript", transcript, "--root", "."]);
+  await ok(["scan-session", "--transcript", transcript, "--root", root]);
 }
 
-async function scanStamped(sentence: string): Promise<Seeded> {
-  await scanSentence(sentence);
+async function scanStamped(sentence: string, root = "."): Promise<Seeded> {
+  await scanSentence(sentence, root);
   const id = UUID_PATTERN.exec((await ok(["list", "--status", "pending"])).stdout)?.[0] ?? "";
   expect(id, "scan-session filed no pending suggestion").not.toBe("");
   return { id, ref: await shownRef(id) };
@@ -375,5 +375,64 @@ describe("audit log read order at an exact created_at tie", () => {
       insertAudit(db, stamped.id, "capture_suggested", creation.detail);
     });
     await expectExempt(stamped.id, "a creation row written after a json_import row at the same millisecond rebinds the stamp");
+  });
+});
+
+describe("the .mem/allowlist remedy unblocks each fail-closed stamped-ref refusal", { timeout: 120_000 }, () => {
+  const SENTENCE = "Remember that the staging box notes live in the wiki.";
+  const EDITED_TEXT = `session id ${U}`;
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(base, "root-"));
+  });
+
+  async function editAt(id: string): Promise<CliResult> {
+    return runCli(["edit", id, "--force", "--text", EDITED_TEXT, "--root", root]);
+  }
+
+  /** The refusal names the remedy, then the remedy works: the same edit is refused, the UUID goes into `<root>/.mem/allowlist`, and the same edit is accepted and stored. */
+  async function expectAllowlistUnblocks(id: string, why: string): Promise<void> {
+    const refused = await editAt(id);
+    expect(refused.exitCode, `${why}: the edit must be refused before the allowlist entry`).not.toBe(0);
+    expect(refused.stderr, `${why}: the refusal names the remedy`).toContain(".mem/allowlist");
+    mkdirSync(join(root, ".mem"), { recursive: true });
+    writeFileSync(join(root, ".mem", "allowlist"), `# reviewed fake session id\n${U}\n`, "utf8");
+    const accepted = await editAt(id);
+    expect(accepted.exitCode, `${why}: the same edit after the allowlist entry: ${accepted.stderr}`).toBe(0);
+    expect((await ok(["show", id])).stdout, `${why}: the stored fact shows the edit`).toContain(`text: ${EDITED_TEXT}`);
+  }
+
+  it("unblocks the edit of a stamped fact rebuilt by a JSON export and re-import into a fresh store", async () => {
+    const stamped = await scanStamped(SENTENCE, root);
+    await ok(["review", "--promote", stamped.id, "--root", root]);
+    const exported = join(base, "export.json");
+    writeFileSync(exported, (await ok(["export"])).stdout, "utf8");
+    useFreshHome();
+    await ok(["import", "--from-json", exported, "--root", root]);
+    expect(await shownRef(stamped.id), "the re-imported fact kept the stamped ref").toBe(stamped.ref);
+    await expectAllowlistUnblocks(stamped.id, "JSON re-import");
+  });
+
+  it("unblocks the edit of a stamped fact whose creation audit row gc pruned", async () => {
+    const stamped = await scanStamped(SENTENCE, root);
+    withStore(storePath(), (db) => db.prepare("UPDATE audit_log SET created_at = ? WHERE fact_id = ?").run(new Date(Date.now() - 200 * DAY_MS).toISOString(), stamped.id));
+    await ok(["epoch", "--gc"]);
+    const remaining = withStore(storePath(), (db) => (db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE fact_id = ?").get(stamped.id) as { n: number }).n);
+    expect(remaining, "gc pruned the stamped fact's creation row").toBe(0);
+    await expectAllowlistUnblocks(stamped.id, "gc-pruned creation row");
+  });
+
+  it("unblocks the edit of a stamped fact whose creation row predates the stamped_ref marker", async () => {
+    const stamped = await scanStamped(SENTENCE, root);
+    const stripped = withStore(storePath(), (db) => {
+      const row = db.prepare("SELECT id, detail FROM audit_log WHERE fact_id = ? AND event = 'capture_suggested'").get(stamped.id) as { id: string; detail: string };
+      expect(row.detail, "the creation row carries the marker before it is stripped").toContain("[stamped_ref=");
+      const detail = row.detail.replace(/ \[stamped_ref=[^\]]*\]/u, "");
+      db.prepare("UPDATE audit_log SET detail = ? WHERE id = ?").run(detail, row.id);
+      return detail;
+    });
+    expect(stripped, "the marker is gone from the creation row").not.toContain("[stamped_ref=");
+    await expectAllowlistUnblocks(stamped.id, "pre-marker creation row");
   });
 });
