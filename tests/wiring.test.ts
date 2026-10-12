@@ -14,6 +14,7 @@ import {
   claudeCode,
   CLAUDE_HOOK_EVENTS,
   codex,
+  createMemProbeCache,
   copilotCli,
   copilotJetbrains,
   copilotVisualStudio,
@@ -25,11 +26,13 @@ import {
   parseHookCommandSpec,
   resolveBinaryOnPath,
   resolveMemBinary,
+  timeMemLaunch,
   vscodeUserDir,
   WiringConflictError,
   WiringUserUnsupportedError,
   writeManagedFile,
 } from "../src/wiring.js";
+import { CAPABLE_MEM_SHIM, HANGING_MEM_SHIM, NOT_RUNNABLE_MEM_SHIM, OLD_MEM_SHIM, writeCountingFakeMem, writeFakeMem } from "./support/fakeMem.js";
 
 let root: string;
 let home: string;
@@ -2057,6 +2060,105 @@ describe("checkHookCapability / checkClaudeHookHealth / resolveMemBinary (agains
     const health = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
     expect(health.bin).toBeNull();
     expect(health.hooks.every((h) => !h.capable)).toBe(true);
+  });
+});
+
+// Each case launches counting fake mems through cmd.exe and node, 1-10 s a launch on this machine, so the 30 s default is spent on launches before any assertion runs.
+describe("probe cache, skip after unanswered, and notRunnable (counting fake mem)", { timeout: 300_000 }, () => {
+  let dir: string;
+  let counter: string;
+  const isWindows = process.platform === "win32";
+  const platform = isWindows ? "win32" : "linux";
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-probe-cache-"));
+    counter = join(dir, "launches.txt");
+    process.env["FAKE_MEM_COUNTER"] = counter;
+  });
+
+  afterEach(() => {
+    delete process.env["FAKE_MEM_COUNTER"];
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  function launches(): number {
+    return existsSync(counter) ? readFileSync(counter, "utf8").split("\n").filter((line) => line !== "").length : 0;
+  }
+
+  /** The wiring module loaded without this file's spawn-timeout floor, which would lift a 1000 ms budget to 120 s and so keep a hanging shim from ever being unanswered; every `spawnSync` call it makes is pushed onto `spawned`, because a launcher killed at a 1000 ms budget on a loaded machine may never reach its counter line. */
+  async function loadWiringWithRealTimeouts(spawned: unknown[][]): Promise<typeof import("../src/wiring.js")> {
+    vi.doMock("node:child_process", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("node:child_process")>();
+      return {
+        ...actual,
+        spawnSync: (...args: unknown[]) => {
+          spawned.push(args);
+          return Reflect.apply(actual.spawnSync, actual, args);
+        },
+      };
+    });
+    vi.resetModules();
+    try {
+      return await import("../src/wiring.js");
+    } finally {
+      vi.doMock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
+    }
+  }
+
+  it("checkClaudeHookHealth over every hook event launches the binary twice: one --version and one shared hook --help", () => {
+    writeCountingFakeMem(dir, CAPABLE_MEM_SHIM);
+    const health = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform });
+    expect(CLAUDE_HOOK_EVENTS).toHaveLength(4);
+    expect(health.hooks.every((hook) => hook.capable)).toBe(true);
+    expect(launches()).toBe(2);
+  });
+
+  it("a cache passed to two checkClaudeHookHealth calls makes the second launch nothing", () => {
+    writeCountingFakeMem(dir, CAPABLE_MEM_SHIM);
+    const cache = createMemProbeCache();
+    checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform, cache });
+    checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform, cache });
+    expect(launches()).toBe(2);
+  });
+
+  it("timeMemLaunch spawns even when the same --version probe is cached", () => {
+    writeCountingFakeMem(dir, CAPABLE_MEM_SHIM);
+    const cache = createMemProbeCache();
+    checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform, cache });
+    expect(launches()).toBe(2);
+    expect(timeMemLaunch({ pathEnv: dir, cache })).toEqual(expect.any(Number));
+    expect(launches()).toBe(3);
+  });
+
+  it("a hanging binary is launched once under a 1000 ms budget, not once per probe, and timeMemLaunch through the same cache spawns nothing", async () => {
+    const spawned: unknown[][] = [];
+    const real = await loadWiringWithRealTimeouts(spawned);
+    writeCountingFakeMem(dir, HANGING_MEM_SHIM);
+    const cache = real.createMemProbeCache();
+    const health = real.checkClaudeHookHealth(real.CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform, timeoutMs: 1000, cache });
+    expect(health.hooks.every((hook) => !hook.capable && hook.probeFailure?.includes("could not probe") === true)).toBe(true);
+    expect(real.timeMemLaunch({ pathEnv: dir, timeoutMs: 1000, cache })).toBeNull();
+    expect(spawned).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    expect(launches()).toBeLessThanOrEqual(1);
+  });
+
+  it("a shim exiting 127 gives notRunnable on the capability result and keeps the missing value of a nonzero exit", () => {
+    writeCountingFakeMem(dir, NOT_RUNNABLE_MEM_SHIM);
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    expect(checkHookCapability(binPath, { subcommand: "hook", flags: ["session-start"] })).toEqual({ capable: false, missing: ["hook"], notRunnable: true });
+
+    const health = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS.slice(0, 1), { pathEnv: dir, platform });
+    const [hook] = health.hooks;
+    expect(hook?.notRunnable).toBe(true);
+    expect(hook?.missing).toEqual(["hook"]);
+    expect(hook?.probeFailure).toBeUndefined();
+  });
+
+  it("a binary that runs and exits 1 is not notRunnable", () => {
+    writeFakeMem(dir, OLD_MEM_SHIM);
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    expect(checkHookCapability(binPath, { subcommand: "hook", flags: ["session-start"] })).toEqual({ capable: false, missing: ["hook"] });
   });
 });
 

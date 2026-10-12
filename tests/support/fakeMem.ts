@@ -22,6 +22,17 @@ export const OLD_MEM_SHIM =
 /** Answers nothing for a few seconds, then exits 0: a healthy binary that a probe with a short budget cannot tell from a hang. */
 export const HANGING_MEM_SHIM = "#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 5000);\n";
 
+/** Exits 127 at once, as a shell does for a command it cannot find. */
+export const NOT_RUNNABLE_MEM_SHIM = "#!/usr/bin/env node\nprocess.exit(127);\n";
+
+/** Writes `body` as `mem.js` plus launchers (`mem`, `mem.cmd`) that append one line to the file named by `FAKE_MEM_COUNTER` before node starts, so a launch is counted even when the probe's budget kills the launcher before node is up. */
+export function writeCountingFakeMem(dir: string, body: string): void {
+  writeFileSync(join(dir, "mem.js"), body, "utf8");
+  writeFileSync(join(dir, "mem"), '#!/bin/sh\necho launch >> "$FAKE_MEM_COUNTER"\nexec node "$(dirname "$0")/mem.js" "$@"\n', "utf8");
+  chmodSync(join(dir, "mem"), 0o755);
+  writeFileSync(join(dir, "mem.cmd"), `@echo off\r\necho launch>>"%FAKE_MEM_COUNTER%"\r\nnode "%~dp0mem.js" %*\r\n`, "utf8");
+}
+
 /** Writes `body` as `mem` (and a `mem.cmd` wrapper) into `dir`. */
 export function writeFakeMem(dir: string, body: string): void {
   writeFileSync(join(dir, "mem"), body, "utf8");

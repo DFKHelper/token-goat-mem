@@ -1,6 +1,6 @@
 /** Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets those guides document (Claude Code's `settings.json` hook + `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and only that. Two idempotency/authorship mechanisms, chosen per file format: - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked block plus the one separator newline install adds, leaving everything else untouched. - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`; `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` -- neither reads `AGENTS.md`, so they share a block in their own file instead of joining the `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of near-duplicate per-tool blocks they share one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole block as it goes -- the body comes from one constant shared by every tool that writes here, so a later tool's install is also what upgrades a body left behind by an older mem. Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other tool remains listed, and only removes the whole block once the last listed tool uninstalls. A project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens. - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped* entry already occupies the same identity (hook `command`, task `label`, keybinding `key`) rather than duplicating or silently overwriting hand-written config. Uninstall removes only stamped entries, so it survives content drift across mem versions (unlike deep-equality matching against a remembered snapshot). Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read used to compute the new content. */
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
@@ -904,21 +904,71 @@ export function resolveBinaryOnPath(
 }
 
 /** Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed out, or exited nonzero. The command is assembled as one shell string (quoting each token) and run with `shell: true` rather than passed as an argv array: Windows cannot exec an npm-installed `.cmd`/`.bat` shim directly (`spawnSync` raises `EINVAL`), and `shell: true` with a separate argv array is a documented footgun (Node's own DEP0190) because the array elements are concatenated into the command line unescaped -- quoting them here, once, in the string form avoids both. */
-function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: number): string | null {
-  return runMemProbe(binPath, args, timeoutMs).output;
+function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: number, opts: MemProbeOptions = {}): string | null {
+  return runMemProbe(binPath, args, timeoutMs, opts).output;
 }
 
+/** One probe's outcome: `output` is null unless the run exited 0; `unanswered` means no exit at all (a timeout or spawn error); `notRunnable` means the binary cannot run at all (exit 126, 127 or 9009, or a spawn ENOENT), as against one that ran and exited nonzero. */
+export interface MemProbeResult {
+  readonly output: string | null;
+  readonly unanswered: boolean;
+  readonly notRunnable: boolean;
+}
+
+/** What one doctor or init run remembers about its probes: each (binary, args) answer, and the binaries that have left a probe unanswered, which every later probe of the same binary then reports without spawning. */
+export interface MemProbeCache {
+  readonly results: Map<string, MemProbeResult>;
+  readonly unansweredBins: Map<string, MemProbeResult>;
+}
+
+/** Options for one probe: the cache to consult and fill, and `bypassCachedResult` for a probe that measures the launch itself and so must spawn even when the same (binary, args) is cached; it still honours a binary already recorded as unanswered. */
+export interface MemProbeOptions {
+  readonly cache?: MemProbeCache;
+  readonly bypassCachedResult?: boolean;
+}
+
+/** A fresh, empty probe cache; pass one cache through every probe of a run so identical probes launch once. */
+export function createMemProbeCache(): MemProbeCache {
+  return { results: new Map(), unansweredBins: new Map() };
+}
+
+/** Exit codes a shell reports for a binary it cannot launch: 126 (found but not executable), 127 (not found), 9009 (cmd.exe's not recognized). */
+const NOT_RUNNABLE_EXIT_CODES: ReadonlySet<number> = new Set([126, 127, 9009]);
+
 /** `runMemSubprocess` plus whether the run produced no exit at all (a timeout or spawn error, `unanswered`), as against a binary that ran and exited nonzero: an old binary answers an unknown subcommand with exit 1, which says something about it, where a timeout does not. */
-function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number): { readonly output: string | null; readonly unanswered: boolean } {
+function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number, opts: MemProbeOptions = {}): MemProbeResult {
+  const { cache } = opts;
+  const key = JSON.stringify([binPath, args]);
+  if (cache !== undefined) {
+    const skipped = cache.unansweredBins.get(binPath);
+    if (skipped !== undefined) {
+      return skipped;
+    }
+    const cached = opts.bypassCachedResult === true ? undefined : cache.results.get(key);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
   const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
   const result = spawnSync(quoted, { encoding: "utf8", timeout: timeoutMs, shell: true });
+  const outcome = classifyMemProbe(result);
+  if (cache !== undefined) {
+    cache.results.set(key, outcome);
+    if (outcome.unanswered) {
+      cache.unansweredBins.set(binPath, outcome);
+    }
+  }
+  return outcome;
+}
+
+function classifyMemProbe(result: SpawnSyncReturns<string>): MemProbeResult {
   if (result.error !== undefined) {
-    return { output: null, unanswered: true };
+    return { output: null, unanswered: true, notRunnable: Reflect.get(result.error, "code") === "ENOENT" };
   }
   if (result.status !== 0) {
-    return { output: null, unanswered: false };
+    return { output: null, unanswered: false, notRunnable: result.status !== null && NOT_RUNNABLE_EXIT_CODES.has(result.status) };
   }
-  return { output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`, unanswered: false };
+  return { output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`, unanswered: false, notRunnable: false };
 }
 
 /** How long a capability probe of the installed `mem` may run: a machine whose antivirus scans every process launch can take several seconds on a healthy binary, and a tighter budget makes it look incapable. */
@@ -926,13 +976,13 @@ export const MEM_PROBE_TIMEOUT_MS = 10_000;
 
 /** Resolves `mem` on PATH and its reported version, or `null` if nothing resolves. */
 export function resolveMemBinary(
-  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number } = {}
+  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number; readonly cache?: MemProbeCache } = {}
 ): ResolvedMemBinary | null {
   const path = resolveBinaryOnPath("mem", opts);
   if (path === null) {
     return null;
   }
-  const output = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
+  const output = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS, opts.cache === undefined ? {} : { cache: opts.cache });
   return { path, version: output === null ? null : output.trim() || null };
 }
 
@@ -941,11 +991,13 @@ export function checkHookCapability(
   binPath: string,
   spec: { readonly subcommand: string; readonly flags: readonly string[] },
   timeoutMs = MEM_PROBE_TIMEOUT_MS,
-  launcherArgs: readonly string[] = []
-): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true } {
-  const { output: help, unanswered } = runMemProbe(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs);
+  launcherArgs: readonly string[] = [],
+  cache?: MemProbeCache
+): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true; readonly notRunnable?: true } {
+  const { output: help, unanswered, notRunnable } = runMemProbe(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs, cache === undefined ? {} : { cache });
   if (help === null) {
-    return unanswered ? { capable: false, missing: [], probeFailed: true } : { capable: false, missing: [spec.subcommand] };
+    const unrunnable = notRunnable ? { notRunnable: true as const } : {};
+    return unanswered ? { capable: false, missing: [], probeFailed: true, ...unrunnable } : { capable: false, missing: [spec.subcommand], ...unrunnable };
   }
   if (spec.subcommand === "hook") {
     // The slug is the only thing a `hook` command depends on. A binary without a `hook` command answers `hook --help` with its root help (or an error), which never names a slug, so an absent slug is reported as the command being missing.
@@ -964,6 +1016,8 @@ export interface HookCapabilityResult {
   readonly missing: readonly string[];
   /** Set when the probe of the binary got no answer in time, so `missing` says nothing about what it supports; the sentence names the probed binary and the budget. */
   readonly probeFailure?: string;
+  /** Set when the probed binary cannot run at all (exit 126, 127 or 9009, or a spawn ENOENT), as against one that ran and lacks the capability; `missing` and `probeFailure` read exactly as they do without it. */
+  readonly notRunnable?: true;
 }
 
 /** Full health picture for a set of `{event, command}` hook entries: the resolved `mem` binary (or `null`), and each entry's capability against it. */
@@ -974,36 +1028,37 @@ export interface ClaudeHookHealth {
 
 export function checkClaudeHookHealth(
   commands: ReadonlyArray<{ readonly event: string; readonly command: string }>,
-  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number } = {}
+  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number; readonly cache?: MemProbeCache } = {}
 ): ClaudeHookHealth {
-  const bin = resolveMemBinary(opts);
+  const cache = opts.cache ?? createMemProbeCache();
+  const bin = resolveMemBinary({ ...opts, cache });
   const hooks = commands.map(({ event, command }): HookCapabilityResult => {
     const spec = parseHookCommandSpec(command);
     // A direct-launch hook runs its own bundle first, so that bundle -- not whatever `mem` PATH resolves to -- is what must support the flags; a bundle that is gone falls through to the PATH binary, exactly as the hook itself would.
     const bundle = parseHookBundlePath(command);
     if (spec !== null && bundle !== null && existsSync(bundle)) {
       const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-      const { capable, missing, probeFailed } = checkHookCapability("node", spec, timeoutMs, [bundle]);
-      return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}) };
+      const { capable, missing, probeFailed, notRunnable } = checkHookCapability("node", spec, timeoutMs, [bundle], cache);
+      return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}) };
     }
     if (bin === null || spec === null) {
       return { event, command, capable: false, missing: spec === null ? [] : spec.flags };
     }
     const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-    const { capable, missing, probeFailed } = checkHookCapability(bin.path, spec, timeoutMs);
-    return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bin.path, timeoutMs) } : {}) };
+    const { capable, missing, probeFailed, notRunnable } = checkHookCapability(bin.path, spec, timeoutMs, [], cache);
+    return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bin.path, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}) };
   });
   return { bin, hooks };
 }
 
 /** Milliseconds one `mem --version` launch takes through the PATH `mem` a plain hook would resolve, or `null` when there is no mem on PATH or it fails to run; `mem doctor` warns when this is slow, since every hook event pays it. */
-export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeoutMs?: number } = {}): number | null {
+export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeoutMs?: number; readonly cache?: MemProbeCache } = {}): number | null {
   const path = resolveBinaryOnPath("mem", opts.pathEnv === undefined ? {} : { pathEnv: opts.pathEnv });
   if (path === null) {
     return null;
   }
   const started = performance.now();
-  const out = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
+  const out = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS, { bypassCachedResult: true, ...(opts.cache === undefined ? {} : { cache: opts.cache }) });
   return out === null ? null : performance.now() - started;
 }
 
