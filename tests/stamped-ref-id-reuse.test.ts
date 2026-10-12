@@ -8,6 +8,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { listAuditLogForFact } from "../src/db.js";
 import { runCli, type CliResult } from "./support/cli.js";
 
 /** Fake session UUID with entropy above the generic threshold, so only the labelled-identifier exemption decides each edit. */
@@ -333,5 +334,46 @@ describe("mem edit --undo", () => {
     expect(edited.exitCode, "a credential keyword beside the UUID must be refused").not.toBe(0);
     expect(edited.stderr).toContain("secret");
     expect((await ok(["show", stamped.id])).stdout, "the refused edit left the text alone").toContain(`text: ${SENTENCE}`);
+  });
+});
+
+describe("audit log read order at an exact created_at tie", () => {
+  const TIED_AT = "2030-01-01T00:00:00.000Z";
+
+  function insertAudit(db: Database.Database, id: string, event: string, detail: string): void {
+    db.prepare("INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, NULL, ?)").run(randomUUID(), event, id, detail, TIED_AT);
+  }
+
+  it("reads rows that share one created_at back in insertion (rowid) order", async () => {
+    const stamped = await scanStamped("Remember that the staging box notes live in the wiki.");
+    const events = withStore(storePath(), (db) => {
+      for (const event of ["tie_a", "tie_b", "tie_c"]) {
+        insertAudit(db, stamped.id, event, event);
+      }
+      return listAuditLogForFact(db, stamped.id).filter((row) => row.createdAt === TIED_AT).map((row) => row.event);
+    });
+    expect(events, "tied rows come back oldest first, broken by rowid").toEqual(["tie_a", "tie_b", "tie_c"]);
+  });
+
+  it("withholds the exemption when a json_import row ties with the creation row but was written after it", async () => {
+    const stamped = await scanStamped("Remember that the staging box notes live in the wiki.");
+    await promote(stamped.id);
+    withStore(storePath(), (db) => {
+      db.prepare("UPDATE audit_log SET created_at = ? WHERE fact_id = ? AND event = 'capture_suggested'").run(TIED_AT, stamped.id);
+      insertAudit(db, stamped.id, "json_import", "imported");
+    });
+    await expectRefusedAsSecret(stamped.id, "a json_import row written after the creation row at the same millisecond voids the binding");
+  });
+
+  it("keeps the exemption when the json_import row ties with the creation row but was written before it", async () => {
+    const stamped = await scanStamped("Remember that the staging box notes live in the wiki.");
+    await promote(stamped.id);
+    withStore(storePath(), (db) => {
+      const creation = db.prepare("SELECT detail FROM audit_log WHERE fact_id = ? AND event = 'capture_suggested'").get(stamped.id) as { detail: string };
+      db.prepare("DELETE FROM audit_log WHERE fact_id = ? AND event = 'capture_suggested'").run(stamped.id);
+      insertAudit(db, stamped.id, "json_import", "imported");
+      insertAudit(db, stamped.id, "capture_suggested", creation.detail);
+    });
+    await expectExempt(stamped.id, "a creation row written after a json_import row at the same millisecond rebinds the stamp");
   });
 });
