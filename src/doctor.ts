@@ -14,7 +14,7 @@ import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { formatAge, MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
-import { describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
+import { createProbeBudget, describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv, type ProbeBudget } from "./doctorWiring.js";
 import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, type WiringOpts } from "./wiring.js";
 
 /** The fixed set of `check` names a finding can carry. Closed on purpose: `--json` consumers key off these strings, so a new check is a deliberate, tested addition here rather than a string typed at one call site. One name covers every line a topic prints (`hooks` is a header plus one line per event), and the order is the order the report prints in. */
@@ -156,12 +156,15 @@ function describeScopePlacement(unreachableRoots: number, unreachableFacts: numb
 }
 
 /** The remedy for an installed hook that cannot run: upgrading fixes a real capability gap, but a probe that timed out says nothing about the mem version, so it gets a retry hint instead. */
-export function hookGapRemedy(hook: { readonly probeFailure?: string }): string {
+export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly notRunnable?: true }): string {
+  if (hook.notRunnable === true) {
+    return "reinstall token-goat-mem or fix PATH (the mem this hook launches could not run at all)";
+  }
   return hook.probeFailure === undefined ? "npm install -g token-goat-mem" : "re-run mem doctor once the machine is less busy (a probe that times out says nothing about the mem version)";
 }
 
 /** `doctor` section for Claude Code hooks: the `mem` binary that actually resolves on PATH (which may be a different build than the one running this `doctor`), and whether each installed hook command -- read from disk, not from what this build would write -- can run against it. Checks both project-level (cwd) and user-level (`--user` install) settings.json, since either or both may exist and `doctor` takes no `--root`/`--user` of its own. This is the check that would have surfaced the 219-hook-failure incident on day one: a stale PATH binary rejecting a newer install's flags produces a `capable: false` line here on the very first `mem doctor` run, instead of five days of silent `|| true` swallowing. */
-function describeHookHealth(opts: WiringOpts): Finding[] {
+function describeHookHealth(opts: WiringOpts, probe: ProbeBudget): Finding[] {
   const project = installedClaudeHookCommands(opts);
   const user = installedClaudeHookCommands({ ...opts, user: true });
   if (project.length === 0 && user.length === 0) {
@@ -177,7 +180,7 @@ function describeHookHealth(opts: WiringOpts): Finding[] {
     if (hooks.length === 0) {
       continue;
     }
-    const health = checkClaudeHookHealth(hooks);
+    const health = checkClaudeHookHealth(hooks, probe);
     // A direct-launch hook runs its own bundle, so no mem on PATH is only a fault when some hook cannot run that way either.
     const allCapable = health.hooks.every((hook) => hook.capable);
     lines.push(
@@ -194,7 +197,7 @@ function describeHookHealth(opts: WiringOpts): Finding[] {
           : finding(
               "hooks",
               "fail",
-              `  ${hook.event}: ${health.bin === null ? "would be inert" : hook.probeFailure ?? `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
+              `  ${hook.event}: ${health.bin === null ? "would be inert" : hook.notRunnable === true ? "cannot run at all (the binary it launches did not start)" : hook.probeFailure ?? `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
               hookGapRemedy(hook)
             )
       );
@@ -433,7 +436,8 @@ export function registerDoctorCommand(program: Command): void {
         "embedding configuration and coverage, dream configuration, how many decisions and corrections carry a why, term coverage, how much of the store fits in one recall block, when recall last surfaced a fact, " +
         "project/path-scoped facts whose root is gone, backup snapshots, installed Claude Code hooks (can the mem on PATH run each one, is a hook in the legacy shape that `mem init claude-code` rewrites to `mem hook <event>`, " +
         "or did a probe of that mem time out), project-versus-user hook divergence, mem launch time, and wiring drift per tool. " +
-        "The one network call is --probe-embeddings, which makes a single embed request to the configured embedding endpoint"
+        "The one network call is --probe-embeddings, which makes a single embed request to the configured embedding endpoint. " +
+        "TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS (integer, 100-600000, default 10000) sets how long doctor waits on each probe of the mem on PATH"
     )
     .option("--json", "Output the findings as machine-readable JSON: { findings: [{ check, status, message, remedy? }], epoch } (unstable, pre-1.0)")
     .option("--root <dir>", "Project root whose Claude Code hooks and tool config files doctor inspects (default: the current directory)")
@@ -446,7 +450,9 @@ export function registerDoctorCommand(program: Command): void {
         const dbPath = resolveDbPath();
         // The environment checks first: none of them needs the store, so a store that is missing, corrupt, or on an older schema cannot take them down with it.
         const dream = describeDream();
-        const hooks = [...describeHookHealth(wiringOpts), ...describeHookDivergence(wiringOpts), ...describeLaunchTime(wiringOpts), ...describeWiringDrift(wiringOpts)];
+        // One budget and one cache for the whole run: an identical probe runs once, and a binary that gave no answer is not probed again.
+        const probeBudget = createProbeBudget();
+        const hooks = [...describeHookHealth(wiringOpts, probeBudget), ...describeHookDivergence(wiringOpts), ...describeLaunchTime(wiringOpts, undefined, undefined, probeBudget), ...describeWiringDrift(wiringOpts)];
         const inspection = inspectStoreFile(dbPath, (db) => {
           const journalMode = db.pragma("journal_mode", { simple: true }) as string;
           const foreignKeys = db.pragma("foreign_keys", { simple: true }) as number;

@@ -3,12 +3,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 import { hookGapRemedy } from "../src/doctor.js";
-import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS } from "../src/wiring.js";
+import { probeTimeoutFromEnv } from "../src/doctorWiring.js";
+import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, MEM_PROBE_TIMEOUT_MS } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
-import { HANGING_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+import { CAPABLE_MEM_SHIM, HANG_ONCE_MEM_SHIM, HANGING_MEM_SHIM, NOT_RUNNABLE_MEM_SHIM, writeCountingFakeMem, writeFakeMem } from "./support/fakeMem.js";
 
 interface JsonFinding {
   readonly check: string;
@@ -186,5 +187,122 @@ describe("mem hook capability probe that gets no answer", { timeout: 120_000 }, 
     } finally {
       rmSync(binDir, { recursive: true, force: true });
     }
+  });
+});
+
+/** Runs `fn` with the given env vars set and PATH narrowed to `binDir` plus node's own directory (so no real `mem` on this machine can answer), restoring all of it afterwards. */
+async function withProbeEnv(binDir: string, env: Readonly<Record<string, string>>, fn: () => Promise<void>): Promise<void> {
+  const originalPath = process.env["PATH"];
+  const originalCwd = process.cwd();
+  process.env["PATH"] = `${binDir}${delimiter}${dirname(process.execPath)}`;
+  for (const [key, value] of Object.entries(env)) {
+    process.env[key] = value;
+  }
+  try {
+    await fn();
+  } finally {
+    process.env["PATH"] = originalPath;
+    process.chdir(originalCwd);
+    for (const key of Object.keys(env)) {
+      delete process.env[key];
+    }
+  }
+}
+
+function countLaunches(counterPath: string): number {
+  return existsSync(counterPath) ? readFileSync(counterPath, "utf8").split("\n").filter((line) => line.trim().length > 0).length : 0;
+}
+
+describe("mem doctor and mem init probe a PATH mem under one shared cache and budget", { timeout: 300_000 }, () => {
+  let binDir: string;
+
+  beforeEach(() => {
+    binDir = mkdtempSync(join(tmpdir(), "mem-dw-probe-bin-"));
+  });
+
+  afterEach(() => {
+    rmSync(binDir, { recursive: true, force: true });
+  });
+
+  it("launches a hanging mem at most once per doctor run and reports it as a probe with no answer", async () => {
+    const counter = join(binDir, "launches.txt");
+    writeCountingFakeMem(binDir, HANGING_MEM_SHIM);
+    await init("claude-code");
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "1000", FAKE_MEM_COUNTER: counter }, async () => {
+      const started = Date.now();
+      const hooks = await doctorFindings("hooks");
+      const elapsedMs = Date.now() - started;
+      expect(hooks.some((entry) => entry.status === "fail" && entry.remedy?.includes("less busy") === true)).toBe(true);
+      expect(countLaunches(counter)).toBeLessThanOrEqual(1);
+      expect(elapsedMs).toBeLessThan(10_000);
+    });
+  });
+
+  it("tells a binary that cannot run at all to reinstall or fix PATH, not that it lacks the hook entry point", async () => {
+    writeFakeMem(binDir, NOT_RUNNABLE_MEM_SHIM);
+    await init("claude-code");
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000" }, async () => {
+      const failures = (await doctorFindings("hooks")).filter((entry) => entry.status === "fail");
+      expect(failures.length).toBeGreaterThan(0);
+      for (const entry of failures) {
+        expect(entry.remedy).toContain("fix PATH");
+        expect(entry.remedy).not.toContain("npm install -g");
+        expect(entry.message).not.toContain("entry point");
+      }
+    });
+  });
+
+  it("init retries a probe that got no answer once at 3x the budget, and writes the hooks without --force", async () => {
+    const marker = join(binDir, "hung-once.marker");
+    writeFakeMem(binDir, HANG_ONCE_MEM_SHIM);
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "5000", FAKE_MEM_MARKER: marker }, async () => {
+      const result = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(true);
+      expect(existsSync(marker)).toBe(true);
+    });
+  });
+
+  it("init still refuses, as before, when the retry gets no answer either", async () => {
+    writeFakeMem(binDir, HANGING_MEM_SHIM);
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "500" }, async () => {
+      const result = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("less busy");
+      expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+    });
+  });
+
+  it("init refuses a binary that cannot run with the reinstall-or-fix-PATH remedy, and does not retry it", async () => {
+    const counter = join(binDir, "launches.txt");
+    writeCountingFakeMem(binDir, NOT_RUNNABLE_MEM_SHIM);
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000", FAKE_MEM_COUNTER: counter }, async () => {
+      const result = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stdout).toContain("fix PATH");
+      expect(result.stdout).not.toContain("does not support");
+      // Two distinct probes (--version and hook --help), once each; a retry would double it.
+      expect(countLaunches(counter)).toBe(2);
+    });
+  });
+
+  it.each(["50", "abc", "600001", "1.5"])("rejects TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS=%s naming the variable and the range, for doctor and init", async (value) => {
+    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: value }, async () => {
+      for (const args of [["doctor"], ["init", "claude-code", "--root", toolRoot]]) {
+        const result = await runCli(args);
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS");
+        expect(result.stderr).toContain("100");
+        expect(result.stderr).toContain("600000");
+      }
+    });
+  });
+
+  it("accepts the range ends and falls back to the default when unset or blank", () => {
+    expect(probeTimeoutFromEnv({ TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "100" })).toBe(100);
+    expect(probeTimeoutFromEnv({ TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "600000" })).toBe(600_000);
+    expect(probeTimeoutFromEnv({})).toBe(MEM_PROBE_TIMEOUT_MS);
+    expect(probeTimeoutFromEnv({ TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "  " })).toBe(MEM_PROBE_TIMEOUT_MS);
   });
 });

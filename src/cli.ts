@@ -23,7 +23,7 @@ import { detectContradictions } from "./contradiction.js";
 import { ageInDays, daysAgoIso } from "./timeUtils.js";
 import { registerBackupCommands } from "./backupCommands.js";
 import { registerDoctorCommand } from "./doctor.js";
-import { wiringHomeFromEnv } from "./doctorWiring.js";
+import { createProbeBudget, wiringHomeFromEnv } from "./doctorWiring.js";
 import { registerHookCommand } from "./hookCommand.js";
 import { registerReflectCommand } from "./reflect.js";
 import { findRelatedFacts, type RelatedFact } from "./related.js";
@@ -108,6 +108,7 @@ import { importFromJson, JSON_EXPORT_SCHEMA_VERSION, planImportFromJson } from "
 import { importFromMarkdown, planImportFromMarkdown, type ImportOutcome } from "./import.js";
 import {
   checkClaudeHookHealth,
+  createMemProbeCache,
   claudeHookEventsFor,
   describeHookGap,
   getToolWiring,
@@ -755,14 +756,35 @@ function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
       "     install with `npm i -g token-goat-mem`, or re-run with --force to write them anyway",
     ].join("\n");
   }
-  const unprobed = [...new Set(incapable.flatMap((hook) => (hook.probeFailure === undefined ? [] : [hook.probeFailure])))];
-  const gaps = [...new Set(incapable.filter((hook) => hook.probeFailure === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
+  const cannotRun = incapable.some((hook) => hook.notRunnable === true);
+  const probed = incapable.filter((hook) => hook.notRunnable !== true);
+  const unprobed = [...new Set(probed.flatMap((hook) => (hook.probeFailure === undefined ? [] : [hook.probeFailure])))];
+  const gaps = [...new Set(probed.filter((hook) => hook.probeFailure === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
+  if (cannotRun && probed.length === 0) {
+    return [
+      `mem: hooks will invoke ${health.bin.path}, which could not run at all`,
+      "     reinstall token-goat-mem or fix PATH, or re-run with --force to write the hooks without the check",
+    ].join("\n");
+  }
   return [
     `mem: hooks will invoke ${health.bin.path}, which is ${health.bin.version ?? "an unknown version"}`,
     ...unprobed.map((sentence) => `     ${sentence}`),
     ...(gaps.length > 0 ? [`     it does not support: ${gaps.join(", ")}`] : []),
     gaps.length > 0 ? "     upgrade with `npm i -g token-goat-mem`, or re-run with --force" : "     re-run once the machine is less busy, or re-run with --force to write the hooks without the check",
   ].join("\n");
+}
+
+/** Times the retried pre-flight probe is given its first budget multiplied by. */
+const PREFLIGHT_RETRY_BUDGET_FACTOR = 3;
+
+/** The init pre-flight's hook health: probed once under the `TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS` budget, and when some probe got no answer (not a verdict) probed once more at 3x the budget with a fresh cache, so the first run's skip-after-unanswered cannot suppress the retry. A binary that cannot run is a verdict and is never retried. */
+function preflightHookHealth(events: ReadonlyArray<{ readonly event: string; readonly command: string }>): ClaudeHookHealth {
+  const first = createProbeBudget();
+  const health = checkClaudeHookHealth(events, first);
+  if (!health.hooks.some((hook) => hook.probeFailure !== undefined && hook.notRunnable !== true)) {
+    return health;
+  }
+  return checkClaudeHookHealth(events, { timeoutMs: first.timeoutMs * PREFLIGHT_RETRY_BUDGET_FACTOR, cache: createMemProbeCache() });
 }
 
 function formatWiringPlanForUninstall(plan: WiringPlan): string {
@@ -2714,7 +2736,8 @@ export function buildProgram(): Command {
         "a copilot-instructions.md tool (copilot-visual-studio/copilot-jetbrains) writes mem's block into both files, which " +
         "VS Code and Copilot CLI both read -- harmless, just redundant tokens. " +
         "For claude-code the hooks call `mem hook <event>`, so before writing them init probes the `mem` on PATH (or the installed bundle) with `--help` and refuses " +
-        "when it has no `hook` command, naming that binary; a probe that gets no answer within the probe budget is reported as such (it could not probe), not as an old binary. " +
+        "when it has no `hook` command, naming that binary; a probe that gets no answer within the probe budget is reported as such (it could not probe), not as an old binary, and a binary that cannot run at all is reported with the remedy to reinstall token-goat-mem or fix PATH. " +
+        "The probe budget is TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS (integer 100-600000, default 10000); a probe that gets no answer is retried once at 3x that budget before init refuses. " +
         "Re-running `mem init claude-code` also rewrites hooks installed in the older shape, which carried recall flags in the settings file."
     )
     .option("--root <path>", "Project root to write project-level config into (default: current directory)")
@@ -2731,7 +2754,7 @@ export function buildProgram(): Command {
         const wiringOpts = toWiringOpts(options);
         // Only claude-code writes hooks a shell invokes unattended later, on whatever `mem` PATH resolves to at that later time -- a config text change here can be byte-perfect and the hooks it wrote can still fail every time, silently, if that binary can't run them. The other tools' wiring (AGENTS.md instructions, tasks.json) is read and invoked directly by an agent or a human, not delegated to a `command -v mem && mem ...` shell guard, so they have no equivalent failure mode this check would catch.
         if (toolName === "claude-code" && options.force !== true) {
-          const refusal = describeHookHealthRefusal(checkClaudeHookHealth(claudeHookEventsFor(wiringOpts)));
+          const refusal = describeHookHealthRefusal(preflightHookHealth(claudeHookEventsFor(wiringOpts)));
           if (refusal !== null) {
             process.stdout.write(`${refusal}\n`);
             process.exitCode = EXIT_USER_ERROR;
@@ -2810,6 +2833,7 @@ function withExitOverride(program: Command): Command {
 
 /** Runs one argv (after `mem`) through a fresh copy of the whole program, which is how `mem hook <event>` reaches the handler behind its slug; a parse failure throws to the calling action's `guard`. */
 async function dispatchHookArgv(argv: string[]): Promise<void> {
+  // Measured: building the full CLI program for one hook dispatch costs about 0.16 ms, so dispatching hooks through it is not a latency concern.
   await withExitOverride(buildProgram()).parseAsync(argv, { from: "user" });
 }
 

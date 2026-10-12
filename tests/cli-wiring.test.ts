@@ -575,6 +575,15 @@ describe("mem init/uninstall", { timeout: 120_000 }, () => {
   describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", { timeout: 300_000 }, () => {
     // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session` hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older build that rejects those flags -- every hook then fails, silently, because nothing compared the write against the binary that would actually run it. These tests replace the always- capable fake `mem` this describe block's `beforeEach` puts on PATH with a deliberately incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
 
+    // The version probe decides these assertions, so its budget is explicit here instead of the test timeout being raised.
+    beforeEach(() => {
+      process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"] = "60000";
+    });
+
+    afterEach(() => {
+      delete process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"];
+    });
+
     function installOldMemShim(dir: string): void {
       // The exact shape of the real incident: an install that predates `--hook-stdin`/`--delta` and `scan-session`.
       writeFakeMem(dir, OLD_MEM_SHIM);

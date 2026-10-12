@@ -3,8 +3,12 @@
 import { existsSync } from "node:fs";
 import { resolve, sep } from "node:path";
 
+import { UsageError } from "./cliRuntime.js";
 import type { Finding } from "./doctor.js";
 import {
+  createMemProbeCache,
+  MEM_PROBE_TIMEOUT_MS,
+  type MemProbeCache,
   getToolWiring,
   installedClaudeHookCommands,
   parseHookBundlePath,
@@ -22,6 +26,36 @@ import {
 export function wiringHomeFromEnv(): string | undefined {
   const override = process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
   return typeof override === "string" && override.trim().length > 0 ? override : undefined;
+}
+
+/** The env var that sets the per-probe budget `mem doctor` and `mem init` give each probe of the PATH `mem`. */
+export const PROBE_TIMEOUT_ENV = "TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS";
+
+const PROBE_TIMEOUT_MIN_MS = 100;
+const PROBE_TIMEOUT_MAX_MS = 600_000;
+
+/** The per-probe budget in milliseconds: `TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS` when set to an integer in 100..600000, `MEM_PROBE_TIMEOUT_MS` when unset or blank; any other value throws a `UsageError` naming the variable and the range, so a typo is never silently replaced by the default. */
+export function probeTimeoutFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[PROBE_TIMEOUT_ENV];
+  if (raw === undefined || raw.trim().length === 0) {
+    return MEM_PROBE_TIMEOUT_MS;
+  }
+  const parsed = Number(raw.trim());
+  if (!/^\d+$/.test(raw.trim()) || parsed < PROBE_TIMEOUT_MIN_MS || parsed > PROBE_TIMEOUT_MAX_MS) {
+    throw new UsageError(`${PROBE_TIMEOUT_ENV}=${raw} is invalid (expected an integer from ${PROBE_TIMEOUT_MIN_MS} to ${PROBE_TIMEOUT_MAX_MS}, in milliseconds; default ${MEM_PROBE_TIMEOUT_MS})`);
+  }
+  return parsed;
+}
+
+/** The budget and the shared cache one `mem doctor` run passes to every probe, so an identical probe runs once and a binary that gave no answer is not probed again. */
+export interface ProbeBudget {
+  readonly timeoutMs: number;
+  readonly cache: MemProbeCache;
+}
+
+/** One budget for one run: the env-var budget and a fresh cache. */
+export function createProbeBudget(env: NodeJS.ProcessEnv = process.env): ProbeBudget {
+  return { timeoutMs: probeTimeoutFromEnv(env), cache: createMemProbeCache() };
 }
 
 type Scope = "project" | "user";
@@ -157,7 +191,12 @@ function launchesBundleDirectly(command: string): boolean {
 }
 
 /** One warning when launching `mem` through the shell shim a plain hook uses is slower than `LAUNCH_TIME_WARN_MS`; silent when it is fast, cannot be measured, or the measurement throws, so a doctor run never fails on it. Nothing is measured when no installed hook would launch the PATH `mem` (none installed, or every one a direct launch of an existing bundle). On Windows the remedy is the direct-node user hook, which skips npm's shim. */
-export function describeLaunchTime(opts: WiringOpts, measure: () => number | null = timeMemLaunch, platform: NodeJS.Platform = process.platform): Finding[] {
+export function describeLaunchTime(
+  opts: WiringOpts,
+  measure: (probe: Partial<ProbeBudget>) => number | null = timeMemLaunch,
+  platform: NodeJS.Platform = process.platform,
+  probe: Partial<ProbeBudget> = {}
+): Finding[] {
   const projectHooks = projectSettingsIsUserSettings(opts) ? [] : installedClaudeHookCommands({ ...opts, user: false });
   const commands = [...projectHooks, ...installedClaudeHookCommands({ ...opts, user: true })].map((hook) => hook.command);
   if (commands.every(launchesBundleDirectly)) {
@@ -165,7 +204,7 @@ export function describeLaunchTime(opts: WiringOpts, measure: () => number | nul
   }
   let ms: number | null;
   try {
-    ms = measure();
+    ms = measure(probe);
   } catch {
     return [];
   }

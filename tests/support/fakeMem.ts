@@ -25,6 +25,18 @@ export const HANGING_MEM_SHIM = "#!/usr/bin/env node\nsetTimeout(() => process.e
 /** Exits 127 at once, as a shell does for a command it cannot find. */
 export const NOT_RUNNABLE_MEM_SHIM = "#!/usr/bin/env node\nprocess.exit(127);\n";
 
+/** Hangs on its first invocation (recorded by a marker file named by `FAKE_MEM_MARKER`) and answers like `CAPABLE_MEM_SHIM` on every later one: a healthy binary that was slow once, the case an init pre-flight retry exists for. */
+export const HANG_ONCE_MEM_SHIM =
+  "#!/usr/bin/env node\n" +
+  'const fs = require("node:fs");\n' +
+  "const marker = process.env.FAKE_MEM_MARKER;\n" +
+  'if (marker && !fs.existsSync(marker)) { fs.writeFileSync(marker, "hung"); setTimeout(() => process.exit(0), 60000); } else {\n' +
+  "const args = process.argv.slice(2);\n" +
+  'if (args[0] === "--version") { process.stdout.write("0.0.0-test-shim\\n"); process.exit(0); }\n' +
+  'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root session-start user-prompt-submit stop pre-compact\\n"); process.exit(0); }\n' +
+  "process.exit(1);\n" +
+  "}\n";
+
 /** Writes `body` as `mem.js` plus launchers (`mem`, `mem.cmd`) that append one line to the file named by `FAKE_MEM_COUNTER` before node starts, so a launch is counted even when the probe's budget kills the launcher before node is up. */
 export function writeCountingFakeMem(dir: string, body: string): void {
   writeFileSync(join(dir, "mem.js"), body, "utf8");
