@@ -13,7 +13,7 @@ import { openDb, resolveDbPath } from "../src/db.js";
 import { DOCTOR_CHECKS } from "../src/doctor.js";
 import { getEpoch } from "../src/epoch.js";
 
-// Process launches on this machine take 1-10 s, past the 4000 ms probe budget in wiring.ts; the floor keeps capability tests from timing out on launch latency.
+// Process launches on this machine take 1-10 s and stack up under load, so a probe can exceed MEM_PROBE_TIMEOUT_MS in wiring.ts and come back as "version unknown" or "incapable"; the floor keeps capability tests asserting capability logic, not launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
 
 let home: string;
