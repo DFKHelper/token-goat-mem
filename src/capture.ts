@@ -243,6 +243,15 @@ function isLabelledByIdentifierWord(value: string, index: number): boolean {
   return UUID_IDENTIFIER_WORDS.has(words.at(-1) ?? "");
 }
 
+/** The most words before a value that count as directly labelling it for `isCredentialAdjacent` (`api key`, `client secret is`, `token set to`). */
+const CREDENTIAL_ADJACENCY_WORDS = 3;
+
+/** Whether a credential keyword is among the last few words before `index`, on the same line, so `api key <hex>` is a credential claim while `md5 checksum <hex>` or a keyword earlier in a long sentence is not. */
+function isCredentialAdjacent(value: string, index: number): boolean {
+  const line = value.slice(0, index).split("\n").at(-1) ?? "";
+  return hasCredentialKeyword(splitWords(line).slice(-CREDENTIAL_ADJACENCY_WORDS).join(" "));
+}
+
 /** Whether a canonical 8-4-4-4-12 UUID (either case) stands alone as its own token, an identifier word directly labels it, and the capture and everything known about the fact as stored has no credential keyword, so a record, session, or fact id is not refused as a secret while `token=<uuid>`, `user:<uuid>@host` and `the session job is done; <uuid>` still are. */
 function isCanonicalUuid(token: string, value: string, index: number, credentialContext: boolean): boolean {
   if (credentialContext || !CANONICAL_UUID.test(token)) {
@@ -299,6 +308,7 @@ const MAX_PROSE_NUMBER_WORDS = 2;
 /** The shortest letter word that must carry a vowel to read as a word: a consonant run this long (`xqztkmvb`) is a random string, not prose. */
 const MIN_VOWEL_CHECKED_WORD_LENGTH = 5;
 
+/** The vowel half of the prose-shape test in `isProseShapedToken`: every letter word of `MIN_VOWEL_CHECKED_WORD_LENGTH` or more must hold one, so `xqztkmvb` is not prose; it does not stand alone, because the word-count, number-word and unbroken-run rules there reject the other random shapes. */
 const PROSE_VOWEL = /[aeiouy]/;
 
 /** Whether a slash-free token is shaped like a kebab/snake/dotted-case prose identifier -- `subagent-git-discard-prohibition`, the kind of descriptive `mem remember --subject`/`--value` key this project's own CLAUDE.md tells agents to pass -- which the generic entropy heuristic must not flag. `isPathShapedToken` above already exempts this shape when it contains a slash; a slash-less kebab identifier never reaches that check (it returns early on `!token.includes("/")`) and so falls straight through to `generic-high-entropy-token` once it clears 32 characters, which a descriptive multi-word subject key does routinely. Every named `SECRET_PATTERNS` entry (aws-access-key-id, github-token, slack-token, jwt, ...) runs unconditionally before this; this exemption only ever reaches the *unlabeled, prefix-less* entropy fallback. A real prefix-less secret is essentially always drawn from a base64/hex alphabet or carries digits/mixed case, so requiring every `[._-]`-delimited word to be pure lowercase letters, or a version, ordinal or year number (`PROSE_NUMBER_WORD`, at most `MAX_PROSE_NUMBER_WORDS` of them) that does not outnumber the letter words, with every letter word of five or more characters holding a vowel, excludes it outright -- a digit glued into a word (`git2`), a hex fragment (`3f9a`) and any uppercase all disqualify the token: it is what keeps a Slack-style `xoxb-1234567890-...` shape (or any base64 `+`/`=`/mixed-case blob) out of the exemption even if its named pattern were ever loosened. Two or more words are required so a single long lowercase run can never buy the exemption on its own, and each word is still capped at `MAX_UNBROKEN_SEGMENT_RUN` (the same bound `isPathSegment` uses for a path segment's internal runs) -- a real English word doesn't reach that length, whereas an unbroken lowercase run that long is the shape of a random token, not prose. */
@@ -332,14 +342,17 @@ function scanField(field: string, value: string, credentialContext: boolean): Se
   let g = GENERIC_TOKEN.exec(genericValue);
   while (g !== null) {
     const token = g[0];
-    if (!exemptField && credentialContext && CANONICAL_UUID.test(token)) {
+    // A bare anchor argument (the whole whitespace-delimited argument, no path separator) under credential context gets no UUID or content-hash exemption; a path segment, or a filename such as `<uuid>.jsonl`, is not bare and keeps the path exemption.
+    const bareAnchorArgument = field === "anchor" && credentialContext && !token.includes("/") && isStandaloneToken(genericValue, g.index, g.index + token.length);
+    if (((!exemptField && credentialContext) || bareAnchorArgument) && CANONICAL_UUID.test(token)) {
       // A UUID-shaped token beside a credential keyword is refused whatever its entropy: some services issue API keys as UUIDs, and a run of repeated digits is as plausible a key as a random one.
       matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
     } else if (
       !(exemptField && token.includes("/")) &&
       !isPathShapedToken(token) &&
       !isProseShapedToken(token) &&
-      !isCanonicalHexHash(token) &&
+      // The content-hash exemption yields to a credential keyword among the few words just before the value, and to a bare anchor argument under credential context, so `api key <32 hex>` is refused while `md5 checksum <32 hex>` is stored.
+      !(isCanonicalHexHash(token) && !bareAnchorArgument && !isCredentialAdjacent(genericValue, g.index)) &&
       !(!exemptField && isCanonicalUuid(token, genericValue, g.index, credentialContext)) &&
       !DIGITS_ONLY.test(token) &&
       shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD

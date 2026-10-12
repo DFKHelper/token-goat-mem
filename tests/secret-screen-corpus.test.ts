@@ -97,3 +97,56 @@ describe("secret-screen corpus: a uuid beside a credential keyword is flagged wh
     expect(screenForSecrets({ text: `the session id is ${LOW_ENTROPY_UUID}`, sourceRef }, [])).toEqual([]);
   });
 });
+
+describe("secret-screen corpus: a canonical-length hex value right after a credential keyword is flagged", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+  const HEX40 = "0123456789abcdef0123456789abcdef01234567";
+
+  it.each([
+    { name: "api key label", text: `api key ${HEX32}` },
+    { name: "token label", text: `token: ${HEX32}` },
+    { name: "password sentence", text: `the staging password is ${HEX32}` },
+    { name: "forty hex after a secret", text: `client secret ${HEX40}` },
+  ])("flags $name", ({ text }) => {
+    expect(screenForSecrets({ text }, [])).not.toHaveLength(0);
+  });
+
+  it.each([
+    { name: "md5 checksum mention", text: `md5 checksum ${HEX32}` },
+    { name: "git object id", text: `git object ${HEX40}` },
+    { name: "hash with a credential word far earlier in the sentence", text: `the token cache was cleared long ago and now the file hash is ${HEX32}` },
+  ])("passes $name", ({ text }) => {
+    expect(screenForSecrets({ text }, [])).toEqual([]);
+  });
+});
+
+describe("secret-screen corpus: a bare uuid anchor argument is read with the fact text's credential words", () => {
+  const UUID = "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b";
+  const LOW_UUID = "11111111-1111-1111-1111-111111111111";
+  const CREDENTIAL_TEXT = "the api key lives in config.json";
+  const BACKSLASH = String.fromCharCode(92);
+
+  it.each([
+    { name: "a high-entropy uuid", anchor: `file-contains config.json ${UUID}` },
+    { name: "a low-entropy uuid", anchor: `file-contains config.json ${LOW_UUID}` },
+  ])("flags $name that is only in the anchor", ({ anchor }) => {
+    expect(screenForSecrets({ text: CREDENTIAL_TEXT, anchor }, []).map((match) => match.field)).toContain("anchor");
+  });
+
+  it("passes a low-entropy uuid anchor argument when nothing in the fact names a credential", () => {
+    expect(screenForSecrets({ text: "the build config lives in config.json", anchor: `file-contains config.json ${LOW_UUID}` }, [])).toEqual([]);
+  });
+
+  it.each([
+    { name: "a POSIX path segment", anchor: `file-exists logs/${UUID}/out.txt` },
+    { name: "a Windows path segment", anchor: `file-exists logs${BACKSLASH}${UUID}${BACKSLASH}out.txt` },
+    { name: "a uuid filename", anchor: `file-exists ${LOW_UUID}.jsonl` },
+  ])("still exempts $name in the anchor under credential text", ({ anchor }) => {
+    expect(screenForSecrets({ text: CREDENTIAL_TEXT, anchor }, [])).toEqual([]);
+  });
+
+  it("still exempts a scan-session style transcript sourceRef under credential text", () => {
+    const sourceRef = `C:${BACKSLASH}Users${BACKSLASH}x${BACKSLASH}.claude${BACKSLASH}projects${BACKSLASH}p${BACKSLASH}${UUID}.jsonl#turn3`;
+    expect(screenForSecrets({ text: CREDENTIAL_TEXT, sourceRef }, [])).toEqual([]);
+  });
+});

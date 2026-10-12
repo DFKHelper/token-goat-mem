@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -272,6 +272,21 @@ describe("extractMarkdownBullets", () => {
 // ─────────────────────────────────────────────────────────────────────────── planImportFromMarkdown (dry-run, DB-free) ───────────────────────────────────────────────────────────────────────────
 
 describe("planImportFromMarkdown", () => {
+  it("never reads the file path as credential context for a candidate", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-ctx-"));
+    const credentialDir = join(dir, "api key");
+    mkdirSync(credentialDir);
+    const path = join(credentialDir, "passwords.md");
+    writeFileSync(path, ["## Prod", "", "- the session id is kept in the wiki"].join("\n"), "utf8");
+    try {
+      const [candidate] = planImportFromMarkdown({ path, root: dir }).candidates;
+      expect(candidate?.screenContext).toContain("the session id is kept in the wiki");
+      expect(candidate?.screenContext).not.toMatch(/api key|passwords/u);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("produces dry_run outcomes for every candidate without opening a database (the CLI --dry-run path)", () => {
     const dir = mkdtempSync(join(tmpdir(), "mem-import-plan-"));
     const path = join(dir, "CLAUDE.md");

@@ -1,6 +1,6 @@
 /** `mem import --from-md <path>` -- the mem-side half of the "advisory CLAUDE.md->mem migration probe" (the other half, `token-goat baseline --suggest-mem`, lives in the token-goat repo and is not this module's concern; this module only needs to be a well-behaved producer of `pending` facts through the existing trust path). Parses a markdown file (CLAUDE.md-style) for bullet-list lines that look like preference/ decision-shaped statements, and hands each qualifying bullet to `capture.ts`'s `captureSuggested` -- the exact same `pending`, never-auto-promoted trust path any other suggested/derived fact goes through (S9). There is deliberately no code path here that can write `status: "active"`; this module does not call `captureExplicit` or `setFactStatus` at all. Promotion is exclusively `mem review --promote`, already wired in cli.ts -- this module does not add a second one. The heuristic for "looks like a preference/decision statement" is intentionally shallow (a classifier is out of scope): a single-line `-`/`*` bullet, outside a fenced code block, that is not a *nested* sub-bullet under an obviously structural/non-preference heading (e.g. "Architecture", "File Structure"). Ambiguous cases are imported rather than filtered out -- the safety property comes from every candidate landing as `pending` (human confirmation required via `mem review --promote`), not from pre-filtering cleverness. */
 
-import { basename, relative, resolve } from "node:path";
+import { relative, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import {
@@ -241,8 +241,8 @@ function existingImportKeys(db: Database.Database): Set<string> {
   return keys;
 }
 
-/** The text a bullet at 1-based line `bulletLine` is read in for credential keywords: its enclosing headings (each shallower heading above it), every line between the nearest heading and the next one (so sibling bullets count), and the file's path below the root (its base name when no root is known). Headings are found by a plain line test that ignores code fences, which can only add context, never drop it. */
-function sectionScreenContext(lines: readonly string[], bulletLine: number, fileName: string): string {
+/** The text a bullet at 1-based line `bulletLine` is read in for credential keywords: its enclosing headings (each shallower heading above it), every line between the nearest heading and the next one (so sibling bullets count); the file path is deliberately not read, since a directory named `api key/` would make every UUID in it look credential-adjacent. Headings are found by a plain line test that ignores code fences, which can only add context, never drop it. */
+function sectionScreenContext(lines: readonly string[], bulletLine: number): string {
   const isHeading = (line: string): boolean => INDENTED_HEADING_RE.test(line);
   const at = bulletLine - 1;
   let start = at;
@@ -262,7 +262,7 @@ function sectionScreenContext(lines: readonly string[], bulletLine: number, file
       chain.push(lines[i] ?? "");
     }
   }
-  return [fileName, ...chain, ...lines.slice(start, end)].join("\n");
+  return [...chain, ...lines.slice(start, end)].join("\n");
 }
 
 /** Reads and parses `options.path` into import candidates and their `dry_run` outcomes *without opening a database*. This is the entire body of a `--dry-run` import, factored out so the CLI can preview an import without side effects: opening mem's SQLite store (`openDb`) does `mkdirSync` + creates the db file, WAL sidecars, and schema on disk, which would contradict `--dry-run`'s documented "nothing written" contract for a project that has no store yet. */
@@ -281,14 +281,12 @@ export function planImportFromMarkdown(options: Pick<ImportFromMarkdownOptions, 
   const markdown = readFileWithErrorMapping(filePath, MarkdownImportError);
 
   const lines = markdown.split(/\r?\n/u);
-  // The path below the root, directory names included, so a file under `secrets/` reads as credential context; the base name alone when no root is known.
-  const fileName = options.root !== undefined ? relative(options.root, filePath) : basename(filePath);
   const candidates: ImportCandidate[] = extractMarkdownBullets(markdown).map((bullet) => ({
     text: bullet.text,
     line: bullet.line,
     sourceRef: `${filePath}:${bullet.line}`,
     rawLine: bullet.rawLine,
-    screenContext: sectionScreenContext(lines, bullet.line, fileName),
+    screenContext: sectionScreenContext(lines, bullet.line),
   }));
   return { filePath, candidates, outcomes: candidates.map((candidate) => ({ status: "dry_run", candidate })) };
 }

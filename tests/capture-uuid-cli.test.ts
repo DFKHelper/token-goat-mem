@@ -111,7 +111,7 @@ describe("mem scan-session reads the whole user turn for credential keywords", (
   });
 });
 
-describe("mem import --from-md reads the section and file name for credential keywords", () => {
+describe("mem import --from-md reads the section, not the file name, for credential keywords", () => {
   async function importFile(name: string, lines: readonly string[]): Promise<string> {
     const path = join(home, name);
     writeFileSync(path, lines.join("\n"), "utf8");
@@ -127,8 +127,8 @@ describe("mem import --from-md reads the section and file name for credential ke
     expect(await importFile("notes.md", ["## Prod", "", "- the prod db password is rotated weekly", `- the session id is ${U}`])).not.toContain(U);
   });
 
-  it("skips a labelled bullet in a file named for passwords (I3)", async () => {
-    expect(await importFile("passwords.md", ["## Prod", "", `- the session id is ${U}`])).not.toContain(U);
+  it("files a labelled bullet in a file named for passwords, since the file name is not credential context (I3)", async () => {
+    expect(await importFile("passwords.md", ["## Prod", "", `- the session id is ${U}`])).toContain(U);
   });
 
   it("skips a labelled bullet nested under a password heading of a shallower level", async () => {
@@ -295,7 +295,7 @@ describe("credential keywords added to the veto", () => {
   });
 });
 
-describe("the anchor, a typed source ref, and the import directory are credential context", () => {
+describe("the anchor and a typed source ref are credential context, an import directory is not", () => {
   it("refuses a labelled UUID when the anchor arguments name a password", async () => {
     expectRefused(await runCli(["remember", `session id ${U}`, "--kind", "fact", "--scope", "global", "--anchor", "file-contains password.txt x"]));
   });
@@ -304,11 +304,55 @@ describe("the anchor, a typed source ref, and the import directory are credentia
     expectRefused(await runCli(["remember", `session id ${U}`, "--kind", "fact", "--scope", "global", "--source-ref", "password notes"]));
   });
 
-  it("skips a labelled bullet in a file under a directory named for secrets", async () => {
+  it("files a labelled bullet in a file under a directory named for secrets, since the path is not credential context", async () => {
     mkdirSync(join(home, "secrets"));
     writeFileSync(join(home, "secrets", "g.md"), ["## Prod", "", `- the session id is ${U}`].join("\n"), "utf8");
     await runCli(["import", "--from-md", join(home, "secrets", "g.md"), "--root", home]);
-    expect((await runCli(["list", "--status", "pending"])).stdout).not.toContain(U);
+    expect((await runCli(["list", "--status", "pending"])).stdout).toContain(U);
+  });
+});
+
+describe("a directory named api key does not make an imported UUID credential-adjacent", () => {
+  async function importUnderApiKeyDirectory(bullet: string): Promise<string> {
+    mkdirSync(join(home, "api key"));
+    const path = join(home, "api key", "notes.md");
+    writeFileSync(path, ["## Prod", "", bullet].join("\n"), "utf8");
+    const imported = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(imported.exitCode, imported.stderr).toBe(0);
+    return (await runCli(["list", "--status", "pending"])).stdout;
+  }
+
+  it("imports a session id bullet as pending", async () => {
+    expect(await importUnderApiKeyDirectory(`- session id ${U}`)).toContain(U);
+  });
+
+  it("still refuses a bullet that itself says api key", async () => {
+    expect(await importUnderApiKeyDirectory(`- api key ${U}`)).not.toContain(U);
+  });
+});
+
+describe("a canonical-length hex value or a bare anchor UUID is refused under credential words and stores nothing", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+  const LOW = "11111111-1111-1111-1111-111111111111";
+
+  async function storedFactCount(): Promise<number> {
+    return (JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: unknown[] }).facts.length;
+  }
+
+  it("refuses a 32-hex value right after api key", async () => {
+    expectRefused(await runCli(["remember", `api key ${HEX32}`, "--kind", "fact", "--scope", "global"]));
+    expect(await storedFactCount()).toBe(0);
+  });
+
+  it("refuses a bare uuid that only the anchor holds when the fact text names an api key", async () => {
+    expectRefused(await runCli(["remember", "the api key lives in config.json", "--kind", "fact", "--scope", "global", "--anchor", `file-contains config.json ${LOW}`]));
+    expect(await storedFactCount()).toBe(0);
+  });
+
+  it("stores an md5 checksum mention and a uuid path segment in the anchor", async () => {
+    await remember(`md5 checksum ${HEX32}`);
+    await remember("the api key lives in config.json", "--anchor", `file-exists logs/${LOW}/out.txt`);
+    expect(await storedFactCount()).toBe(2);
   });
 });
 
