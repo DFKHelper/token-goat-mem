@@ -258,8 +258,8 @@ describe("forget, gc and a new capture with the old stamped ref", () => {
     await expectRefusedAsSecret(fresh, "new capture typing the pruned stamp's ref");
   });
 
-  // BUG (leak): importFromJson preserves a caller-supplied id, so the surviving capture_suggested row of the pruned stamped fact binds to the unrelated imported fact that reuses its id and ref.
-  it.fails("gives a crafted JSON import that reuses the pruned id and ref no exemption (fact ids are caller-supplied only on --from-json)", async () => {
+  // importFromJson preserves a caller-supplied id, so the pruned stamped fact's surviving capture_suggested row would bind to an unrelated imported fact that reuses its id and ref; the later json_import row voids that binding.
+  it("gives a crafted JSON import that reuses the pruned id and ref no exemption (fact ids are caller-supplied only on --from-json)", async () => {
     const stamped = await scanStamped(SENTENCE);
     await promote(stamped.id);
     await forgetAndAge(stamped.id, false);

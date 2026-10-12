@@ -668,9 +668,20 @@ function storedSourceRefContext(db: Database.Database, fact: Fact): string | nul
   return isBoundStampedRef(db, fact, ref) ? null : ref;
 }
 
-/** Whether `ref` has the stamped shape (a transcript path plus turn, or an import file path plus line) and the fact's own creation audit row records that exact ref. */
+/** Whether `ref` has the stamped shape (a transcript path plus turn, or an import file path plus line) and the fact's own creation audit row records that exact ref, with no `json_import` row after it: an import is the only writer that recreates a fact row under a caller-supplied id, so a later one means the row is a new incarnation that merely reuses the pruned fact's id and must not inherit its exemption. */
 function isBoundStampedRef(db: Database.Database, fact: Fact, ref: string): boolean {
-  return STAMPED_TRANSCRIPT_REF.test(ref) && listAuditLogForFact(db, fact.id).some((row) => row.event === "capture_suggested" && row.detail.endsWith(`${STAMPED_REF_DETAIL_MARKER}${ref}]`));
+  if (!STAMPED_TRANSCRIPT_REF.test(ref)) {
+    return false;
+  }
+  let bound = false;
+  for (const row of listAuditLogForFact(db, fact.id)) {
+    if (row.event === "capture_suggested" && row.detail.endsWith(`${STAMPED_REF_DETAIL_MARKER}${ref}]`)) {
+      bound = true;
+    } else if (row.event === "json_import") {
+      bound = false;
+    }
+  }
+  return bound;
 }
 
 /** A fact's stored source excerpts as keyword context, each import excerpt without its file path when the fact's stamped ref names that file (see {@link excerptKeywordContext}). */
