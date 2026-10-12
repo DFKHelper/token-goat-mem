@@ -48,7 +48,7 @@ const NUMBERED_ITEM_RE = /^\s+\d+[.)]\s/u;
 /** Headings whose *nested* bullets describe file/directory layout or system structure rather than a preference or decision a human stated -- not a general topic blocklist, and only excludes nested (indented) bullets under one of these headings. Top-level bullets and bullets under any other heading are still candidates; per this module's doc comment, the review gate (not this list) is the actual safety boundary. */
 const NON_PREFERENCE_HEADING_RE = /\b(architecture|file structure|file organization|directory structure)\b/iu;
 
-/** True when a fence line using `marker` appears at or after line index `from` -- a fence opener with no such close later is ordinary text, so an unclosed fence never swallows the rest of the file. */
+/** True when a fence line using `marker` appears at or after line index `from` -- a fence opener with no such close later is ordinary text, so an unclosed fence never swallows the rest of the file; only the marker character is compared, so the closing fence's length, indent and trailing text do not matter. */
 function fenceClosesLater(lines: readonly string[], from: number, marker: string): boolean {
   for (let j = from; j < lines.length; j++) {
     const fence = FENCE_RE.exec(lines[j] ?? "");

@@ -2,6 +2,27 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Added
+
+- **`mem forget --reason`.** `mem forget <id> --reason wrong|outdated|duplicate|unwanted` records why a fact was retired, in the same audit row as the soft-delete. Any other value is refused before anything is written. `mem show` prints it as `forget_reason` (`forgetReason` under `--json`) on a superseded fact.
+- **`mem doctor` reports the latest fact surfacing.** A `store` line gives when recall last put a fact in front of a session, so hooks that died silently show up. It warns, with `mem init claude-code` as the remedy, when active or pinned facts exist and either none was ever surfaced or the latest surfacing is over 7 days old. The time is a lower bound, because a recall that surfaced nothing leaves no record.
+- **`mem doctor --probe-embeddings`.** Makes one real embed request with a tiny fixed input to the configured endpoint and reports whether it answered. Without the flag `mem doctor` still makes no network call.
+- **The recall footer says when embedding ranking degraded.** When a backend is configured but the ranking fell back to text match alone, the `--hint-format` footer adds `embedding backend unavailable; ranked by text match only`, or, when the store's vectors came from another model, a clause pointing at `mem embed --all`. Neither names the endpoint. Such a footer is emitted even when the response carries no facts.
+
+### Changed
+
+- **`mem used` treats recall ids as candidates.** The footer clause now reads `mark only the facts that informed the work: mem used <ids> --session-id <id>`. `mem used` refuses a command naming exactly the facts one recall surfaced (3 or more), since that makes "used" mean "surfaced" and feeds the ranking back into itself. `--all` confirms they all helped. The `## Memory` block `mem init` writes carries the same instruction, so re-run `mem init` to refresh an installed copy.
+- **`mem consolidate` no longer clusters facts that disagree.** Two facts that share topic terms but differ in polarity (a negation, an `unless`/`except` exception) or in swapped `X over Y` preference roles are listed as `not clustered -- these look like a contradiction, not a duplicate`, each with a `mem edit <id> --subject <subject> --value <value>` hint (with `--force` for a user-stated fact). `--apply` never supersedes across such a pair.
+- **`mem import --from-md` reads wrapped bullets whole.** An indented prose line under a bullet is joined onto it with a single space, and the stored source excerpt includes those continuation lines. A heading or an indented numbered item ends the bullet. A joined bullet over 500 characters is reported as skipped and not stored. Re-importing a file whose wrapped bullets were previously stored cut short creates the full-text versions as new `pending` facts and leaves the shorter ones as they are; clear them with `mem review --reject <id>`, or `mem forget <id>` if already promoted.
+- **A bare UUID is stored only when it is labelled as an identifier.** An identifier word such as `id`, `session` or `uuid` must directly label it, and no credential keyword (`key`, `token`, `auth`, `password` and similar) may appear in the fact or its stored source ref. `token=<uuid>` and `user:<uuid>@host` are still refused. The transcript pointer `mem scan-session` stamps is exempt from the keyword check, and only when the fact's creation recorded that exact ref.
+
+### Fixed
+
+- **`mem import --from-md` skips mem's own block.** A `token-goat-mem` integration block in the file (shared or per-tool) is no longer imported back as facts. A code fence that never closes is now ordinary text instead of hiding every bullet after it.
+- **Endpoint URLs are redacted in config errors.** An invalid `TOKEN_GOAT_MEM_EMBED_URL` or `TOKEN_GOAT_MEM_DREAM_URL` is reported by host and port only, never the raw value, which could carry a `user:password@` credential.
+
 ## [0.5.2] - 2026-10-04
 
 ### Fixed
