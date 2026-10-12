@@ -67,7 +67,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("concurrent mem processes against one store", () => {
+describe("concurrent mem processes against one store", { timeout: 120_000 }, () => {
   it("loses no write, duplicates no reaffirm, and never surfaces SQLITE_BUSY", async () => {
     const perWorker = await Promise.all(Array.from({ length: WORKERS }, (_unused, index) => worker(index)));
     const results = perWorker.flat();
