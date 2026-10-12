@@ -35,7 +35,15 @@ import {
   replaceFactTerms,
   resolveFactIdOrPrefix,
 } from "../src/storage.js";
-import { openDb } from "../src/db.js";
+import {
+  findSupersedingFactId,
+  insertAuditLog,
+  lastStateChangingAuditRow,
+  listAuditLog,
+  listAuditLogForFact,
+  openDb,
+  SUPERSEDED_BY_FACT_PREFIX,
+} from "../src/db.js";
 import { hashFactText } from "../src/factText.js";
 import { addColumn } from "../src/migrations.js";
 import type { NewFact } from "../src/types.js";
@@ -903,5 +911,69 @@ describe("prefetchAnchorCache / createBufferedAnchorCacheStore / persistAnchorVe
     const prepareSpy = vi.spyOn(db, "prepare");
     persistAnchorVerdicts(db, new Map());
     expect(prepareSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("audit order (insertAuditLog stamps monotonic insertion time; every audit walk breaks ties by rowid)", () => {
+  let auditDb: Database.Database;
+  const TIED_AT = "2030-01-01T00:00:00.000Z";
+
+  beforeEach(() => {
+    auditDb = openDb(join(root, "audit.db"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    auditDb.close();
+  });
+
+  function rawAudit(event: string, factId: string, detail: string, createdAt: string): void {
+    auditDb
+      .prepare("INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, NULL, ?)")
+      .run(`${event}-${detail}`, event, factId, detail, createdAt);
+  }
+
+  it("a clock stepped back an hour never gives a later row an earlier created_at", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2031-06-01T12:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "capture", factId: "f1", detail: "first" });
+    vi.setSystemTime(new Date("2031-06-01T11:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "pin", factId: "f1", detail: "second" });
+    const stamps = (auditDb.prepare("SELECT created_at FROM audit_log ORDER BY rowid").all() as { created_at: string }[]).map((r) => r.created_at);
+    expect([...stamps].sort()).toEqual(stamps);
+    expect(stamps[0]).toBe("2031-06-01T12:00:00.000Z");
+    expect(listAuditLog(auditDb, { factId: "f1" }, { newestFirst: true })[0]?.detail).toBe("second");
+  });
+
+  it("a later wall clock still stamps the real time", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2031-06-01T12:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "capture", factId: "f1", detail: "first" });
+    vi.setSystemTime(new Date("2031-06-01T13:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "pin", factId: "f1", detail: "second" });
+    expect(listAuditLog(auditDb, { factId: "f1" }, { newestFirst: true })[0]?.createdAt).toBe("2031-06-01T13:00:00.000Z");
+  });
+
+  it("an empty audit log stamps the wall clock", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2031-06-01T12:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "capture", factId: "f1", detail: "only" });
+    expect(listAuditLog(auditDb)[0]?.createdAt).toBe("2031-06-01T12:00:00.000Z");
+  });
+
+  const tiedWalks: ReadonlyArray<readonly [string, () => string | undefined]> = [
+    ["listAuditLog newestFirst", () => listAuditLog(auditDb, { factId: "f1" }, { newestFirst: true })[0]?.detail],
+    ["listAuditLog newestFirst with a limit", () => listAuditLog(auditDb, { factId: "f1" }, { newestFirst: true, limit: 1 })[0]?.detail],
+    ["listAuditLog oldest first (last row)", () => listAuditLog(auditDb, { factId: "f1" }).at(-1)?.detail],
+    ["listAuditLogForFact (last row)", () => listAuditLogForFact(auditDb, "f1").at(-1)?.detail],
+    ["lastStateChangingAuditRow", () => lastStateChangingAuditRow(auditDb, "f1")?.detail],
+    ["findSupersedingFactId", () => findSupersedingFactId(auditDb, "f1") ?? undefined],
+  ];
+
+  it.each(tiedWalks)("%s returns the later-inserted row on a created_at tie", (_name, walk) => {
+    rawAudit("superseded", "f1", `${SUPERSEDED_BY_FACT_PREFIX}aaaaaaaa-0000-0000-0000-000000000001`, TIED_AT);
+    rawAudit("superseded", "f1", `${SUPERSEDED_BY_FACT_PREFIX}bbbbbbbb-0000-0000-0000-000000000002`, TIED_AT);
+    const result = walk();
+    expect(result?.includes("bbbbbbbb")).toBe(true);
   });
 });

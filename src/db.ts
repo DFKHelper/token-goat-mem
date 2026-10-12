@@ -296,11 +296,13 @@ export function listAuditLogFactIdsByPrefix(db: Database.Database, prefix: strin
     .map((row) => row.fact_id);
 }
 
-/** Appends one row to the audit log (design principle 5). Any write path (capture, forget, edit, pin, review resolution) can call this. */
+/** Appends one row to the audit log (design principle 5). Any write path (capture, forget, edit, pin, review resolution) can call this. `created_at` is monotonic insertion time, not the bare wall clock: it is the later of now and the newest-inserted row's stamp (the largest rowid, read in the same statement), so a clock stepped back never gives a later row an earlier stamp and every newest-first walk stays truthful. ISO strings of one format compare chronologically, so the SQL `max` is exact. */
 export function insertAuditLog(db: Database.Database, entry: AuditLogEntry): void {
+  const nowIso = new Date().toISOString();
   db.prepare(
-    "INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-  ).run(randomUUID(), entry.event, entry.factId, entry.detail, entry.priorJson ?? null, new Date().toISOString());
+    `INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at)
+     SELECT ?, ?, ?, ?, ?, max(?, coalesce((SELECT created_at FROM audit_log ORDER BY rowid DESC LIMIT 1), ?))`
+  ).run(randomUUID(), entry.event, entry.factId, entry.detail, entry.priorJson ?? null, nowIso, nowIso);
 }
 
 // Note: the write epoch's read/write primitives live in src/epoch.ts, and the policy of when it moves in src/storage.ts (its private `bumpEpoch`) -- storage.ts is the canonical entry point for every fact-table write (insert/update/setStatus/delete) and bumps the epoch atomically alongside each one. The `meta` table (seeded above) is still created here so a caller that opens via bare `openDb()` (without `storage.openStorage()`) still gets a zero-initialized epoch row to read.
