@@ -709,7 +709,7 @@ describe("recall's follow-up line names only the commands that apply", () => {
   it("omits the review call-to-action when no result needs resolving, and adds it when one does", async () => {
     await runCli(["remember", "the ingestion worker batches 250 rows", "--kind", "decision"]);
 
-    // It used to print unconditionally. That is not merely noise: tests/cli-recall.test.ts's own contested-annotation test carries a comment explaining that the permanent CTA made a looser assertion pass vacuously against unfixed code -- an always-on string is indistinguishable from a real signal to a reader and to a test alike.
+    // It used to print unconditionally. That is not merely noise: this file's contested-annotation test carries a comment explaining that the permanent CTA made a looser assertion pass vacuously against unfixed code -- an always-on string is indistinguishable from a real signal to a reader and to a test alike.
     const clean = await runCli(["recall", "ingestion"]);
     expect(clean.stdout).toContain("mem show <id> for detail");
     expect(clean.stdout).not.toContain("mem review");

@@ -42,9 +42,12 @@ function pinsBudget(text: string): boolean {
   return /\bNO_TRUNCATION_BUDGET_MS\b/.test(text);
 }
 
-/** Whether `text` runs the CLI in-process by importing `run` from `src/cli.ts`. */
+/** Whether `text` runs the CLI in-process, either by importing `run` from `src/cli.ts` or by importing `runCli` from `support/cli.js`, which wraps that same in-process `run()`. */
 function importsCli(text: string): boolean {
-  return /import\s+[^;]*\brun\b[^;]*from\s+["'][^"']*src\/cli\.js["']/s.test(text);
+  return (
+    /import\s+[^;]*\brun\b[^;]*from\s+["'][^"']*src\/cli\.js["']/s.test(text) ||
+    /import\s+[^;]*\brunCli\b[^;]*from\s+["'][^"']*support\/cli\.js["']/s.test(text)
+  );
 }
 
 /** Whether `text` runs the built bundle in a subprocess. */
@@ -133,6 +136,8 @@ describe("test files that reach the seam through the CLI", () => {
     expect(watched.length).toBeGreaterThan(0);
     // The in-process door is the one that went red in 0.4.0; make sure it is still recognized.
     expect(watched.map(repoRelative)).toContain("tests/cli-wiring.test.ts");
+    // The shared `runCli` helper is the door most CLI test files use; make sure it is recognized too.
+    expect(watched.map(repoRelative)).toContain("tests/cli-recall.test.ts");
   });
 
   it("non-firing: files that only mention --hint-format without running the CLI are not flagged", () => {
