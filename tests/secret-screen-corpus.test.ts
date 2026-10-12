@@ -150,3 +150,68 @@ describe("secret-screen corpus: a bare uuid anchor argument is read with the fac
     expect(screenForSecrets({ text: CREDENTIAL_TEXT, sourceRef }, [])).toEqual([]);
   });
 });
+
+describe("secret-screen corpus: a hex value is read with the subject and text that label it", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+
+  it.each([
+    { name: "a credential subject", fields: { text: "x", subject: "api key", value: HEX32 } },
+    { name: "a credential word in the text", fields: { text: "the deploy token for staging", subject: "deploy-target", value: HEX32 } },
+  ])("flags a bare hex value under $name", ({ fields }) => {
+    expect(screenForSecrets(fields, []).map((match) => match.field)).toContain("value");
+  });
+
+  it.each([
+    { name: "a neutral subject and text", fields: { text: "x", subject: "build output", value: HEX32 } },
+    { name: "a commit subject", fields: { text: "the release build", subject: "release commit", value: "0123456789abcdef0123456789abcdef01234567" } },
+  ])("passes a bare hex value under $name", ({ fields }) => {
+    expect(screenForSecrets(fields, [])).toEqual([]);
+  });
+});
+
+describe("secret-screen corpus: a hex value is read against a credential keyword anywhere in its sentence or the line before", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+  const HEX40 = "0123456789abcdef0123456789abcdef01234567";
+
+  it.each([
+    { name: "a keyword four words back", text: `the api key was then set to ${HEX32}` },
+    { name: "a keyword ten words back", text: `The deploy pipeline signing key was last rotated by the platform team to ${HEX32}` },
+    { name: "a keyword on the previous line", text: `api key:\n${HEX32}` },
+  ])("flags $name", ({ text }) => {
+    expect(screenForSecrets({ text }, []).map((match) => match.patternName)).toContain(GENERIC);
+  });
+
+  it.each([
+    { name: "a commit mention", text: `commit ${HEX40} fixed the parser` },
+    { name: "a commit nearer than an earlier token word", text: `the token refresh bug was fixed in commit ${HEX40}` },
+    { name: "a keyword two lines back", text: `api key rotated\nsee the notes\nmd5 of the build ${HEX32}` },
+  ])("passes $name", ({ text }) => {
+    expect(screenForSecrets({ text }, [])).toEqual([]);
+  });
+
+  it.each([
+    { name: "an anchor path segment", fields: { text: "the api key cache", anchor: `file-exists a/${HEX32}` } },
+    { name: "a sourceRef path directory", fields: { text: "the api key cache", sourceRef: `docs/${HEX32}/notes.md:3` } },
+  ])("still exempts a hex in $name", ({ fields }) => {
+    expect(screenForSecrets(fields, [])).toEqual([]);
+  });
+});
+
+describe("secret-screen corpus: zero-width characters inside a hex value do not hide it", () => {
+  const HALF = "0123456789abcdef";
+
+  it.each([
+    ["U+200B", "​"],
+    ["U+200C", "‌"],
+    ["U+200D", "‍"],
+    ["U+FEFF", "﻿"],
+    ["U+2060", "⁠"],
+  ])("flags a hex split by %s", (_name, zeroWidth) => {
+    const text = `API key: ${HALF}${zeroWidth}${HALF}`;
+    expect(screenForSecrets({ text }, []).map((match) => match.patternName)).toContain(GENERIC);
+  });
+
+  it("passes a zero-width character in text with no hex or credential word", () => {
+    expect(screenForSecrets({ text: "the build​ step ran" }, [])).toEqual([]);
+  });
+});

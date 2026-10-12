@@ -174,14 +174,16 @@ function splitWords(text: string): string[] {
     .filter((word) => word.length > 0);
 }
 
+/** Whether one folded lowercase word is a credential keyword: an exact-word keyword, or a word that starts or ends with a keyword. */
+function isCredentialWord(word: string): boolean {
+  return UUID_CREDENTIAL_EXACT_WORDS.has(word) || UUID_CREDENTIAL_KEYWORDS.some((keyword) => word.startsWith(keyword) || word.endsWith(keyword));
+}
+
 /** Whether `text` carries a credential keyword as a word, a word prefix, or a word suffix, or an exact-word keyword, case-insensitively. */
 function hasCredentialKeyword(text: string): boolean {
   const words = splitWords(text);
   const spaced = ` ${words.join(" ")} `;
-  return (
-    UUID_CREDENTIAL_PHRASES.some((phrase) => spaced.includes(` ${phrase} `)) ||
-    words.some((word) => UUID_CREDENTIAL_EXACT_WORDS.has(word) || UUID_CREDENTIAL_KEYWORDS.some((keyword) => word.startsWith(keyword) || word.endsWith(keyword)))
-  );
+  return UUID_CREDENTIAL_PHRASES.some((phrase) => spaced.includes(` ${phrase} `)) || words.some(isCredentialWord);
 }
 
 /** An anchor's arguments with its predicate name dropped (`file-contains password.txt x` gives `password.txt x`): the arguments say what the fact is about, the predicate name is fixed vocabulary. */
@@ -252,6 +254,28 @@ function isCredentialAdjacent(value: string, index: number): boolean {
   return hasCredentialKeyword(splitWords(line).slice(-CREDENTIAL_ADJACENCY_WORDS).join(" "));
 }
 
+/** Whole words that name a hash a mention is about (`commit <hex>`, `md5 checksum <hex>`); one nearer to a hex than any credential keyword marks the hex as a content hash. */
+const HASH_WORDS: ReadonlySet<string> = new Set(["commit", "sha", "sha1", "sha256", "sha512", "md5", "checksum", "cksum", "digest", "hash", "rev", "revision", "oid", "blob", "tree", "object"]);
+
+/** The index of the last credential keyword in `words` (a single word, or the second word of a credential phrase), or -1. */
+function lastCredentialWordIndex(words: readonly string[]): number {
+  for (let i = words.length - 1; i >= 0; i -= 1) {
+    const word = words[i] ?? "";
+    if (isCredentialWord(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`))) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/** Whether a credential keyword on the hex's own line or the line before it labels the hex, unless a hash word (`commit`, `md5`, `checksum`) sits nearer to the hex than the keyword: `the api key was then set to <hex>` and `api key:` newline `<hex>` are credential claims while `the token bug was fixed in commit <hex>` is not. */
+function isCredentialSentence(value: string, index: number): boolean {
+  const words = splitWords(value.slice(0, index).split("\n").slice(-2).join("\n"));
+  const credentialIndex = lastCredentialWordIndex(words);
+  const hashIndex = words.reduce((last, word, i) => (HASH_WORDS.has(word) ? i : last), -1);
+  return credentialIndex !== -1 && credentialIndex > hashIndex;
+}
+
 /** Whether a canonical 8-4-4-4-12 UUID (either case) stands alone as its own token, an identifier word directly labels it, and the capture and everything known about the fact as stored has no credential keyword, so a record, session, or fact id is not refused as a secret while `token=<uuid>`, `user:<uuid>@host` and `the session job is done; <uuid>` still are. */
 function isCanonicalUuid(token: string, value: string, index: number, credentialContext: boolean): boolean {
   if (credentialContext || !CANONICAL_UUID.test(token)) {
@@ -320,8 +344,10 @@ function isProseShapedToken(token: string): boolean {
   return letterWords.length >= 2 && wordLike && letterWords.length + numberWords.length === words.length && numberWords.length <= Math.min(letterWords.length, MAX_PROSE_NUMBER_WORDS);
 }
 
-function scanField(field: string, value: string, credentialContext: boolean): SecretMatch[] {
+function scanField(field: string, rawValue: string, credentialContext: boolean): SecretMatch[] {
   const matches: SecretMatch[] = [];
+  // Invisible characters split a secret into halves that each fall under the length floors below, so the value is screened as a person reads it.
+  const value = rawValue.replace(INVISIBLE_CHARACTERS, "");
 
   for (const pattern of SECRET_PATTERNS) {
     pattern.regex.lastIndex = 0;
@@ -351,8 +377,14 @@ function scanField(field: string, value: string, credentialContext: boolean): Se
       !(exemptField && token.includes("/")) &&
       !isPathShapedToken(token) &&
       !isProseShapedToken(token) &&
-      // The content-hash exemption yields to a credential keyword among the few words just before the value, and to a bare anchor argument under credential context, so `api key <32 hex>` is refused while `md5 checksum <32 hex>` is stored.
-      !(isCanonicalHexHash(token) && !bareAnchorArgument && !isCredentialAdjacent(genericValue, g.index)) &&
+      // The content-hash exemption yields to a credential keyword among the few words just before the value or earlier in its sentence or the line before it with no hash word nearer, to a bare anchor argument under credential context, and to a whole `value` field under credential context (its subject and text label it), so `api key <32 hex>` is refused while `md5 checksum <32 hex>` is stored.
+      !(
+        isCanonicalHexHash(token) &&
+        !bareAnchorArgument &&
+        !(field === "value" && credentialContext && genericValue.trim() === token) &&
+        !isCredentialAdjacent(genericValue, g.index) &&
+        !isCredentialSentence(genericValue, g.index)
+      ) &&
       !(!exemptField && isCanonicalUuid(token, genericValue, g.index, credentialContext)) &&
       !DIGITS_ONLY.test(token) &&
       shannonEntropy(token) >= GENERIC_ENTROPY_THRESHOLD
