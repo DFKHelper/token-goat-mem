@@ -1,11 +1,11 @@
 /** Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets those guides document (Claude Code's `settings.json` hook + `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and only that. Two idempotency/authorship mechanisms, chosen per file format: - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked block plus the one separator newline install adds, leaving everything else untouched. - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`; `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` -- neither reads `AGENTS.md`, so they share a block in their own file instead of joining the `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of near-duplicate per-tool blocks they share one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole block as it goes -- the body comes from one constant shared by every tool that writes here, so a later tool's install is also what upgrades a body left behind by an older mem. Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other tool remains listed, and only removes the whole block once the last listed tool uninstalls. A project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens. - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped* entry already occupies the same identity (hook `command`, task `label`, keybinding `key`) rather than duplicating or silently overwriting hand-written config. Uninstall removes only stamped entries, so it survives content drift across mem versions (unlike deep-equality matching against a remembered snapshot). Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read used to compute the new content. */
 
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { probeSkipKey, spawnProbe, type ProbeSpawnResult } from "./probeSpawn.js";
 import { applyEdits, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type JSONPath, type ModificationOptions, type Node } from "jsonc-parser";
 
 // ─────────────────────────────────────────────────────────────────────────── Public types ───────────────────────────────────────────────────────────────────────────
@@ -903,7 +903,7 @@ export function resolveBinaryOnPath(
   return null;
 }
 
-/** Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed out, or exited nonzero. The command is assembled as one shell string (quoting each token) and run with `shell: true` rather than passed as an argv array: Windows cannot exec an npm-installed `.cmd`/`.bat` shim directly (`spawnSync` raises `EINVAL`), and `shell: true` with a separate argv array is a documented footgun (Node's own DEP0190) because the array elements are concatenated into the command line unescaped -- quoting them here, once, in the string form avoids both. */
+/** Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed out, or exited nonzero. A binary that needs no shell is spawned from an argv array so a timeout kills the real process; a Windows `.cmd`/`.bat` shim runs as one quoted shell string (see `spawnProbe` in probeSpawn.ts) and a timeout kills its whole process tree. */
 function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: number, opts: MemProbeOptions = {}): string | null {
   return runMemProbe(binPath, args, timeoutMs, opts).output;
 }
@@ -940,7 +940,7 @@ function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number
   const { cache } = opts;
   const key = JSON.stringify([binPath, args]);
   if (cache !== undefined) {
-    const skipped = cache.unansweredBins.get(binPath);
+    const skipped = cache.unansweredBins.get(probeSkipKey(binPath, args));
     if (skipped !== undefined) {
       return skipped;
     }
@@ -949,26 +949,24 @@ function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number
       return cached;
     }
   }
-  const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
-  const result = spawnSync(quoted, { encoding: "utf8", timeout: timeoutMs, shell: true });
-  const outcome = classifyMemProbe(result);
+  const outcome = classifyMemProbe(spawnProbe(binPath, args, timeoutMs));
   if (cache !== undefined) {
     cache.results.set(key, outcome);
     if (outcome.unanswered) {
-      cache.unansweredBins.set(binPath, outcome);
+      cache.unansweredBins.set(probeSkipKey(binPath, args), outcome);
     }
   }
   return outcome;
 }
 
-function classifyMemProbe(result: SpawnSyncReturns<string>): MemProbeResult {
-  if (result.error !== undefined) {
-    return { output: null, unanswered: true, notRunnable: Reflect.get(result.error, "code") === "ENOENT" };
+function classifyMemProbe(result: ProbeSpawnResult): MemProbeResult {
+  if (result.errorCode !== undefined) {
+    return { output: null, unanswered: true, notRunnable: result.errorCode === "ENOENT" || result.errorCode === "EACCES" };
   }
   if (result.status !== 0) {
     return { output: null, unanswered: false, notRunnable: result.status !== null && NOT_RUNNABLE_EXIT_CODES.has(result.status) };
   }
-  return { output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`, unanswered: false, notRunnable: false };
+  return { output: `${result.stdout}\n${result.stderr}`, unanswered: false, notRunnable: false };
 }
 
 /** How long a capability probe of the installed `mem` may run: a machine whose antivirus scans every process launch can take several seconds on a healthy binary, and a tighter budget makes it look incapable. */

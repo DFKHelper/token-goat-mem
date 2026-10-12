@@ -2162,6 +2162,120 @@ describe("probe cache, skip after unanswered, and notRunnable (counting fake mem
   });
 });
 
+// Each case launches node (1-11 s a launch on this machine) under a 1000 ms probe budget and polls for the survivor, so the 30 s default is spent before any assertion runs.
+describe("a timed-out probe leaves no live process behind", { timeout: 300_000 }, () => {
+  let dir: string;
+  let pidFile: string;
+  const isWindows = process.platform === "win32";
+  const hookSpec = { subcommand: "hook", flags: ["session-start"] };
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-probe-orphan-"));
+    pidFile = join(dir, "child.pid");
+    process.env["PROBE_PIDFILE"] = pidFile;
+    writeFileSync(join(dir, "hang.js"), 'require("node:fs").writeFileSync(process.env.PROBE_PIDFILE, String(process.pid));\nsetTimeout(() => {}, 120000);\n', "utf8");
+    writeFileSync(join(dir, "answer.js"), 'process.stdout.write("session-start\\n");\n', "utf8");
+    writeFileSync(join(dir, "mem.cmd"), `@echo off\r\nnode "%~dp0hang.js" %*\r\n`, "utf8");
+  });
+
+  afterEach(() => {
+    delete process.env["PROBE_PIDFILE"];
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  /** The wiring module loaded without this file's spawn-timeout floor, which would lift a 1000 ms budget to 120 s and so never time the hanging probe out. */
+  async function loadWiringWithRealTimeouts(): Promise<typeof import("../src/wiring.js")> {
+    vi.doMock("node:child_process", async (importOriginal) => importOriginal<typeof import("node:child_process")>());
+    vi.resetModules();
+    try {
+      return await import("../src/wiring.js");
+    } finally {
+      vi.doMock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
+    }
+  }
+
+  function isAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function killTree(pid: number): void {
+    if (isWindows) {
+      spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" });
+    } else if (isAlive(pid)) {
+      process.kill(pid, "SIGKILL");
+    }
+  }
+
+  async function waitUntil(done: () => boolean, withinMs: number): Promise<boolean> {
+    const deadline = Date.now() + withinMs;
+    while (Date.now() < deadline) {
+      if (done()) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    return done();
+  }
+
+  /** Probes until the hanging child has written its pid (a launch slower than the 1000 ms budget is killed before node is up and proves nothing), then asserts that pid is gone; whatever is left is killed in `finally`. */
+  async function expectProbeKillsChild(probe: () => void): Promise<void> {
+    const seen: number[] = [];
+    try {
+      for (let attempt = 0; attempt < 8 && seen.length === 0; attempt += 1) {
+        rmSync(pidFile, { force: true });
+        probe();
+        if (await waitUntil(() => existsSync(pidFile) && readFileSync(pidFile, "utf8") !== "", 3000)) {
+          seen.push(Number(readFileSync(pidFile, "utf8")));
+        }
+      }
+      if (seen.length === 0) {
+        throw new Error("the hanging child never wrote its pid file in 8 probes, so the test could not observe a survivor");
+      }
+      const pid = seen[0] as number;
+      expect(await waitUntil(() => !isAlive(pid), 10_000), `pid ${pid} is still alive after its probe timed out`).toBe(true);
+    } finally {
+      for (const pid of seen) {
+        killTree(pid);
+      }
+      if (existsSync(pidFile)) {
+        killTree(Number(readFileSync(pidFile, "utf8")));
+      }
+    }
+  }
+
+  it.runIf(isWindows)("a .cmd shim that hangs is killed with its whole process tree when the probe times out", async () => {
+    const real = await loadWiringWithRealTimeouts();
+    await expectProbeKillsChild(() => {
+      expect(real.checkHookCapability(join(dir, "mem.cmd"), hookSpec, 1000)).toMatchObject({ capable: false, probeFailed: true });
+    });
+  });
+
+  it("a direct binary that hangs is killed when the probe times out", async () => {
+    const real = await loadWiringWithRealTimeouts();
+    await expectProbeKillsChild(() => {
+      expect(real.checkHookCapability(process.execPath, hookSpec, 1000, [join(dir, "hang.js")])).toMatchObject({ capable: false, probeFailed: true });
+    });
+  });
+
+  it("a node probe that timed out does not make a probe of another script through the same cache unanswered", async () => {
+    const real = await loadWiringWithRealTimeouts();
+    const cache = real.createMemProbeCache();
+    const hung = real.checkHookCapability(process.execPath, hookSpec, 1000, [join(dir, "hang.js")], cache);
+    expect(hung.probeFailed).toBe(true);
+    expect(real.checkHookCapability(process.execPath, hookSpec, 120_000, [join(dir, "answer.js")], cache)).toEqual({ capable: true, missing: [] });
+    const again = real.checkHookCapability(process.execPath, hookSpec, 120_000, [join(dir, "hang.js")], cache);
+    expect(again.probeFailed).toBe(true);
+    if (existsSync(pidFile)) {
+      killTree(Number(readFileSync(pidFile, "utf8")));
+    }
+  });
+});
+
 describe("installedClaudeHookCommands", () => {
   it("returns [] when no settings.json exists", () => {
     expect(installedClaudeHookCommands({ root, homeDir: home })).toEqual([]);
