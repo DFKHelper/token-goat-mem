@@ -8,6 +8,7 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "../support/spawnTimeoutFloor.js";
 
 let root: string;
 let memHome: string;
@@ -50,7 +51,7 @@ afterEach(() => {
   rmSync(fakeMemDir, { recursive: true, force: true });
 });
 
-describe("init/uninstall round trip through the built bundle", () => {
+describe("init/uninstall round trip through the built bundle", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("returns a hand-formatted settings.json and a CRLF CLAUDE.md to their exact bytes", () => {
     mkdirSync(join(root, ".claude"), { recursive: true });
     const settingsPath = join(root, ".claude", "settings.json");

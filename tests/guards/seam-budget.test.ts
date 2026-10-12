@@ -76,9 +76,7 @@ function inheritsProcessEnv(text: string): boolean {
 }
 
 /** Whether the shared setup file pins the budget for every in-process test, and is actually wired into vitest so that pin runs. Both are checked because either one going missing silently unpins every CLI-path file at once. */
-function sharedSetupPinsBudget(): boolean {
-  const setupText = readRepoFile(SHARED_SETUP);
-  const configText = readRepoFile(VITEST_CONFIG);
+function sharedSetupPinsBudget(setupText: string, configText: string): boolean {
   // Keyed on the assignment, not on the variable's name: the setup file names the variable in a constant and a comment, and with only those left the pin would read as present while every CLI-path file ran against the real budget.
   const declaresName = /const RETRIEVAL_BUDGET_ENV = "TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS"/.test(setupText);
   const assigns = /process\.env\[RETRIEVAL_BUDGET_ENV\] = NO_TRUNCATION_BUDGET_MS;/.test(setupText);
@@ -120,7 +118,7 @@ describe("integration-seam test files", () => {
 
 describe("test files that reach the seam through the CLI", () => {
   it("pin the retrieval soft budget via TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS, in the file or through the shared setup", () => {
-    const envPinned = sharedSetupPinsBudget();
+    const envPinned = sharedSetupPinsBudget(readRepoFile(SHARED_SETUP), readRepoFile(VITEST_CONFIG));
     const offenders = testFiles(TESTS_DIR)
       .filter((file) => {
         const text = readFileSync(file, "utf8");
@@ -150,5 +148,40 @@ describe("test files that reach the seam through the CLI", () => {
     for (const file of candidates) {
       expect(drivesSeamViaCli(readFileSync(file, "utf8"))).toBe(false);
     }
+  });
+});
+
+describe("the shared pin detection itself", () => {
+  const setupText = readRepoFile(SHARED_SETUP);
+  const configText = readRepoFile(VITEST_CONFIG);
+  const pinLine = /^.*process\.env\[RETRIEVAL_BUDGET_ENV\] = NO_TRUNCATION_BUDGET_MS;.*$/m.exec(setupText)?.[0] ?? "";
+  const setupWithoutPin = setupText.replace(pinLine, "");
+
+  it("accepts the real setup file wired into the real vitest config", () => {
+    expect(pinLine).not.toBe("");
+    expect(sharedSetupPinsBudget(setupText, configText)).toBe(true);
+  });
+
+  it("reports the pin missing when the setup file no longer assigns it", () => {
+    expect(setupWithoutPin).not.toBe(setupText);
+    expect(sharedSetupPinsBudget(setupWithoutPin, configText)).toBe(false);
+  });
+
+  it("reports the pin missing when vitest no longer wires the setup file", () => {
+    const unwired = configText.split(SHARED_SETUP).join("tests/setup/elsewhere.ts");
+    expect(unwired).not.toBe(configText);
+    expect(sharedSetupPinsBudget(setupText, unwired)).toBe(false);
+  });
+
+  it("flags a CLI-path test file with no local pin when the shared pin is absent", () => {
+    const cliTest = [
+      'import { runCli } from "../support/cli.js";',
+      'it("recalls the hint", async () => {',
+      '  await runCli(["recall", "--hint-format"]);',
+      "});",
+    ].join("\n");
+    expect(drivesSeamViaCli(cliTest)).toBe(true);
+    expect(cliPathPinned(cliTest, sharedSetupPinsBudget(setupText, configText))).toBe(true);
+    expect(cliPathPinned(cliTest, sharedSetupPinsBudget(setupWithoutPin, configText))).toBe(false);
   });
 });
