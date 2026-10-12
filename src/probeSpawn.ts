@@ -49,6 +49,20 @@ child.on("error", (error) => { clearTimeout(timer); finish(null, error.code || "
 child.on("close", (code) => { clearTimeout(timer); finish(code, undefined); });
 `;
 
+/** The only shape a subcommand or flag token sent to a probe may take: letters, digits, dot, underscore and hyphen, so no quote, separator or shell metacharacter can ride in on text read from a settings file. */
+const SAFE_PROBE_TOKEN = /^[A-Za-z0-9._-]+$/u;
+
+/** Whether `token` is safe to hand to a probe as an argument. */
+export function isSafeProbeToken(token: string): boolean {
+  return SAFE_PROBE_TOKEN.test(token);
+}
+
+/** The characters cmd.exe treats specially inside a quoted string (a quote closes it, `&|<>^` chain or redirect, `%` and `!` expand, a newline ends the command); an argument carrying one never reaches the shell. */
+const CMD_UNSAFE_CHARS = /["&|<>^%!\r\n]/u;
+
+/** Error code of a probe refused before any process was started because an argument could not be quoted safely for cmd.exe. */
+export const PROBE_REFUSED_ERROR_CODE = "EPROBEREFUSED";
+
 /** Whether `binPath` is a Windows command script, which only a shell can launch (`spawn` raises `EINVAL` on one). */
 function needsWindowsShell(binPath: string): boolean {
   const extension = extname(binPath).toLowerCase();
@@ -61,6 +75,9 @@ export function spawnProbe(binPath: string, args: readonly string[], timeoutMs: 
     const result = spawnSync(binPath, [...args], { encoding: "utf8", timeout: timeoutMs });
     const errorCode = result.error === undefined ? undefined : String(Reflect.get(result.error, "code") ?? "UNKNOWN");
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "", ...(errorCode === undefined ? {} : { errorCode }) };
+  }
+  if (args.some((token) => CMD_UNSAFE_CHARS.test(token))) {
+    return { status: null, stdout: "", stderr: "", errorCode: PROBE_REFUSED_ERROR_CODE };
   }
   const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
   const helper = spawnSync(process.execPath, ["-e", PROBE_HELPER_SCRIPT, String(timeoutMs), quoted], { encoding: "utf8", timeout: timeoutMs + PROBE_HELPER_GRACE_MS });

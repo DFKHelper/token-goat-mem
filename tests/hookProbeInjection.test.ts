@@ -1,0 +1,196 @@
+/** A hook command read from a project's settings.json is attacker-controlled text: `mem doctor` must never let it reach a shell, and must probe a project hook's bundle with the node that is running, never a `node` found through the working directory. */
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, dirname, join, sep } from "node:path";
+
+const spawned = vi.hoisted((): unknown[][] => []);
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawnSync: (...args: unknown[]) => {
+      spawned.push(args);
+      return Reflect.apply(actual.spawnSync, actual, args);
+    },
+  };
+});
+
+import { spawnProbe } from "../src/probeSpawn.js";
+import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, isLegacyHookShape, parseHookCommandSpec } from "../src/wiring.js";
+import { runCli } from "./support/cli.js";
+import { CAPABLE_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+
+const isWindows = process.platform === "win32";
+/** A launch budget a loaded machine cannot miss: process starts take several seconds here. */
+const LAUNCH_BUDGET_MS = 120_000;
+const ROOT_ARG = '--root "$CLAUDE_PROJECT_DIR"';
+const FALLBACK = 'echo "mem failed (exit $?); run mem doctor"';
+
+/** Forward slashes, so a path can sit inside a cmd.exe redirect in a payload. */
+function slashed(path: string): string {
+  return path.split(sep).join("/");
+}
+
+/** The same hostile subcommand wrapped in every shape mem init has ever stamped. */
+function wrappedIn(subcommand: string): string[] {
+  return [
+    `mem ${subcommand} --hint-format ${ROOT_ARG}`,
+    `command -v mem >/dev/null 2>&1 && mem ${subcommand} --hint-format ${ROOT_ARG} || true`,
+    `if command -v mem >/dev/null 2>&1; then mem ${subcommand} --hint-format ${ROOT_ARG} || ${FALLBACK}; fi`,
+    `if [ -f "/b/x.mjs" ]; then node "/b/x.mjs" ${subcommand} --hint-format ${ROOT_ARG} || ${FALLBACK}; elif command -v mem >/dev/null 2>&1; then mem ${subcommand} --hint-format ${ROOT_ARG} || ${FALLBACK}; fi`,
+  ];
+}
+
+describe("hook wrapper shapes accept only a plain subcommand word", () => {
+  it.each(['x"&echo>m&echo', "x;touch", "x$(id)", "x|y", "x`id`"])("a subcommand word running into %s is read as its plain lead word, never with the metacharacters", (subcommand) => {
+    for (const command of wrappedIn(subcommand)) {
+      const spec = parseHookCommandSpec(command);
+      expect(spec?.subcommand, command).toBe("x");
+      expect(spec?.flags.every((flag) => /^--[a-z-]+$/u.test(flag)), command).toBe(true);
+    }
+  });
+
+  it.each(["X", "1x", "x_y", "_x", "-x"])("no shape recognises the subcommand %s", (subcommand) => {
+    for (const command of wrappedIn(subcommand)) {
+      expect(parseHookCommandSpec(command), command).toBeNull();
+      expect(isLegacyHookShape(command), command).toBe(false);
+    }
+  });
+
+  it("every shape still reads the subcommands mem has stamped", () => {
+    for (const subcommand of ["recall", "scan-session", "reflect"]) {
+      for (const command of wrappedIn(subcommand)) {
+        expect(parseHookCommandSpec(command)?.subcommand, command).toBe(subcommand);
+      }
+    }
+    for (const { command } of CLAUDE_HOOK_EVENTS) {
+      expect(parseHookCommandSpec(command)?.subcommand).toBe("hook");
+    }
+  });
+});
+
+describe("a probe is never started for a subcommand that is not a plain token", { timeout: 300_000 }, () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-inject-"));
+    spawned.length = 0;
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  it("checkHookCapability refuses a subcommand carrying shell metacharacters and spawns nothing", () => {
+    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    const marker = join(dir, "marker.txt");
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    const result = checkHookCapability(binPath, { subcommand: `x"&echo>${slashed(marker)}&echo`, flags: ["--help"] }, LAUNCH_BUDGET_MS);
+    expect(result).toEqual({ capable: false, missing: [`x"&echo>${slashed(marker)}&echo`], refused: true });
+    expect(spawned).toHaveLength(0);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("checkHookCapability still probes an ordinary subcommand", () => {
+    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
+    expect(checkHookCapability(binPath, { subcommand: "recall", flags: ["--hint-format"] }, LAUNCH_BUDGET_MS)).toEqual({ capable: true, missing: [] });
+    expect(spawned.length).toBeGreaterThan(0);
+  });
+
+  for (const token of ['a"b', "a&b", "a|b", "a<b", "a>b", "a^b", "a%b", "a!b", "a\nb", "a\rb"]) {
+    it.runIf(isWindows)(`spawnProbe refuses the argument ${JSON.stringify(token)} for a .cmd shim before any process starts`, () => {
+      const result = spawnProbe(join(dir, "mem.cmd"), [token, "--help"], 5000);
+      expect(result.errorCode).toBe("EPROBEREFUSED");
+      expect(result.status).toBeNull();
+      expect(spawned).toHaveLength(0);
+    });
+  }
+
+  it.runIf(isWindows)("spawnProbe does not let a quote in an argument run a command through cmd.exe", () => {
+    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    const marker = join(dir, "marker.txt");
+    const result = spawnProbe(join(dir, "mem.cmd"), [`x"&echo>${slashed(marker)}&echo`, "--help"], 5000);
+    expect(result.errorCode).toBe("EPROBEREFUSED");
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it.runIf(isWindows)("spawnProbe still runs a .cmd shim with ordinary arguments", () => {
+    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    const result = spawnProbe(join(dir, "mem.cmd"), ["--version"], 120_000);
+    expect(result.errorCode).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("0.0.0-test-shim");
+  });
+});
+
+describe("a project hook's bundle is probed with the running node", { timeout: 300_000 }, () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "mem-bundle-probe-"));
+    spawned.length = 0;
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+  });
+
+  it("launches process.execPath on the bundle, never a bare `node`", () => {
+    const bundle = join(dir, "bundle.mjs");
+    writeFileSync(bundle, 'process.stdout.write("session-start\\n");\n', "utf8");
+    const command = `if [ -f "${slashed(bundle)}" ]; then node "${slashed(bundle)}" hook session-start || ${FALLBACK}; elif command -v mem >/dev/null 2>&1; then mem hook session-start || ${FALLBACK}; fi`;
+    const health = checkClaudeHookHealth([{ event: "SessionStart", command }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: LAUNCH_BUDGET_MS });
+    expect(health.hooks[0]?.capable).toBe(true);
+    const launchers = spawned.map((call) => call[0]);
+    expect(launchers).toContain(process.execPath);
+    expect(launchers).not.toContain("node");
+  });
+});
+
+describe("mem doctor with a hostile hook in a cloned project's settings.json", { timeout: 300_000 }, () => {
+  let memHome: string;
+  let toolRoot: string;
+  let toolHome: string;
+  let binDir: string;
+  const originalPath = process.env["PATH"];
+
+  beforeEach(() => {
+    memHome = mkdtempSync(join(tmpdir(), "mem-inject-mem-"));
+    toolRoot = mkdtempSync(join(tmpdir(), "mem-inject-root-"));
+    toolHome = mkdtempSync(join(tmpdir(), "mem-inject-home-"));
+    binDir = mkdtempSync(join(tmpdir(), "mem-inject-bin-"));
+    process.env["TOKEN_GOAT_MEM_HOME"] = memHome;
+    process.env["TOKEN_GOAT_MEM_BACKUP_DIR"] = join(memHome, "backups");
+    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
+    process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"] = String(LAUNCH_BUDGET_MS);
+    process.env["PATH"] = `${binDir}${delimiter}${dirname(process.execPath)}`;
+  });
+
+  afterEach(() => {
+    process.env["PATH"] = originalPath;
+    delete process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"];
+    delete process.env["TOKEN_GOAT_MEM_HOME"];
+    delete process.env["TOKEN_GOAT_MEM_BACKUP_DIR"];
+    delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    for (const path of [memHome, toolRoot, toolHome, binDir]) {
+      rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
+    }
+  });
+
+  it("runs nothing the hook names", async () => {
+    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    const marker = join(toolRoot, "marker.txt");
+    const hostile = `mem x"&echo>${slashed(marker)}&echo ${ROOT_ARG}`;
+    mkdirSync(join(toolRoot, ".claude"), { recursive: true });
+    writeFileSync(join(toolRoot, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", __token_goat_mem: true, command: hostile }] }] } }), "utf8");
+    const result = await runCli(["doctor", "--json", "--root", toolRoot]);
+    expect(existsSync(marker)).toBe(false);
+    const report = JSON.parse(result.stdout) as { findings: Array<{ check: string; status: string; message: string }> };
+    const hooks = report.findings.filter((entry) => entry.check === "hooks");
+    expect(hooks.some((entry) => entry.message.includes("SessionStart"))).toBe(true);
+    expect(hooks.every((entry) => !entry.message.includes("&echo"))).toBe(true);
+  });
+});

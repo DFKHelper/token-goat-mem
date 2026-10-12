@@ -5,7 +5,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
-import { probeSkipKey, spawnProbe, type ProbeSpawnResult } from "./probeSpawn.js";
+import { isSafeProbeToken, PROBE_REFUSED_ERROR_CODE, probeSkipKey, spawnProbe, type ProbeSpawnResult } from "./probeSpawn.js";
 import { applyEdits, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type JSONPath, type ModificationOptions, type Node } from "jsonc-parser";
 
 // ─────────────────────────────────────────────────────────────────────────── Public types ───────────────────────────────────────────────────────────────────────────
@@ -735,11 +735,11 @@ function runningBundlePath(): string {
 
 // Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand and `--root` vary across events, and the wrapper shape itself has varied across mem versions -- a bare, unguarded `mem ... --root "$CLAUDE_PROJECT_DIR"` first, then `command -v mem ... && mem ... || true`, then `if command -v mem ...; then mem ... || fallback; fi`. Exact alternatives, not one loosened pattern, so a hybrid string that happens to satisfy pieces of several without being any of them is not accidentally recognised. Each captures the subcommand, then the text between it and `--root` (the flags). Matching the wrapper -- not the full literal string -- is what lets `looksLikeMemHookCommand` recognise an older *or* newer mem install's hook as its own, and `parseHookCommandSpec` read the flags of any of them.
 export const MEM_HOOK_INVOCATION_SHAPES: readonly RegExp[] = [
-  /^mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR"$/u,
-  /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u,
-  /^if command -v mem >\/dev\/null 2>&1; then mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
+  /^mem ([a-z][a-z-]*)\b(.*?)--root "\$CLAUDE_PROJECT_DIR"$/u,
+  /^command -v mem >\/dev\/null 2>&1 && mem ([a-z][a-z-]*)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u,
+  /^if command -v mem >\/dev\/null 2>&1; then mem ([a-z][a-z-]*)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
   // The Windows user shape: a direct `node <bundle>` launch guarded by `[ -f ]`, then the same plain `mem` call as `elif`. The backreference ties the `elif` branch to the same subcommand so a hybrid of two different hooks is not recognised.
-  /^if \[ -f "[^"]+" \]; then node "[^"]+" (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; elif command -v mem >\/dev\/null 2>&1; then mem \1\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
+  /^if \[ -f "[^"]+" \]; then node "[^"]+" ([a-z][a-z-]*)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; elif command -v mem >\/dev\/null 2>&1; then mem \1\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
   // The frozen `mem hook <slug>` shapes carry no `--root` and no flags, so group 2 is the space-led slug. The Windows form ties its `elif` branch to the same slug by backreference.
   /^if command -v mem >\/dev\/null 2>&1; then mem (hook)\b( [a-z][a-z-]*) \|\| .*; fi$/u,
   /^if \[ -f "[^"]+" \]; then node "[^"]+" (hook)\b( [a-z][a-z-]*) \|\| .*; elif command -v mem >\/dev\/null 2>&1; then mem hook\2 \|\| .*; fi$/u,
@@ -960,6 +960,9 @@ function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number
 }
 
 function classifyMemProbe(result: ProbeSpawnResult): MemProbeResult {
+  if (result.errorCode === PROBE_REFUSED_ERROR_CODE) {
+    return { output: null, unanswered: false, notRunnable: false };
+  }
   if (result.errorCode !== undefined) {
     return { output: null, unanswered: true, notRunnable: result.errorCode === "ENOENT" || result.errorCode === "EACCES" };
   }
@@ -991,7 +994,11 @@ export function checkHookCapability(
   timeoutMs = MEM_PROBE_TIMEOUT_MS,
   launcherArgs: readonly string[] = [],
   cache?: MemProbeCache
-): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true; readonly notRunnable?: true } {
+): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true; readonly notRunnable?: true; readonly refused?: true } {
+  // The subcommand comes from a settings file that may belong to a cloned repository, so nothing outside the safe token shape is ever handed to a probe.
+  if (!isSafeProbeToken(spec.subcommand)) {
+    return { capable: false, missing: [spec.subcommand], refused: true };
+  }
   const { output: help, unanswered, notRunnable } = runMemProbe(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs, cache === undefined ? {} : { cache });
   if (help === null) {
     const unrunnable = notRunnable ? { notRunnable: true as const } : {};
@@ -1036,7 +1043,7 @@ export function checkClaudeHookHealth(
     const bundle = parseHookBundlePath(command);
     if (spec !== null && bundle !== null && existsSync(bundle)) {
       const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-      const { capable, missing, probeFailed, notRunnable } = checkHookCapability("node", spec, timeoutMs, [bundle], cache);
+      const { capable, missing, probeFailed, notRunnable } = checkHookCapability(process.execPath, spec, timeoutMs, [bundle], cache);
       return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}) };
     }
     if (bin === null || spec === null) {
