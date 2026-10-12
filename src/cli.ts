@@ -780,11 +780,11 @@ const PREFLIGHT_RETRY_BUDGET_FACTOR = 3;
 /** The init pre-flight's hook health: probed once under the `TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS` budget, and when some probe got no answer (not a verdict) probed once more at 3x the budget with a fresh cache, so the first run's skip-after-unanswered cannot suppress the retry. A binary that cannot run is a verdict and is never retried. */
 function preflightHookHealth(events: ReadonlyArray<{ readonly event: string; readonly command: string }>): ClaudeHookHealth {
   const first = createProbeBudget();
-  const health = checkClaudeHookHealth(events, first);
+  const health = checkClaudeHookHealth(events, { ...first, trustBundles: true });
   if (!health.hooks.some((hook) => hook.probeFailure !== undefined && hook.notRunnable !== true)) {
     return health;
   }
-  return checkClaudeHookHealth(events, { timeoutMs: first.timeoutMs * PREFLIGHT_RETRY_BUDGET_FACTOR, cache: createMemProbeCache() });
+  return checkClaudeHookHealth(events, { timeoutMs: first.timeoutMs * PREFLIGHT_RETRY_BUDGET_FACTOR, cache: createMemProbeCache(), trustBundles: true });
 }
 
 function formatWiringPlanForUninstall(plan: WiringPlan): string {

@@ -1033,7 +1033,7 @@ export interface ClaudeHookHealth {
 
 export function checkClaudeHookHealth(
   commands: ReadonlyArray<{ readonly event: string; readonly command: string }>,
-  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number; readonly cache?: MemProbeCache } = {}
+  opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number; readonly cache?: MemProbeCache; readonly trustBundles?: boolean } = {}
 ): ClaudeHookHealth {
   const cache = opts.cache ?? createMemProbeCache();
   const bin = resolveMemBinary({ ...opts, cache });
@@ -1041,7 +1041,8 @@ export function checkClaudeHookHealth(
     const spec = parseHookCommandSpec(command);
     // A direct-launch hook runs its own bundle first, so that bundle -- not whatever `mem` PATH resolves to -- is what must support the flags; a bundle that is gone falls through to the PATH binary, exactly as the hook itself would.
     const bundle = parseHookBundlePath(command);
-    if (spec !== null && bundle !== null && existsSync(bundle)) {
+    // A bundle path is only ever run when the caller vouches for the commands (mem's own, or the user's own settings file): a project settings.json is a cloned repository's text, and the file it names must never be executed.
+    if (opts.trustBundles === true && spec !== null && bundle !== null && existsSync(bundle)) {
       const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
       const { capable, missing, probeFailed, notRunnable } = checkHookCapability(process.execPath, spec, timeoutMs, [bundle], cache);
       return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}) };

@@ -131,7 +131,7 @@ describe("capability pre-flight with the bundle as launcher", () => {
     mkdirSync(dirname(bundle), { recursive: true });
     writeFileSync(bundle, 'console.log(process.argv.slice(2).join(" ") + " session-start user-prompt-submit stop pre-compact");\n', "utf8");
     const commands = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: bundle });
-    const health = checkClaudeHookHealth(commands, { pathEnv: join(home, "empty") });
+    const health = checkClaudeHookHealth(commands, { pathEnv: join(home, "empty"), trustBundles: true });
     expect(health.bin).toBeNull();
     expect(health.hooks.every((hook) => hook.capable)).toBe(true);
   });

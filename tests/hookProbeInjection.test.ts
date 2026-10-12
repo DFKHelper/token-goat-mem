@@ -33,6 +33,16 @@ function slashed(path: string): string {
   return path.split(sep).join("/");
 }
 
+/** A hook command in the Windows user shape that runs `bundle`. */
+function bundleHookCommand(bundle: string): string {
+  return `if [ -f "${slashed(bundle)}" ]; then node "${slashed(bundle)}" hook session-start || ${FALLBACK}; elif command -v mem >/dev/null 2>&1; then mem hook session-start || ${FALLBACK}; fi`;
+}
+
+/** Writes a bundle that creates `marker` when it is executed. */
+function writeMarkerBundle(path: string, marker: string): void {
+  writeFileSync(path, `process.getBuiltinModule("node:fs").writeFileSync(${JSON.stringify(slashed(marker))}, "ran");\n`, "utf8");
+}
+
 /** The same hostile subcommand wrapped in every shape mem init has ever stamped. */
 function wrappedIn(subcommand: string): string[] {
   return [
@@ -142,11 +152,21 @@ describe("a project hook's bundle is probed with the running node", { timeout: 3
     const bundle = join(dir, "bundle.mjs");
     writeFileSync(bundle, 'process.stdout.write("session-start\\n");\n', "utf8");
     const command = `if [ -f "${slashed(bundle)}" ]; then node "${slashed(bundle)}" hook session-start || ${FALLBACK}; elif command -v mem >/dev/null 2>&1; then mem hook session-start || ${FALLBACK}; fi`;
-    const health = checkClaudeHookHealth([{ event: "SessionStart", command }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: LAUNCH_BUDGET_MS });
+    const health = checkClaudeHookHealth([{ event: "SessionStart", command }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: LAUNCH_BUDGET_MS, trustBundles: true });
     expect(health.hooks[0]?.capable).toBe(true);
     const launchers = spawned.map((call) => call[0]);
     expect(launchers).toContain(process.execPath);
     expect(launchers).not.toContain("node");
+  });
+
+  it("never runs a bundle unless the caller vouches for the commands", () => {
+    const marker = join(dir, "marker.txt");
+    const bundle = join(dir, "evil.mjs");
+    writeMarkerBundle(bundle, marker);
+    const health = checkClaudeHookHealth([{ event: "SessionStart", command: bundleHookCommand(bundle) }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: LAUNCH_BUDGET_MS });
+    expect(health.hooks[0]?.capable).toBe(false);
+    expect(spawned.flatMap((call) => (Array.isArray(call[1]) ? call[1] : []))).not.toContain(slashed(bundle));
+    expect(existsSync(marker)).toBe(false);
   });
 });
 
@@ -192,5 +212,27 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", {
     const hooks = report.findings.filter((entry) => entry.check === "hooks");
     expect(hooks.some((entry) => entry.message.includes("SessionStart"))).toBe(true);
     expect(hooks.every((entry) => !entry.message.includes("&echo"))).toBe(true);
+  });
+
+  it("never executes a bundle file named by the project settings.json", async () => {
+    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    const marker = join(toolRoot, "marker2.txt");
+    const bundle = join(toolRoot, "evil.mjs");
+    writeMarkerBundle(bundle, marker);
+    mkdirSync(join(toolRoot, ".claude"), { recursive: true });
+    writeFileSync(join(toolRoot, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", __token_goat_mem: true, command: bundleHookCommand(bundle) }] }] } }), "utf8");
+    await runCli(["doctor", "--json", "--root", toolRoot]);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  it("still health-checks the bundle a user-level settings.json names", async () => {
+    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    const marker = join(toolRoot, "user-marker.txt");
+    const bundle = join(toolRoot, "user-bundle.mjs");
+    writeMarkerBundle(bundle, marker);
+    mkdirSync(join(toolHome, ".claude"), { recursive: true });
+    writeFileSync(join(toolHome, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", __token_goat_mem: true, command: bundleHookCommand(bundle) }] }] } }), "utf8");
+    await runCli(["doctor", "--json", "--root", toolRoot]);
+    expect(existsSync(marker)).toBe(true);
   });
 });

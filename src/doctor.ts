@@ -180,7 +180,7 @@ function describeHookHealth(opts: WiringOpts, probe: ProbeBudget): Finding[] {
     if (hooks.length === 0) {
       continue;
     }
-    const health = checkClaudeHookHealth(hooks, probe);
+    const health = checkClaudeHookHealth(hooks, { ...probe, trustBundles: label === "user" });
     // A direct-launch hook runs its own bundle, so no mem on PATH is only a fault when some hook cannot run that way either.
     const allCapable = health.hooks.every((hook) => hook.capable);
     lines.push(

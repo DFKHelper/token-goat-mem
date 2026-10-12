@@ -198,8 +198,9 @@ export function describeLaunchTime(
   probe: Partial<ProbeBudget> = {}
 ): Finding[] {
   const projectHooks = projectSettingsIsUserSettings(opts) ? [] : installedClaudeHookCommands({ ...opts, user: false });
-  const commands = [...projectHooks, ...installedClaudeHookCommands({ ...opts, user: true })].map((hook) => hook.command);
-  if (commands.every(launchesBundleDirectly)) {
+  const userCommands = installedClaudeHookCommands({ ...opts, user: true }).map((hook) => hook.command);
+  // A project hook never counts as a direct launch: doctor does not run a bundle a project settings file names, so its hook is measured through the PATH mem.
+  if (projectHooks.length === 0 && userCommands.every(launchesBundleDirectly)) {
     return [];
   }
   let ms: number | null;
