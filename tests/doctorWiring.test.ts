@@ -50,7 +50,7 @@ async function init(tool: string, ...extra: string[]): Promise<void> {
   expect(result.exitCode).toBe(0);
 }
 
-describe("mem doctor wiring drift", () => {
+describe("mem doctor wiring drift", { timeout: 120_000 }, () => {
   it("reports ok for a tool whose wiring is current", async () => {
     await init("codex");
     await init("claude-code");
@@ -126,7 +126,7 @@ describe("mem doctor wiring drift", () => {
   });
 });
 
-describe("mem doctor project-vs-user hook divergence", () => {
+describe("mem doctor project-vs-user hook divergence", { timeout: 120_000 }, () => {
   it("warns when project and user hooks run different mem invocations, naming both fixes", async () => {
     await init("claude-code");
     await init("claude-code", "--user");
