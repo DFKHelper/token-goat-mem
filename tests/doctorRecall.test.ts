@@ -124,6 +124,23 @@ describe("describeLastSurfaced", () => {
     expect(quiet?.message).toContain("unreadable");
   });
 
+  it("treats a lenient-only date string as unreadable instead of reading it as a real date", () => {
+    for (const lenient of ["1", "2026", "12/31/2026"]) {
+      const entry = describeLastSurfaced(lenient, 3, now)[0];
+      expect(entry?.status).toBe("warn");
+      expect(entry?.message).toContain("last surfacing timestamp is unreadable");
+    }
+    const valid = describeLastSurfaced("2026-10-11T11:30:00.000Z", 3, now)[0];
+    expect(valid?.status).toBe("ok");
+    expect(valid?.message).toContain("last fact surfaced 2026-10-11T11:30:00.000Z");
+  });
+
+  it("strips control characters, ESC included, from an unreadable timestamp before echoing it", () => {
+    const message = describeLastSurfaced("bad\u001b[31mred\u0007\nvalue", 3, now)[0]?.message ?? "";
+    expect(message).toContain('("bad[31mredvalue")');
+    expect(message).not.toMatch(/\p{Cc}/u);
+  });
+
   it("truncates an unreadable timestamp to 40 characters in the message", () => {
     const message = describeLastSurfaced("x".repeat(100), 1, now)[0]?.message ?? "";
     expect(message).toContain(`("${"x".repeat(40)}")`);

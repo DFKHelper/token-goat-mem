@@ -5,7 +5,10 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { hookGapRemedy } from "../src/doctor.js";
+import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
+import { HANGING_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
 
 interface JsonFinding {
   readonly check: string;
@@ -158,5 +161,30 @@ describe("mem doctor project-vs-user hook divergence", () => {
     expect(wiring.filter((entry) => entry.status !== "ok")).toEqual([]);
     expect(wiring.some((entry) => entry.message.includes("stale"))).toBe(false);
     expect(await doctorFindings("hook-divergence")).toEqual([]);
+  });
+});
+
+describe("mem hook capability probe that gets no answer", { timeout: 120_000 }, () => {
+  it("reports a probe that timed out as such, not as a mem without the `mem hook <event>` entry point", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "mem-dw-bin-"));
+    try {
+      writeFakeMem(binDir, HANGING_MEM_SHIM);
+      const isWindows = process.platform === "win32";
+      const binPath = join(binDir, isWindows ? "mem.cmd" : "mem");
+      expect(checkHookCapability(binPath, { subcommand: "hook", flags: ["session-start"] }, 1000)).toEqual({ capable: false, missing: [], probeFailed: true });
+
+      const health = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS.slice(0, 1), { pathEnv: binDir, platform: isWindows ? "win32" : "linux", timeoutMs: 1000 });
+      const [hook] = health.hooks;
+      expect(hook?.capable).toBe(false);
+      expect(hook?.missing).toEqual([]);
+      expect(hook?.probeFailure).toContain("could not probe");
+      expect(hook?.probeFailure).toContain("within 1 s");
+      expect(hook?.probeFailure).not.toContain("entry point");
+      expect(hookGapRemedy(hook ?? {})).toContain("less busy");
+      expect(hookGapRemedy(hook ?? {})).not.toContain("npm install");
+      expect(hookGapRemedy({})).toBe("npm install -g token-goat-mem");
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
   });
 });

@@ -8,7 +8,7 @@ import { extractRememberedId, runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, insertFact, openStorage } from "../src/storage.js";
 
-// Process launches on this machine take 1-10 s, past the 4000 ms probe budget in wiring.ts; the floor keeps capability tests from timing out on launch latency.
+// Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
 
 let home: string;

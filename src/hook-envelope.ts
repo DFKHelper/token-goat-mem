@@ -1,5 +1,7 @@
 /** Parsing for the JSON envelope a coding tool's hook hands `mem recall --hook-stdin` on stdin. Claude Code delivers every hook's input as one JSON object on stdin (not env vars). `session_id` is a common field present on every event; a `UserPromptSubmit` hook additionally carries the submitted text in `prompt` (hooks reference, "UserPromptSubmit input"). Other tools, and the plugin-authoring guide's own `$USER_PROMPT` naming, suggest `user_prompt`, so a short ordered probe list is used rather than one hard-coded key. Everything here fails open. A hook that exits non-zero, or prints a parse error into an agent's context, is worse than a hook that returns unranked facts -- so an unexpected shape, a truncated pipe, or a non-string field degrades to "no query / no session", never to an error. */
 
+import { isAbsolute } from "node:path";
+
 /** Keys probed, in order, for the submitted prompt text; the first non-empty string wins. */
 export const HOOK_PROMPT_KEYS: readonly string[] = ["prompt", "user_prompt", "message"];
 
@@ -21,7 +23,7 @@ export interface HookEnvelope {
   readonly transcriptPath?: string;
   /** Whether a Stop hook already continued this agent, when the envelope carried a real boolean under `stop_hook_active`. */
   readonly stopHookActive?: boolean;
-  /** The working directory the host reported, when the envelope carried a non-empty string under `cwd`; `mem hook` falls back to it when `CLAUDE_PROJECT_DIR` is unset. */
+  /** The working directory the host reported, when the envelope carried an absolute path under `cwd` (a relative one is ignored, as if absent); `mem hook` falls back to it when `CLAUDE_PROJECT_DIR` is unset. */
   readonly cwd?: string;
 }
 
@@ -51,7 +53,8 @@ export function parseHookEnvelope(raw: string): HookEnvelope {
   }
   const transcriptPath = nonEmptyString(record[HOOK_TRANSCRIPT_KEY]);
   const stopHookActive = record[HOOK_STOP_ACTIVE_KEY];
-  const cwd = nonEmptyString(record["cwd"]);
+  const reportedCwd = nonEmptyString(record["cwd"]);
+  const cwd = reportedCwd !== undefined && isAbsolute(reportedCwd) ? reportedCwd : undefined;
   return {
     ...(cwd !== undefined ? { cwd } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),

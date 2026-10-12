@@ -12,7 +12,7 @@ import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } f
 import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, createHttpEmbeddingBackend, type EmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
-import { formatAge, MS_PER_DAY } from "./timeUtils.js";
+import { formatAge, MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
 import { describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
 import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, type WiringOpts } from "./wiring.js";
@@ -63,9 +63,13 @@ function describeWhyCoverage(withWhy: number, total: number): Finding[] {
 /** The age past which the last recorded surfacing counts as stale: doctor warns about it only while recallable facts exist, so an empty store stays quiet. */
 export const LAST_SURFACED_WARN_AFTER_MS = 7 * MS_PER_DAY;
 
+/** C0 and C1 control characters (ESC included), stripped from a stored value before it is echoed so it cannot drive the terminal. */
+const CONTROL_CHARACTERS = /\p{Cc}/gu;
+
 /** `mem doctor`'s last-surfacing line: when recall last put a fact in front of a session, a lower bound only -- a recall that surfaced nothing, or took a path that does not log, leaves no record. Silent hook death (every hook exiting 0 with empty output) is otherwise invisible; a store full of facts with no recent surfacing is the symptom. It warns when active or pinned facts exist and either nothing was ever surfaced or the last surfacing is older than LAST_SURFACED_WARN_AFTER_MS (7 days); a timestamp in the future (clock skew) is reported as such and stays ok. */
 export function describeLastSurfaced(latest: string | null, recallableFacts: number, now: Date): Finding[] {
-  const at = latest === null ? Number.NaN : Date.parse(latest);
+  const parsed = latest === null ? null : parseStrictIsoTimestamp(latest);
+  const at = parsed ?? Number.NaN;
   if (latest !== null && !Number.isFinite(at)) {
     return recallableFacts === 0
       ? [finding("store", "ok", "recall: last surfacing timestamp is unreadable (the store has no active or pinned facts)")]
@@ -73,7 +77,7 @@ export function describeLastSurfaced(latest: string | null, recallableFacts: num
           finding(
             "store",
             "warn",
-            `recall: last surfacing timestamp is unreadable ("${latest.slice(0, 40)}"), though the store has active or pinned facts (the recall hooks may not be running; run mem doctor after the next recall)`
+            `recall: last surfacing timestamp is unreadable ("${latest.replace(CONTROL_CHARACTERS, "").slice(0, 40)}"), though the store has active or pinned facts (the recall hooks may not be running; run mem doctor after the next recall)`
           ),
         ];
   }
@@ -151,6 +155,11 @@ function describeScopePlacement(unreachableRoots: number, unreachableFacts: numb
   return lines;
 }
 
+/** The remedy for an installed hook that cannot run: upgrading fixes a real capability gap, but a probe that timed out says nothing about the mem version, so it gets a retry hint instead. */
+export function hookGapRemedy(hook: { readonly probeFailure?: string }): string {
+  return hook.probeFailure === undefined ? "npm install -g token-goat-mem" : "re-run mem doctor once the machine is less busy (a probe that times out says nothing about the mem version)";
+}
+
 /** `doctor` section for Claude Code hooks: the `mem` binary that actually resolves on PATH (which may be a different build than the one running this `doctor`), and whether each installed hook command -- read from disk, not from what this build would write -- can run against it. Checks both project-level (cwd) and user-level (`--user` install) settings.json, since either or both may exist and `doctor` takes no `--root`/`--user` of its own. This is the check that would have surfaced the 219-hook-failure incident on day one: a stale PATH binary rejecting a newer install's flags produces a `capable: false` line here on the very first `mem doctor` run, instead of five days of silent `|| true` swallowing. */
 function describeHookHealth(opts: WiringOpts): Finding[] {
   const project = installedClaudeHookCommands(opts);
@@ -185,8 +194,8 @@ function describeHookHealth(opts: WiringOpts): Finding[] {
           : finding(
               "hooks",
               "fail",
-              `  ${hook.event}: ${health.bin === null ? "would be inert" : `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
-              "npm install -g token-goat-mem"
+              `  ${hook.event}: ${health.bin === null ? "would be inert" : hook.probeFailure ?? `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
+              hookGapRemedy(hook)
             )
       );
     }
@@ -419,7 +428,13 @@ function inspectStoreFile(dbPath: string, inspect: (db: Database.Database) => St
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
-    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how many decisions and corrections carry a why, how much of the store fits in one recall block, when recall last surfaced a fact, and project/path-scoped facts whose root is gone; --probe-embeddings adds one real embed request to the configured endpoint")
+    .description(
+      "Environment/DB health check that changes no fact or file: db path, WAL mode, foreign keys, schema tables and pending migrations, integrity, epoch, fact counts by status, source and audit_log row counts, " +
+        "embedding configuration and coverage, dream configuration, how many decisions and corrections carry a why, term coverage, how much of the store fits in one recall block, when recall last surfaced a fact, " +
+        "project/path-scoped facts whose root is gone, backup snapshots, installed Claude Code hooks (can the mem on PATH run each one, is a hook in the legacy shape that `mem init claude-code` rewrites to `mem hook <event>`, " +
+        "or did a probe of that mem time out), project-versus-user hook divergence, mem launch time, and wiring drift per tool. " +
+        "The one network call is --probe-embeddings, which makes a single embed request to the configured embedding endpoint"
+    )
     .option("--json", "Output the findings as machine-readable JSON: { findings: [{ check, status, message, remedy? }], epoch } (unstable, pre-1.0)")
     .option("--root <dir>", "Project root whose Claude Code hooks and tool config files doctor inspects (default: the current directory)")
     .option("--strict", "Exit 1 when any finding has status fail (an installed hook that cannot run, an unreadable store); without it doctor always exits 0 so a warning never breaks a script")

@@ -19,6 +19,9 @@ export const OLD_MEM_SHIM =
   'if (args[0] === "recall" && args[1] === "--help") { process.stdout.write("--hint-format --root\\n"); process.exit(0); }\n' +
   "process.exit(1);\n";
 
+/** Answers nothing for a few seconds, then exits 0: a healthy binary that a probe with a short budget cannot tell from a hang. */
+export const HANGING_MEM_SHIM = "#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 5000);\n";
+
 /** Writes `body` as `mem` (and a `mem.cmd` wrapper) into `dir`. */
 export function writeFakeMem(dir: string, body: string): void {
   writeFileSync(join(dir, "mem"), body, "utf8");

@@ -755,11 +755,13 @@ function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
       "     install with `npm i -g token-goat-mem`, or re-run with --force to write them anyway",
     ].join("\n");
   }
-  const gaps = [...new Set(incapable.map((hook) => describeHookGap(hook.command, hook.missing)))];
+  const unprobed = [...new Set(incapable.flatMap((hook) => (hook.probeFailure === undefined ? [] : [hook.probeFailure])))];
+  const gaps = [...new Set(incapable.filter((hook) => hook.probeFailure === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
   return [
     `mem: hooks will invoke ${health.bin.path}, which is ${health.bin.version ?? "an unknown version"}`,
-    `     it does not support: ${gaps.join(", ")}`,
-    "     upgrade with `npm i -g token-goat-mem`, or re-run with --force",
+    ...unprobed.map((sentence) => `     ${sentence}`),
+    ...(gaps.length > 0 ? [`     it does not support: ${gaps.join(", ")}`] : []),
+    gaps.length > 0 ? "     upgrade with `npm i -g token-goat-mem`, or re-run with --force" : "     re-run once the machine is less busy, or re-run with --force to write the hooks without the check",
   ].join("\n");
 }
 
@@ -2710,14 +2712,17 @@ export function buildProgram(): Command {
         "partial write. Add `*.token-goat-mem.bak` to this project's .gitignore: install takes a one-time snapshot of any " +
         "pre-existing file before its first write. Installing both an AGENTS.md tool (codex/copilot-cli/copilot-vscode/opencode) and " +
         "a copilot-instructions.md tool (copilot-visual-studio/copilot-jetbrains) writes mem's block into both files, which " +
-        "VS Code and Copilot CLI both read -- harmless, just redundant tokens."
+        "VS Code and Copilot CLI both read -- harmless, just redundant tokens. " +
+        "For claude-code the hooks call `mem hook <event>`, so before writing them init probes the `mem` on PATH (or the installed bundle) with `--help` and refuses " +
+        "when it has no `hook` command, naming that binary; a probe that gets no answer within the probe budget is reported as such (it could not probe), not as an old binary. " +
+        "Re-running `mem init claude-code` also rewrites hooks installed in the older shape, which carried recall flags in the settings file."
     )
     .option("--root <path>", "Project root to write project-level config into (default: current directory)")
     .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")
     .option("--dry-run", "Print what would be written without touching disk")
     .option(
       "--force",
-      "Write Claude Code hooks even if the mem binary on PATH can't run them (skips the pre-flight capability check)"
+      "Write Claude Code hooks even if the mem binary on PATH has no `hook` command or could not be probed in time (skips the pre-flight capability check)"
     )
     .action(
       guard((tool: string, options: InitCliOptions) => {

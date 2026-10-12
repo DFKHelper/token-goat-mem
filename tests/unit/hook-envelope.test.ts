@@ -24,6 +24,11 @@ describe("parseHookEnvelope", () => {
     });
   });
 
+  it("ignores a relative cwd, as if the envelope carried none", () => {
+    expect(parseHookEnvelope(JSON.stringify({ session_id: "s1", cwd: "../elsewhere" }))).toEqual({ sessionId: "s1" });
+    expect(parseHookEnvelope(JSON.stringify({ session_id: "s1", cwd: "project" }))).toEqual({ sessionId: "s1" });
+  });
+
   it("reads a SessionStart envelope (session_id, no prompt) as session-only", () => {
     const envelope = parseHookEnvelope(JSON.stringify({ session_id: "s1", hook_event_name: "SessionStart", source: "startup" }));
     expect(envelope).toEqual({ sessionId: "s1" });

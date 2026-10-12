@@ -905,12 +905,20 @@ export function resolveBinaryOnPath(
 
 /** Runs `binPath <args>` and returns its stdout+stderr, or `null` if it could not be started, timed out, or exited nonzero. The command is assembled as one shell string (quoting each token) and run with `shell: true` rather than passed as an argv array: Windows cannot exec an npm-installed `.cmd`/`.bat` shim directly (`spawnSync` raises `EINVAL`), and `shell: true` with a separate argv array is a documented footgun (Node's own DEP0190) because the array elements are concatenated into the command line unescaped -- quoting them here, once, in the string form avoids both. */
 function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: number): string | null {
+  return runMemProbe(binPath, args, timeoutMs).output;
+}
+
+/** `runMemSubprocess` plus whether the run produced no exit at all (a timeout or spawn error, `unanswered`), as against a binary that ran and exited nonzero: an old binary answers an unknown subcommand with exit 1, which says something about it, where a timeout does not. */
+function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number): { readonly output: string | null; readonly unanswered: boolean } {
   const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
   const result = spawnSync(quoted, { encoding: "utf8", timeout: timeoutMs, shell: true });
-  if (result.error !== undefined || result.status !== 0) {
-    return null;
+  if (result.error !== undefined) {
+    return { output: null, unanswered: true };
   }
-  return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  if (result.status !== 0) {
+    return { output: null, unanswered: false };
+  }
+  return { output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`, unanswered: false };
 }
 
 /** How long a capability probe of the installed `mem` may run: a machine whose antivirus scans every process launch can take several seconds on a healthy binary, and a tighter budget makes it look incapable. */
@@ -928,16 +936,16 @@ export function resolveMemBinary(
   return { path, version: output === null ? null : output.trim() || null };
 }
 
-/** Whether `binPath` accepts `spec`'s subcommand and every one of its flags, determined from its own `--help` output. `missing` names the unsupported subcommand (as its only element) when the subcommand itself doesn't exist, or the unsupported flags otherwise. */
+/** Whether `binPath` accepts `spec`'s subcommand and every one of its flags, determined from its own `--help` output. `missing` names the unsupported subcommand (as its only element) when the subcommand itself doesn't exist, or the unsupported flags otherwise. `probeFailed` is set, with `missing` empty, when the probe itself got no answer (a timeout or spawn error; a nonzero exit still reports the subcommand missing): that says nothing about what the binary supports. */
 export function checkHookCapability(
   binPath: string,
   spec: { readonly subcommand: string; readonly flags: readonly string[] },
   timeoutMs = MEM_PROBE_TIMEOUT_MS,
   launcherArgs: readonly string[] = []
-): { readonly capable: boolean; readonly missing: readonly string[] } {
-  const help = runMemSubprocess(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs);
+): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true } {
+  const { output: help, unanswered } = runMemProbe(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs);
   if (help === null) {
-    return { capable: false, missing: [spec.subcommand] };
+    return unanswered ? { capable: false, missing: [], probeFailed: true } : { capable: false, missing: [spec.subcommand] };
   }
   if (spec.subcommand === "hook") {
     // The slug is the only thing a `hook` command depends on. A binary without a `hook` command answers `hook --help` with its root help (or an error), which never names a slug, so an absent slug is reported as the command being missing.
@@ -954,6 +962,8 @@ export interface HookCapabilityResult {
   readonly command: string;
   readonly capable: boolean;
   readonly missing: readonly string[];
+  /** Set when the probe of the binary got no answer in time, so `missing` says nothing about what it supports; the sentence names the probed binary and the budget. */
+  readonly probeFailure?: string;
 }
 
 /** Full health picture for a set of `{event, command}` hook entries: the resolved `mem` binary (or `null`), and each entry's capability against it. */
@@ -972,14 +982,16 @@ export function checkClaudeHookHealth(
     // A direct-launch hook runs its own bundle first, so that bundle -- not whatever `mem` PATH resolves to -- is what must support the flags; a bundle that is gone falls through to the PATH binary, exactly as the hook itself would.
     const bundle = parseHookBundlePath(command);
     if (spec !== null && bundle !== null && existsSync(bundle)) {
-      const { capable, missing } = checkHookCapability("node", spec, opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS, [bundle]);
-      return { event, command, capable, missing };
+      const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
+      const { capable, missing, probeFailed } = checkHookCapability("node", spec, timeoutMs, [bundle]);
+      return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}) };
     }
     if (bin === null || spec === null) {
       return { event, command, capable: false, missing: spec === null ? [] : spec.flags };
     }
-    const { capable, missing } = checkHookCapability(bin.path, spec, opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
-    return { event, command, capable, missing };
+    const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
+    const { capable, missing, probeFailed } = checkHookCapability(bin.path, spec, timeoutMs);
+    return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bin.path, timeoutMs) } : {}) };
   });
   return { bin, hooks };
 }
@@ -993,6 +1005,11 @@ export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeou
   const started = performance.now();
   const out = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
   return out === null ? null : performance.now() - started;
+}
+
+/** The one sentence for a capability probe that got no answer: it names the probed binary and the budget and claims nothing about the binary's version, since a slow launch (antivirus scanning) looks the same as a hang from here. */
+export function describeProbeFailure(probed: string, timeoutMs: number): string {
+  return `could not probe \`${probed}\` within ${timeoutMs / 1000} s (it gave no answer to --help in time; the launch may be slow rather than the binary old)`;
 }
 
 /** Human-readable "<subcommand> <missing flags>" (or just "<subcommand>" when the subcommand itself is unsupported), for reporting one incapable hook; a stamped command in no shape mem recognises names its remedy instead of a placeholder subcommand. */
