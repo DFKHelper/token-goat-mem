@@ -881,6 +881,9 @@ function runMemSubprocess(binPath: string, args: readonly string[], timeoutMs: n
   return `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
 }
 
+/** How long a capability probe of the installed `mem` may run: a machine whose antivirus scans every process launch can take several seconds on a healthy binary, and a tighter budget makes it look incapable. */
+export const MEM_PROBE_TIMEOUT_MS = 10_000;
+
 /** Resolves `mem` on PATH and its reported version, or `null` if nothing resolves. */
 export function resolveMemBinary(
   opts: { readonly pathEnv?: string; readonly pathExt?: string; readonly platform?: NodeJS.Platform; readonly timeoutMs?: number } = {}
@@ -889,7 +892,7 @@ export function resolveMemBinary(
   if (path === null) {
     return null;
   }
-  const output = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? 4000);
+  const output = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
   return { path, version: output === null ? null : output.trim() || null };
 }
 
@@ -897,7 +900,7 @@ export function resolveMemBinary(
 export function checkHookCapability(
   binPath: string,
   spec: { readonly subcommand: string; readonly flags: readonly string[] },
-  timeoutMs = 4000,
+  timeoutMs = MEM_PROBE_TIMEOUT_MS,
   launcherArgs: readonly string[] = []
 ): { readonly capable: boolean; readonly missing: readonly string[] } {
   const help = runMemSubprocess(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs);
@@ -932,13 +935,13 @@ export function checkClaudeHookHealth(
     // A direct-launch hook runs its own bundle first, so that bundle -- not whatever `mem` PATH resolves to -- is what must support the flags; a bundle that is gone falls through to the PATH binary, exactly as the hook itself would.
     const bundle = parseHookBundlePath(command);
     if (spec !== null && bundle !== null && existsSync(bundle)) {
-      const { capable, missing } = checkHookCapability("node", spec, opts.timeoutMs ?? 4000, [bundle]);
+      const { capable, missing } = checkHookCapability("node", spec, opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS, [bundle]);
       return { event, command, capable, missing };
     }
     if (bin === null || spec === null) {
       return { event, command, capable: false, missing: spec === null ? [] : spec.flags };
     }
-    const { capable, missing } = checkHookCapability(bin.path, spec, opts.timeoutMs ?? 4000);
+    const { capable, missing } = checkHookCapability(bin.path, spec, opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
     return { event, command, capable, missing };
   });
   return { bin, hooks };
@@ -951,7 +954,7 @@ export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeou
     return null;
   }
   const started = performance.now();
-  const out = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? 10000);
+  const out = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS);
   return out === null ? null : performance.now() - started;
 }
 

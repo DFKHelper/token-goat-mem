@@ -66,6 +66,17 @@ export const LAST_SURFACED_WARN_AFTER_MS = 7 * MS_PER_DAY;
 /** `mem doctor`'s last-surfacing line: when recall last put a fact in front of a session, a lower bound only -- a recall that surfaced nothing, or took a path that does not log, leaves no record. Silent hook death (every hook exiting 0 with empty output) is otherwise invisible; a store full of facts with no recent surfacing is the symptom. It warns when active or pinned facts exist and either nothing was ever surfaced or the last surfacing is older than LAST_SURFACED_WARN_AFTER_MS (7 days); a timestamp in the future (clock skew) is reported as such and stays ok. */
 export function describeLastSurfaced(latest: string | null, recallableFacts: number, now: Date): Finding[] {
   const at = latest === null ? Number.NaN : Date.parse(latest);
+  if (latest !== null && !Number.isFinite(at)) {
+    return recallableFacts === 0
+      ? [finding("store", "ok", "recall: last surfacing timestamp is unreadable (the store has no active or pinned facts)")]
+      : [
+          finding(
+            "store",
+            "warn",
+            `recall: last surfacing timestamp is unreadable ("${latest.slice(0, 40)}"), though the store has active or pinned facts (the recall hooks may not be running; run mem doctor after the next recall)`
+          ),
+        ];
+  }
   if (!Number.isFinite(at)) {
     return recallableFacts === 0
       ? [finding("store", "ok", "recall: no fact has been surfaced yet (the store has no active or pinned facts)")]
@@ -397,7 +408,7 @@ function inspectStoreFile(dbPath: string, inspect: (db: Database.Database) => St
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
-    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how many decisions and corrections carry a why, how much of the store fits in one recall block, and project/path-scoped facts whose root is gone")
+    .description("Read-only environment/DB health check: db path, WAL mode, schema tables, epoch, fact counts by status, embedding configuration and coverage, how many decisions and corrections carry a why, how much of the store fits in one recall block, when recall last surfaced a fact, and project/path-scoped facts whose root is gone; --probe-embeddings adds one real embed request to the configured endpoint")
     .option("--json", "Output the findings as machine-readable JSON: { findings: [{ check, status, message, remedy? }], epoch } (unstable, pre-1.0)")
     .option("--root <dir>", "Project root whose Claude Code hooks and tool config files doctor inspects (default: the current directory)")
     .option("--strict", "Exit 1 when any finding has status fail (an installed hook that cannot run, an unreadable store); without it doctor always exits 0 so a warning never breaks a script")

@@ -856,6 +856,12 @@ describe("mem dream", () => {
     expect(on.stdout).not.toContain("/v1/chat/completions");
   });
 
+  it("names the last-surfacing check and --probe-embeddings in `mem doctor --help`", async () => {
+    const help = await runCli(["doctor", "--help"]);
+    expect(help.stdout).toContain("surfaced a fact");
+    expect(help.stdout).toContain("--probe-embeddings");
+  });
+
   it("reports a broken dream config in `mem doctor` rather than crashing the health check", async () => {
     // doctor's whole job is to run when things are wrong; a misconfiguration must be a line in the report, not an exception that suppresses every check after it.
     process.env[URL_ENV] = "not a url";

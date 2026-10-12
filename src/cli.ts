@@ -2152,7 +2152,7 @@ export function buildProgram(): Command {
         let reason: ForgetReason | undefined;
         if (options.reason !== undefined) {
           if (!isForgetReason(options.reason)) {
-            throw new UsageError(`--reason must be one of ${FORGET_REASONS.join(", ")} (got "${options.reason}")`);
+            throw new UsageError(`--reason must be one of ${FORGET_REASONS.join(", ")}`);
           }
           reason = options.reason;
         }

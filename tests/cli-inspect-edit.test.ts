@@ -52,6 +52,14 @@ describe("mem forget --reason records why a fact was retired", () => {
     expect((await runCli(["show", id])).stdout).toContain(`forget_reason: ${reason}`);
   });
 
+  it("does not echo a rejected --reason value back to stderr", async () => {
+    const id = await rememberFact("the staging database is read only");
+    const refused = await runCli(["forget", id, "--reason", "MARKER-rejected-free-text"]);
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stderr).toContain("--reason must be one of");
+    expect(refused.stderr).not.toContain("MARKER-rejected-free-text");
+  });
+
   it("refuses an unknown reason with a usage error and leaves the fact and audit log untouched", async () => {
     const id = await rememberFact("the staging database is read only");
     const refused = await runCli(["forget", id, "--reason", "bogus"]);

@@ -114,6 +114,22 @@ describe("describeLastSurfaced", () => {
     expect(describeLastSurfaced(null, 0, now)[0]?.status).toBe("ok");
   });
 
+  it("reports an unparseable timestamp as unreadable, not as never surfaced", () => {
+    const warned = describeLastSurfaced("not-a-date", 3, now)[0];
+    expect(warned?.status).toBe("warn");
+    expect(warned?.message).toContain('last surfacing timestamp is unreadable ("not-a-date")');
+    expect(warned?.message).not.toContain("no fact has been surfaced yet");
+    const quiet = describeLastSurfaced("not-a-date", 0, now)[0];
+    expect(quiet?.status).toBe("ok");
+    expect(quiet?.message).toContain("unreadable");
+  });
+
+  it("truncates an unreadable timestamp to 40 characters in the message", () => {
+    const message = describeLastSurfaced("x".repeat(100), 1, now)[0]?.message ?? "";
+    expect(message).toContain(`("${"x".repeat(40)}")`);
+    expect(message).not.toContain("x".repeat(41));
+  });
+
   it("warns with the remedy when the last surfacing is 8 days old and facts are recallable", () => {
     const entry = describeLastSurfaced("2026-10-03T12:00:00.000Z", 3, now)[0];
     expect(entry?.status).toBe("warn");

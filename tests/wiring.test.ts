@@ -19,6 +19,7 @@ import {
   copilotVisualStudio,
   copilotVscode,
   describeHookGap,
+  MEM_PROBE_TIMEOUT_MS,
   installedClaudeHookCommands,
   opencode,
   parseHookCommandSpec,
@@ -2155,5 +2156,14 @@ describe("copilot-vscode shared user keybindings", () => {
     expect(JSON.parse(read(keybindingsPath))).toHaveLength(2);
     copilotVscode.uninstall({ root, homeDir: home, user: true });
     expect(existsSync(keybindingsPath)).toBe(false);
+  });
+});
+
+describe("MEM_PROBE_TIMEOUT_MS", () => {
+  it("is 10 seconds and no bare probe timeout literal remains in wiring.ts", () => {
+    expect(MEM_PROBE_TIMEOUT_MS).toBe(10_000);
+    const source = readFileSync(join(__dirname, "..", "src", "wiring.ts"), "utf8");
+    expect(source).not.toContain("4000");
+    expect(source).not.toContain("10000");
   });
 });
