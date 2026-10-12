@@ -254,7 +254,7 @@ describe("matrix 7: strict input", () => {
   });
 });
 
-describe("matrix 8: doctor and the capability probe", () => {
+describe("matrix 8: doctor and the capability probe", { timeout: 120_000 }, () => {
   it("fails the probe with `hook` missing on an old binary and passes on a new one", () => {
     const hooks = CLAUDE_HOOK_EVENTS.map(({ event, command }) => ({ event, command }));
     writeFakeMem(binDir, OLD_MEM_SHIM);

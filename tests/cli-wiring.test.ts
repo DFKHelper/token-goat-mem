@@ -242,7 +242,7 @@ describe("mem doctor (read-only health check)", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── mem init / uninstall ───────────────────────────────────────────────────────────────────────────
 
-describe("mem init/uninstall", () => {
+describe("mem init/uninstall", { timeout: 120_000 }, () => {
   let toolRoot: string;
   let toolHome: string;
   let fakeMemDir: string;

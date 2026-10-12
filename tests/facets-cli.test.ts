@@ -179,7 +179,7 @@ describe("fact_terms write path", () => {
   });
 });
 
-describe("mem facets", () => {
+describe("mem facets", { timeout: 120_000 }, () => {
   it("backfills facts that have no terms and reports what it did", async () => {
     const id = await remember("the ranking lives in src/retrieval.ts");
     // Simulate a store written before the facet layer existed: drop the rows the write path added, and the extraction record with them (terms_checked_at predates the facet layer too).

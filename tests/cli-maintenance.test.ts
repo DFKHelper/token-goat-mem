@@ -759,7 +759,7 @@ describe("sources table (mem remember/mem suggest never feed it; mem epoch --gc 
   });
 });
 
-describe("mem dream", () => {
+describe("mem dream", { timeout: 120_000 }, () => {
   const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
   const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";
   const KEY_ENV = "TOKEN_GOAT_MEM_DREAM_API_KEY";

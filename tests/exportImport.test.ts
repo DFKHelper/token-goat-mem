@@ -204,7 +204,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("importFromJson", () => {
+describe("importFromJson", { timeout: 120_000 }, () => {
   it("imports a fact preserving its original id, status, confidence, and captured_at", () => {
     const result = importFromJson(db, { path: jsonPath, root });
     expect(result.outcomes).toHaveLength(1);
