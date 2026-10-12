@@ -50,12 +50,46 @@ describe("secret-screen corpus: a uuid next to a credential keyword stays flagge
   });
 });
 
-describe("secret-screen corpus: known limitation, benign but kept flagged", () => {
-  // Kebab ids with digit segments stay flagged on purpose (tests/capture.test.ts pins the same catch as desired).
+describe("secret-screen corpus: kebab and snake identifiers with short number segments pass", () => {
   it.each([
-    { name: "kebab id with a digit segment", text: "feature-flag-new-checkout-flow-experiment-variant-v2" },
+    { name: "kebab id with a version segment", text: "feature-flag-new-checkout-flow-experiment-variant-v2" },
     { name: "kebab deploy id with digit segments", text: "deploy-prod-eu-west-1-blue-green-release-candidate-2" },
-  ])("keeps $name flagged as generic-high-entropy-token", ({ text }) => {
+    { name: "kebab id with a year", text: "feature-flag-2026-rollout-for-search-ranking-v2" },
+    { name: "snake id with a year", text: "migration_plan_2026_for_the_billing_service_v3" },
+  ])("passes $name", ({ text }) => {
+    expect(patternNamesFor(text)).toEqual([]);
+  });
+});
+
+describe("secret-screen corpus: random-looking hyphenated tokens stay flagged", () => {
+  it.each([
+    { name: "hyphen-joined base64 groups", text: "Xk9Pq2LmZ8-vB3nRt7YwQ1-aS5dFg6HjK4-mN8pQ2rT" },
+    { name: "lowercase hex groups", text: "3f9a-1c7e-2b8d-04f6-5a93-ce17-b240-9d1f-77aa" },
+    { name: "lowercase letter-digit groups", text: "a8f3k2-9xq7m1-p4z6w0-h2j5n8-c1v3b7-t9y4u6" },
+    { name: "digits glued into words", text: "subagent-git2-discard-prohibition9-and-more-words" },
+  ])("flags $name as generic-high-entropy-token", ({ text }) => {
     expect(patternNamesFor(text)).toContain(GENERIC);
+  });
+});
+
+describe("secret-screen corpus: a uuid beside a credential keyword is flagged whatever its entropy", () => {
+  const LOW_ENTROPY_UUID = "11111111-1111-1111-1111-111111111111";
+
+  it.each([
+    { name: "api key label", text: `api key ${LOW_ENTROPY_UUID}` },
+    { name: "token label", text: `token: ${LOW_ENTROPY_UUID}` },
+    { name: "keyword after the uuid", text: `${LOW_ENTROPY_UUID} is the staging password` },
+  ])("flags a low-entropy uuid in $name", ({ text }) => {
+    expect(patternNamesFor(text)).toContain(GENERIC);
+  });
+
+  it("passes a bare low-entropy uuid with no credential keyword", () => {
+    expect(patternNamesFor(`the session id is ${LOW_ENTROPY_UUID}`)).toEqual([]);
+    expect(patternNamesFor(`fact ${LOW_ENTROPY_UUID} is the canonical one`)).toEqual([]);
+  });
+
+  it("still exempts a low-entropy uuid in a transcript sourceRef under a credential-named directory", () => {
+    const sourceRef = `/home/x/.claude/projects/token-goat-mem/${LOW_ENTROPY_UUID}.jsonl#turn3`;
+    expect(screenForSecrets({ text: `the session id is ${LOW_ENTROPY_UUID}`, sourceRef }, [])).toEqual([]);
   });
 });

@@ -290,10 +290,15 @@ function isPathShapedToken(token: string): boolean {
 /** One `[._-]`-delimited word of a prose-shaped identifier: pure lowercase letters, no digits, no separators of its own -- deliberately narrower than `PATH_SEGMENT` (which allows digits and internal `[._-]` runs), because a slash-less token has no directory-name convention to lean on and so gets no benefit of the doubt beyond plain English words. */
 const PROSE_WORD = /^[a-z]+$/;
 
-/** Whether a slash-free token is shaped like a kebab/snake/dotted-case prose identifier -- `subagent-git-discard-prohibition`, the kind of descriptive `mem remember --subject`/`--value` key this project's own CLAUDE.md tells agents to pass -- which the generic entropy heuristic must not flag. `isPathShapedToken` above already exempts this shape when it contains a slash; a slash-less kebab identifier never reaches that check (it returns early on `!token.includes("/")`) and so falls straight through to `generic-high-entropy-token` once it clears 32 characters, which a descriptive multi-word subject key does routinely. Every named `SECRET_PATTERNS` entry (aws-access-key-id, github-token, slack-token, jwt, ...) runs unconditionally before this; this exemption only ever reaches the *unlabeled, prefix-less* entropy fallback. A real prefix-less secret is essentially always drawn from a base64/hex alphabet or carries digits/mixed case, so requiring every `[._-]`-delimited word to be pure lowercase letters -- no digits, no uppercase -- excludes it outright: it is what keeps a Slack-style `xoxb-1234567890-...` shape (or any base64 `+`/`=`/mixed-case blob) out of the exemption even if its named pattern were ever loosened. Two or more words are required so a single long lowercase run can never buy the exemption on its own, and each word is still capped at `MAX_UNBROKEN_SEGMENT_RUN` (the same bound `isPathSegment` uses for a path segment's internal runs) -- a real English word doesn't reach that length, whereas an unbroken lowercase run that long is the shape of a random token, not prose. */
+/** One `[._-]`-delimited numeric word of a prose-shaped identifier: one to four digits behind at most one letter (`2026`, `v2`, `1`), the year, version, and ordinal segments of a kebab key; a run mixing digits with several letters (`3f9a`, `git2`) is the shape of a hex or base64 fragment and is not one. */
+const PROSE_NUMBER_WORD = /^[a-z]?\d{1,4}$/;
+
+/** Whether a slash-free token is shaped like a kebab/snake/dotted-case prose identifier -- `subagent-git-discard-prohibition`, the kind of descriptive `mem remember --subject`/`--value` key this project's own CLAUDE.md tells agents to pass -- which the generic entropy heuristic must not flag. `isPathShapedToken` above already exempts this shape when it contains a slash; a slash-less kebab identifier never reaches that check (it returns early on `!token.includes("/")`) and so falls straight through to `generic-high-entropy-token` once it clears 32 characters, which a descriptive multi-word subject key does routinely. Every named `SECRET_PATTERNS` entry (aws-access-key-id, github-token, slack-token, jwt, ...) runs unconditionally before this; this exemption only ever reaches the *unlabeled, prefix-less* entropy fallback. A real prefix-less secret is essentially always drawn from a base64/hex alphabet or carries digits/mixed case, so requiring every `[._-]`-delimited word to be pure lowercase letters, or a short number (`PROSE_NUMBER_WORD`: up to four digits behind at most one letter) that does not outnumber the letter words, excludes it outright -- a digit glued into a word (`git2`), a hex fragment (`3f9a`) and any uppercase all disqualify the token: it is what keeps a Slack-style `xoxb-1234567890-...` shape (or any base64 `+`/`=`/mixed-case blob) out of the exemption even if its named pattern were ever loosened. Two or more words are required so a single long lowercase run can never buy the exemption on its own, and each word is still capped at `MAX_UNBROKEN_SEGMENT_RUN` (the same bound `isPathSegment` uses for a path segment's internal runs) -- a real English word doesn't reach that length, whereas an unbroken lowercase run that long is the shape of a random token, not prose. */
 function isProseShapedToken(token: string): boolean {
   const words = token.split(/[._-]/).filter((word) => word.length > 0);
-  return words.length >= 2 && words.every((word) => PROSE_WORD.test(word) && word.length <= MAX_UNBROKEN_SEGMENT_RUN);
+  const letterWords = words.filter((word) => PROSE_WORD.test(word) && word.length <= MAX_UNBROKEN_SEGMENT_RUN);
+  const numberWords = words.filter((word) => PROSE_NUMBER_WORD.test(word));
+  return letterWords.length >= 2 && letterWords.length + numberWords.length === words.length && numberWords.length <= letterWords.length;
 }
 
 function scanField(field: string, value: string, credentialContext: boolean): SecretMatch[] {
@@ -318,7 +323,10 @@ function scanField(field: string, value: string, credentialContext: boolean): Se
   let g = GENERIC_TOKEN.exec(genericValue);
   while (g !== null) {
     const token = g[0];
-    if (
+    if (!exemptField && credentialContext && CANONICAL_UUID.test(token)) {
+      // A UUID-shaped token beside a credential keyword is refused whatever its entropy: some services issue API keys as UUIDs, and a run of repeated digits is as plausible a key as a random one.
+      matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
+    } else if (
       !(exemptField && token.includes("/")) &&
       !isPathShapedToken(token) &&
       !isProseShapedToken(token) &&
@@ -623,7 +631,21 @@ export function screenFactFields(fields: ScreenableFactFields, allowlist: readon
 /** The marker `mem scan-session` stamps between a transcript path and its turn number in a `source_ref` (`<path>#turn<n>`); sessionCapture.ts writes it and {@link storedSourceRefContext} recognises it, so the format has one definition. */
 export const TRANSCRIPT_TURN_MARKER = "#turn";
 
-const STAMPED_TRANSCRIPT_REF = new RegExp(`^(?:[A-Za-z]:|/).*${TRANSCRIPT_TURN_MARKER}\\d+$`, "su");
+const STAMPED_TRANSCRIPT_REF = new RegExp(`^(?:[A-Za-z]:|/).*(?:${TRANSCRIPT_TURN_MARKER}\\d+|:\\d+)$`, "su");
+
+/** The `<relative path>:<line>: ` head `mem import --from-md` puts on a source excerpt ahead of the bullet's own line; lazy, so the first `:<digits>: ` ends the path. */
+const IMPORT_EXCERPT_HEAD = /^(.+?):\d+: /su;
+
+/** A source excerpt's text as keyword context: an import excerpt (`<path>:<line>: <bullet>`) of a fact whose stamped ref names that same file drops its path head, since a directory or file name is not a statement about the fact, and every other excerpt (a scan-session turn, a typed-ref fact's) is returned whole. */
+function excerptKeywordContext(excerpt: string, importRef: string | null): string {
+  const head = IMPORT_EXCERPT_HEAD.exec(excerpt);
+  if (importRef === null || head === null || head[1] === undefined) {
+    return excerpt;
+  }
+  const refPath = importRef.replaceAll(String.fromCharCode(92), "/").replace(/:\d+$/u, "");
+  const headPath = head[1].replaceAll(String.fromCharCode(92), "/");
+  return refPath === headPath || refPath.endsWith(`/${headPath}`) ? excerpt.slice(head[0].length) : excerpt;
+}
 
 /** Written after a creation audit row's detail when the capture stored a stamped transcript ref together with its source excerpt, followed by that exact ref: the binding {@link storedSourceRefContext} checks. */
 const STAMPED_REF_DETAIL_MARKER = " [stamped_ref=";
@@ -634,8 +656,19 @@ function storedSourceRefContext(db: Database.Database, fact: Fact): string | nul
   if (typeof ref !== "string") {
     return null;
   }
-  const boundToCapture = STAMPED_TRANSCRIPT_REF.test(ref) && listAuditLogForFact(db, fact.id).some((row) => row.event === "capture_suggested" && row.detail.endsWith(`${STAMPED_REF_DETAIL_MARKER}${ref}]`));
-  return boundToCapture ? null : ref;
+  return isBoundStampedRef(db, fact, ref) ? null : ref;
+}
+
+/** Whether `ref` has the stamped shape (a transcript path plus turn, or an import file path plus line) and the fact's own creation audit row records that exact ref. */
+function isBoundStampedRef(db: Database.Database, fact: Fact, ref: string): boolean {
+  return STAMPED_TRANSCRIPT_REF.test(ref) && listAuditLogForFact(db, fact.id).some((row) => row.event === "capture_suggested" && row.detail.endsWith(`${STAMPED_REF_DETAIL_MARKER}${ref}]`));
+}
+
+/** A fact's stored source excerpts as keyword context, each import excerpt without its file path when the fact's stamped ref names that file (see {@link excerptKeywordContext}). */
+function keywordExcerpts(db: Database.Database, fact: Fact): string[] {
+  const ref = fact.source_ref;
+  const importRef = typeof ref === "string" && /:\d+$/u.test(ref) && isBoundStampedRef(db, fact, ref) ? ref : null;
+  return listSourcesForFact(db, fact.id).map((source) => excerptKeywordContext(source.excerpt, importRef));
 }
 
 /** The text of a stored fact as it will read after `patch` is applied (a `null` in the patch clears that field), plus its stored source excerpts and any typed source ref: the keyword context `mem edit` and `mem review --promote` hand to screening, so a field the edit did not touch still counts as context for the one it did. */
@@ -645,7 +678,6 @@ export function mergedFactScreenContext(
   patch: FactScreenPatch = {}
 ): string {
   const anchor = patchedOrStored(patch.anchor, fact.anchor);
-  const sources = listSourcesForFact(db, fact.id);
   return [
     patchedOrStored(patch.text, fact.text),
     patchedOrStored(patch.subject, fact.subject),
@@ -653,7 +685,7 @@ export function mergedFactScreenContext(
     patchedOrStored(patch.why, fact.why),
     typeof anchor === "string" ? anchorArguments(anchor) : null,
     storedSourceRefContext(db, fact),
-    ...sources.map((source) => source.excerpt),
+    ...keywordExcerpts(db, fact),
   ]
     .filter((part): part is string => typeof part === "string")
     .join("\n");
@@ -681,7 +713,7 @@ export function screenMergedFactOrThrow(
   auditEvent: string,
   extraContext = ""
 ): void {
-  const excerpts = listSourcesForFact(db, fact.id).map((source) => source.excerpt);
+  const excerpts = keywordExcerpts(db, fact);
   const matches = screenFactFields(
     {
       text: patchedOrStored(patch.text, fact.text) ?? "",

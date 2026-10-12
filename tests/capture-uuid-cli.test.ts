@@ -188,6 +188,23 @@ describe("credential keywords the veto learned", () => {
   });
 });
 
+describe("a low-entropy UUID is refused beside a credential keyword whatever its entropy", () => {
+  const LOW = "11111111-1111-1111-1111-111111111111";
+
+  it("refuses a low-entropy UUID beside api key", async () => {
+    expectRefused(await runCli(["remember", `api key ${LOW}`, "--kind", "fact", "--scope", "global"]));
+  });
+
+  it("refuses a low-entropy labelled UUID when the subject names a token", async () => {
+    expectRefused(await runCli(["remember", `session id ${LOW}`, "--kind", "fact", "--scope", "global", "--subject", "auth token", "--value", "rotated"]));
+  });
+
+  it("stores a bare low-entropy UUID with no credential keyword", async () => {
+    const result = await runCli(["remember", `the build id is ${LOW}`, "--kind", "fact", "--scope", "global"]);
+    expect(result.exitCode, result.stderr).toBe(0);
+  });
+});
+
 describe("a UUID that an identifier word labels still stores", () => {
   it.each([
     ["the session id is U", `the session id is ${U}`],
@@ -425,6 +442,42 @@ describe("the scan-session stamp exemption is bound to the capture that wrote it
     const id = await onlyPendingId();
     const rejected = await runCli(["review", "--reject", id, "--reason", `session id ${U}`, "--root", "."]);
     expect(rejected.exitCode, rejected.stderr).toBe(0);
+  });
+});
+
+describe("an imported fact's file path is not credential context on edit", () => {
+  const BULLET = "- the staging box notes live in the wiki";
+  const EDITED = `the session id is ${U} for the staging box`;
+
+  async function importedId(relativePath: string): Promise<string> {
+    const path = join(home, relativePath);
+    mkdirSync(join(path, ".."), { recursive: true });
+    writeFileSync(path, ["## Prod", "", BULLET].join("\n"), "utf8");
+    const imported = await runCli(["import", "--from-md", path, "--root", home]);
+    expect(imported.exitCode, imported.stderr).toBe(0);
+    const listed = (await runCli(["list", "--status", "pending"])).stdout;
+    const id = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u.exec(listed)?.[0] ?? "";
+    expect(id).not.toBe("");
+    return id;
+  }
+
+  it.each([
+    ["a directory named for a token", "token-goat-mem/notes.md"],
+    ["a file named for passwords", "password-notes.md"],
+  ])("still edits an imported fact to add a labelled UUID when its path is %s", async (_label, relativePath) => {
+    const id = await importedId(relativePath);
+    const edited = await runCli(["edit", id, "--force", "--text", EDITED, "--root", home]);
+    expect(edited.exitCode, edited.stderr).toBe(0);
+    expect((await runCli(["show", id])).stdout).toContain(`text: ${EDITED}`);
+  });
+
+  it("still refuses the edit when the imported bullet itself names a password", async () => {
+    const path = join(home, "notes.md");
+    writeFileSync(path, "- the staging box password lives in the wiki\n", "utf8");
+    await runCli(["import", "--from-md", path, "--root", home]);
+    const id = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u.exec((await runCli(["list", "--status", "pending"])).stdout)?.[0] ?? "";
+    expect(id).not.toBe("");
+    expectRefused(await runCli(["edit", id, "--force", "--text", EDITED, "--root", home]));
   });
 });
 
