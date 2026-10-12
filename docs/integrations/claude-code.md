@@ -77,7 +77,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi"
+            "command": "if command -v mem >/dev/null 2>&1; then mem hook session-start || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi"
           }
         ]
       }
@@ -87,7 +87,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root \"$CLAUDE_PROJECT_DIR\" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi"
+            "command": "if command -v mem >/dev/null 2>&1; then mem hook user-prompt-submit || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi"
           }
         ]
       }
@@ -97,7 +97,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root \"$CLAUDE_PROJECT_DIR\" || echo \"mem reflect failed (exit $?); run mem doctor\"; fi"
+            "command": "if command -v mem >/dev/null 2>&1; then mem hook stop || echo \"mem reflect failed (exit $?); run mem doctor\"; fi"
           }
         ]
       }
@@ -107,7 +107,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root \"$CLAUDE_PROJECT_DIR\" || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi"
+            "command": "if command -v mem >/dev/null 2>&1; then mem hook pre-compact || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi"
           }
         ]
       }

@@ -24,6 +24,7 @@ import { ageInDays, daysAgoIso } from "./timeUtils.js";
 import { registerBackupCommands } from "./backupCommands.js";
 import { registerDoctorCommand } from "./doctor.js";
 import { wiringHomeFromEnv } from "./doctorWiring.js";
+import { registerHookCommand } from "./hookCommand.js";
 import { registerReflectCommand } from "./reflect.js";
 import { findRelatedFacts, type RelatedFact } from "./related.js";
 import { formatAuditLine, registerLogCommand } from "./timeline.js";
@@ -2032,6 +2033,7 @@ export function buildProgram(): Command {
 
   registerLogCommand(program);
   registerReflectCommand(program);
+  registerHookCommand(program, { dispatch: dispatchHookArgv });
 
   program
     .command("show <id>")
@@ -2792,14 +2794,23 @@ export function buildProgram(): Command {
   return program;
 }
 
-/** Parses `argv` and dispatches. Sets `process.exitCode`; callers (src/main.ts) should let the process exit naturally so buffered stdout flushes first, rather than calling `process.exit()`. */
-export async function run(argv: string[] = process.argv): Promise<void> {
-  const program = buildProgram();
-  // Commander's exitOverride lets us catch its internal exits (help, version, unknown command) instead of letting it call process.exit() mid-flush. It is not inherited: a Command applies it to itself alone, so setting it only on the root left all 15 subcommands calling `process.exit()` directly on any parse error of their own -- exactly the mid-flush exit the line above exists to prevent, and the same class as the EPIPE truncation fixed in 0.3.0. It also made the `commander.`-prefixed branch below unreachable for every subcommand: a subcommand parse failure surfaced here as a plain Error with no `code`, so it was classified as an internal bug (exit 2) rather than the usage error (exit 1) the contract specifies. Production masked this -- Commander's own `process.exit(1)` happened to produce the right code before our handler ran -- which is why only the in-process path could reveal it.
+/** Commander's exitOverride lets us catch its internal exits (help, version, unknown command) instead of letting it call process.exit() mid-flush. It is not inherited: a Command applies it to itself alone, so setting it only on the root left all 15 subcommands calling `process.exit()` directly on any parse error of their own -- exactly the mid-flush exit `run` exists to prevent, and the same class as the EPIPE truncation fixed in 0.3.0. It also made the `commander.`-prefixed branch in `run` unreachable for every subcommand: a subcommand parse failure surfaced there as a plain Error with no `code`, so it was classified as an internal bug (exit 2) rather than the usage error (exit 1) the contract specifies. Production masked this -- Commander's own `process.exit(1)` happened to produce the right code before our handler ran -- which is why only the in-process path could reveal it. */
+function withExitOverride(program: Command): Command {
   program.exitOverride();
   for (const command of program.commands) {
     command.exitOverride();
   }
+  return program;
+}
+
+/** Runs one argv (after `mem`) through a fresh copy of the whole program, which is how `mem hook <event>` reaches the handler behind its slug; a parse failure throws to the calling action's `guard`. */
+async function dispatchHookArgv(argv: string[]): Promise<void> {
+  await withExitOverride(buildProgram()).parseAsync(argv, { from: "user" });
+}
+
+/** Parses `argv` and dispatches. Sets `process.exitCode`; callers (src/main.ts) should let the process exit naturally so buffered stdout flushes first, rather than calling `process.exit()`. */
+export async function run(argv: string[] = process.argv): Promise<void> {
+  const program = withExitOverride(buildProgram());
   try {
     await program.parseAsync(argv);
   } catch (error) {

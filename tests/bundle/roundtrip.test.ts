@@ -1,13 +1,14 @@
 /** `mem init` / `mem uninstall` driven through the built `dist/token-goat-mem.mjs`, against hand-formatted config files, asserting the file comes back byte-identical. CONTRIBUTING.md's test-tier rule is that a command with no coverage driving the built bundle fails the gate by design, and until this file existed exactly one test in the suite executed the bundle (`mem --version`). Everything else drives `run()` in-process against transformed TS. That gap is not theoretical: the two deepest 0.2.6 defects -- a reinstall that never refreshed a stale shared block, and uninstall leaving behind the containers install had created -- were both found by running the built binary against a real config, not by the suite. The assertions here are on file *bytes*, because the 0.2.6 formatting damage was invisible to a green suite whose every assertion went through `JSON.parse`. */
 
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
+import { CAPABLE_MEM_SHIM, writeFakeMem } from "../support/fakeMem.js";
 import { SPAWN_TIMEOUT_FLOOR_MS } from "../support/spawnTimeoutFloor.js";
 
 let root: string;
@@ -34,15 +35,7 @@ beforeEach(() => {
   fakeMemDir = mkdtempSync(join(tmpdir(), "mem-bundle-fake-bin-"));
 
   // Provide a capable mem shim on PATH so `mem init claude-code` passes preflight in CI environments where token-goat-mem is not installed globally.
-  const shimBody =
-    "#!/usr/bin/env node\n" +
-    "const args = process.argv.slice(2);\n" +
-    'if (args[0] === "--version") { process.stdout.write("0.4.1-test-shim\\n"); process.exit(0); }\n' +
-    'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root\\n"); process.exit(0); }\n' +
-    "process.exit(1);\n";
-  writeFileSync(join(fakeMemDir, "mem"), shimBody, "utf8");
-  chmodSync(join(fakeMemDir, "mem"), 0o755);
-  writeFileSync(join(fakeMemDir, "mem.cmd"), `@echo off\r\nnode "%~dp0mem" %*\r\n`, "utf8");
+  writeFakeMem(fakeMemDir, CAPABLE_MEM_SHIM);
 });
 
 afterEach(() => {

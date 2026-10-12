@@ -66,23 +66,23 @@ describe("claudeCode wiring", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
     const hook = settings.hooks.SessionStart[0].hooks[0];
     expect(hook.__token_goat_mem).toBe(true);
-    expect(hook.command).toContain("mem recall --hint-format --hook-stdin --root");
+    expect(hook.command).toContain("mem hook session-start ||");
 
     // The per-prompt companion: same guard, reads the same envelope, but opts into a delta so a prompt never re-sends what SessionStart (or an earlier prompt) already surfaced this session.
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
     const promptHook = settings.hooks.UserPromptSubmit[0].hooks[0];
     expect(promptHook.__token_goat_mem).toBe(true);
-    expect(promptHook.command).toContain("mem recall --hint-format --hook-stdin --delta --root");
+    expect(promptHook.command).toContain("mem hook user-prompt-submit ||");
     // The capture half of the seam: the only event carrying `transcript_path`, and so the only place mem can see what was said without the agent volunteering it. `mem reflect` files the transcript and blocks the stop only on what it just filed, so the agent that said it resolves it.
     expect(settings.hooks.Stop).toHaveLength(1);
     const stopHook = settings.hooks.Stop[0].hooks[0];
     expect(stopHook.__token_goat_mem).toBe(true);
-    expect(stopHook.command).toContain("mem reflect --hook-stdin --root");
+    expect(stopHook.command).toContain("mem hook stop ||");
     // PreCompact is the only event guaranteed to fire while the pre-compaction transcript is still on disk -- a session compacted mid-task and then killed rather than ending a turn never fires Stop at all. It only files, `--quiet`: blocking belongs to Stop, where the agent can answer.
     expect(settings.hooks.PreCompact).toHaveLength(1);
     const preCompactHook = settings.hooks.PreCompact[0].hooks[0];
     expect(preCompactHook.__token_goat_mem).toBe(true);
-    expect(preCompactHook.command).toContain("mem scan-session --hook-stdin --quiet --root");
+    expect(preCompactHook.command).toContain("mem hook pre-compact ||");
     expect(Object.keys(settings.hooks).sort()).toEqual([
       "PreCompact",
       "SessionStart",
@@ -129,21 +129,21 @@ describe("claudeCode wiring", () => {
 
     // Pin the exact guarded string: `command -v mem` gates the call so a machine with no mem stays silent (the `if` body never runs), but "mem is on PATH and exits nonzero" now falls through to a `printf` that emits a bare TGMEM/2 response with a footer line -- collapsing that case into the same silence as "mem absent" is exactly what hid a stale-PATH-binary incident for 5 days.
     expect(command).toBe(
-      'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
+      'if command -v mem >/dev/null 2>&1; then mem hook session-start || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
     );
-    // The UserPromptSubmit hook carries the identical guard and fallback; only the recall flags differ.
+    // The UserPromptSubmit hook carries the identical guard and fallback; only the frozen event slug differs.
     const promptCommand: string = settings.hooks.UserPromptSubmit[0].hooks[0].command;
     expect(promptCommand).toBe(
-      'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --delta --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
+      'if command -v mem >/dev/null 2>&1; then mem hook user-prompt-submit || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi',
     );
     // Stop/PreCompact aren't on the TGMEM wire, so their failure fallback is a plain notice instead.
     const stopCommand: string = settings.hooks.Stop[0].hooks[0].command;
     expect(stopCommand).toBe(
-      'if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root "$CLAUDE_PROJECT_DIR" || echo "mem reflect failed (exit $?); run mem doctor"; fi',
+      'if command -v mem >/dev/null 2>&1; then mem hook stop || echo "mem reflect failed (exit $?); run mem doctor"; fi',
     );
     const preCompactCommand: string = settings.hooks.PreCompact[0].hooks[0].command;
     expect(preCompactCommand).toBe(
-      'if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || echo "mem scan-session failed (exit $?); run mem doctor"; fi',
+      'if command -v mem >/dev/null 2>&1; then mem hook pre-compact || echo "mem scan-session failed (exit $?); run mem doctor"; fi',
     );
   });
 
@@ -345,7 +345,7 @@ describe("claudeCode wiring", () => {
     expect(settings.hooks.SessionStart).toHaveLength(1);
     expect(settings.hooks.SessionStart[0].hooks[0].__token_goat_mem).toBe(true);
     expect(settings.hooks.SessionStart[0].hooks[0].command).toBe(
-      'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi'
+      'if command -v mem >/dev/null 2>&1; then mem hook session-start || printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"; fi'
     );
     expect(settings.hooks.UserPromptSubmit).toHaveLength(1);
     expect(settings.hooks.Stop).toHaveLength(1);
@@ -1882,16 +1882,23 @@ describe("regression: integration docs match the markdown mem init actually writ
 // ─────────────────────────────────────────────────────────────────────────── hook-binary capability detection ───────────────────────────────────────────────────────────────────────────
 
 describe("parseHookCommandSpec", () => {
-  it("extracts subcommand and flags from the new (if/then/fallback) wrapper", () => {
-    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[0]?.command as string)).toEqual({
+  it("reads the frozen event slug from a `mem hook <event>` command as its one flag-less argument", () => {
+    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[0]?.command as string)).toEqual({ subcommand: "hook", flags: ["session-start"] });
+    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[2]?.command as string)).toEqual({ subcommand: "hook", flags: ["stop"] });
+    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[3]?.command as string)).toEqual({ subcommand: "hook", flags: ["pre-compact"] });
+  });
+
+  it("extracts subcommand and flags from the flag-carrying (if/then/fallback) wrapper an earlier mem wrote", () => {
+    const fallback = 'echo "mem reflect failed (exit $?); run mem doctor"';
+    expect(parseHookCommandSpec(`if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || ${fallback}; fi`)).toEqual({
       subcommand: "recall",
       flags: ["--hint-format", "--hook-stdin"],
     });
-    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[2]?.command as string)).toEqual({
+    expect(parseHookCommandSpec(`if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root "$CLAUDE_PROJECT_DIR" || ${fallback}; fi`)).toEqual({
       subcommand: "reflect",
       flags: ["--hook-stdin"],
     });
-    expect(parseHookCommandSpec(CLAUDE_HOOK_EVENTS[3]?.command as string)).toEqual({
+    expect(parseHookCommandSpec(`if command -v mem >/dev/null 2>&1; then mem scan-session --hook-stdin --quiet --root "$CLAUDE_PROJECT_DIR" || ${fallback}; fi`)).toEqual({
       subcommand: "scan-session",
       flags: ["--hook-stdin", "--quiet"],
     });
@@ -2020,21 +2027,27 @@ describe("checkHookCapability / checkClaudeHookHealth / resolveMemBinary (agains
     expect(result).toEqual({ capable: false, missing: ["scan-session"] });
   });
 
-  it("checkClaudeHookHealth: an old binary is incapable of --hook-stdin/scan-session, a current one is capable of everything CLAUDE_HOOK_EVENTS writes", () => {
-    installShim("0.2.5", ["recall"], "--hint-format --root");
-    const oldHealth = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
-    expect(oldHealth.bin?.version).toBe("0.2.5");
-    expect(oldHealth.hooks.every((h) => !h.capable)).toBe(true);
-
+  it("checkClaudeHookHealth: a binary without `mem hook` is incapable of every event and names hook as missing, a current one is capable of everything CLAUDE_HOOK_EVENTS writes", () => {
     installShim("0.4.1", ["recall", "scan-session", "reflect"], "--hint-format --hook-stdin --delta --quiet --root");
+    const oldHealth = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
+    expect(oldHealth.bin?.version).toBe("0.4.1");
+    expect(oldHealth.hooks.map((h) => ({ event: h.event, capable: h.capable, missing: h.missing }))).toEqual(
+      CLAUDE_HOOK_EVENTS.map(({ event }) => ({ event, capable: false, missing: ["hook"] }))
+    );
+
+    installShim("0.6.0", ["hook"], "session-start user-prompt-submit stop pre-compact");
     const currentHealth = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
-    expect(currentHealth.bin?.version).toBe("0.4.1");
+    expect(currentHealth.bin?.version).toBe("0.6.0");
     expect(currentHealth.hooks.every((h) => h.capable)).toBe(true);
   });
 
-  it("checkClaudeHookHealth: a binary from before `mem reflect` can run every hook but Stop, and names reflect as what it lacks", () => {
+  it("checkClaudeHookHealth: a legacy flag-carrying command is still probed by its own flags, so a binary from before `mem reflect` lacks only Stop", () => {
     installShim("0.4.1", ["recall", "scan-session"], "--hint-format --hook-stdin --delta --quiet --root");
-    const health = checkClaudeHookHealth(CLAUDE_HOOK_EVENTS, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
+    const legacy = [
+      { event: "SessionStart", command: 'if command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || echo x; fi' },
+      { event: "Stop", command: 'if command -v mem >/dev/null 2>&1; then mem reflect --hook-stdin --root "$CLAUDE_PROJECT_DIR" || echo x; fi' },
+    ];
+    const health = checkClaudeHookHealth(legacy, { pathEnv: dir, platform: isWindows ? "win32" : "linux" });
     expect(health.hooks.filter((h) => !h.capable).map((h) => ({ event: h.event, missing: h.missing }))).toEqual([
       { event: "Stop", missing: ["reflect"] },
     ]);

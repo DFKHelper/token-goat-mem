@@ -8,10 +8,10 @@ export const CAPABLE_MEM_SHIM =
   "#!/usr/bin/env node\n" +
   "const args = process.argv.slice(2);\n" +
   'if (args[0] === "--version") { process.stdout.write("0.0.0-test-shim\\n"); process.exit(0); }\n' +
-  'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root\\n"); process.exit(0); }\n' +
+  'if (args[1] === "--help") { process.stdout.write("--hint-format --hook-stdin --delta --quiet --root session-start user-prompt-submit stop pre-compact\\n"); process.exit(0); }\n' +
   "process.exit(1);\n";
 
-/** Understands `--version` and a `--help` for `recall`, but its help text is missing `--hook-stdin`/`--delta`, and it has no `scan-session` subcommand at all -- the shape of an install that predates both. */
+/** Understands `--version` and a `--help` for `recall`, but its help text is missing `--hook-stdin`/`--delta`, it has no `scan-session` subcommand at all, and it has no `hook` command: `hook --help` exits 1 as Commander does for an unknown command -- the shape of an install that predates all three. */
 export const OLD_MEM_SHIM =
   "#!/usr/bin/env node\n" +
   "const args = process.argv.slice(2);\n" +

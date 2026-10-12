@@ -589,7 +589,7 @@ describe("mem init/uninstall", () => {
       const result = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("0.2.5");
-      expect(result.stdout).toMatch(/hook-stdin|scan-session/u);
+      expect(result.stdout).toContain("no `mem hook <event>` entry point");
       expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
     });
 
@@ -652,7 +652,7 @@ describe("mem init/uninstall", () => {
         const doctor = await runCli(["doctor"]);
         expect(doctor.exitCode).toBe(0);
         expect(doctor.stdout).toContain("0.2.5");
-        expect(doctor.stdout).toMatch(/hook-stdin|scan-session/u);
+        expect(doctor.stdout).toContain("no `mem hook <event>` entry point");
       });
     });
 

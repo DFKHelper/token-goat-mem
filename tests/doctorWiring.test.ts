@@ -129,8 +129,8 @@ describe("mem doctor project-vs-user hook divergence", () => {
     await init("claude-code", "--user");
     const projectSettings = join(toolRoot, ".claude", "settings.json");
     const text = readFileSync(projectSettings, "utf8");
-    expect(text).toContain("--hint-format");
-    writeFileSync(projectSettings, text.replace("--hint-format", "--hint-format --limit 3"), "utf8");
+    expect(text).toContain("hook user-prompt-submit");
+    writeFileSync(projectSettings, text.replace("hook user-prompt-submit", "hook session-start"), "utf8");
 
     const findings = await doctorFindings("hook-divergence");
     expect(findings).toHaveLength(1);

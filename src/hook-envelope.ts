@@ -21,6 +21,8 @@ export interface HookEnvelope {
   readonly transcriptPath?: string;
   /** Whether a Stop hook already continued this agent, when the envelope carried a real boolean under `stop_hook_active`. */
   readonly stopHookActive?: boolean;
+  /** The working directory the host reported, when the envelope carried a non-empty string under `cwd`; `mem hook` falls back to it when `CLAUDE_PROJECT_DIR` is unset. */
+  readonly cwd?: string;
 }
 
 function nonEmptyString(value: unknown): string | undefined {
@@ -49,7 +51,9 @@ export function parseHookEnvelope(raw: string): HookEnvelope {
   }
   const transcriptPath = nonEmptyString(record[HOOK_TRANSCRIPT_KEY]);
   const stopHookActive = record[HOOK_STOP_ACTIVE_KEY];
+  const cwd = nonEmptyString(record["cwd"]);
   return {
+    ...(cwd !== undefined ? { cwd } : {}),
     ...(sessionId !== undefined ? { sessionId } : {}),
     ...(prompt !== undefined ? { prompt } : {}),
     ...(transcriptPath !== undefined ? { transcriptPath } : {}),
@@ -98,9 +102,21 @@ export function readStreamWithTimeout(
   });
 }
 
+let primedStdin: string | undefined;
+
+/** Hands the next `readHookEnvelope` call stdin text something already consumed: `mem hook` reads stdin once to find the host's `cwd`, then dispatches to a handler that reads the envelope itself, and a pipe cannot be read twice. */
+export function primeHookStdin(raw: string): void {
+  primedStdin = raw;
+}
+
 /** `--hook-stdin`: the hook envelope from stdin, or an empty envelope when stdin is a TTY, unreadable, not JSON, or simply slow to close. Never throws -- see this module's header for why a hook that errors is worse than one that returns unranked facts. */
 export async function readHookEnvelope(): Promise<HookEnvelope> {
   try {
+    if (primedStdin !== undefined) {
+      const raw = primedStdin;
+      primedStdin = undefined;
+      return parseHookEnvelope(raw);
+    }
     return parseHookEnvelope(await readStreamWithTimeout(process.stdin));
   } catch {
     return {};

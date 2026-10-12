@@ -15,7 +15,7 @@ import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCove
 import { formatAge, MS_PER_DAY } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
 import { describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv } from "./doctorWiring.js";
-import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, type WiringOpts } from "./wiring.js";
+import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, type WiringOpts } from "./wiring.js";
 
 /** The fixed set of `check` names a finding can carry. Closed on purpose: `--json` consumers key off these strings, so a new check is a deliberate, tested addition here rather than a string typed at one call site. One name covers every line a topic prints (`hooks` is a header plus one line per event), and the order is the order the report prints in. */
 export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks", "hook-divergence", "launch-time", "wiring"] as const;
@@ -188,6 +188,17 @@ function describeHookHealth(opts: WiringOpts): Finding[] {
               `  ${hook.event}: ${health.bin === null ? "would be inert" : `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
               "npm install -g token-goat-mem"
             )
+      );
+    }
+    const legacy = hooks.filter((hook) => isLegacyHookShape(hook.command)).map((hook) => hook.event);
+    if (legacy.length > 0) {
+      lines.push(
+        finding(
+          "hooks",
+          "warn",
+          `hooks (${label}): legacy hook shape on ${legacy.join(", ")} -- these still run, but carry flags in the settings file (\`mem init claude-code\` rewrites them to \`mem hook <event>\`)`,
+          "mem init claude-code"
+        )
       );
     }
   }

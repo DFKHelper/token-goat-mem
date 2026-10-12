@@ -14,6 +14,7 @@ const EXPECTED_COMMANDS = [
   "export",
   "facets",
   "forget",
+  "hook",
   "import",
   "init",
   "list",

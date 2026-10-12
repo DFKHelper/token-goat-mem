@@ -37,11 +37,11 @@ describe("claudeHookEventsFor", () => {
     const events = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: BUNDLE });
     const start = events.find((entry) => entry.event === "SessionStart")?.command;
     expect(start).toBe(
-      `if [ -f "${BUNDLE}" ]; then node "${BUNDLE}" recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' "$?"; ` +
-        `elif command -v mem >/dev/null 2>&1; then mem recall --hint-format --hook-stdin --root "$CLAUDE_PROJECT_DIR" || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' "$?"; fi`
+      `if [ -f "${BUNDLE}" ]; then node "${BUNDLE}" hook session-start || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' "$?"; ` +
+        `elif command -v mem >/dev/null 2>&1; then mem hook session-start || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' "$?"; fi`
     );
     const stop = events.find((entry) => entry.event === "Stop")?.command as string;
-    expect(stop).toContain(`node "${BUNDLE}" reflect --hook-stdin --root "$CLAUDE_PROJECT_DIR" || echo "mem reflect failed (exit $?); run mem doctor"; elif command -v mem`);
+    expect(stop).toContain(`node "${BUNDLE}" hook stop || echo "mem reflect failed (exit $?); run mem doctor"; elif command -v mem`);
   });
 
   it("keeps today's exact commands for project installs and for non-Windows platforms", () => {
@@ -52,7 +52,7 @@ describe("claudeHookEventsFor", () => {
 
   it("normalises backslashes in the bundle path to forward slashes", () => {
     const events = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: "C:\\Users\\someone\\dist\\token-goat-mem.mjs" });
-    expect(events[0]?.command).toContain('node "C:/Users/someone/dist/token-goat-mem.mjs" recall');
+    expect(events[0]?.command).toContain('node "C:/Users/someone/dist/token-goat-mem.mjs" hook session-start');
   });
 
   it.each(['C:/odd"dir/token-goat-mem.mjs', "C:/odd$dir/token-goat-mem.mjs", "C:/odd`dir/token-goat-mem.mjs"])(
@@ -87,8 +87,8 @@ describe("claudeCode user install with the direct launcher", () => {
   it("recognises the new shape: subcommand and flags parse, and an unchanged re-run is a noop", () => {
     claudeCode.install(opts());
     const [start, , stop] = commandsOf(home) as [string, string, string];
-    expect(parseHookCommandSpec(start)).toEqual({ subcommand: "recall", flags: ["--hint-format", "--hook-stdin"] });
-    expect(parseHookCommandSpec(stop)).toEqual({ subcommand: "reflect", flags: ["--hook-stdin"] });
+    expect(parseHookCommandSpec(start)).toEqual({ subcommand: "hook", flags: ["session-start"] });
+    expect(parseHookCommandSpec(stop)).toEqual({ subcommand: "hook", flags: ["stop"] });
     const again = claudeCode.install(opts());
     expect(again.changes.map((change) => change.action)).toEqual(["noop"]);
   });
@@ -129,7 +129,7 @@ describe("capability pre-flight with the bundle as launcher", () => {
   it("checks the bundle itself when the hook's bundle exists, even with no mem on PATH", () => {
     const bundle = join(home, "dist", "token-goat-mem.mjs").replace(/\\/gu, "/");
     mkdirSync(dirname(bundle), { recursive: true });
-    writeFileSync(bundle, 'console.log(process.argv.slice(2).join(" ") + " --hook-stdin --hint-format --quiet --delta");\n', "utf8");
+    writeFileSync(bundle, 'console.log(process.argv.slice(2).join(" ") + " session-start user-prompt-submit stop pre-compact");\n', "utf8");
     const commands = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: bundle });
     const health = checkClaudeHookHealth(commands, { pathEnv: join(home, "empty") });
     expect(health.bin).toBeNull();
@@ -224,7 +224,7 @@ describe("describeHookDivergence across launchers", () => {
     claudeCode.install({ root, homeDir: home });
     claudeCode.install({ root, homeDir: home, user: true, platform: "win32", bundlePath: BUNDLE });
     const path = join(root, ".claude", "settings.json");
-    writeFileSync(path, readFileSync(path, "utf8").replace("--hook-stdin --delta", "--hook-stdin"), "utf8");
+    writeFileSync(path, readFileSync(path, "utf8").replace("hook user-prompt-submit", "hook session-start"), "utf8");
     const findings = describeHookDivergence({ root, homeDir: home });
     expect(findings[0]?.status).toBe("warn");
     expect(findings[0]?.message).toContain("UserPromptSubmit");

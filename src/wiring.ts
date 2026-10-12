@@ -683,26 +683,38 @@ function surgicalJsoncRemoveArrayEntry(content: string, arrayPath: JSONPath, ind
 // These hooks land in `<root>/.claude/settings.json`, which is typically committed and shared with collaborators -- some of whom may not have mem on PATH. `command -v mem` gates the call so a machine with no mem installed stays silent (the historically fail-open case the README documents for this seam: a missing mem must never block a session). But "mem is on PATH and exits nonzero" is a different case from "mem is absent", and collapsing both into the same silent branch (the old `guard && call || true` shape) hid a real incident: a stale PATH binary rejecting flags a newer `mem init` had written produced 219 silently-swallowed hook failures over five days with no visible signal anywhere. `if guard; then call || fallback; fi` keeps "absent" silent (the `if` condition is false, nothing runs) while giving "present but failed" a fallback that actually prints something the host will show -- `$?` inside the fallback is the failed call's own exit code, captured before the fallback runs. Both read the hook's JSON envelope from stdin (`--hook-stdin`) rather than depending on `jq` or any other tool being on PATH: `mem` parses it itself. `session_id` is a common field on every Claude Code hook event, so the SessionStart recall is logged under the same session the later UserPromptSubmit deltas subtract from -- otherwise the first prompt would re-send everything the session opener already surfaced. A SessionStart envelope carries no prompt, so that recall stays query-less (recency order) exactly as before; UserPromptSubmit's `prompt` field becomes the query. The fallback's output is itself a (bare, fact-less) `TGMEM/2` response with a `footer` line, so a host already rendering that wire format shows the failure instead of nothing.
 const RECALL_FAILURE_FALLBACK = 'printf \'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n\' "$?"';
 
-/** What distinguishes one mem hook command from another: the subcommand, the flags between it and `--root`, and what prints when a present mem fails. The launcher (plain `mem`, or a direct `node <bundle>` for a Windows user install) is chosen separately by `buildMemHookCommand`, so the four hooks are written once, not once per launcher shape. */
+/** The frozen event slugs `mem hook <event>` accepts, each mapped to the host event name it serves. A slug is written into users' settings files and is never renamed or removed (additions only): the binary owns every flag and the project root behind it, so the written string never changes when those do. */
+export const MEM_HOOK_EVENT_SLUGS = {
+  "session-start": "SessionStart",
+  "user-prompt-submit": "UserPromptSubmit",
+  stop: "Stop",
+  "pre-compact": "PreCompact",
+} as const;
+
+export type MemHookSlug = keyof typeof MEM_HOOK_EVENT_SLUGS;
+
+/** Slugs a host has since retired: `mem hook <slug>` still exits 0 with empty stdout, so a settings file that outlives the event keeps working. None is retired yet. */
+export const RETIRED_MEM_HOOK_SLUGS: ReadonlySet<string> = new Set<string>();
+
+/** What distinguishes one mem hook command from another: the frozen event slug and what prints when a present mem fails. The launcher (plain `mem`, or a direct `node <bundle>` for a Windows user install) is chosen separately by `buildMemHookCommand`, so the four hooks are written once, not once per launcher shape. */
 interface MemHookShape {
-  readonly subcommand: string;
-  readonly flags: string;
+  readonly slug: MemHookSlug;
   readonly fallback: string;
 }
 
-const CLAUDE_SESSION_START_SHAPE: MemHookShape = { subcommand: "recall", flags: "--hint-format --hook-stdin", fallback: RECALL_FAILURE_FALLBACK };
-const CLAUDE_USER_PROMPT_SUBMIT_SHAPE: MemHookShape = { subcommand: "recall", flags: "--hint-format --hook-stdin --delta", fallback: RECALL_FAILURE_FALLBACK };
+const CLAUDE_SESSION_START_SHAPE: MemHookShape = { slug: "session-start", fallback: RECALL_FAILURE_FALLBACK };
+const CLAUDE_USER_PROMPT_SUBMIT_SHAPE: MemHookShape = { slug: "user-prompt-submit", fallback: RECALL_FAILURE_FALLBACK };
 
 // `Stop` fires after the user has actually said something -- the two recall events above run before or instead of that -- and carries `transcript_path`, so there is a transcript to read. Without it, capture depends entirely on the agent obeying the CLAUDE.md instruction block. `mem reflect` files the transcript's durable statements as pending (the same scan `scan-session` runs) and, only when that run filed something new, blocks the stop with a worklist so the agent that said them resolves each one -- updating an existing fact before creating another. Otherwise it prints nothing. A failure prints a plain one-line notice, not `TGMEM/2`: Stop/PreCompact are not on the recall wire and nothing here parses their stdout as that format.
-const CLAUDE_STOP_SHAPE: MemHookShape = { subcommand: "reflect", flags: "--hook-stdin", fallback: 'echo "mem reflect failed (exit $?); run mem doctor"' };
+const CLAUDE_STOP_SHAPE: MemHookShape = { slug: "stop", fallback: 'echo "mem reflect failed (exit $?); run mem doctor"' };
 
 // `PreCompact` is the same filing under a different trigger, and it is not redundant with `Stop`: `Stop` fires when a turn ends, so a session that runs long enough to be compacted mid-task has had everything before the compaction boundary summarized away -- and if that session is later killed, closed, or interrupted rather than ending a turn cleanly, `Stop` never fires at all and the whole transcript is captured by nothing. `PreCompact` is the one event guaranteed to fire while the pre-compaction transcript still exists on disk, and it carries `transcript_path` for the same reason `Stop` does. It files only (`--quiet`): a compaction has no agent turn to answer a worklist. What it files is a sighting by the time `Stop` scans the same turns, so nothing is filed twice -- and `Stop` does not prompt for it either, since the agent past the compaction boundary no longer holds the context to judge it; it waits in `mem reflect` / `mem review`.
-const CLAUDE_PRE_COMPACT_SHAPE: MemHookShape = { subcommand: "scan-session", flags: "--hook-stdin --quiet", fallback: 'echo "mem scan-session failed (exit $?); run mem doctor"' };
+const CLAUDE_PRE_COMPACT_SHAPE: MemHookShape = { slug: "pre-compact", fallback: 'echo "mem scan-session failed (exit $?); run mem doctor"' };
 
 /** Builds one hook command from its shape and launcher: with no `bundlePath` the plain `command -v mem` guard, with one the `[ -f bundle ]` / `node bundle` form. A Windows user-level install launches the bundle directly: `mem` there is npm's shell shim, whose lookup-and-relaunch chain adds hundreds of milliseconds to every hook before node even starts. The `[ -f ]` guard keeps the plain `command -v mem` path as the fallback for a bundle that has since moved or been uninstalled, and both branches keep the same visible failure fallback. Only `--user` gets this: project settings are committed and shared, and a machine-specific absolute path must never land there. */
 function buildMemHookCommand(shape: MemHookShape, bundlePath?: string): string {
-  const { subcommand, flags, fallback } = shape;
-  const call = (launcher: string): string => `${launcher} ${subcommand} ${flags} --root "$CLAUDE_PROJECT_DIR" || ${fallback}`;
+  const { slug, fallback } = shape;
+  const call = (launcher: string): string => `${launcher} hook ${slug} || ${fallback}`;
   const viaPath = `if command -v mem >/dev/null 2>&1; then ${call("mem")}; fi`;
   if (bundlePath === undefined) {
     return viaPath;
@@ -722,12 +734,15 @@ function runningBundlePath(): string {
 }
 
 // Every command above shares a guard/subcommand/root wrapper; only the flags between the subcommand and `--root` vary across events, and the wrapper shape itself has varied across mem versions -- a bare, unguarded `mem ... --root "$CLAUDE_PROJECT_DIR"` first, then `command -v mem ... && mem ... || true`, then `if command -v mem ...; then mem ... || fallback; fi`. Exact alternatives, not one loosened pattern, so a hybrid string that happens to satisfy pieces of several without being any of them is not accidentally recognised. Each captures the subcommand, then the text between it and `--root` (the flags). Matching the wrapper -- not the full literal string -- is what lets `looksLikeMemHookCommand` recognise an older *or* newer mem install's hook as its own, and `parseHookCommandSpec` read the flags of any of them.
-const MEM_HOOK_INVOCATION_SHAPES: readonly RegExp[] = [
+export const MEM_HOOK_INVOCATION_SHAPES: readonly RegExp[] = [
   /^mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR"$/u,
   /^command -v mem >\/dev\/null 2>&1 && mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| true$/u,
   /^if command -v mem >\/dev\/null 2>&1; then mem (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
   // The Windows user shape: a direct `node <bundle>` launch guarded by `[ -f ]`, then the same plain `mem` call as `elif`. The backreference ties the `elif` branch to the same subcommand so a hybrid of two different hooks is not recognised.
   /^if \[ -f "[^"]+" \]; then node "[^"]+" (\S+)\b(.*?)--root "\$CLAUDE_PROJECT_DIR" \|\| .*; elif command -v mem >\/dev\/null 2>&1; then mem \1\b.*--root "\$CLAUDE_PROJECT_DIR" \|\| .*; fi$/u,
+  // The frozen `mem hook <slug>` shapes carry no `--root` and no flags, so group 2 is the space-led slug. The Windows form ties its `elif` branch to the same slug by backreference.
+  /^if command -v mem >\/dev\/null 2>&1; then mem (hook)\b( [a-z][a-z-]*) \|\| .*; fi$/u,
+  /^if \[ -f "[^"]+" \]; then node "[^"]+" (hook)\b( [a-z][a-z-]*) \|\| .*; elif command -v mem >\/dev\/null 2>&1; then mem hook\2 \|\| .*; fi$/u,
 ];
 
 /** The bundle a direct-launch hook command runs, or `null` for any other shape (including every project-level hook). */
@@ -754,7 +769,23 @@ function looksLikeMemHookCommand(command: string, event: string): boolean {
     return false;
   }
   const subcommand = actualMatch[1] as string;
+  if (subcommand === "hook") {
+    // A `hook <slug>` is mem's own for this event only under the slug that event owns, so `hook stop` sitting under PreCompact is a stranger's entry.
+    return canonicalMatch[1] === "hook" && (actualMatch[2] as string).trim() === (canonicalMatch[2] as string).trim();
+  }
   return subcommand === canonicalMatch[1] || (entry.legacySubcommands?.includes(subcommand) ?? false);
+}
+
+/** Whether `command` is a mem hook command in the old flag-carrying shape (`mem recall --hint-format ...`, `mem scan-session ...`) rather than the frozen `mem hook <event>` shape; `false` for a command in no recognised shape. `mem doctor` warns on these and `mem init claude-code` rewrites them. */
+export function isLegacyHookShape(command: string): boolean {
+  const match = matchMemHookInvocation(command);
+  return match !== null && match[1] !== "hook";
+}
+
+/** Whether `command` is exactly the frozen `mem hook <slug>` shape mem writes for `event`, in either launcher form. */
+function isCurrentHookShape(command: string, event: string): boolean {
+  const match = matchMemHookInvocation(command);
+  return match !== null && match[1] === "hook" && looksLikeMemHookCommand(command, event);
 }
 
 /** The subcommand and flags a mem-authored hook command actually invokes -- `null` if `command` is none of the wrapper shapes `matchMemHookInvocation` knows, so recognising a hook as mem's and reading its flags can never disagree. Each shape anchors `mem` after its own guard, so the earlier `command -v mem` in the same string is never mistaken for the invocation. Used to check a command (whether the one `CLAUDE_HOOK_EVENTS` is about to write, or one already sitting in a settings.json this build did not write) against what a candidate `mem` binary's own `--help` output actually supports -- derived from the command text itself rather than a separately maintained flag list, so it never drifts from what mem init/doctor really checks. */
@@ -764,8 +795,9 @@ export function parseHookCommandSpec(command: string): { readonly subcommand: st
     return null;
   }
   const subcommand = match[1] as string;
-  const flagsPart = match[2] as string;
-  const flags = flagsPart.split(/\s+/u).filter((token) => token.startsWith("--"));
+  const rest = match[2] as string;
+  // A `hook` command carries no flags: its one argument is the frozen slug, which is what the capability probe looks for in `hook --help`.
+  const flags = subcommand === "hook" ? [rest.trim()] : rest.split(/\s+/u).filter((token) => token.startsWith("--"));
   return { subcommand, flags };
 }
 
@@ -780,10 +812,10 @@ interface ClaudeHookEvent {
 
 function hookEventsFor(bundlePath: string | undefined): ReadonlyArray<ClaudeHookEvent> {
   return [
-    { event: "SessionStart", command: buildMemHookCommand(CLAUDE_SESSION_START_SHAPE, bundlePath) },
-    { event: "UserPromptSubmit", command: buildMemHookCommand(CLAUDE_USER_PROMPT_SUBMIT_SHAPE, bundlePath) },
-    { event: "Stop", command: buildMemHookCommand(CLAUDE_STOP_SHAPE, bundlePath), legacySubcommands: ["scan-session"] },
-    { event: "PreCompact", command: buildMemHookCommand(CLAUDE_PRE_COMPACT_SHAPE, bundlePath) },
+    { event: "SessionStart", command: buildMemHookCommand(CLAUDE_SESSION_START_SHAPE, bundlePath), legacySubcommands: ["recall"] },
+    { event: "UserPromptSubmit", command: buildMemHookCommand(CLAUDE_USER_PROMPT_SUBMIT_SHAPE, bundlePath), legacySubcommands: ["recall"] },
+    { event: "Stop", command: buildMemHookCommand(CLAUDE_STOP_SHAPE, bundlePath), legacySubcommands: ["reflect", "scan-session"] },
+    { event: "PreCompact", command: buildMemHookCommand(CLAUDE_PRE_COMPACT_SHAPE, bundlePath), legacySubcommands: ["scan-session"] },
   ];
 }
 
@@ -907,6 +939,11 @@ export function checkHookCapability(
   if (help === null) {
     return { capable: false, missing: [spec.subcommand] };
   }
+  if (spec.subcommand === "hook") {
+    // The slug is the only thing a `hook` command depends on. A binary without a `hook` command answers `hook --help` with its root help (or an error), which never names a slug, so an absent slug is reported as the command being missing.
+    const slugKnown = spec.flags.every((slug) => help.includes(slug));
+    return { capable: slugKnown, missing: slugKnown ? [] : [spec.subcommand] };
+  }
   const missing = spec.flags.filter((flag) => !help.includes(flag));
   return { capable: missing.length === 0, missing };
 }
@@ -965,6 +1002,9 @@ export function describeHookGap(command: string, missing: readonly string[]): st
     return "this command shape (re-run `mem init claude-code` to rewrite it)";
   }
   const { subcommand } = spec;
+  if (subcommand === "hook" && missing.length > 0) {
+    return `hook ${spec.flags.join(" ")} (this mem has no \`mem hook <event>\` entry point)`;
+  }
   if (missing.length === 0 || (missing.length === 1 && missing[0] === subcommand)) {
     return subcommand;
   }
@@ -987,7 +1027,7 @@ interface ClaudeSettings {
   [key: string]: unknown;
 }
 
-function installClaudeSettings(current: string | undefined, path: string, hookEvents: ReadonlyArray<ClaudeHookEvent>): string | undefined {
+export function installClaudeSettings(current: string | undefined, path: string, hookEvents: ReadonlyArray<ClaudeHookEvent>): string | undefined {
   // JSONC, not strict JSON: Claude Code's own settings.json commonly carries `//`/`/* */` comments and trailing commas, and this file already depends on jsonc-parser to preserve exactly that formatting -- rejecting the file here defeated the point for the users it matters most to.
   const rawParsed: unknown = isBlank(current) ? {} : parseJsoncOrConflict(current as string, path);
   if (!isPlainObject(rawParsed)) {
@@ -1124,6 +1164,10 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
 
   if (stampedHook !== undefined) {
     if (stampedHook.type === "command" && stampedHook.command === command) {
+      return text;
+    }
+    // No downgrade: a stamped `hook <slug>` command is never rewritten back to the flag-carrying shape, whatever wrote the candidate. Migration runs the other way, so a stamped legacy command falls through to the in-place rewrite below.
+    if (stampedHook.type === "command" && isCurrentHookShape(stampedHook.command, event) && isLegacyHookShape(command)) {
       return text;
     }
     const hookPath: JSONPath = ["hooks", event, stampedGroupIdx, "hooks", stampedHookIdx];

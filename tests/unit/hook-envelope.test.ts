@@ -20,6 +20,7 @@ describe("parseHookEnvelope", () => {
       sessionId: "abc123",
       prompt: "Write a function to calculate the factorial of a number",
       transcriptPath: "/home/user/.claude/projects/x/transcript.jsonl",
+      cwd: "/home/user/my-project",
     });
   });
 
