@@ -441,7 +441,7 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     const db = openStorage(resolveDbPath());
     const day = 24 * 60 * 60 * 1000;
     const insert = db.prepare("INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, NULL, ?)");
-    insert.run("jump", "capture", "f1", "jumped", "2099-01-01T00:00:00.000Z");
+    insert.run("jump", "capture", "f1", "jumped", new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString());
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() - 400 * day);
     insertAuditLog(db, { event: "pin", factId: "f1", detail: "old-a" });
