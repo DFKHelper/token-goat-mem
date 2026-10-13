@@ -140,7 +140,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | Module | Layer | Role | Key exports |
 | --- | --- | --- | --- |
 | `src/backupCommands.ts` | Entry | `mem backup` and `mem restore`: the hand-driven side of the snapshots src/backup.ts takes on its own | registerBackupCommands |
-| `src/cli.ts` | Entry | Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list) | buildProgram, run |
+| `src/cli.ts` | Entry | Commander-based CLI wiring for `mem` (design plan Sections 3/4/5/6, AGENTS.md's command list) | describeHookHealthRefusal, buildProgram, run |
 | `src/cliRuntime.ts` | Entry | The runtime every `mem` command action shares: the exit-code contract, the error-to-exit-code mapping, the `guard` wrapp | EXIT_SUCCESS, EXIT_USER_ERROR, EXIT_INTERNAL_ERROR, UsageError, exitCodeForError |
 | `src/doctor.ts` | Entry | `mem doctor`: the read-only environment and store health check | DOCTOR_CHECKS, DoctorCheck, FindingStatus, Finding, LAST_SURFACED_WARN_AFTER_MS |
 | `src/doctorWiring.ts` | Entry | `mem doctor`'s wiring checks, kept out of doctor.ts: whether each supported tool's mem block is present and current (`wi | wiringHomeFromEnv, PROBE_TIMEOUT_ENV, probeTimeoutFromEnv, ProbeBudget, createProbeBudget |

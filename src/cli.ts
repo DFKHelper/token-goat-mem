@@ -745,7 +745,7 @@ function formatWiringPlanForInit(plan: WiringPlan): string {
 }
 
 /** `mem init claude-code`'s pre-flight message when the `mem` binary these hooks would invoke can't actually run them -- `null` when there is nothing to refuse (a binary was found and every hook it would run is capable). Named after the binary's own resolved path, not this build's, since that is the one whose flags matter at hook time; see `checkClaudeHookHealth`'s doc comment for why this is decided by capability probe rather than a version-number floor. */
-function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
+export function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
   const incapable = health.hooks.filter((hook) => !hook.capable);
   if (incapable.length === 0) {
     return null;
@@ -774,7 +774,7 @@ function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
     ...(gaps.length > 0 ? [`     it does not support: ${gaps.join(", ")}`] : []),
     gaps.length > 0
       ? "     upgrade with `npm i -g token-goat-mem`, or re-run with --force"
-      : unprobed.length === 0 && refusals.length > 0
+      : refusals.length > 0
         ? "     re-run with --force to write the hooks without the check, or install mem under a path without those characters"
         : "     re-run once the machine is less busy, or re-run with --force to write the hooks without the check",
   ].join("\n");

@@ -161,7 +161,7 @@ export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly p
     return "reinstall token-goat-mem or fix PATH (the mem this hook launches could not run at all)";
   }
   if (hook.probeRefusal !== undefined) {
-    return "install mem under a path without & % ! ^ | < > or quote characters (the hook was not judged; only its probe was skipped)";
+    return "install mem under a path without & % ! ^ | < >, a quote or a line break (the hook was not judged; only its probe was skipped)";
   }
   return hook.probeFailure === undefined ? "npm install -g token-goat-mem" : "re-run mem doctor once the machine is less busy (a probe that times out says nothing about the mem version)";
 }
@@ -207,6 +207,16 @@ function describeHookHealth(opts: WiringOpts, probe: ProbeBudget): Finding[] {
     }
     for (const hook of hooks) {
       const recommended = claudeHookTimeoutSeconds(hook.event);
+      if (recommended !== undefined && hook.timeoutNotNumber === true) {
+        lines.push(
+          finding(
+            "hooks",
+            "warn",
+            `hooks (${label}): ${hook.event} has a timeout that is not a number of seconds -- Claude Code may ignore it, and recall can be cut off or left unbounded`,
+            `set "timeout": ${recommended} (a number, not a string) on the ${hook.event} mem hook in the ${label} settings.json (mem init claude-code does not replace a timeout already there)`
+          )
+        );
+      }
       if (recommended !== undefined && hook.timeout !== undefined && hook.timeout < MIN_RECALL_HOOK_TIMEOUT_SECONDS) {
         lines.push(
           finding(

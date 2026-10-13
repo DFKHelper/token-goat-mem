@@ -1077,7 +1077,7 @@ export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeou
 
 /** The one sentence for a capability probe that was skipped: it names the binary and why (its path carries a character cmd.exe would interpret, so it is never launched through a shell) and claims nothing about what the binary supports. */
 export function describeProbeRefusal(probed: string): string {
-  return `skipped the capability probe of \`${probed}\`: its path contains a character cmd.exe would interpret (one of & % ! ^ | < > or a quote), so it was not launched to check it`;
+  return `skipped the capability probe of \`${probed}\`: its path contains a character cmd.exe would interpret (one of & % ! ^ | < >, a quote or a line break), so it was not launched to check it`;
 }
 
 /** The one sentence for a capability probe that got no answer: it names the probed binary and the budget and claims nothing about the binary's version, since a slow launch (antivirus scanning) looks the same as a hang from here. */
@@ -1162,6 +1162,8 @@ export interface InstalledClaudeHook {
   readonly stamped: boolean;
   /** The `timeout` (seconds) on the hook entry the command came from, when it carries a numeric one. */
   readonly timeout?: number;
+  /** Set when the hook entry carries a `timeout` that is not a number (a string such as "45"), which Claude Code does not read as seconds. */
+  readonly timeoutNotNumber?: true;
 }
 
 /** Every mem-authored (stamped, or unstamped-but-adoptable) hook command currently sitting in `before`'s `hooks` object, one entry per event that has one. The one place that walks `hooks.<event>[].hooks[]` looking for mem's own shape -- shared by `claudeHookAdoptions` (which events would be *upgraded* by an install) and `mem doctor`'s hook-health report (which commands to check a candidate `mem` binary against), so a second traversal of the same structure never drifts from this one. */
@@ -1184,8 +1186,8 @@ function installedClaudeHooks(before: string): InstalledClaudeHook[] {
     }
     let stampedCommand: string | undefined;
     let adoptableCommand: string | undefined;
-    let stampedTimeout: number | undefined;
-    let adoptableTimeout: number | undefined;
+    let stampedTimeout: unknown;
+    let adoptableTimeout: unknown;
     for (const group of eventValue) {
       if (!isPlainObject(group) || !Array.isArray(group["hooks"])) {
         continue;
@@ -1196,17 +1198,23 @@ function installedClaudeHooks(before: string): InstalledClaudeHook[] {
         }
         if (isStamped(hook)) {
           stampedCommand = hook["command"];
-          stampedTimeout = typeof hook["timeout"] === "number" ? hook["timeout"] : undefined;
+          stampedTimeout = hook["timeout"];
         } else if (looksLikeMemHookCommand(hook["command"], event)) {
           adoptableCommand = hook["command"];
-          adoptableTimeout = typeof hook["timeout"] === "number" ? hook["timeout"] : undefined;
+          adoptableTimeout = hook["timeout"];
         }
       }
     }
     const command = stampedCommand ?? adoptableCommand;
     if (command !== undefined) {
       const timeout = stampedCommand !== undefined ? stampedTimeout : adoptableTimeout;
-      result.push({ event, command, stamped: stampedCommand !== undefined, ...(timeout === undefined ? {} : { timeout }) });
+      result.push({
+        event,
+        command,
+        stamped: stampedCommand !== undefined,
+        ...(typeof timeout === "number" ? { timeout } : {}),
+        ...(timeout !== undefined && typeof timeout !== "number" ? { timeoutNotNumber: true as const } : {}),
+      });
     }
   }
   return result;

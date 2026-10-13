@@ -5,9 +5,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
+import { describeHookHealthRefusal } from "../src/cli.js";
 import { hookGapRemedy } from "../src/doctor.js";
 import { probeTimeoutFromEnv } from "../src/doctorWiring.js";
-import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, MEM_PROBE_TIMEOUT_MS } from "../src/wiring.js";
+import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, describeProbeRefusal, MEM_PROBE_TIMEOUT_MS } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
 import { CAPABLE_MEM_SHIM, HANG_ONCE_MEM_SHIM, HANGING_MEM_SHIM, NOT_RUNNABLE_MEM_SHIM, writeCountingFakeMem, writeFakeMem } from "./support/fakeMem.js";
 import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
@@ -168,7 +169,7 @@ describe("mem doctor project-vs-user hook divergence", { timeout: SPAWN_TIMEOUT_
 
 describe("mem doctor warns about a recall hook timeout that is too low", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   /** Installs the hooks, then sets (or removes, for `undefined`) the `timeout` on every hook of `event`. */
-  async function installWithTimeout(event: string, timeout: number | undefined): Promise<void> {
+  async function installWithTimeout(event: string, timeout: number | string | undefined): Promise<void> {
     await init("claude-code");
     const path = join(toolRoot, ".claude", "settings.json");
     const settings = JSON.parse(readFileSync(path, "utf8")) as { hooks: Record<string, { hooks: Record<string, unknown>[] }[]> };
@@ -205,6 +206,43 @@ describe("mem doctor warns about a recall hook timeout that is too low", { timeo
   it("does not warn for a Stop hook with a timeout of 5", async () => {
     await installWithTimeout("Stop", 5);
     expect(await timeoutWarnings()).toEqual([]);
+  });
+
+  it.each(["SessionStart", "UserPromptSubmit"])("warns that a %s timeout given as a string is not a number of seconds", async (event) => {
+    await installWithTimeout(event, "45");
+    const warnings = await timeoutWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.message).toContain(event);
+    expect(warnings[0]?.message).toContain("not a number");
+    expect(warnings[0]?.remedy).toContain("45");
+  });
+
+  it("does not warn for a Stop hook with a non-numeric timeout", async () => {
+    await installWithTimeout("Stop", "5");
+    expect(await timeoutWarnings()).toEqual([]);
+  });
+});
+
+describe("a probe refusal names every character that made it skip, the line break included", () => {
+  it("says so in the doctor remedy and in the probe sentence", () => {
+    expect(hookGapRemedy({ probeRefusal: "skipped" })).toContain("line break");
+    expect(describeProbeRefusal("C:/x")).toContain("line break");
+  });
+});
+
+describe("the init refusal remedy follows the refusal when a probe also timed out", () => {
+  const bin = { path: "C:/m&m/mem", version: "0.5.2" };
+  const refused = { event: "SessionStart", command: "mem hook session-start", capable: false, missing: [], probeRefusal: "skipped the capability probe" };
+  const timedOut = { event: "UserPromptSubmit", command: "mem hook user-prompt-submit", capable: false, missing: [], probeFailure: "could not probe it within 5 s" };
+
+  it("names the path-character remedy, not the busy-machine one, when there is a refusal and a timeout but no gap", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [refused, timedOut] });
+    expect(message).toContain("without those characters");
+    expect(message).not.toContain("less busy");
+  });
+
+  it("still says the machine may be busy when there is a timeout and no refusal", () => {
+    expect(describeHookHealthRefusal({ bin, hooks: [timedOut] })).toContain("less busy");
   });
 });
 
