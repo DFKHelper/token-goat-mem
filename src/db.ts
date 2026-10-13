@@ -11,6 +11,8 @@ import { snapshotOnOpen } from "./backup.js";
 import { MEM_DB_MODE, MEM_HOME_MODE, restrictPermissions } from "./fileUtils.js";
 
 const DB_FILE_NAME = "mem.db";
+// better-sqlite3 waits 5 s for a held write lock by default, which a writer queued behind a stalled sibling process outlives on a loaded machine (a node start alone takes 5-11 s), so the wait is stated here and is long enough to span that.
+const BUSY_TIMEOUT_MS = 30_000;
 
 /** Resolves mem's home directory. `TOKEN_GOAT_MEM_HOME` overrides the default `~/.mem` -- used by tests to isolate the real user home (see tests/setup/isolate-home.ts) and by anyone who wants a non-default location. */
 export function resolveMemHome(): string {
@@ -96,7 +98,7 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
   // `mode` applies only when mkdir actually creates the directory, so an existing home -- including one created 0755 by an earlier version of mem -- is tightened explicitly on the next line.
   mkdirSync(home, { recursive: true, mode: MEM_HOME_MODE });
   restrictPermissions(home, MEM_HOME_MODE);
-  const db = new Database(dbPath);
+  const db = new Database(dbPath, { timeout: BUSY_TIMEOUT_MS });
   // Everything past construction is closed on failure. `new Database` connects lazily, so the first statement is what surfaces a damaged file (`SQLITE_NOTADB` on a truncated or non-sqlite path) -- and an escaping error would otherwise leave this handle open with no reference to close it by, which on Windows holds an exclusive lock on the file. That turns a recoverable "your store is corrupt" into an unrecoverable one: the user cannot delete or replace their own database without killing the process, and `mem doctor` -- whose whole job is diagnosing this -- opens through the same path and hangs on the same lock.
   try {
     // Order matters: SQLite creates the `-wal` and `-shm` sidecars with the database file's own permissions, so the database has to already be 0600 when the WAL pragma runs or the sidecars -- which hold the same fact rows -- are born world-readable.
