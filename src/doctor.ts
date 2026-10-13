@@ -15,7 +15,7 @@ import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCove
 import { formatAge, MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
 import { createProbeBudget, describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv, type ProbeBudget } from "./doctorWiring.js";
-import { checkClaudeHookHealth, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, type WiringOpts } from "./wiring.js";
+import { checkClaudeHookHealth, claudeHookTimeoutSeconds, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, MIN_RECALL_HOOK_TIMEOUT_SECONDS, type WiringOpts } from "./wiring.js";
 
 /** The fixed set of `check` names a finding can carry. Closed on purpose: `--json` consumers key off these strings, so a new check is a deliberate, tested addition here rather than a string typed at one call site. One name covers every line a topic prints (`hooks` is a header plus one line per event), and the order is the order the report prints in. */
 export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks", "hook-divergence", "launch-time", "wiring"] as const;
@@ -204,6 +204,19 @@ function describeHookHealth(opts: WiringOpts, probe: ProbeBudget): Finding[] {
               hookGapRemedy(hook)
             )
       );
+    }
+    for (const hook of hooks) {
+      const recommended = claudeHookTimeoutSeconds(hook.event);
+      if (recommended !== undefined && hook.timeout !== undefined && hook.timeout < MIN_RECALL_HOOK_TIMEOUT_SECONDS) {
+        lines.push(
+          finding(
+            "hooks",
+            "warn",
+            `hooks (${label}): ${hook.event} has a timeout of ${hook.timeout} s, below ${MIN_RECALL_HOOK_TIMEOUT_SECONDS} s -- recall can be cut off while it waits on the store's 30 s busy timeout`,
+            `set "timeout": ${recommended} on the ${hook.event} mem hook in the ${label} settings.json (mem init claude-code does not replace a timeout already there)`
+          )
+        );
+      }
     }
     const legacy = hooks.filter((hook) => isLegacyHookShape(hook.command)).map((hook) => hook.event);
     if (legacy.length > 0) {

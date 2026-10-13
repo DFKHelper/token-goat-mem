@@ -166,7 +166,49 @@ describe("mem doctor project-vs-user hook divergence", { timeout: SPAWN_TIMEOUT_
   });
 });
 
-describe("mem hook capability probe that gets no answer", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem doctor warns about a recall hook timeout that is too low", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+  /** Installs the hooks, then sets (or removes, for `undefined`) the `timeout` on every hook of `event`. */
+  async function installWithTimeout(event: string, timeout: number | undefined): Promise<void> {
+    await init("claude-code");
+    const path = join(toolRoot, ".claude", "settings.json");
+    const settings = JSON.parse(readFileSync(path, "utf8")) as { hooks: Record<string, { hooks: Record<string, unknown>[] }[]> };
+    for (const group of settings.hooks[event] ?? []) {
+      for (const hook of group.hooks) {
+        if (timeout === undefined) {
+          delete hook["timeout"];
+        } else {
+          hook["timeout"] = timeout;
+        }
+      }
+    }
+    writeFileSync(path, JSON.stringify(settings, null, 2), "utf8");
+  }
+
+  async function timeoutWarnings(): Promise<JsonFinding[]> {
+    return (await doctorFindings("hooks")).filter((entry) => entry.status === "warn" && entry.message.includes("timeout"));
+  }
+
+  it.each(["SessionStart", "UserPromptSubmit"])("warns, naming the event, the value and 45, for a %s timeout of 10", async (event) => {
+    await installWithTimeout(event, 10);
+    const warnings = await timeoutWarnings();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]?.message).toContain(event);
+    expect(warnings[0]?.message).toContain("10");
+    expect(warnings[0]?.remedy).toContain("45");
+  });
+
+  it.each([45, undefined])("does not warn for a SessionStart timeout of %s", async (timeout) => {
+    await installWithTimeout("SessionStart", timeout);
+    expect(await timeoutWarnings()).toEqual([]);
+  });
+
+  it("does not warn for a Stop hook with a timeout of 5", async () => {
+    await installWithTimeout("Stop", 5);
+    expect(await timeoutWarnings()).toEqual([]);
+  });
+});
+
+describe("mem hook capability probe that gets no answer",{ timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("reports a probe that timed out as such, not as a mem without the `mem hook <event>` entry point", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mem-dw-bin-"));
     try {

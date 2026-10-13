@@ -1104,6 +1104,9 @@ export function describeHookGap(command: string, missing: readonly string[]): st
 /** Seconds Claude Code lets a recall hook (SessionStart, UserPromptSubmit: `mem hook` runs `recall`) run: above a loaded machine's 5-11 s node start plus most of the 30 s store busy wait, yet far below Claude Code's 600 s default, so a recall stalled behind a writer is cut off. The Stop and PreCompact hooks (`reflect`, `scan-session`) write captures from a transcript that can take longer than any fixed bound, so they get no `timeout` field and keep Claude Code's default rather than lose a scan. */
 const CLAUDE_RECALL_HOOK_TIMEOUT_SECONDS = 45;
 
+/** The lowest `timeout` (seconds) on a recall hook that `mem doctor` accepts without a warning: below it, a recall waiting on the store's 30 s busy timeout is cut off. */
+export const MIN_RECALL_HOOK_TIMEOUT_SECONDS = 20;
+
 /** The `timeout` mem writes on a new hook entry for `event`, or `undefined` for an event that keeps Claude Code's default. */
 export function claudeHookTimeoutSeconds(event: string): number | undefined {
   return event === "SessionStart" || event === "UserPromptSubmit" ? CLAUDE_RECALL_HOOK_TIMEOUT_SECONDS : undefined;
@@ -1157,6 +1160,8 @@ export interface InstalledClaudeHook {
   readonly event: string;
   readonly command: string;
   readonly stamped: boolean;
+  /** The `timeout` (seconds) on the hook entry the command came from, when it carries a numeric one. */
+  readonly timeout?: number;
 }
 
 /** Every mem-authored (stamped, or unstamped-but-adoptable) hook command currently sitting in `before`'s `hooks` object, one entry per event that has one. The one place that walks `hooks.<event>[].hooks[]` looking for mem's own shape -- shared by `claudeHookAdoptions` (which events would be *upgraded* by an install) and `mem doctor`'s hook-health report (which commands to check a candidate `mem` binary against), so a second traversal of the same structure never drifts from this one. */
@@ -1179,6 +1184,8 @@ function installedClaudeHooks(before: string): InstalledClaudeHook[] {
     }
     let stampedCommand: string | undefined;
     let adoptableCommand: string | undefined;
+    let stampedTimeout: number | undefined;
+    let adoptableTimeout: number | undefined;
     for (const group of eventValue) {
       if (!isPlainObject(group) || !Array.isArray(group["hooks"])) {
         continue;
@@ -1189,14 +1196,17 @@ function installedClaudeHooks(before: string): InstalledClaudeHook[] {
         }
         if (isStamped(hook)) {
           stampedCommand = hook["command"];
+          stampedTimeout = typeof hook["timeout"] === "number" ? hook["timeout"] : undefined;
         } else if (looksLikeMemHookCommand(hook["command"], event)) {
           adoptableCommand = hook["command"];
+          adoptableTimeout = typeof hook["timeout"] === "number" ? hook["timeout"] : undefined;
         }
       }
     }
     const command = stampedCommand ?? adoptableCommand;
     if (command !== undefined) {
-      result.push({ event, command, stamped: stampedCommand !== undefined });
+      const timeout = stampedCommand !== undefined ? stampedTimeout : adoptableTimeout;
+      result.push({ event, command, stamped: stampedCommand !== undefined, ...(timeout === undefined ? {} : { timeout }) });
     }
   }
   return result;
