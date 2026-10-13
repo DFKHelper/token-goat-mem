@@ -1,7 +1,9 @@
-import { PROBE_HELPER_BUDGET_ARG_INDEX } from "../../src/probeSpawn.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./spawnTimeoutFloorMs.js";
 
-/** Wraps `node:child_process` so no `spawnSync` call runs under a timeout shorter than `SPAWN_TIMEOUT_FLOOR_MS`, for tests that drive src code with a hard-coded short probe timeout (wiring.ts's short `mem --version`/`--help` probe budget). Process launches on a scanned Windows machine take 1-10 s each (cmd.exe then node for a `.cmd` shim), so the production budget turns a healthy fake `mem` into a timed-out, "incapable" one at random; the tests assert capability logic, not launch latency, so they get a floor the machine cannot miss. Only timeouts are raised -- argv, env, and output are untouched. */
-export const SPAWN_TIMEOUT_FLOOR_MS = 120_000;
+export { SPAWN_TIMEOUT_FLOOR_MS };
+
+// Mirrors PROBE_HELPER_BUDGET_ARG_INDEX in src/probeSpawn.ts; importing that module here would close a cycle through the mocked node:child_process and hang collection, so tests/guards/spawn-floor-leaf.test.ts pins the two equal.
+const PROBE_HELPER_BUDGET_ARG_INDEX = 2;
 
 type SpawnSyncFn = (...args: unknown[]) => unknown;
 

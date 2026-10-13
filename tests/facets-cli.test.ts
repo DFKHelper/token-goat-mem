@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { extractRememberedId, runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, listTermsForFact, openStorage } from "../src/storage.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 let home: string;
 let root: string;
@@ -179,7 +180,7 @@ describe("fact_terms write path", () => {
   });
 });
 
-describe("mem facets", { timeout: 120_000 }, () => {
+describe("mem facets", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("backfills facts that have no terms and reports what it did", async () => {
     const id = await remember("the ranking lives in src/retrieval.ts");
     // Simulate a store written before the facet layer existed: drop the rows the write path added, and the extraction record with them (terms_checked_at predates the facet layer too).

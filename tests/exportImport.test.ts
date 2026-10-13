@@ -11,6 +11,7 @@ import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projec
 import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
 import type { ImportOutcome } from "../src/import.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 /** The `reason` of a `skipped_error` outcome, or "" for any other outcome, so a `toContain` on it fails rather than reading a field the outcome does not carry. */
 function skipReason(outcome: ImportOutcome | undefined): string {
@@ -204,7 +205,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("importFromJson", { timeout: 120_000 }, () => {
+describe("importFromJson", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("imports a fact preserving its original id, status, confidence, and captured_at", () => {
     const result = importFromJson(db, { path: jsonPath, root });
     expect(result.outcomes).toHaveLength(1);

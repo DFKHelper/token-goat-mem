@@ -10,6 +10,7 @@ import { extractRememberedId, runCli, type CliResult } from "./support/cli.js";
 import { findSupersedingFactId, insertAuditLog, resolveDbPath } from "../src/db.js";
 import { insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 // Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
@@ -1015,7 +1016,7 @@ describe("mem edit keeps the value it is about to destroy", () => {
 });
 
 describe("mem show and mem log hide the stamped-ref audit marker from text", () => {
-  it("keeps [stamped_ref= in --json only, and leaves the source_ref line alone", { timeout: 120_000 }, async () => {
+  it("keeps [stamped_ref= in --json only, and leaves the source_ref line alone", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, async () => {
     const directory = join(home, "transcripts");
     mkdirSync(directory, { recursive: true });
     const transcript = join(directory, "transcript.jsonl");

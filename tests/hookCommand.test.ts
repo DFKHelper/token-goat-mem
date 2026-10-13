@@ -25,6 +25,7 @@ import {
   MEM_HOOK_INVOCATION_SHAPES,
   parseHookCommandSpec,
 } from "../src/wiring.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 // Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
@@ -256,7 +257,7 @@ describe("matrix 7: strict input", () => {
   });
 });
 
-describe("matrix 8: doctor and the capability probe", { timeout: 120_000 }, () => {
+describe("matrix 8: doctor and the capability probe", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("fails the probe with `hook` missing on an old binary and passes on a new one", () => {
     const hooks = CLAUDE_HOOK_EVENTS.map(({ event, command }) => ({ event, command }));
     writeFakeMem(binDir, OLD_MEM_SHIM);
@@ -318,7 +319,7 @@ describe("end to end through the built bundle", () => {
   const bashOnPath = spawnSync("bash", ["-c", "true"]).status === 0;
 
   // Claude Code runs a hook command through bash on Windows too, so the direct-bundle string a win32 user-level install writes must work as written.
-  it.skipIf(!bashOnPath)("runs the win32 direct-bundle hook command through bash against the built bundle and emits TGMEM/2", { timeout: 120_000 }, async () => {
+  it.skipIf(!bashOnPath)("runs the win32 direct-bundle hook command through bash against the built bundle and emits TGMEM/2", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, async () => {
     const memHome = process.env["TOKEN_GOAT_MEM_HOME"] as string;
     const remembered = await runCli(["remember", "the quokka deploy token lives in vault", "--kind", "fact", "--scope", "project", "--root", root]);
     expect(remembered.exitCode ?? 0).toBe(0);

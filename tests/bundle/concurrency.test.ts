@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "../support/spawnTimeoutFloorMs.js";
 
 /** Parallel processes. Enough to keep several writers queued on the lock at once on a 2-core CI runner. */
 const WORKERS = 6;
@@ -99,7 +100,7 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-describe("concurrent mem processes against one store", { timeout: 120_000 }, () => {
+describe("concurrent mem processes against one store", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("loses no write, duplicates no reaffirm, and never surfaces SQLITE_BUSY", async () => {
     const perWorker = await Promise.all(Array.from({ length: WORKERS }, (_unused, index) => worker(index)));
     const results = perWorker.flat();

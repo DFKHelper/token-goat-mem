@@ -10,6 +10,7 @@ import { probeTimeoutFromEnv } from "../src/doctorWiring.js";
 import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, MEM_PROBE_TIMEOUT_MS } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
 import { CAPABLE_MEM_SHIM, HANG_ONCE_MEM_SHIM, HANGING_MEM_SHIM, NOT_RUNNABLE_MEM_SHIM, writeCountingFakeMem, writeFakeMem } from "./support/fakeMem.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 interface JsonFinding {
   readonly check: string;
@@ -51,7 +52,7 @@ async function init(tool: string, ...extra: string[]): Promise<void> {
   expect(result.exitCode).toBe(0);
 }
 
-describe("mem doctor wiring drift", { timeout: 120_000 }, () => {
+describe("mem doctor wiring drift", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("reports ok for a tool whose wiring is current", async () => {
     await init("codex");
     await init("claude-code");
@@ -127,7 +128,7 @@ describe("mem doctor wiring drift", { timeout: 120_000 }, () => {
   });
 });
 
-describe("mem doctor project-vs-user hook divergence", { timeout: 120_000 }, () => {
+describe("mem doctor project-vs-user hook divergence", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("warns when project and user hooks run different mem invocations, naming both fixes", async () => {
     await init("claude-code");
     await init("claude-code", "--user");
@@ -165,7 +166,7 @@ describe("mem doctor project-vs-user hook divergence", { timeout: 120_000 }, () 
   });
 });
 
-describe("mem hook capability probe that gets no answer", { timeout: 120_000 }, () => {
+describe("mem hook capability probe that gets no answer", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("reports a probe that timed out as such, not as a mem without the `mem hook <event>` entry point", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mem-dw-bin-"));
     try {

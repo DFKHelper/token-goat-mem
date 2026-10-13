@@ -12,6 +12,7 @@ import { runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { DOCTOR_CHECKS } from "../src/doctor.js";
 import { getEpoch } from "../src/epoch.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 // Process launches on this machine take 1-10 s and stack up under load, so a probe can exceed MEM_PROBE_TIMEOUT_MS in wiring.ts and come back as "version unknown" or "incapable"; the floor keeps capability tests asserting capability logic, not launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
@@ -242,7 +243,7 @@ describe("mem doctor (read-only health check)", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── mem init / uninstall ───────────────────────────────────────────────────────────────────────────
 
-describe("mem init/uninstall", { timeout: 120_000 }, () => {
+describe("mem init/uninstall", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   let toolRoot: string;
   let toolHome: string;
   let fakeMemDir: string;

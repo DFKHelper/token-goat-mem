@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openDb } from "../../src/db.js";
 import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "../support/spawnTimeoutFloorMs.js";
 
 /** Longer than better-sqlite3's five second default, with margin for the waiter to reach the lock after its preload ran. */
 const LOCK_HELD_MS = 9_000;
@@ -32,7 +33,7 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-describe("the store's busy timeout", { timeout: 120_000 }, () => {
+describe("the store's busy timeout", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   it("opens every connection with a busy timeout above better-sqlite3's five second default", () => {
     const db = openDb(join(memHome, "mem.db"), { autoSnapshot: false });
     try {

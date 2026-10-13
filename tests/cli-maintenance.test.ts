@@ -9,6 +9,7 @@ import { extractRememberedId, runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { getFactById, insertFact, listSourcesForFact, openStorage } from "../src/storage.js";
 import { MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
+import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 // Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
@@ -759,7 +760,7 @@ describe("sources table (mem remember/mem suggest never feed it; mem epoch --gc 
   });
 });
 
-describe("mem dream", { timeout: 120_000 }, () => {
+describe("mem dream", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
   const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";
   const KEY_ENV = "TOKEN_GOAT_MEM_DREAM_API_KEY";
