@@ -1089,8 +1089,13 @@ export function describeHookGap(command: string, missing: readonly string[]): st
   return `${subcommand} ${missing.join(" ")}`;
 }
 
-/** Seconds Claude Code lets a mem hook run (the `timeout` field on a command hook): above a normal busy wait and a slow node start, below the 30 s store busy timeout, so a recall stalled behind another writer is cut off rather than holding the prompt. */
-export const CLAUDE_HOOK_TIMEOUT_SECONDS = 20;
+/** Seconds Claude Code lets a recall hook (SessionStart, UserPromptSubmit: `mem hook` runs `recall`) run: above a loaded machine's 5-11 s node start plus most of the 30 s store busy wait, yet far below Claude Code's 600 s default, so a recall stalled behind a writer is cut off. The Stop and PreCompact hooks (`reflect`, `scan-session`) write captures from a transcript that can take longer than any fixed bound, so they get no `timeout` field and keep Claude Code's default rather than lose a scan. */
+const CLAUDE_RECALL_HOOK_TIMEOUT_SECONDS = 45;
+
+/** The `timeout` mem writes on a new hook entry for `event`, or `undefined` for an event that keeps Claude Code's default. */
+export function claudeHookTimeoutSeconds(event: string): number | undefined {
+  return event === "SessionStart" || event === "UserPromptSubmit" ? CLAUDE_RECALL_HOOK_TIMEOUT_SECONDS : undefined;
+}
 
 interface ClaudeHook {
   readonly type: string;
@@ -1242,13 +1247,14 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
       stampedHookIdx = hookIdx;
     }
   }
+  const eventTimeout = claudeHookTimeoutSeconds(event);
   const stampedHook: ClaudeHook | undefined = stampedGroupIdx === -1 ? undefined : groups[stampedGroupIdx]?.hooks?.[stampedHookIdx];
 
   if (stampedHook !== undefined) {
     const hookPath: JSONPath = ["hooks", event, stampedGroupIdx, "hooks", stampedHookIdx];
-    // An entry an older mem wrote carries no timeout; setting it here upgrades that entry in place rather than adding a second one.
+    // An entry an older mem wrote carries no timeout; adding one here upgrades it in place rather than adding a second entry, and a timeout already on the entry (a hand-set value included) is never replaced.
     const withTimeout = (current: string): string =>
-      stampedHook.timeout === CLAUDE_HOOK_TIMEOUT_SECONDS ? current : surgicalJsoncEdit(current, [...hookPath, "timeout"], CLAUDE_HOOK_TIMEOUT_SECONDS);
+      eventTimeout === undefined || stampedHook.timeout !== undefined ? current : surgicalJsoncEdit(current, [...hookPath, "timeout"], eventTimeout);
     if (stampedHook.type === "command" && stampedHook.command === command) {
       return withTimeout(text);
     }
@@ -1277,11 +1283,13 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
     const stamped = surgicalJsoncEdit(text, [...hookPath, STAMP_KEY], true);
     const retyped = surgicalJsoncEdit(stamped, [...hookPath, "type"], "command");
     const adopted = surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
-    return surgicalJsoncEdit(adopted, [...hookPath, "timeout"], CLAUDE_HOOK_TIMEOUT_SECONDS);
+    return eventTimeout === undefined || groups[adoptGroupIdx]?.hooks?.[adoptHookIdx]?.timeout !== undefined
+      ? adopted
+      : surgicalJsoncEdit(adopted, [...hookPath, "timeout"], eventTimeout);
   }
 
   // Insert at the deepest container the file already has, so `modify` never has to synthesise intermediates -- that is the one case surgicalJsoncEdit has to fall back to a reformat.
-  const group = { hooks: [{ type: "command", command, timeout: CLAUDE_HOOK_TIMEOUT_SECONDS, [STAMP_KEY]: true }] };
+  const group = { hooks: [{ type: "command", command, ...(eventTimeout === undefined ? {} : { timeout: eventTimeout }), [STAMP_KEY]: true }] };
   if (!hadHooks) {
     return surgicalJsoncEdit(text, ["hooks"], { [event]: [group] });
   }

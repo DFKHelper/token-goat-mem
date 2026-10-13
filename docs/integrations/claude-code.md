@@ -78,7 +78,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
           {
             "type": "command",
             "command": "if command -v mem >/dev/null 2>&1; then mem hook session-start || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi",
-            "timeout": 20
+            "timeout": 45
           }
         ]
       }
@@ -89,7 +89,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
           {
             "type": "command",
             "command": "if command -v mem >/dev/null 2>&1; then mem hook user-prompt-submit || printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' \"$?\"; fi",
-            "timeout": 20
+            "timeout": 45
           }
         ]
       }
@@ -99,8 +99,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v mem >/dev/null 2>&1; then mem hook stop || echo \"mem reflect failed (exit $?); run mem doctor\"; fi",
-            "timeout": 20
+            "command": "if command -v mem >/dev/null 2>&1; then mem hook stop || echo \"mem reflect failed (exit $?); run mem doctor\"; fi"
           }
         ]
       }
@@ -110,8 +109,7 @@ Claude Code's `SessionStart` hook runs a command when a session starts, and its 
         "hooks": [
           {
             "type": "command",
-            "command": "if command -v mem >/dev/null 2>&1; then mem hook pre-compact || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi",
-            "timeout": 20
+            "command": "if command -v mem >/dev/null 2>&1; then mem hook pre-compact || echo \"mem scan-session failed (exit $?); run mem doctor\"; fi"
           }
         ]
       }

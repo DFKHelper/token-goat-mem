@@ -13,7 +13,7 @@ import {
   checkHookCapability,
   claudeCode,
   CLAUDE_HOOK_EVENTS,
-  CLAUDE_HOOK_TIMEOUT_SECONDS,
+  claudeHookTimeoutSeconds,
   codex,
   createMemProbeCache,
   copilotCli,
@@ -1196,13 +1196,43 @@ describe("claude-code hook entries carry a timeout", () => {
     return (parsed.hooks?.[event] ?? []).flatMap((group) => group.hooks);
   };
 
-  it("a fresh install writes the named timeout on every hook mem installs", () => {
+  it("a fresh install bounds the recall hooks and leaves the scan-session hooks on Claude Code's own default", () => {
     claudeCode.install({ root, homeDir: home });
     for (const { event } of CLAUDE_HOOK_EVENTS) {
-      const hooks = hooksOf(event);
-      expect(hooks).toHaveLength(1);
-      expect(hooks[0]?.timeout).toBe(CLAUDE_HOOK_TIMEOUT_SECONDS);
+      expect(hooksOf(event)).toHaveLength(1);
     }
+    for (const event of ["SessionStart", "UserPromptSubmit"]) {
+      const timeout = hooksOf(event)[0]?.timeout;
+      expect(timeout).toBe(claudeHookTimeoutSeconds(event));
+      expect(timeout).toBeGreaterThanOrEqual(30);
+    }
+    for (const event of ["Stop", "PreCompact"]) {
+      expect(hooksOf(event)[0]).not.toHaveProperty("timeout");
+    }
+  });
+
+  it("a stamped entry's own timeout survives re-init, on every event", () => {
+    const hooks: Record<string, unknown> = {};
+    for (const { event, command } of CLAUDE_HOOK_EVENTS) {
+      hooks[event] = [{ hooks: [{ type: "command", command, timeout: 45, __token_goat_mem: true }] }];
+    }
+    seed(settingsPath(), JSON.stringify({ hooks }, null, 2));
+    claudeCode.install({ root, homeDir: home });
+    for (const { event } of CLAUDE_HOOK_EVENTS) {
+      expect(hooksOf(event)).toHaveLength(1);
+      expect(hooksOf(event)[0]?.timeout).toBe(45);
+    }
+  });
+
+  it("an unstamped orphan that already has a timeout keeps it when adopted", () => {
+    const [first] = CLAUDE_HOOK_EVENTS;
+    if (first === undefined) {
+      throw new Error("no hook events");
+    }
+    seed(settingsPath(), JSON.stringify({ hooks: { [first.event]: [{ hooks: [{ type: "command", command: first.command, timeout: 45 }] }] } }));
+    claudeCode.install({ root, homeDir: home });
+    expect(hooksOf(first.event)).toHaveLength(1);
+    expect(hooksOf(first.event)[0]?.timeout).toBe(45);
   });
 
   it("re-running install on a stamped entry without a timeout upgrades it in place instead of duplicating it", () => {
@@ -1214,7 +1244,8 @@ describe("claude-code hook entries carry a timeout", () => {
 
     claudeCode.install({ root, homeDir: home });
     for (const { event, command } of CLAUDE_HOOK_EVENTS) {
-      expect(hooksOf(event)).toEqual([{ type: "command", command, timeout: CLAUDE_HOOK_TIMEOUT_SECONDS, __token_goat_mem: true }]);
+      const timeout = claudeHookTimeoutSeconds(event);
+      expect(hooksOf(event)).toEqual([{ type: "command", command, ...(timeout === undefined ? {} : { timeout }), __token_goat_mem: true }]);
     }
     const afterFirst = read(settingsPath());
     claudeCode.install({ root, homeDir: home });
@@ -1230,7 +1261,7 @@ describe("claude-code hook entries carry a timeout", () => {
     claudeCode.install({ root, homeDir: home });
     const hooks = hooksOf(first.event);
     expect(hooks).toHaveLength(1);
-    expect(hooks[0]?.timeout).toBe(CLAUDE_HOOK_TIMEOUT_SECONDS);
+    expect(hooks[0]?.timeout).toBe(claudeHookTimeoutSeconds(first.event));
   });
 
   it("uninstall removes the entry in both the old shape (no timeout) and the new one, sparing a user's own hook", () => {
@@ -1243,7 +1274,7 @@ describe("claude-code hook entries carry a timeout", () => {
       JSON.stringify({
         hooks: {
           [first.event]: [{ hooks: [{ type: "command", command: first.command, __token_goat_mem: true }] }, { hooks: [{ type: "command", command: "echo mine", timeout: 5 }] }],
-          [second.event]: [{ hooks: [{ type: "command", command: second.command, timeout: CLAUDE_HOOK_TIMEOUT_SECONDS, __token_goat_mem: true }] }],
+          [second.event]: [{ hooks: [{ type: "command", command: second.command, timeout: claudeHookTimeoutSeconds(second.event), __token_goat_mem: true }] }],
         },
       })
     );
