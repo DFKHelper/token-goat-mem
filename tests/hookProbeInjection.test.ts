@@ -119,6 +119,24 @@ describe("a probe is never started for a subcommand that is not a plain token", 
     });
   }
 
+  for (const char of ['"', "&", "^", "%", "|", "<", ">", "!"]) {
+    it.runIf(isWindows)(`spawnProbe refuses a .cmd path carrying ${JSON.stringify(char)} before any process starts`, () => {
+      const result = spawnProbe(join(dir, `me${char}m`, "mem.cmd"), ["--help"], 5000);
+      expect(result.errorCode).toBe("EPROBEREFUSED");
+      expect(result.status).toBeNull();
+      expect(spawned).toHaveLength(0);
+    });
+  }
+
+  it.runIf(isWindows)("spawnProbe still runs a .cmd shim whose path holds a space", () => {
+    const spaced = join(dir, "with space");
+    mkdirSync(spaced);
+    writeFakeMem(spaced, CAPABLE_MEM_SHIM);
+    const result = spawnProbe(join(spaced, "mem.cmd"), ["--version"], 120_000);
+    expect(result.errorCode).toBeUndefined();
+    expect(result.status).toBe(0);
+  });
+
   it.runIf(isWindows)("spawnProbe does not let a quote in an argument run a command through cmd.exe", () => {
     writeFakeMem(dir, CAPABLE_MEM_SHIM);
     const marker = join(dir, "marker.txt");

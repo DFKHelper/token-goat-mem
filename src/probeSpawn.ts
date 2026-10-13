@@ -57,10 +57,10 @@ export function isSafeProbeToken(token: string): boolean {
   return SAFE_PROBE_TOKEN.test(token);
 }
 
-/** The characters cmd.exe treats specially inside a quoted string (a quote closes it, `&|<>^` chain or redirect, `%` and `!` expand, a newline ends the command); an argument carrying one never reaches the shell. */
+/** The characters cmd.exe treats specially inside a quoted string (a quote closes it, `&|<>^` chain or redirect, `%` and `!` expand, a newline ends the command); a binary path or argument carrying one never reaches the shell. */
 const CMD_UNSAFE_CHARS = /["&|<>^%!\r\n]/u;
 
-/** Error code of a probe refused before any process was started because an argument could not be quoted safely for cmd.exe. */
+/** Error code of a probe refused before any process was started because the binary path or an argument could not be quoted safely for cmd.exe. */
 export const PROBE_REFUSED_ERROR_CODE = "EPROBEREFUSED";
 
 /** Whether `binPath` is a Windows command script, which only a shell can launch (`spawn` raises `EINVAL` on one). */
@@ -76,7 +76,7 @@ export function spawnProbe(binPath: string, args: readonly string[], timeoutMs: 
     const errorCode = result.error === undefined ? undefined : String(Reflect.get(result.error, "code") ?? "UNKNOWN");
     return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "", ...(errorCode === undefined ? {} : { errorCode }) };
   }
-  if (args.some((token) => CMD_UNSAFE_CHARS.test(token))) {
+  if ([binPath, ...args].some((token) => CMD_UNSAFE_CHARS.test(token))) {
     return { status: null, stdout: "", stderr: "", errorCode: PROBE_REFUSED_ERROR_CODE };
   }
   const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
