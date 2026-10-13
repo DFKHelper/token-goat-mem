@@ -196,6 +196,16 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a trailing production API key label", `${HEX32} is the production API key`],
     ["a trailing token label", `${HEX32} was the token for staging`],
     ["a trailing api_key label", `${HEX32} is our api_key`],
+    ["a Spanish contrasena label", `${HEX32} es mi contrase${String.fromCharCode(0xf1)}a`],
+    ["a German Passwort label", `${HEX32} ist mein Passwort`],
+    ["a totp label", `${HEX32} is my totp`],
+    ["a lowercase refreshtoken compound", `${HEX32} is my refreshtoken`],
+    ["a lowercase clientsecret compound", `${HEX32} is the clientsecret`],
+    ["a webhooksecret compound", `${HEX32} is the webhooksecret`],
+    ["a passkey compound", `${HEX32} is my passkey`],
+    ["an apikey compound", `${HEX32} is the apikey`],
+    ["a vault label", `${HEX32} is the vault password`],
+    ["a cookie label", `${HEX32} is the session cookie`],
     ["a hex split by U+200E", `API key: 0123456789abcdef${String.fromCodePoint(0x200e)}0123456789abcdef`],
     ["a hex split by U+2066", `API key: 0123456789abcdef${String.fromCodePoint(0x2066)}0123456789abcdef`],
     ["a hex split by U+FE0F", `API key: 0123456789abcdef${String.fromCodePoint(0xfe0f)}0123456789abcdef`],
@@ -209,6 +219,8 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a word that merely starts with a keyword", `Fixed in ${HEX40} by renaming the keyboard shortcut handler`],
     ["words that merely end with a keyword", `${HEX40} fixed the monkey patch in the authors list`],
     ["a keyword in a later sentence", `${HEX40} was reverted. The deploy key rotation is separate`],
+    ["a word that merely ends in a short keyword", `${HEX40} fixed the turkey and hockey fixtures`],
+    ["a word that merely starts with a short keyword", `${HEX40} fixed the saltwater and pinball tests`],
   ])("stores %s", async (_label, text) => {
     await remember(text);
   });
