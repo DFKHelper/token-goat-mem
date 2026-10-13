@@ -306,7 +306,43 @@ function isTrailingCredentialWord(word: string): boolean {
 }
 
 /** The end of a sentence: `.`, `;`, `!` or `?` followed by whitespace or the end of the text. */
-const SENTENCE_BOUNDARY = /[.;!?](?:\s|$)/u;
+const SENTENCE_BOUNDARY = /[.;!?](?:\s|$)/gu;
+
+/** A full stop that ends an abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`) rather than a sentence, tested against the text up to and including the stop. */
+const ABBREVIATION_BEFORE_STOP = /(?:^|[^a-z])(?:e\.g|i\.e|etc|vs)\.$/iu;
+
+/** Words that open a sentence referring back to the hex before it (`<hex>. This is my API key`). */
+const CREDENTIAL_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["this", "that", "it", "its", "these", "those", "which"]);
+
+/** The most words a next sentence may have and still read as a bare label of the hex (`<hex>. Password`). */
+const CREDENTIAL_BARE_LABEL_WORDS = 3;
+
+/** The index and length of the first genuine sentence boundary in `text` at or after `from`, or null; the stop of an abbreviation is not one. */
+function nextSentenceBoundary(text: string, from: number): { readonly index: number; readonly length: number } | null {
+  SENTENCE_BOUNDARY.lastIndex = from;
+  for (let match = SENTENCE_BOUNDARY.exec(text); match !== null; match = SENTENCE_BOUNDARY.exec(text)) {
+    if (!ABBREVIATION_BEFORE_STOP.test(text.slice(0, match.index + 1))) {
+      return { index: match.index, length: match[0].length };
+    }
+  }
+  return null;
+}
+
+/** Whether the sentence starting at `start` still describes the hex before it: it opens with a back-reference word, or is a bare label of at most a few words. */
+function continuesStatement(text: string, start: number): boolean {
+  const boundary = nextSentenceBoundary(text, start);
+  const words = splitWords(text.slice(start, boundary === null ? text.length : boundary.index));
+  return words.length > 0 && (CREDENTIAL_BACK_REFERENCE_WORDS.has(words[0] ?? "") || words.length <= CREDENTIAL_BARE_LABEL_WORDS);
+}
+
+/** The part of `following` that can still label the hex: it ends at the first sentence boundary unless the next sentence continues the statement. */
+function labellingWindow(following: string): string {
+  let boundary = nextSentenceBoundary(following, 0);
+  while (boundary !== null && continuesStatement(following, boundary.index + boundary.length)) {
+    boundary = nextSentenceBoundary(following, boundary.index + boundary.length);
+  }
+  return boundary === null ? following : following.slice(0, boundary.index);
+}
 
 /** Whether a credential keyword among the first few words after `end` (the rest of the hex's line and the next line) labels the hex that ends there (`<hex> is the production API key`), unless a hash word sits before the keyword or directly before the hex, so `<hex> is the commit that fixed the token parser` and `commit <hex> fixed the token parser` are not credential claims. */
 function isCredentialLabelledAfter(value: string, index: number, end: number): boolean {
@@ -315,8 +351,7 @@ function isCredentialLabelledAfter(value: string, index: number, end: number): b
     return false;
   }
   const following = value.slice(end).split("\n").slice(0, 2).join("\n");
-  const boundary = SENTENCE_BOUNDARY.exec(following);
-  const words = splitWords(boundary === null ? following : following.slice(0, boundary.index)).slice(0, CREDENTIAL_TRAILING_WORDS);
+  const words = splitWords(labellingWindow(following)).slice(0, CREDENTIAL_TRAILING_WORDS);
   const credentialIndex = words.findIndex((word, i) => isTrailingCredentialWord(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`)));
   return credentialIndex !== -1 && !words.slice(0, credentialIndex).some((word) => HASH_WORDS.has(word));
 }
