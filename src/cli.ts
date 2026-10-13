@@ -760,7 +760,13 @@ export function describeHookHealthRefusal(health: ClaudeHookHealth): string | nu
   const probed = incapable.filter((hook) => hook.notRunnable !== true);
   const unprobed = [...new Set(probed.flatMap((hook) => (hook.probeFailure === undefined ? [] : [hook.probeFailure])))];
   const refusals = [...new Set(probed.flatMap((hook) => (hook.probeRefusal === undefined ? [] : [hook.probeRefusal])))];
-  const gaps = [...new Set(probed.filter((hook) => hook.probeFailure === undefined && hook.probeRefusal === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
+  const unsafe = probed.filter((hook) => hook.commandRefusal !== undefined).map((hook) => `${hook.event}: ${hook.commandRefusal}`);
+  const gaps = [...new Set(probed.filter((hook) => hook.probeFailure === undefined && hook.probeRefusal === undefined && hook.commandRefusal === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
+  const remedies = [
+    ...(refusals.length > 0 ? ["install mem under a path without those characters"] : []),
+    ...(gaps.length > 0 ? ["upgrade with `npm i -g token-goat-mem`"] : []),
+    ...(unprobed.length > 0 ? ["re-run once the machine is less busy"] : []),
+  ];
   if (cannotRun && probed.length === 0) {
     return [
       `mem: hooks will invoke ${health.bin.path}, which could not run at all`,
@@ -771,12 +777,9 @@ export function describeHookHealthRefusal(health: ClaudeHookHealth): string | nu
     `mem: hooks will invoke ${health.bin.path}, which is ${health.bin.version ?? "an unknown version"}`,
     ...unprobed.map((sentence) => `     ${sentence}`),
     ...refusals.map((sentence) => `     ${sentence}`),
+    ...unsafe.map((sentence) => `     ${sentence}`),
     ...(gaps.length > 0 ? [`     it does not support: ${gaps.join(", ")}`] : []),
-    gaps.length > 0
-      ? "     upgrade with `npm i -g token-goat-mem`, or re-run with --force"
-      : refusals.length > 0
-        ? "     re-run with --force to write the hooks without the check, or install mem under a path without those characters"
-        : "     re-run once the machine is less busy, or re-run with --force to write the hooks without the check",
+    `     ${remedies.map((remedy) => `${remedy}, or `).join("")}re-run with --force to write the hooks without the check`,
   ].join("\n");
 }
 

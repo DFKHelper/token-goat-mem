@@ -230,19 +230,50 @@ describe("a probe refusal names every character that made it skip, the line brea
   });
 });
 
-describe("the init refusal remedy follows the refusal when a probe also timed out", () => {
+describe("the init refusal lists the remedy for every kind of problem it reports, a refusal's first", () => {
   const bin = { path: "C:/m&m/mem", version: "0.5.2" };
   const refused = { event: "SessionStart", command: "mem hook session-start", capable: false, missing: [], probeRefusal: "skipped the capability probe" };
   const timedOut = { event: "UserPromptSubmit", command: "mem hook user-prompt-submit", capable: false, missing: [], probeFailure: "could not probe it within 5 s" };
+  const gap = { event: "Stop", command: "mem hook stop", capable: false, missing: ["hook"] };
+  const unsafe = { event: "PreCompact", command: "mem hook pre-compact", capable: false, missing: ["pre-compact;x"], commandRefusal: "did not probe this hook: its command looks unsafe" };
 
-  it("names the path-character remedy, not the busy-machine one, when there is a refusal and a timeout but no gap", () => {
-    const message = describeHookHealthRefusal({ bin, hooks: [refused, timedOut] });
+  it("names both the path-character remedy and the busy-machine one, the refusal's first, when there is a refusal and a timeout", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [refused, timedOut] }) ?? "";
+    expect(message).toContain("without those characters");
+    expect(message).toContain("less busy");
+    expect(message.indexOf("without those characters")).toBeLessThan(message.indexOf("less busy"));
+  });
+
+  it("names only the busy-machine remedy when there is a timeout and no refusal", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [timedOut] }) ?? "";
+    expect(message).toContain("less busy");
+    expect(message).not.toContain("without those characters");
+  });
+
+  it("names only the path-character remedy when there is a refusal and no timeout", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [refused] }) ?? "";
     expect(message).toContain("without those characters");
     expect(message).not.toContain("less busy");
   });
 
-  it("still says the machine may be busy when there is a timeout and no refusal", () => {
-    expect(describeHookHealthRefusal({ bin, hooks: [timedOut] })).toContain("less busy");
+  it("names the upgrade remedy and the busy-machine one when there is a gap and a timeout", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [gap, timedOut] }) ?? "";
+    expect(message).toContain("upgrade with");
+    expect(message).toContain("less busy");
+  });
+
+  it("says each remedy once and offers --force once", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [refused, timedOut, gap] }) ?? "";
+    expect(message.match(/less busy/gu)).toHaveLength(1);
+    expect(message.match(/upgrade with/gu)).toHaveLength(1);
+    expect(message.match(/--force/gu)).toHaveLength(1);
+  });
+
+  it("reports a hook whose command was not probed as such, never as an unsupported command", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [unsafe] }) ?? "";
+    expect(message).toContain("PreCompact");
+    expect(message).toContain("did not probe this hook");
+    expect(message).not.toContain("does not support");
   });
 });
 
