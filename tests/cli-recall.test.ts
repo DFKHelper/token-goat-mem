@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractRememberedId, runCli } from "./support/cli.js";
-import { openDb, resolveDbPath } from "../src/db.js";
+import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, insertFact, openStorage } from "../src/storage.js";
 
 // Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
@@ -435,6 +435,23 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     expect(gc.exitCode).toBe(0);
     expect(gc.stdout).toMatch(/pruned_audit_log_rows=\d+ {2}pruned_recall_log_rows=2\b/u);
     expect(recallLogRows().map(([, sessionId]) => sessionId)).toEqual(["recent"]);
+  });
+
+  it("mem epoch --gc prunes old audit rows even when an earlier row was stamped by a far-future clock", async () => {
+    const db = openStorage(resolveDbPath());
+    const day = 24 * 60 * 60 * 1000;
+    const insert = db.prepare("INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, NULL, ?)");
+    insert.run("jump", "capture", "f1", "jumped", "2099-01-01T00:00:00.000Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() - 400 * day);
+    insertAuditLog(db, { event: "pin", factId: "f1", detail: "old-a" });
+    insertAuditLog(db, { event: "pin", factId: "f1", detail: "old-b" });
+    vi.useRealTimers();
+    db.close();
+
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode).toBe(0);
+    expect(gc.stdout).toContain("pruned_audit_log_rows=2  ");
   });
 
   it("a hard-deleted fact takes its recall_log rows with it (ON DELETE CASCADE); a soft `forget` keeps them until gc", async () => {

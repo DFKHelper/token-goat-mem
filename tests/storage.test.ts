@@ -914,7 +914,7 @@ describe("prefetchAnchorCache / createBufferedAnchorCacheStore / persistAnchorVe
   });
 });
 
-describe("audit order (insertAuditLog stamps monotonic insertion time; every audit walk breaks ties by rowid)", () => {
+describe("audit order (insertAuditLog stamps wall time; every audit walk orders by rowid)", () => {
   let auditDb: Database.Database;
   const TIED_AT = "2030-01-01T00:00:00.000Z";
 
@@ -933,16 +933,30 @@ describe("audit order (insertAuditLog stamps monotonic insertion time; every aud
       .run(`${event}-${detail}`, event, factId, detail, createdAt);
   }
 
-  it("a clock stepped back an hour never gives a later row an earlier created_at", () => {
+  it("a clock stepped back an hour stamps the real time and still reads the later insert as newest", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2031-06-01T12:00:00.000Z"));
     insertAuditLog(auditDb, { event: "capture", factId: "f1", detail: "first" });
     vi.setSystemTime(new Date("2031-06-01T11:00:00.000Z"));
     insertAuditLog(auditDb, { event: "pin", factId: "f1", detail: "second" });
     const stamps = (auditDb.prepare("SELECT created_at FROM audit_log ORDER BY rowid").all() as { created_at: string }[]).map((r) => r.created_at);
-    expect([...stamps].sort()).toEqual(stamps);
-    expect(stamps[0]).toBe("2031-06-01T12:00:00.000Z");
+    expect(stamps).toEqual(["2031-06-01T12:00:00.000Z", "2031-06-01T11:00:00.000Z"]);
     expect(listAuditLog(auditDb, { factId: "f1" }, { newestFirst: true })[0]?.detail).toBe("second");
+    expect(listAuditLog(auditDb, { factId: "f1" }).at(-1)?.detail).toBe("second");
+  });
+
+  it("rows written after a forward clock jump carry their own wall time, so an age cutoff can reach them", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2099-01-01T00:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "capture", factId: "f1", detail: "jumped" });
+    vi.setSystemTime(new Date("2031-06-01T12:00:00.000Z"));
+    insertAuditLog(auditDb, { event: "pin", factId: "f1", detail: "normal-a" });
+    insertAuditLog(auditDb, { event: "pin", factId: "f1", detail: "normal-b" });
+    const rows = auditDb.prepare("SELECT detail, created_at FROM audit_log ORDER BY rowid").all() as { detail: string; created_at: string }[];
+    expect(rows.map((r) => r.created_at)).toEqual(["2099-01-01T00:00:00.000Z", "2031-06-01T12:00:00.000Z", "2031-06-01T12:00:00.000Z"]);
+    expect(listAuditLog(auditDb, { factId: "f1" }, { newestFirst: true })[0]?.detail).toBe("normal-b");
+    const pruned = auditDb.prepare("DELETE FROM audit_log WHERE created_at < ?").run("2032-01-01T00:00:00.000Z").changes;
+    expect(pruned).toBe(2);
   });
 
   it("a later wall clock still stamps the real time", () => {
@@ -969,6 +983,12 @@ describe("audit order (insertAuditLog stamps monotonic insertion time; every aud
     ["lastStateChangingAuditRow", () => lastStateChangingAuditRow(auditDb, "f1")?.detail],
     ["findSupersedingFactId", () => findSupersedingFactId(auditDb, "f1") ?? undefined],
   ];
+
+  it.each(tiedWalks)("%s returns the later-inserted row even when its created_at is earlier", (_name, walk) => {
+    rawAudit("superseded", "f1", `${SUPERSEDED_BY_FACT_PREFIX}aaaaaaaa-0000-0000-0000-000000000001`, "2031-06-01T12:00:00.000Z");
+    rawAudit("superseded", "f1", `${SUPERSEDED_BY_FACT_PREFIX}bbbbbbbb-0000-0000-0000-000000000002`, "2031-06-01T11:00:00.000Z");
+    expect(walk()?.includes("bbbbbbbb")).toBe(true);
+  });
 
   it.each(tiedWalks)("%s returns the later-inserted row on a created_at tie", (_name, walk) => {
     rawAudit("superseded", "f1", `${SUPERSEDED_BY_FACT_PREFIX}aaaaaaaa-0000-0000-0000-000000000001`, TIED_AT);

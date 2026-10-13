@@ -162,14 +162,14 @@ const SUPERSEDING_ID_PATTERN = new RegExp(
   `(?:${SUPERSEDED_BY_FACT_PREFIX}|${SUPERSEDED_AS_DUPLICATE_PREFIX})([0-9a-fA-F-]{1,128})`
 );
 
-/** The id of the fact that superseded `factId`, or `null` if nothing did or the reason names no winner. Reads the most recent audit row for the fact, not the first: a fact can be superseded, restored, and superseded again by a different winner, and the current edge is the last one written. `rowid` breaks ties because `created_at` is an ISO string at millisecond resolution and two rows written inside one transaction can share it exactly. Returns an id, never a fact: the winner may itself have been superseded, or pruned by `mem gc`, and the caller is the one positioned to decide how to present either case. */
+/** The id of the fact that superseded `factId`, or `null` if nothing did or the reason names no winner. Reads the most recent audit row for the fact, not the first: a fact can be superseded, restored, and superseded again by a different winner, and the current edge is the last one written. Order is `rowid` (insertion order), never `created_at`: a stepped clock can leave `created_at` out of order, and rows written inside one transaction can share it exactly. Returns an id, never a fact: the winner may itself have been superseded, or pruned by `mem gc`, and the caller is the one positioned to decide how to present either case. */
 export function findSupersedingFactId(db: Database.Database, factId: string): string | null {
   // The last audit row for a fact need not be the supersession row -- e.g. `mem used` appends a row after supersession -- so this filters to rows that actually name a superseding fact rather than assuming the last row is that one.
   const row = db
     .prepare<[string, string, string], { detail: string }>(
       `SELECT detail FROM audit_log
        WHERE fact_id = ? AND (detail LIKE ? OR detail LIKE ?)
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`
+       ORDER BY rowid DESC LIMIT 1`
     )
     .get(factId, `${SUPERSEDED_BY_FACT_PREFIX}%`, `${SUPERSEDED_AS_DUPLICATE_PREFIX}%`);
   return row === undefined ? null : (SUPERSEDING_ID_PATTERN.exec(row.detail)?.[1] ?? null);
@@ -252,7 +252,7 @@ function auditLogWhere(filter: AuditLogFilter): { sql: string; params: string[] 
   return { sql: clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`, params };
 }
 
-/** Audit rows matching `filter`, oldest first unless `newestFirst`. The audit log has recorded each capture, edit, pin, and status change since the first release, and until `mem show` read it back nothing could: the trail a memory tool keeps so its own output can be trusted was write-only. That is most acute for `mem edit`, which overwrites text in place -- the prior wording lives nowhere else once the row is updated. `rowid` breaks ties because `created_at` is an ISO string at millisecond resolution and two rows written inside one transaction can share it exactly. */
+/** Audit rows matching `filter`, oldest first unless `newestFirst`. The audit log has recorded each capture, edit, pin, and status change since the first release, and until `mem show` read it back nothing could: the trail a memory tool keeps so its own output can be trusted was write-only. That is most acute for `mem edit`, which overwrites text in place -- the prior wording lives nowhere else once the row is updated. Order is `rowid` (insertion order), never `created_at`: a stepped clock can leave `created_at` out of order, and rows written inside one transaction can share it exactly. */
 export function listAuditLog(db: Database.Database, filter: AuditLogFilter = {}, options: AuditLogReadOptions = {}): AuditLogRow[] {
   const where = auditLogWhere(filter);
   const direction = options.newestFirst === true ? "DESC" : "ASC";
@@ -260,7 +260,7 @@ export function listAuditLog(db: Database.Database, filter: AuditLogFilter = {},
   const params: (string | number)[] = options.limit !== undefined ? [...where.params, options.limit] : where.params;
   return db
     .prepare<(string | number)[], AuditLogDbRow>(
-      `SELECT event, fact_id, detail, prior_json, created_at FROM audit_log${where.sql} ORDER BY created_at ${direction}, rowid ${direction}${limit}`
+      `SELECT event, fact_id, detail, prior_json, created_at FROM audit_log${where.sql} ORDER BY rowid ${direction}${limit}`
     )
     .all(...params)
     .map((row) => ({
@@ -300,13 +300,13 @@ export function listAuditLogFactIdsByPrefix(db: Database.Database, prefix: strin
     .map((row) => row.fact_id);
 }
 
-/** Appends one row to the audit log (design principle 5). Any write path (capture, forget, edit, pin, review resolution) can call this. `created_at` is monotonic insertion time, not the bare wall clock: it is the later of now and the newest-inserted row's stamp (the largest rowid, read in the same statement), so a clock stepped back never gives a later row an earlier stamp and every newest-first walk stays truthful. ISO strings of one format compare chronologically, so the SQL `max` is exact. */
+/** Appends one row to the audit log (design principle 5). Any write path (capture, forget, edit, pin, review resolution) can call this. `created_at` is the wall clock at insert, so an age cutoff (`mem gc`) always reaches the row even after a forward clock jump; every walk orders by `rowid` instead, so a clock stepped back never reorders the trail. */
 export function insertAuditLog(db: Database.Database, entry: AuditLogEntry): void {
   const nowIso = new Date().toISOString();
   db.prepare(
     `INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at)
-     SELECT ?, ?, ?, ?, ?, max(?, coalesce((SELECT created_at FROM audit_log ORDER BY rowid DESC LIMIT 1), ?))`
-  ).run(randomUUID(), entry.event, entry.factId, entry.detail, entry.priorJson ?? null, nowIso, nowIso);
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(randomUUID(), entry.event, entry.factId, entry.detail, entry.priorJson ?? null, nowIso);
 }
 
 // Note: the write epoch's read/write primitives live in src/epoch.ts, and the policy of when it moves in src/storage.ts (its private `bumpEpoch`) -- storage.ts is the canonical entry point for every fact-table write (insert/update/setStatus/delete) and bumps the epoch atomically alongside each one. The `meta` table (seeded above) is still created here so a caller that opens via bare `openDb()` (without `storage.openStorage()`) still gets a zero-initialized epoch row to read.
