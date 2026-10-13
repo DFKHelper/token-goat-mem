@@ -279,14 +279,22 @@ function isCredentialSentence(value: string, index: number): boolean {
 /** The most words after a hex that `isCredentialLabelledAfter` reads: wide enough for `is the production API key` and `was the webhook signing secret` (five words), narrow enough that a keyword later in a long sentence does not label the hex. */
 const CREDENTIAL_TRAILING_WORDS = 8;
 
+/** Credential words that label a hex when they follow it, matched only as whole words (or these compounds), because the prefix/suffix rule of `isCredentialWord` would make `keyboard`, `monkey` and `authors` credential words. */
+const CREDENTIAL_TRAILING_WORD_SET: ReadonlySet<string> = new Set(["key", "keys", "token", "tokens", "secret", "secrets", "password", "passwords", "passwd", "passphrase", "passcode", "credential", "credentials", "cred", "creds", "bearer", "apikey", "accesskey", "secretkey", "privatekey", "authkey", "authtoken", "accesstoken", "sshkey", "hmac", "jwt", "psk", "mnemonic", ...UUID_CREDENTIAL_EXACT_WORDS]);
+
+/** The end of a sentence: `.`, `;`, `!` or `?` followed by whitespace or the end of the text. */
+const SENTENCE_BOUNDARY = /[.;!?](?:\s|$)/u;
+
 /** Whether a credential keyword among the first few words after `end` (the rest of the hex's line and the next line) labels the hex that ends there (`<hex> is the production API key`), unless a hash word sits before the keyword or directly before the hex, so `<hex> is the commit that fixed the token parser` and `commit <hex> fixed the token parser` are not credential claims. */
 function isCredentialLabelledAfter(value: string, index: number, end: number): boolean {
   const before = splitWords(value.slice(0, index).split("\n").at(-1) ?? "");
   if (HASH_WORDS.has(before.at(-1) ?? "")) {
     return false;
   }
-  const words = splitWords(value.slice(end).split("\n").slice(0, 2).join("\n")).slice(0, CREDENTIAL_TRAILING_WORDS);
-  const credentialIndex = words.findIndex((word, i) => isCredentialWord(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`)));
+  const following = value.slice(end).split("\n").slice(0, 2).join("\n");
+  const boundary = SENTENCE_BOUNDARY.exec(following);
+  const words = splitWords(boundary === null ? following : following.slice(0, boundary.index)).slice(0, CREDENTIAL_TRAILING_WORDS);
+  const credentialIndex = words.findIndex((word, i) => CREDENTIAL_TRAILING_WORD_SET.has(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`)));
   return credentialIndex !== -1 && !words.slice(0, credentialIndex).some((word) => HASH_WORDS.has(word));
 }
 

@@ -195,6 +195,7 @@ describe("a hex value is refused when a credential label follows it, and a direc
   it.each([
     ["a trailing production API key label", `${HEX32} is the production API key`],
     ["a trailing token label", `${HEX32} was the token for staging`],
+    ["a trailing api_key label", `${HEX32} is our api_key`],
     ["a hex split by U+200E", `API key: 0123456789abcdef${String.fromCodePoint(0x200e)}0123456789abcdef`],
     ["a hex split by U+2066", `API key: 0123456789abcdef${String.fromCodePoint(0x2066)}0123456789abcdef`],
     ["a hex split by U+FE0F", `API key: 0123456789abcdef${String.fromCodePoint(0xfe0f)}0123456789abcdef`],
@@ -205,6 +206,9 @@ describe("a hex value is refused when a credential label follows it, and a direc
   it.each([
     ["a commit mention", `commit ${HEX40} fixed the parser`],
     ["a commit sentence", `${HEX40} is the commit that fixed the parser`],
+    ["a word that merely starts with a keyword", `Fixed in ${HEX40} by renaming the keyboard shortcut handler`],
+    ["words that merely end with a keyword", `${HEX40} fixed the monkey patch in the authors list`],
+    ["a keyword in a later sentence", `${HEX40} was reverted. The deploy key rotation is separate`],
   ])("stores %s", async (_label, text) => {
     await remember(text);
   });
