@@ -1030,12 +1030,25 @@ export interface HookCapabilityResult {
   readonly notRunnable?: true;
   /** Set when the probe was skipped because the probed binary's path carries a character cmd.exe would interpret, so `missing` says nothing about what it supports; the sentence names the path. */
   readonly probeRefusal?: string;
+  /** Set when the probe was skipped because the hook command's subcommand is not a plain word, so `missing` says nothing about what the binary supports; the sentence names the command (truncated). */
+  readonly commandRefusal?: string;
 }
 
 /** Full health picture for a set of `{event, command}` hook entries: the resolved `mem` binary (or `null`), and each entry's capability against it. */
 export interface ClaudeHookHealth {
   readonly bin: ResolvedMemBinary | null;
   readonly hooks: readonly HookCapabilityResult[];
+}
+
+/** Turns one `checkHookCapability` answer into the hook's result: `bin` is the executable that was probed and `launched` the file named when a timeout is reported (the bundle for a direct launch, else `bin`). */
+export function toHookCapabilityResult(
+  event: string,
+  command: string,
+  check: ReturnType<typeof checkHookCapability>,
+  probed: { readonly bin: string; readonly launched: string; readonly timeoutMs: number }
+): HookCapabilityResult {
+  const { capable, missing, probeFailed, notRunnable, pathRefused, refused } = check;
+  return { event, command, capable, missing, ...(refused === true ? { commandRefusal: describeCommandRefusal(command) } : {}), ...(probeFailed === true ? { probeFailure: describeProbeFailure(probed.launched, probed.timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}), ...(pathRefused === true ? { probeRefusal: describeProbeRefusal(probed.bin) } : {}) };
 }
 
 export function checkClaudeHookHealth(
@@ -1051,15 +1064,13 @@ export function checkClaudeHookHealth(
     // A bundle path is only ever run when the caller vouches for the commands (mem's own, or the user's own settings file): a project settings.json is a cloned repository's text, and the file it names must never be executed.
     if (opts.trustBundles === true && spec !== null && bundle !== null && existsSync(bundle)) {
       const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-      const { capable, missing, probeFailed, notRunnable, pathRefused } = checkHookCapability(process.execPath, spec, timeoutMs, [bundle], cache);
-      return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}), ...(pathRefused === true ? { probeRefusal: describeProbeRefusal(process.execPath) } : {}) };
+      return toHookCapabilityResult(event, command, checkHookCapability(process.execPath, spec, timeoutMs, [bundle], cache), { bin: process.execPath, launched: bundle, timeoutMs });
     }
     if (bin === null || spec === null) {
       return { event, command, capable: false, missing: spec === null ? [] : spec.flags };
     }
     const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-    const { capable, missing, probeFailed, notRunnable, pathRefused } = checkHookCapability(bin.path, spec, timeoutMs, [], cache);
-    return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bin.path, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}), ...(pathRefused === true ? { probeRefusal: describeProbeRefusal(bin.path) } : {}) };
+    return toHookCapabilityResult(event, command, checkHookCapability(bin.path, spec, timeoutMs, [], cache), { bin: bin.path, launched: bin.path, timeoutMs });
   });
   return { bin, hooks };
 }
@@ -1078,6 +1089,15 @@ export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeou
 /** The one sentence for a capability probe that was skipped: it names the binary and why (its path carries a character cmd.exe would interpret, so it is never launched through a shell) and claims nothing about what the binary supports. */
 export function describeProbeRefusal(probed: string): string {
   return `skipped the capability probe of \`${probed}\`: its path contains a character cmd.exe would interpret (one of & % ! ^ | < >, a quote or a line break), so it was not launched to check it`;
+}
+
+/** Longest hook command text a refusal sentence quotes before it is cut. */
+const REFUSED_COMMAND_QUOTE_LENGTH = 80;
+
+/** The one sentence for a hook whose command's subcommand failed the safety check: it was not run, and nothing is claimed about the binary. */
+export function describeCommandRefusal(command: string): string {
+  const quoted = command.length > REFUSED_COMMAND_QUOTE_LENGTH ? `${command.slice(0, REFUSED_COMMAND_QUOTE_LENGTH)}...` : command;
+  return `did not probe this hook: its command \`${quoted}\` looks unsafe or unrecognised, so it was not run to check it`;
 }
 
 /** The one sentence for a capability probe that got no answer: it names the probed binary and the budget and claims nothing about the binary's version, since a slow launch (antivirus scanning) looks the same as a hang from here. */

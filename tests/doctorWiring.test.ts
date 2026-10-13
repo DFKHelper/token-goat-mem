@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
 import { describeHookHealthRefusal } from "../src/cli.js";
-import { hookGapRemedy } from "../src/doctor.js";
+import { describeIncapableHook, hookGapRemedy } from "../src/doctor.js";
 import { probeTimeoutFromEnv } from "../src/doctorWiring.js";
-import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, describeProbeRefusal, MEM_PROBE_TIMEOUT_MS } from "../src/wiring.js";
+import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, describeProbeRefusal, MEM_PROBE_TIMEOUT_MS, toHookCapabilityResult, type HookCapabilityResult } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
 import { CAPABLE_MEM_SHIM, HANG_ONCE_MEM_SHIM, HANGING_MEM_SHIM, NOT_RUNNABLE_MEM_SHIM, writeCountingFakeMem, writeFakeMem } from "./support/fakeMem.js";
 import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
@@ -243,6 +243,47 @@ describe("the init refusal remedy follows the refusal when a probe also timed ou
 
   it("still says the machine may be busy when there is a timeout and no refusal", () => {
     expect(describeHookHealthRefusal({ bin, hooks: [timedOut] })).toContain("less busy");
+  });
+});
+
+describe("a hook whose command the safety check refuses is reported as not probed, never as a missing command", () => {
+  const event = "UserPromptSubmit";
+  const tampered = "mem recall;touch pwned --hint-format --root \"$CLAUDE_PROJECT_DIR\"";
+
+  function refusedHook(binPath: string): HookCapabilityResult {
+    const check = checkHookCapability(binPath, { subcommand: "recall;touch", flags: ["--hint-format"] });
+    return toHookCapabilityResult(event, tampered, check, { bin: binPath, launched: binPath, timeoutMs: MEM_PROBE_TIMEOUT_MS });
+  }
+
+  it("names the event and the command, does not call it unsupported, warns, and launches nothing", () => {
+    const binDir = mkdtempSync(join(tmpdir(), "mem-dw-refused-"));
+    try {
+      writeCountingFakeMem(binDir, CAPABLE_MEM_SHIM);
+      const counter = join(binDir, "launches.txt");
+      process.env["FAKE_MEM_COUNTER"] = counter;
+      const hook = refusedHook(join(binDir, process.platform === "win32" ? "mem.cmd" : "mem"));
+      const entry = describeIncapableHook(hook, true);
+      expect(entry.message).toContain(event);
+      expect(entry.message).toContain("did not probe");
+      expect(entry.message).toContain("recall;touch");
+      expect(entry.message).not.toContain("does not support");
+      expect(entry.message).not.toContain("entry point");
+      expect(entry.status).toBe("warn");
+      expect(entry.remedy).toContain("mem init claude-code");
+      expect(entry.remedy).toContain("--user");
+      expect(entry.remedy).toContain("--root");
+      expect(existsSync(counter)).toBe(false);
+    } finally {
+      delete process.env["FAKE_MEM_COUNTER"];
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
+  it("truncates a very long command in the message", () => {
+    const long = `mem recall;${"x".repeat(400)} --root "$CLAUDE_PROJECT_DIR"`;
+    const check = checkHookCapability("mem", { subcommand: `recall;${"x".repeat(400)}`, flags: [] });
+    const entry = describeIncapableHook(toHookCapabilityResult(event, long, check, { bin: "mem", launched: "mem", timeoutMs: MEM_PROBE_TIMEOUT_MS }), true);
+    expect(entry.message.length).toBeLessThan(400);
   });
 });
 

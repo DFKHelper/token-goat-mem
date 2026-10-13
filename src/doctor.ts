@@ -15,7 +15,7 @@ import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCove
 import { formatAge, MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
 import { FACT_STATUSES } from "./types.js";
 import { createProbeBudget, describeHookDivergence, describeLaunchTime, describeWiringDrift, wiringHomeFromEnv, type ProbeBudget } from "./doctorWiring.js";
-import { checkClaudeHookHealth, claudeHookTimeoutSeconds, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, MIN_RECALL_HOOK_TIMEOUT_SECONDS, type WiringOpts } from "./wiring.js";
+import { checkClaudeHookHealth, claudeHookTimeoutSeconds, describeHookGap, installedClaudeHookCommands, isLegacyHookShape, MIN_RECALL_HOOK_TIMEOUT_SECONDS, type HookCapabilityResult, type WiringOpts } from "./wiring.js";
 
 /** The fixed set of `check` names a finding can carry. Closed on purpose: `--json` consumers key off these strings, so a new check is a deliberate, tested addition here rather than a string typed at one call site. One name covers every line a topic prints (`hooks` is a header plus one line per event), and the order is the order the report prints in. */
 export const DOCTOR_CHECKS = ["store", "schema", "integrity", "facts", "embeddings", "dream", "facets", "why", "hints", "scope", "backups", "hooks", "hook-divergence", "launch-time", "wiring"] as const;
@@ -156,7 +156,10 @@ function describeScopePlacement(unreachableRoots: number, unreachableFacts: numb
 }
 
 /** The remedy for an installed hook that cannot run: upgrading fixes a real capability gap, but a probe that timed out says nothing about the mem version, so it gets a retry hint instead. */
-export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly probeRefusal?: string; readonly notRunnable?: true }): string {
+export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly probeRefusal?: string; readonly commandRefusal?: string; readonly notRunnable?: true }): string {
+  if (hook.commandRefusal !== undefined) {
+    return "re-run `mem init claude-code` (with --user or --root to match the settings file) to restore mem's own command for this hook";
+  }
   if (hook.notRunnable === true) {
     return "reinstall token-goat-mem or fix PATH (the mem this hook launches could not run at all)";
   }
@@ -164,6 +167,12 @@ export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly p
     return "install mem under a path without & % ! ^ | < >, a quote or a line break (the hook was not judged; only its probe was skipped)";
   }
   return hook.probeFailure === undefined ? "npm install -g token-goat-mem" : "re-run mem doctor once the machine is less busy (a probe that times out says nothing about the mem version)";
+}
+
+/** The doctor line for one installed hook that is not capable: why, and the remedy. `binFound` is whether a mem binary resolved on PATH. */
+export function describeIncapableHook(hook: HookCapabilityResult, binFound: boolean): Finding {
+  const why = !binFound ? "would be inert" : hook.notRunnable === true ? "cannot run at all (the binary it launches did not start)" : hook.commandRefusal ?? hook.probeFailure ?? hook.probeRefusal ?? `does not support ${describeHookGap(hook.command, hook.missing)}`;
+  return finding("hooks", hook.commandRefusal === undefined ? "fail" : "warn", `  ${hook.event}: ${why}`, hookGapRemedy(hook));
 }
 
 /** `doctor` section for Claude Code hooks: the `mem` binary that actually resolves on PATH (which may be a different build than the one running this `doctor`), and whether each installed hook command -- read from disk, not from what this build would write -- can run against it. Checks both project-level (cwd) and user-level (`--user` install) settings.json, since either or both may exist and `doctor` takes no `--root`/`--user` of its own. This is the check that would have surfaced the 219-hook-failure incident on day one: a stale PATH binary rejecting a newer install's flags produces a `capable: false` line here on the very first `mem doctor` run, instead of five days of silent `|| true` swallowing. */
@@ -194,16 +203,7 @@ function describeHookHealth(opts: WiringOpts, probe: ProbeBudget): Finding[] {
         : finding("hooks", "ok", `hooks (${label}): PATH resolves mem to ${health.bin.path} (${health.bin.version ?? "unknown version"})`)
     );
     for (const hook of health.hooks) {
-      lines.push(
-        hook.capable
-          ? finding("hooks", "ok", `  ${hook.event}: ok`)
-          : finding(
-              "hooks",
-              "fail",
-              `  ${hook.event}: ${health.bin === null ? "would be inert" : hook.notRunnable === true ? "cannot run at all (the binary it launches did not start)" : hook.probeFailure ?? hook.probeRefusal ?? `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
-              hookGapRemedy(hook)
-            )
-      );
+      lines.push(hook.capable ? finding("hooks", "ok", `  ${hook.event}: ok`) : describeIncapableHook(hook, health.bin !== null));
     }
     for (const hook of hooks) {
       const recommended = claudeHookTimeoutSeconds(hook.event);

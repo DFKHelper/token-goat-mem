@@ -2,6 +2,12 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **`mem doctor` says when it did not probe a hook because its command looks unsafe.** A hook whose command carries a subcommand that is not a plain word is no longer reported as a `mem` without that command. The `hooks` finding is a warning that names the event and the command (cut at 80 characters), says the command was not run, and gives `mem init claude-code` (with `--user` or `--root` to match the settings file) as the remedy.
+
 ## [0.5.3] - 2026-10-13
 
 ### Added
