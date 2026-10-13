@@ -2,9 +2,91 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { buildProgram } from "../../src/cli.js";
 import { TOOL_NAMES } from "../../src/wiring.js";
 
 const REPO_ROOT = join(import.meta.dirname, "../..");
+
+const MAX_TABLE_CELL_LENGTH = 600;
+
+const BACKSLASH = String.fromCharCode(92);
+
+/** The README command-table rows whose description cell was already over the limit when the guard was added, keyed by their first cell; each is to be split into a short cell plus prose below the table, then deleted from this set (the guard fails once a listed row is back under the limit). */
+const LEGACY_LONG_CELL_ROWS: ReadonlySet<string> = new Set([
+  "README.md: `mem remember <text>`",
+  "README.md: `mem scan-session`",
+  "README.md: `mem reflect`",
+  "README.md: `mem hook <event>`",
+  "README.md: `mem export`",
+  "README.md: `mem import --from-md <path>`",
+  "README.md: `mem import --from-json <path>`",
+  "README.md: `mem recall [query]`",
+  "README.md: `mem show <id>`",
+  "README.md: `mem review`",
+  "README.md: `mem forget <id> [--by <winner-id>]`",
+  "README.md: `mem edit <id>`",
+  "README.md: `mem used <id...> --session-id <id>`",
+  "README.md: `mem epoch`",
+  "README.md: `mem consolidate`",
+  "README.md: `mem dream`",
+  "README.md: `mem facets`",
+  "README.md: `mem init <tool>`",
+]);
+
+/** Splits one markdown table row into trimmed cells, keeping a backslash-escaped pipe and a pipe inside a code span inside its cell. */
+function splitTableRow(line: string): string[] {
+  const body = line.trim().replace(/^\|/u, "").replace(/\|$/u, "");
+  const cells: string[] = [];
+  let current = "";
+  let inCode = false;
+  for (let i = 0; i < body.length; i += 1) {
+    const ch = body.charAt(i);
+    if (ch === BACKSLASH && body.charAt(i + 1) === "|") {
+      current += `${BACKSLASH}|`;
+      i += 1;
+    } else if (ch === "`") {
+      inCode = !inCode;
+      current += ch;
+    } else if (ch === "|" && !inCode) {
+      cells.push(current.trim());
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
+/** Every table cell over `limit` characters in `source`, as `<file>: <first cell of its row>`. */
+function longTableCells(file: string, source: string, limit: number): string[] {
+  const found: string[] = [];
+  for (const line of source.split("\n")) {
+    if (!line.trimStart().startsWith("|")) {
+      continue;
+    }
+    const cells = splitTableRow(line);
+    if (cells.some((cell) => cell.length > limit)) {
+      found.push(`${file}: ${cells[0] ?? ""}`);
+    }
+  }
+  return found;
+}
+
+/** The `mem <name>` commands an AGENTS.md bullet introduces: the backticked commands before its first " — ", so a line such as "`mem backup` / `mem restore`" covers both. */
+function documentedCommands(agentsSource: string): Set<string> {
+  const names = new Set<string>();
+  for (const line of agentsSource.split("\n")) {
+    if (!line.startsWith("- `mem ")) {
+      continue;
+    }
+    const head = line.split(" — ")[0] ?? "";
+    for (const match of head.matchAll(/`mem ([a-z][a-z-]*)/gu)) {
+      names.add(match[1] ?? "");
+    }
+  }
+  return names;
+}
 
 describe("documentation consistency guards", () => {
   // Helper to read files
@@ -194,6 +276,24 @@ describe("documentation consistency guards", () => {
             "TOKEN_GOAT_MEM_EMBED_URL/_MODEL or TOKEN_GOAT_MEM_DREAM_URL/_MODEL are configured"
         ).not.toMatch(/zero network/i);
       }
+    });
+  });
+
+  describe("command coverage and table shape", () => {
+    it("AGENTS.md has a '- `mem <name>' bullet for every command the CLI registers", () => {
+      const documented = documentedCommands(readDocFile("AGENTS.md"));
+      const registered = buildProgram().commands.map((command) => command.name());
+      expect(registered.length, "the CLI registers commands").toBeGreaterThan(0);
+      const missing = registered.filter((name) => !documented.has(name));
+      expect(missing, `AGENTS.md has no "- \`mem <name>" bullet for: ${missing.join(", ")}`).toEqual([]);
+    });
+
+    it(`no markdown table cell in README.md or AGENTS.md is over ${MAX_TABLE_CELL_LENGTH} characters, apart from the listed legacy rows`, () => {
+      const over = ["README.md", "AGENTS.md"].flatMap((file) => longTableCells(file, readDocFile(file), MAX_TABLE_CELL_LENGTH));
+      const unexpected = over.filter((row) => !LEGACY_LONG_CELL_ROWS.has(row));
+      expect(unexpected, `table cells over ${MAX_TABLE_CELL_LENGTH} characters: move the detail into prose below the table and keep a short cell`).toEqual([]);
+      const stale = [...LEGACY_LONG_CELL_ROWS].filter((row) => !over.includes(row));
+      expect(stale, "these rows are now under the limit: delete them from LEGACY_LONG_CELL_ROWS").toEqual([]);
     });
   });
 });
