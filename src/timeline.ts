@@ -15,17 +15,23 @@ import {
   truncationNotice,
   withDb,
 } from "./cliRuntime.js";
-import { countAuditLog, listAuditLog, listAuditLogFactIdsByPrefix, type AuditLogFilter, type AuditLogRow } from "./db.js";
+import { countAuditLog, listAuditLog, listAuditLogFactIdsByPrefix, STAMPED_REF_DETAIL_MARKER, type AuditLogFilter, type AuditLogRow } from "./db.js";
 import { isPlausibleIdPrefix, resolveFactIdOrPrefix } from "./storage.js";
 import { daysAgoIso } from "./timeUtils.js";
 
 /** Stands in for the short fact id on a store-level event (an import summary) that names no fact, keeping the columns aligned. */
 const NO_FACT_PLACEHOLDER = "-".repeat(SHORT_ID_LENGTH);
 
+/** A detail without its trailing ` [stamped_ref=<ref>]` bookkeeping suffix, which only the stored row and `--json` carry; only a suffix closing the detail is dropped, so a forget reason or other bracketed text is untouched. */
+function visibleAuditDetail(detail: string): string {
+  const index = detail.lastIndexOf(STAMPED_REF_DETAIL_MARKER);
+  return index !== -1 && detail.endsWith("]") ? detail.slice(0, index) : detail;
+}
+
 /** One audit row as a line: `[createdAt] event: detail`, or with `withFactId`, the short fact id between the timestamp and the event. `mem show`'s history block and `mem log` both render through this, so the two views of the same row cannot drift. */
 export function formatAuditLine(entry: AuditLogRow, options: { readonly withFactId?: boolean } = {}): string {
   const fact = options.withFactId === true ? `${entry.factId === null ? NO_FACT_PLACEHOLDER : shortFactId(entry.factId)}  ` : "";
-  return `[${entry.createdAt}] ${fact}${entry.event}: ${entry.detail}`;
+  return `[${entry.createdAt}] ${fact}${entry.event}: ${visibleAuditDetail(entry.detail)}`;
 }
 
 /** Resolves `--fact` to the one full fact id it names, looking in the live store and the audit log together. An exact live id wins outright; otherwise every id either place knows under that prefix is a candidate, so a prefix shared by a live fact and a gc-deleted one is reported as ambiguous instead of silently showing only the live one's trail. */

@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { insertAuditLog } from "../src/db.js";
+import { insertAuditLog, type AuditLogRow } from "../src/db.js";
+import { formatAuditLine } from "../src/timeline.js";
 import { deleteFact, openStorage } from "../src/storage.js";
 import { extractRememberedId, runCli } from "./support/cli.js";
 
@@ -182,6 +183,23 @@ describe("mem log", () => {
     expect(envelope.entries.map((entry) => entry.event)).toEqual(["edit", "capture_explicit"]);
     expect(envelope.entries[0]?.factId).toBe(id);
     expect(envelope.entries[0]?.priorJson).toContain("the build uses esbuild");
+  });
+});
+
+describe("formatAuditLine stamped-ref marker", () => {
+  const row = (detail: string): AuditLogRow => ({ createdAt: "2026-01-02T03:04:05.000Z", event: "capture_suggested", factId: null, detail });
+
+  it("drops a trailing stamped-ref suffix", () => {
+    expect(formatAuditLine(row("stored pending fact [stamped_ref=/t/a.jsonl#turn3]"))).toBe("[2026-01-02T03:04:05.000Z] capture_suggested: stored pending fact");
+  });
+
+  it("keeps a forget reason and other bracketed text, dropping only the stamped suffix", () => {
+    expect(formatAuditLine(row("note [kept]; reason=wrong"))).toBe("[2026-01-02T03:04:05.000Z] capture_suggested: note [kept]; reason=wrong");
+    expect(formatAuditLine(row("forgot; reason=wrong [stamped_ref=/t/a.jsonl#turn3]"))).toBe("[2026-01-02T03:04:05.000Z] capture_suggested: forgot; reason=wrong");
+  });
+
+  it("leaves a detail with no stamped suffix unchanged", () => {
+    expect(formatAuditLine(row("stored pending fact [other=1]"))).toBe("[2026-01-02T03:04:05.000Z] capture_suggested: stored pending fact [other=1]");
   });
 });
 

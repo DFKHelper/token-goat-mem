@@ -1,6 +1,8 @@
 /** End-to-end CLI tests for inspecting and changing stored facts: show, list, forget, edit, and short id prefixes. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+// Loaded before ./support/cli.js so the child_process mock below is registered first; reaching it only through the CLI import deadlocks the mock factory (every sibling cli test imports it directly).
+import "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1009,5 +1011,31 @@ describe("mem edit keeps the value it is about to destroy", () => {
     await runCli(["edit", String(id), "--text", "ingestion worker batches 250 rows", "--force"]);
     const shown = await runCli(["show", String(id)]);
     expect(shown.stdout).toContain(prior);
+  });
+});
+
+describe("mem show and mem log hide the stamped-ref audit marker from text", () => {
+  it("keeps [stamped_ref= in --json only, and leaves the source_ref line alone", { timeout: 120_000 }, async () => {
+    const directory = join(home, "transcripts");
+    mkdirSync(directory, { recursive: true });
+    const transcript = join(directory, "transcript.jsonl");
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: "Remember that the staging box notes live in the wiki." }] } }), "utf8");
+    const scanned = await runCli(["scan-session", "--transcript", transcript, "--root", home]);
+    expect(scanned.exitCode, scanned.stderr).toBe(0);
+    const id = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/u.exec((await runCli(["list", "--status", "pending"])).stdout)?.[0] ?? "";
+    expect(id, "scan-session filed no pending suggestion").not.toBe("");
+
+    const json = await runCli(["show", id, "--json"]);
+    expect(json.stdout).toContain("[stamped_ref=");
+    const ref = (JSON.parse(json.stdout) as { fact: { source_ref: string } }).fact.source_ref;
+    expect((await runCli(["log", "--json"])).stdout).toContain("[stamped_ref=");
+
+    const shown = await runCli(["show", id]);
+    expect(shown.stdout).toContain("capture_suggested");
+    expect(shown.stdout).not.toContain("[stamped_ref=");
+    expect(shown.stdout).toContain(`source_ref: ${ref}`);
+    const log = await runCli(["log"]);
+    expect(log.stdout).toContain("capture_suggested");
+    expect(log.stdout).not.toContain("[stamped_ref=");
   });
 });

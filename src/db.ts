@@ -153,6 +153,8 @@ export const FORGET_REASONS = ["wrong", "outdated", "duplicate", "unwanted"] as 
 export type ForgetReason = (typeof FORGET_REASONS)[number];
 /** The suffix that carries a forget reason at the end of its audit detail; a reworded marker here would silently orphan every recorded reason. */
 export const FORGET_REASON_MARKER = "; reason=";
+/** Written after a creation audit row's detail when the capture stored a stamped transcript ref together with its source excerpt, followed by that exact ref and a closing bracket; a reworded marker here would silently orphan every stored stamp. */
+export const STAMPED_REF_DETAIL_MARKER = " [stamped_ref=";
 
 const SUPERSEDING_ID_PATTERN = new RegExp(
   `(?:${SUPERSEDED_BY_FACT_PREFIX}|${SUPERSEDED_AS_DUPLICATE_PREFIX})([0-9a-fA-F-]{1,128})`

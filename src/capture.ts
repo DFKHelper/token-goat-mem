@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, parseValidUntilDeadline } from "./anchors.js";
 import { parseStrictIsoTimestamp } from "./timeUtils.js";
-import { insertAuditLog, listAuditLogForFact, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
+import { insertAuditLog, listAuditLogForFact, STAMPED_REF_DETAIL_MARKER, SUPERSEDED_AS_DUPLICATE_PREFIX } from "./db.js";
 import { resolveProjectIdentity } from "./projectIdentity.js";
 import { isBoundToRoot } from "./projectIdentity.js";
 import {
@@ -700,9 +700,6 @@ function excerptKeywordContext(excerpt: string, importRef: string | null): strin
   const headPath = head[1].replaceAll(String.fromCharCode(92), "/");
   return refPath === headPath || refPath.endsWith(`/${headPath}`) ? excerpt.slice(head[0].length) : excerpt;
 }
-
-/** Written after a creation audit row's detail when the capture stored a stamped transcript ref together with its source excerpt, followed by that exact ref: the binding {@link storedSourceRefContext} checks. */
-const STAMPED_REF_DETAIL_MARKER = " [stamped_ref=";
 
 /** A fact's stored `source_ref` as keyword context, or `null` when it is the pointer `mem scan-session` stamped itself: the stamp's shape (an absolute transcript path plus a turn) AND the fact's own creation audit row recording that exact ref, which `writeFact` writes only for a capture that stored the ref with a source excerpt in one transaction. A typed ref, a restatement's overwritten ref, and a sighting's later source row therefore never match, and a `mem gc` that pruned the audit row makes a genuine stamp read as typed, which fails closed. */
 function storedSourceRefContext(db: Database.Database, fact: Fact): string | null {
