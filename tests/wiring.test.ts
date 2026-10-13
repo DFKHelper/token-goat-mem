@@ -13,6 +13,7 @@ import {
   checkHookCapability,
   claudeCode,
   CLAUDE_HOOK_EVENTS,
+  CLAUDE_HOOK_TIMEOUT_SECONDS,
   codex,
   createMemProbeCache,
   copilotCli,
@@ -1184,6 +1185,79 @@ describe("regression: a stale .bak snapshot from a bygone install era no longer 
     expect(existsSync(claudeMdPath)).toBe(false);
     expect(existsSync(`${settingsPath}.token-goat-mem.bak`)).toBe(false);
     expect(existsSync(`${claudeMdPath}.token-goat-mem.bak`)).toBe(false);
+  });
+});
+
+describe("claude-code hook entries carry a timeout", () => {
+  type HookEntry = { type: string; command: string; timeout?: number; __token_goat_mem?: boolean };
+  const settingsPath = (): string => join(root, ".claude", "settings.json");
+  const hooksOf = (event: string): HookEntry[] => {
+    const parsed = JSON.parse(read(settingsPath())) as { hooks?: Record<string, { hooks: HookEntry[] }[]> };
+    return (parsed.hooks?.[event] ?? []).flatMap((group) => group.hooks);
+  };
+
+  it("a fresh install writes the named timeout on every hook mem installs", () => {
+    claudeCode.install({ root, homeDir: home });
+    for (const { event } of CLAUDE_HOOK_EVENTS) {
+      const hooks = hooksOf(event);
+      expect(hooks).toHaveLength(1);
+      expect(hooks[0]?.timeout).toBe(CLAUDE_HOOK_TIMEOUT_SECONDS);
+    }
+  });
+
+  it("re-running install on a stamped entry without a timeout upgrades it in place instead of duplicating it", () => {
+    const hooks: Record<string, unknown> = {};
+    for (const { event, command } of CLAUDE_HOOK_EVENTS) {
+      hooks[event] = [{ hooks: [{ type: "command", command, __token_goat_mem: true }] }];
+    }
+    seed(settingsPath(), JSON.stringify({ hooks }, null, 2));
+
+    claudeCode.install({ root, homeDir: home });
+    for (const { event, command } of CLAUDE_HOOK_EVENTS) {
+      expect(hooksOf(event)).toEqual([{ type: "command", command, timeout: CLAUDE_HOOK_TIMEOUT_SECONDS, __token_goat_mem: true }]);
+    }
+    const afterFirst = read(settingsPath());
+    claudeCode.install({ root, homeDir: home });
+    expect(read(settingsPath())).toBe(afterFirst);
+  });
+
+  it("an unstamped orphan adopted in place also gains the timeout", () => {
+    const [first] = CLAUDE_HOOK_EVENTS;
+    if (first === undefined) {
+      throw new Error("no hook events");
+    }
+    seed(settingsPath(), JSON.stringify({ hooks: { [first.event]: [{ hooks: [{ type: "command", command: first.command }] }] } }));
+    claudeCode.install({ root, homeDir: home });
+    const hooks = hooksOf(first.event);
+    expect(hooks).toHaveLength(1);
+    expect(hooks[0]?.timeout).toBe(CLAUDE_HOOK_TIMEOUT_SECONDS);
+  });
+
+  it("uninstall removes the entry in both the old shape (no timeout) and the new one, sparing a user's own hook", () => {
+    const [first, second] = CLAUDE_HOOK_EVENTS;
+    if (first === undefined || second === undefined) {
+      throw new Error("need two hook events");
+    }
+    seed(
+      settingsPath(),
+      JSON.stringify({
+        hooks: {
+          [first.event]: [{ hooks: [{ type: "command", command: first.command, __token_goat_mem: true }] }, { hooks: [{ type: "command", command: "echo mine", timeout: 5 }] }],
+          [second.event]: [{ hooks: [{ type: "command", command: second.command, timeout: CLAUDE_HOOK_TIMEOUT_SECONDS, __token_goat_mem: true }] }],
+        },
+      })
+    );
+    claudeCode.uninstall({ root, homeDir: home });
+    expect(hooksOf(first.event).map((hook) => hook.command)).toEqual(["echo mine"]);
+    expect(hooksOf(second.event)).toEqual([]);
+  });
+
+  it("the old no-timeout entry stays recognised as mem's, so install after install never grows the file", () => {
+    claudeCode.install({ root, homeDir: home });
+    claudeCode.install({ root, homeDir: home });
+    for (const { event } of CLAUDE_HOOK_EVENTS) {
+      expect(hooksOf(event)).toHaveLength(1);
+    }
   });
 });
 

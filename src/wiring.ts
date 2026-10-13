@@ -1089,9 +1089,13 @@ export function describeHookGap(command: string, missing: readonly string[]): st
   return `${subcommand} ${missing.join(" ")}`;
 }
 
+/** Seconds Claude Code lets a mem hook run (the `timeout` field on a command hook): above a normal busy wait and a slow node start, below the 30 s store busy timeout, so a recall stalled behind another writer is cut off rather than holding the prompt. */
+export const CLAUDE_HOOK_TIMEOUT_SECONDS = 20;
+
 interface ClaudeHook {
   readonly type: string;
   readonly command: string;
+  readonly timeout?: number;
   readonly [STAMP_KEY]?: boolean;
 }
 
@@ -1241,16 +1245,19 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
   const stampedHook: ClaudeHook | undefined = stampedGroupIdx === -1 ? undefined : groups[stampedGroupIdx]?.hooks?.[stampedHookIdx];
 
   if (stampedHook !== undefined) {
+    const hookPath: JSONPath = ["hooks", event, stampedGroupIdx, "hooks", stampedHookIdx];
+    // An entry an older mem wrote carries no timeout; setting it here upgrades that entry in place rather than adding a second one.
+    const withTimeout = (current: string): string =>
+      stampedHook.timeout === CLAUDE_HOOK_TIMEOUT_SECONDS ? current : surgicalJsoncEdit(current, [...hookPath, "timeout"], CLAUDE_HOOK_TIMEOUT_SECONDS);
     if (stampedHook.type === "command" && stampedHook.command === command) {
-      return text;
+      return withTimeout(text);
     }
     // No downgrade: a stamped `hook <slug>` command is never rewritten back to the flag-carrying shape, whatever wrote the candidate. Migration runs the other way, so a stamped legacy command falls through to the in-place rewrite below.
     if (stampedHook.type === "command" && isCurrentHookShape(stampedHook.command, event) && isLegacyHookShape(command)) {
-      return text;
+      return withTimeout(text);
     }
-    const hookPath: JSONPath = ["hooks", event, stampedGroupIdx, "hooks", stampedHookIdx];
     const retyped = surgicalJsoncEdit(text, [...hookPath, "type"], "command");
-    return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
+    return withTimeout(surgicalJsoncEdit(retyped, [...hookPath, "command"], command));
   }
 
   // An unstamped hook whose command matches mem's own invocation shape for this event is an orphan left by an install that predates STAMP_KEY (or whose flags have since changed) -- adopt it in place rather than leaving it to run forever alongside the stamped hook this function would otherwise insert, or refusing outright and stranding every older install behind a manual edit.
@@ -1269,11 +1276,12 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
     const hookPath: JSONPath = ["hooks", event, adoptGroupIdx, "hooks", adoptHookIdx];
     const stamped = surgicalJsoncEdit(text, [...hookPath, STAMP_KEY], true);
     const retyped = surgicalJsoncEdit(stamped, [...hookPath, "type"], "command");
-    return surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
+    const adopted = surgicalJsoncEdit(retyped, [...hookPath, "command"], command);
+    return surgicalJsoncEdit(adopted, [...hookPath, "timeout"], CLAUDE_HOOK_TIMEOUT_SECONDS);
   }
 
   // Insert at the deepest container the file already has, so `modify` never has to synthesise intermediates -- that is the one case surgicalJsoncEdit has to fall back to a reformat.
-  const group = { hooks: [{ type: "command", command, [STAMP_KEY]: true }] };
+  const group = { hooks: [{ type: "command", command, timeout: CLAUDE_HOOK_TIMEOUT_SECONDS, [STAMP_KEY]: true }] };
   if (!hadHooks) {
     return surgicalJsoncEdit(text, ["hooks"], { [event]: [group] });
   }
