@@ -156,9 +156,12 @@ function describeScopePlacement(unreachableRoots: number, unreachableFacts: numb
 }
 
 /** The remedy for an installed hook that cannot run: upgrading fixes a real capability gap, but a probe that timed out says nothing about the mem version, so it gets a retry hint instead. */
-export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly notRunnable?: true }): string {
+export function hookGapRemedy(hook: { readonly probeFailure?: string; readonly probeRefusal?: string; readonly notRunnable?: true }): string {
   if (hook.notRunnable === true) {
     return "reinstall token-goat-mem or fix PATH (the mem this hook launches could not run at all)";
+  }
+  if (hook.probeRefusal !== undefined) {
+    return "install mem under a path without & % ! ^ | < > or quote characters (the hook was not judged; only its probe was skipped)";
   }
   return hook.probeFailure === undefined ? "npm install -g token-goat-mem" : "re-run mem doctor once the machine is less busy (a probe that times out says nothing about the mem version)";
 }
@@ -197,7 +200,7 @@ function describeHookHealth(opts: WiringOpts, probe: ProbeBudget): Finding[] {
           : finding(
               "hooks",
               "fail",
-              `  ${hook.event}: ${health.bin === null ? "would be inert" : hook.notRunnable === true ? "cannot run at all (the binary it launches did not start)" : hook.probeFailure ?? `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
+              `  ${hook.event}: ${health.bin === null ? "would be inert" : hook.notRunnable === true ? "cannot run at all (the binary it launches did not start)" : hook.probeFailure ?? hook.probeRefusal ?? `does not support ${describeHookGap(hook.command, hook.missing)}`}`,
               hookGapRemedy(hook)
             )
       );

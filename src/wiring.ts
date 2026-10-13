@@ -913,6 +913,8 @@ export interface MemProbeResult {
   readonly output: string | null;
   readonly unanswered: boolean;
   readonly notRunnable: boolean;
+  /** Set when the probe was refused before any process started because the binary path carries a character cmd.exe would interpret, which says nothing about the binary itself. */
+  readonly refused?: true;
 }
 
 /** What one doctor or init run remembers about its probes: each (binary, args) answer, and the binaries that have left a probe unanswered, which every later probe of the same binary then reports without spawning. */
@@ -961,7 +963,7 @@ function runMemProbe(binPath: string, args: readonly string[], timeoutMs: number
 
 function classifyMemProbe(result: ProbeSpawnResult): MemProbeResult {
   if (result.errorCode === PROBE_REFUSED_ERROR_CODE) {
-    return { output: null, unanswered: false, notRunnable: false };
+    return { output: null, unanswered: false, notRunnable: false, refused: true };
   }
   if (result.errorCode !== undefined) {
     return { output: null, unanswered: true, notRunnable: result.errorCode === "ENOENT" || result.errorCode === "EACCES" };
@@ -994,13 +996,16 @@ export function checkHookCapability(
   timeoutMs = MEM_PROBE_TIMEOUT_MS,
   launcherArgs: readonly string[] = [],
   cache?: MemProbeCache
-): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true; readonly notRunnable?: true; readonly refused?: true } {
+): { readonly capable: boolean; readonly missing: readonly string[]; readonly probeFailed?: true; readonly notRunnable?: true; readonly refused?: true; readonly pathRefused?: true } {
   // The subcommand comes from a settings file that may belong to a cloned repository, so nothing outside the safe token shape is ever handed to a probe.
   if (!isSafeProbeToken(spec.subcommand)) {
     return { capable: false, missing: [spec.subcommand], refused: true };
   }
-  const { output: help, unanswered, notRunnable } = runMemProbe(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs, cache === undefined ? {} : { cache });
+  const { output: help, unanswered, notRunnable, refused } = runMemProbe(binPath, [...launcherArgs, spec.subcommand, "--help"], timeoutMs, cache === undefined ? {} : { cache });
   if (help === null) {
+    if (refused === true) {
+      return { capable: false, missing: [], pathRefused: true };
+    }
     const unrunnable = notRunnable ? { notRunnable: true as const } : {};
     return unanswered ? { capable: false, missing: [], probeFailed: true, ...unrunnable } : { capable: false, missing: [spec.subcommand], ...unrunnable };
   }
@@ -1023,6 +1028,8 @@ export interface HookCapabilityResult {
   readonly probeFailure?: string;
   /** Set when the probed binary cannot run at all (exit 126, 127 or 9009, or a spawn ENOENT), as against one that ran and lacks the capability; `missing` and `probeFailure` read exactly as they do without it. */
   readonly notRunnable?: true;
+  /** Set when the probe was skipped because the probed binary's path carries a character cmd.exe would interpret, so `missing` says nothing about what it supports; the sentence names the path. */
+  readonly probeRefusal?: string;
 }
 
 /** Full health picture for a set of `{event, command}` hook entries: the resolved `mem` binary (or `null`), and each entry's capability against it. */
@@ -1044,15 +1051,15 @@ export function checkClaudeHookHealth(
     // A bundle path is only ever run when the caller vouches for the commands (mem's own, or the user's own settings file): a project settings.json is a cloned repository's text, and the file it names must never be executed.
     if (opts.trustBundles === true && spec !== null && bundle !== null && existsSync(bundle)) {
       const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-      const { capable, missing, probeFailed, notRunnable } = checkHookCapability(process.execPath, spec, timeoutMs, [bundle], cache);
-      return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}) };
+      const { capable, missing, probeFailed, notRunnable, pathRefused } = checkHookCapability(process.execPath, spec, timeoutMs, [bundle], cache);
+      return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bundle, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}), ...(pathRefused === true ? { probeRefusal: describeProbeRefusal(process.execPath) } : {}) };
     }
     if (bin === null || spec === null) {
       return { event, command, capable: false, missing: spec === null ? [] : spec.flags };
     }
     const timeoutMs = opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS;
-    const { capable, missing, probeFailed, notRunnable } = checkHookCapability(bin.path, spec, timeoutMs, [], cache);
-    return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bin.path, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}) };
+    const { capable, missing, probeFailed, notRunnable, pathRefused } = checkHookCapability(bin.path, spec, timeoutMs, [], cache);
+    return { event, command, capable, missing, ...(probeFailed === true ? { probeFailure: describeProbeFailure(bin.path, timeoutMs) } : {}), ...(notRunnable === true ? { notRunnable } : {}), ...(pathRefused === true ? { probeRefusal: describeProbeRefusal(bin.path) } : {}) };
   });
   return { bin, hooks };
 }
@@ -1066,6 +1073,11 @@ export function timeMemLaunch(opts: { readonly pathEnv?: string; readonly timeou
   const started = performance.now();
   const out = runMemSubprocess(path, ["--version"], opts.timeoutMs ?? MEM_PROBE_TIMEOUT_MS, { bypassCachedResult: true, ...(opts.cache === undefined ? {} : { cache: opts.cache }) });
   return out === null ? null : performance.now() - started;
+}
+
+/** The one sentence for a capability probe that was skipped: it names the binary and why (its path carries a character cmd.exe would interpret, so it is never launched through a shell) and claims nothing about what the binary supports. */
+export function describeProbeRefusal(probed: string): string {
+  return `skipped the capability probe of \`${probed}\`: its path contains a character cmd.exe would interpret (one of & % ! ^ | < > or a quote), so it was not launched to check it`;
 }
 
 /** The one sentence for a capability probe that got no answer: it names the probed binary and the budget and claims nothing about the binary's version, since a slow launch (antivirus scanning) looks the same as a hang from here. */

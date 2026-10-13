@@ -759,7 +759,8 @@ function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
   const cannotRun = incapable.some((hook) => hook.notRunnable === true);
   const probed = incapable.filter((hook) => hook.notRunnable !== true);
   const unprobed = [...new Set(probed.flatMap((hook) => (hook.probeFailure === undefined ? [] : [hook.probeFailure])))];
-  const gaps = [...new Set(probed.filter((hook) => hook.probeFailure === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
+  const refusals = [...new Set(probed.flatMap((hook) => (hook.probeRefusal === undefined ? [] : [hook.probeRefusal])))];
+  const gaps = [...new Set(probed.filter((hook) => hook.probeFailure === undefined && hook.probeRefusal === undefined).map((hook) => describeHookGap(hook.command, hook.missing)))];
   if (cannotRun && probed.length === 0) {
     return [
       `mem: hooks will invoke ${health.bin.path}, which could not run at all`,
@@ -769,8 +770,13 @@ function describeHookHealthRefusal(health: ClaudeHookHealth): string | null {
   return [
     `mem: hooks will invoke ${health.bin.path}, which is ${health.bin.version ?? "an unknown version"}`,
     ...unprobed.map((sentence) => `     ${sentence}`),
+    ...refusals.map((sentence) => `     ${sentence}`),
     ...(gaps.length > 0 ? [`     it does not support: ${gaps.join(", ")}`] : []),
-    gaps.length > 0 ? "     upgrade with `npm i -g token-goat-mem`, or re-run with --force" : "     re-run once the machine is less busy, or re-run with --force to write the hooks without the check",
+    gaps.length > 0
+      ? "     upgrade with `npm i -g token-goat-mem`, or re-run with --force"
+      : unprobed.length === 0 && refusals.length > 0
+        ? "     re-run with --force to write the hooks without the check, or install mem under a path without those characters"
+        : "     re-run once the machine is less busy, or re-run with --force to write the hooks without the check",
   ].join("\n");
 }
 

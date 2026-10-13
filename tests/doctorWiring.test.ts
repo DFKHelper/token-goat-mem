@@ -1,7 +1,7 @@
 /** End-to-end tests for `mem doctor`'s wiring checks: whether each supported tool's mem block is present and current (`wiring`), and whether project- and user-level Claude Code hooks disagree (`hook-divergence`). Everything goes through the real CLI against temp roots and homes; doctor itself must never write a file. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 
@@ -284,6 +284,32 @@ describe("mem doctor and mem init probe a PATH mem under one shared cache and bu
       expect(result.stdout).not.toContain("does not support");
       // Two distinct probes (--version and hook --help), once each; a retry would double it.
       expect(countLaunches(counter)).toBe(2);
+    });
+  });
+
+  it.runIf(process.platform === "win32")("says the probe was skipped, naming the path and the character cmd.exe would interpret, when the mem path carries an ampersand", async () => {
+    const special = join(binDir, "user&name");
+    mkdirSync(special);
+    writeFakeMem(special, CAPABLE_MEM_SHIM);
+    await withProbeEnv(special, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000" }, async () => {
+      const init = await runCli(["init", "claude-code", "--root", toolRoot]);
+      expect(init.exitCode).toBe(1);
+      expect(init.stdout).toContain("skipped");
+      expect(init.stdout).toContain(special);
+      expect(init.stdout).toContain("cmd.exe");
+      expect(init.stdout).toContain("--force");
+      expect(init.stdout).not.toContain("does not support");
+      expect(init.stdout).not.toContain("upgrade with");
+
+      await runCli(["init", "claude-code", "--root", toolRoot, "--force"]);
+      const failures = (await doctorFindings("hooks")).filter((entry) => entry.status === "fail");
+      expect(failures.length).toBeGreaterThan(0);
+      for (const entry of failures) {
+        expect(entry.message).toContain("skipped");
+        expect(entry.message).toContain("cmd.exe");
+        expect(entry.message).not.toContain("does not support");
+        expect(entry.remedy).not.toContain("npm install -g");
+      }
     });
   });
 
