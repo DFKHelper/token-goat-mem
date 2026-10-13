@@ -11,28 +11,6 @@ const MAX_TABLE_CELL_LENGTH = 600;
 
 const BACKSLASH = String.fromCharCode(92);
 
-/** The README command-table rows whose description cell was already over the limit when the guard was added, keyed by their first cell; each is to be split into a short cell plus prose below the table, then deleted from this set (the guard fails once a listed row is back under the limit). */
-const LEGACY_LONG_CELL_ROWS: ReadonlySet<string> = new Set([
-  "README.md: `mem remember <text>`",
-  "README.md: `mem scan-session`",
-  "README.md: `mem reflect`",
-  "README.md: `mem hook <event>`",
-  "README.md: `mem export`",
-  "README.md: `mem import --from-md <path>`",
-  "README.md: `mem import --from-json <path>`",
-  "README.md: `mem recall [query]`",
-  "README.md: `mem show <id>`",
-  "README.md: `mem review`",
-  "README.md: `mem forget <id> [--by <winner-id>]`",
-  "README.md: `mem edit <id>`",
-  "README.md: `mem used <id...> --session-id <id>`",
-  "README.md: `mem epoch`",
-  "README.md: `mem consolidate`",
-  "README.md: `mem dream`",
-  "README.md: `mem facets`",
-  "README.md: `mem init <tool>`",
-]);
-
 /** Splits one markdown table row into trimmed cells, keeping a backslash-escaped pipe and a pipe inside a code span inside its cell. */
 function splitTableRow(line: string): string[] {
   const body = line.trim().replace(/^\|/u, "").replace(/\|$/u, "");
@@ -288,12 +266,9 @@ describe("documentation consistency guards", () => {
       expect(missing, `AGENTS.md has no "- \`mem <name>" bullet for: ${missing.join(", ")}`).toEqual([]);
     });
 
-    it(`no markdown table cell in README.md or AGENTS.md is over ${MAX_TABLE_CELL_LENGTH} characters, apart from the listed legacy rows`, () => {
+    it(`no markdown table cell in README.md or AGENTS.md is over ${MAX_TABLE_CELL_LENGTH} characters`, () => {
       const over = ["README.md", "AGENTS.md"].flatMap((file) => longTableCells(file, readDocFile(file), MAX_TABLE_CELL_LENGTH));
-      const unexpected = over.filter((row) => !LEGACY_LONG_CELL_ROWS.has(row));
-      expect(unexpected, `table cells over ${MAX_TABLE_CELL_LENGTH} characters: move the detail into prose below the table and keep a short cell`).toEqual([]);
-      const stale = [...LEGACY_LONG_CELL_ROWS].filter((row) => !over.includes(row));
-      expect(stale, "these rows are now under the limit: delete them from LEGACY_LONG_CELL_ROWS").toEqual([]);
+      expect(over, `table cells over ${MAX_TABLE_CELL_LENGTH} characters: move the detail into prose below the table and keep a short cell`).toEqual([]);
     });
   });
 });
