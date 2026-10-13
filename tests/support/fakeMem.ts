@@ -37,10 +37,10 @@ export const HANG_ONCE_MEM_SHIM =
   "process.exit(1);\n" +
   "}\n";
 
-/** Writes `body` as `mem.js` plus launchers (`mem`, `mem.cmd`) that append one line to the file named by `FAKE_MEM_COUNTER` before node starts, so a launch is counted even when the probe's budget kills the launcher before node is up. */
+/** Writes `body` as `mem.js` plus launchers (`mem`, `mem.cmd`) that append one line to the file named by `FAKE_MEM_COUNTER` before node starts, so a launch is counted even when the probe's budget kills the launcher before node is up; the POSIX launcher uses only shell builtins (no `dirname`), because a test may narrow PATH to this directory plus node's own, where an external utility is not found. */
 export function writeCountingFakeMem(dir: string, body: string): void {
   writeFileSync(join(dir, "mem.js"), body, "utf8");
-  writeFileSync(join(dir, "mem"), '#!/bin/sh\necho launch >> "$FAKE_MEM_COUNTER"\nexec node "$(dirname "$0")/mem.js" "$@"\n', "utf8");
+  writeFileSync(join(dir, "mem"), '#!/bin/sh\necho launch >> "$FAKE_MEM_COUNTER"\nexec node "${0%/*}/mem.js" "$@"\n', "utf8");
   chmodSync(join(dir, "mem"), 0o755);
   writeFileSync(join(dir, "mem.cmd"), `@echo off\r\necho launch>>"%FAKE_MEM_COUNTER%"\r\nnode "%~dp0mem.js" %*\r\n`, "utf8");
 }
