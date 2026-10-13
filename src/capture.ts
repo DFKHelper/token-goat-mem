@@ -279,17 +279,20 @@ function isCredentialSentence(value: string, index: number): boolean {
 /** The most words after a hex that `isCredentialLabelledAfter` reads: wide enough for `is the production API key` and `was the webhook signing secret` (five words), narrow enough that a keyword later in a long sentence does not label the hex. */
 const CREDENTIAL_TRAILING_WORDS = 8;
 
-/** Keywords of `UUID_CREDENTIAL_KEYWORDS` too ordinary as a whole word after a hex to label it (`<hex> fixed the reset`, `<hex> is a private repo`); they still count in compounds such as `webhooksecret` and in the before-window checks. */
+/** Keywords too ordinary as a whole word after a hex to label it (`<hex> fixed the login page`) that still end a lowercase compound (`sessioncookie`) and count in the before-window checks. */
+const CREDENTIAL_TRAILING_COMPOUND_ONLY_KEYWORDS: ReadonlySet<string> = new Set(["auth", "login", "cookie", "salt", "vault"]);
+
+/** Keywords of `UUID_CREDENTIAL_KEYWORDS` too ordinary after a hex to label it (`<hex> fixed the reset`, `<hex> is a private repo`) and inside a longer word to end a compound (`preset` ends in `reset`); they still count in the before-window checks. */
 const CREDENTIAL_TRAILING_ORDINARY_KEYWORDS: ReadonlySet<string> = new Set(["api", "access", "private", "reset", "invite", "seed", "ssh", "license", "licence", "subscription", "connection", "recovery", "webhook", "activation", "unlock", "pairing"]);
 
 /** Credential words that label a hex when they follow it, matched only as whole words (plus a plural), derived from the before-window lists so the two cannot drift, because the prefix/suffix rule of `isCredentialWord` would make `keyboard`, `monkey` and `authors` credential words. */
-const CREDENTIAL_TRAILING_WORD_SET: ReadonlySet<string> = new Set([...UUID_CREDENTIAL_KEYWORDS.filter((keyword) => !CREDENTIAL_TRAILING_ORDINARY_KEYWORDS.has(keyword)), ...UUID_CREDENTIAL_EXACT_WORDS, "credential"]);
+const CREDENTIAL_TRAILING_WORD_SET: ReadonlySet<string> = new Set([...UUID_CREDENTIAL_KEYWORDS.filter((keyword) => !CREDENTIAL_TRAILING_ORDINARY_KEYWORDS.has(keyword) && !CREDENTIAL_TRAILING_COMPOUND_ONLY_KEYWORDS.has(keyword)), ...UUID_CREDENTIAL_EXACT_WORDS, "credential"]);
 
 /** The shortest keyword that also counts as the end of a longer all-lowercase word (`refreshtoken`, `clientsecret`); shorter ones would turn `turkey`, `hockey` or `unsalt`-style words into hits. */
 const CREDENTIAL_TRAILING_SUFFIX_MIN_LENGTH = 5;
 
 /** The trailing words long enough to end a lowercase compound. */
-const CREDENTIAL_TRAILING_SUFFIX_KEYWORDS: readonly string[] = [...CREDENTIAL_TRAILING_WORD_SET].filter((keyword) => keyword.length >= CREDENTIAL_TRAILING_SUFFIX_MIN_LENGTH);
+const CREDENTIAL_TRAILING_SUFFIX_KEYWORDS: readonly string[] = [...CREDENTIAL_TRAILING_WORD_SET, ...CREDENTIAL_TRAILING_COMPOUND_ONLY_KEYWORDS].filter((keyword) => keyword.length >= CREDENTIAL_TRAILING_SUFFIX_MIN_LENGTH);
 
 /** Words that, directly before `key`, form a lowercase credential compound (`passkey`, `apikey`, `privkey`). */
 const CREDENTIAL_KEY_COMPOUND_PREFIXES: ReadonlySet<string> = new Set(["pass", "api", "priv", "private", "access", "secret", "auth", "ssh", "master", "signing", "encryption", "license", "licence"]);
@@ -302,7 +305,7 @@ function isTrailingCredentialWord(word: string): boolean {
   if (word.endsWith("key") && CREDENTIAL_KEY_COMPOUND_PREFIXES.has(word.slice(0, -3))) {
     return true;
   }
-  return CREDENTIAL_TRAILING_SUFFIX_KEYWORDS.some((keyword) => word.endsWith(keyword));
+  return CREDENTIAL_TRAILING_SUFFIX_KEYWORDS.some((keyword) => word.length > keyword.length && word.endsWith(keyword));
 }
 
 /** The end of a sentence: `.`, `;`, `!` or `?` followed by whitespace or the end of the text. */
