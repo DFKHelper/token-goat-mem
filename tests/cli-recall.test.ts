@@ -437,7 +437,7 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     expect(recallLogRows().map(([, sessionId]) => sessionId)).toEqual(["recent"]);
   });
 
-  it("mem epoch --gc prunes old audit rows even when an earlier row was stamped by a far-future clock", async () => {
+  it("mem epoch --gc prunes old audit rows even when an earlier row is stamped a few hours ahead", async () => {
     const db = openStorage(resolveDbPath());
     const day = 24 * 60 * 60 * 1000;
     const insert = db.prepare("INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, ?, ?, ?, NULL, ?)");
@@ -452,6 +452,12 @@ describe("mem recall --hint-format session log and --delta (in-process)", () => 
     const gc = await runCli(["epoch", "--gc"]);
     expect(gc.exitCode).toBe(0);
     expect(gc.stdout).toContain("pruned_audit_log_rows=2  ");
+    const check = openStorage(resolveDbPath());
+    try {
+      expect(check.prepare("SELECT id FROM audit_log WHERE id = ?").all("jump")).toHaveLength(1);
+    } finally {
+      check.close();
+    }
   });
 
   it("a hard-deleted fact takes its recall_log rows with it (ON DELETE CASCADE); a soft `forget` keeps them until gc", async () => {
