@@ -147,11 +147,13 @@ describe("matrix 3: uninstall by stamp", () => {
         SessionStart: [{ hooks: [{ type: "command", command: LEGACY["SessionStart"], __token_goat_mem: true }] }, { hooks: [{ type: "command", command: "echo mine" }] }],
         Stop: [{ hooks: [{ type: "command", command: currentCommands()["Stop"], __token_goat_mem: true }] }],
         PreCompact: [{ hooks: [{ type: "command", command: "node my-own-hook.js" }] }],
+        // A user's own entry running mem's current invocation shape with no stamp: uninstall removes by stamp only, never by command shape.
+        UserPromptSubmit: [{ hooks: [{ type: "command", command: currentCommands()["UserPromptSubmit"] }] }],
       },
     };
     writeFileSync(projectSettingsPath(), JSON.stringify(settings, null, 2), "utf8");
     claudeCode.uninstall({ root, homeDir: home });
-    expect(commandsIn(projectSettingsPath())).toEqual({ SessionStart: ["echo mine"], PreCompact: ["node my-own-hook.js"] });
+    expect(commandsIn(projectSettingsPath())).toEqual({ SessionStart: ["echo mine"], PreCompact: ["node my-own-hook.js"], UserPromptSubmit: [currentCommands()["UserPromptSubmit"]] });
   });
 });
 
@@ -311,5 +313,21 @@ describe("end to end through the built bundle", () => {
     expect(viaEnv.stdout).toBe(direct.stdout);
     expect(readFileSync(projectSettingsPath(), "utf8")).toBe(settingsBefore);
     expect(BUNDLE_PATH).toContain("token-goat-mem.mjs");
+  });
+
+  const bashOnPath = spawnSync("bash", ["-c", "true"]).status === 0;
+
+  // Claude Code runs a hook command through bash on Windows too, so the direct-bundle string a win32 user-level install writes must work as written.
+  it.skipIf(!bashOnPath)("runs the win32 direct-bundle hook command through bash against the built bundle and emits TGMEM/2", { timeout: 120_000 }, async () => {
+    const memHome = process.env["TOKEN_GOAT_MEM_HOME"] as string;
+    const remembered = await runCli(["remember", "the quokka deploy token lives in vault", "--kind", "fact", "--scope", "project", "--root", root]);
+    expect(remembered.exitCode ?? 0).toBe(0);
+    const command = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: BUNDLE_PATH })[0]?.command as string;
+    expect(command, "the direct-bundle form launches node on the bundle path").toContain(`node "${BUNDLE_PATH.replace(/\\/gu, "/")}" hook session-start`);
+    const envelope = JSON.stringify({ session_id: "s-hook-direct", hook_event_name: "SessionStart", source: "startup", cwd: root });
+    const result = spawnSync("bash", ["-c", command], { encoding: "utf8", input: envelope, env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome, CLAUDE_PROJECT_DIR: root } });
+    expect(result.status, `bash exit; stderr: ${result.stderr}`).toBe(0);
+    expect(result.stdout.startsWith("TGMEM/2\n"), `stdout: ${result.stdout}`).toBe(true);
+    expect(result.stdout, "the seeded fact surfaces through the direct-bundle branch").toContain("quokka deploy token");
   });
 });
