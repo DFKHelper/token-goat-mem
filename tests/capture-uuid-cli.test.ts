@@ -207,6 +207,9 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a vault label", `${HEX32} is the vault password`],
     ["a lowercase sessioncookie compound", `${HEX32} is the sessioncookie`],
     ["an authtoken compound", `${HEX32} is my authtoken`],
+    ["a plural apikeys compound", `${HEX32} are the apikeys`],
+    ["a plural sshkeys compound", `${HEX32} are the sshkeys`],
+    ["a plural refreshtokens compound", `${HEX32} are my refreshtokens`],
     ["a label in a following sentence that opens with This", `Here's the value: ${HEX32}. This is my API key.`],
     ["a label in a following sentence that opens with It", `${HEX32}. It is the deploy token.`],
     ["a bare one-word label after a full stop at the end of a line", `${HEX32}. Password`],
@@ -233,6 +236,8 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a long unrelated sentence after a full stop", `${HEX40} was reverted. The deploy token cache is separate work for later`],
     ["a word that merely ends in a short keyword", `${HEX40} fixed the turkey and hockey fixtures`],
     ["a word that merely starts with a short keyword", `${HEX40} fixed the saltwater and pinball tests`],
+    ["an ordinary plural ending in key", `${HEX40} fixed the monkeys test`],
+    ["an ordinary plural starting with a keyword", `${HEX40} renamed the keyboards module`],
   ])("stores %s", async (_label, text) => {
     await remember(text);
   });

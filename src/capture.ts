@@ -302,6 +302,11 @@ function isTrailingCredentialWord(word: string): boolean {
   if (CREDENTIAL_TRAILING_WORD_SET.has(word) || (word.endsWith("s") && !UUID_CREDENTIAL_EXACT_WORDS.has(word.slice(0, -1)) && CREDENTIAL_TRAILING_WORD_SET.has(word.slice(0, -1)))) {
     return true;
   }
+  return isCredentialCompound(word) || (word.length > 1 && word.endsWith("s") && isCredentialCompound(word.slice(0, -1)));
+}
+
+/** Whether a word is a `<prefix>key` compound or ends in a long credential keyword. */
+function isCredentialCompound(word: string): boolean {
   if (word.endsWith("key") && CREDENTIAL_KEY_COMPOUND_PREFIXES.has(word.slice(0, -3))) {
     return true;
   }
