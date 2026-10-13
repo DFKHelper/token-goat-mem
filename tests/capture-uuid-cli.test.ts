@@ -216,6 +216,14 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a bare two-word label after a full stop", `${HEX32}. Deploy token`],
     ["a label inside an e.g. parenthesis", `${HEX32} (e.g. the token)`],
     ["a label after i.e.", `${HEX32}, i.e. the secret`],
+    ["a label in a sentence that opens with The above", `${HEX32}. The above is my password`],
+    ["a label in a sentence that opens with The former", `${HEX32}. The former is the API key`],
+    ["a label in a sentence that opens with The latter", `${HEX32}. The latter is the deploy token`],
+    ["a label in a sentence that opens with Said", `${HEX32}. Said value is my password`],
+    ["a label inside an approx. parenthesis", `${HEX32} (approx. the token for staging)`],
+    ["a label after cf.", `${HEX32} cf. the deploy token for staging`],
+    ["a label after Mr.", `${HEX32}, Mr. Smith's password for staging`],
+    ...["mr", "mrs", "ms", "dr", "approx", "cf", "no", "vol", "fig", "al", "st", "v"].map((abbreviation): [string, string] => [`a label after the abbreviation ${abbreviation}.`, `${HEX32} ${abbreviation}. the deploy token for staging`]),
     ["a hex split by U+200E", `API key: 0123456789abcdef${String.fromCodePoint(0x200e)}0123456789abcdef`],
     ["a hex split by U+2066", `API key: 0123456789abcdef${String.fromCodePoint(0x2066)}0123456789abcdef`],
     ["a hex split by U+FE0F", `API key: 0123456789abcdef${String.fromCodePoint(0xfe0f)}0123456789abcdef`],
@@ -238,6 +246,11 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a word that merely starts with a short keyword", `${HEX40} fixed the saltwater and pinball tests`],
     ["an ordinary plural ending in key", `${HEX40} fixed the monkeys test`],
     ["an ordinary plural starting with a keyword", `${HEX40} renamed the keyboards module`],
+    ["a short sentence chain whose last sentence is a long unrelated one", `${HEX40} merged. Done. Tests green. Next the token refresh work`],
+    ["a short sentence chain ending in a short sentence that names a token", `${HEX40} merged. Done. Tests green. Token refresh next`],
+    ["a short sentence chain ending in a bare password mention", `${HEX40} merged. Done. Password reset next`],
+    ["a commit after an abbreviated title", `Fixed by Dr. Jones in ${HEX40}; the keyboard layout changed`],
+    ["cf. before an unrelated phrase", `${HEX40} cf. the release notes`],
   ])("stores %s", async (_label, text) => {
     await remember(text);
   });

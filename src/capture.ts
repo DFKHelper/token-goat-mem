@@ -316,11 +316,14 @@ function isCredentialCompound(word: string): boolean {
 /** The end of a sentence: `.`, `;`, `!` or `?` followed by whitespace or the end of the text. */
 const SENTENCE_BOUNDARY = /[.;!?](?:\s|$)/gu;
 
-/** A full stop that ends an abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`) rather than a sentence, tested against the text up to and including the stop. */
-const ABBREVIATION_BEFORE_STOP = /(?:^|[^a-z])(?:e\.g|i\.e|etc|vs)\.$/iu;
+/** A full stop that ends an abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`, `Mr.`, `approx.`, `cf.`, `no.`, `fig.`) rather than a sentence, tested against the text up to and including the stop. */
+const ABBREVIATION_BEFORE_STOP = /(?:^|[^a-z])(?:e\.g|i\.e|etc|vs|mr|mrs|ms|dr|approx|cf|no|vol|fig|al|st|v)\.$/iu;
 
 /** Words that open a sentence referring back to the hex before it (`<hex>. This is my API key`). */
-const CREDENTIAL_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["this", "that", "it", "its", "these", "those", "which"]);
+const CREDENTIAL_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["this", "that", "it", "its", "these", "those", "which", "said"]);
+
+/** Two-word openers that refer back to the hex before them (`<hex>. The above is my password`). */
+const CREDENTIAL_BACK_REFERENCE_PHRASES: ReadonlySet<string> = new Set(["the above", "the former", "the latter"]);
 
 /** The most words a next sentence may have and still read as a bare label of the hex (`<hex>. Password`). */
 const CREDENTIAL_BARE_LABEL_WORDS = 3;
@@ -340,13 +343,13 @@ function nextSentenceBoundary(text: string, from: number): { readonly index: num
 function continuesStatement(text: string, start: number): boolean {
   const boundary = nextSentenceBoundary(text, start);
   const words = splitWords(text.slice(start, boundary === null ? text.length : boundary.index));
-  return words.length > 0 && (CREDENTIAL_BACK_REFERENCE_WORDS.has(words[0] ?? "") || words.length <= CREDENTIAL_BARE_LABEL_WORDS);
+  return words.length > 0 && (CREDENTIAL_BACK_REFERENCE_WORDS.has(words[0] ?? "") || CREDENTIAL_BACK_REFERENCE_PHRASES.has(`${words[0] ?? ""} ${words[1] ?? ""}`) || words.length <= CREDENTIAL_BARE_LABEL_WORDS);
 }
 
-/** The part of `following` that can still label the hex: it ends at the first sentence boundary unless the next sentence continues the statement. */
+/** The part of `following` that can still label the hex: it ends at the first sentence boundary unless the next sentence continues the statement, and then at the boundary after that sentence, so a chain of short sentences never keeps it open further. */
 function labellingWindow(following: string): string {
   let boundary = nextSentenceBoundary(following, 0);
-  while (boundary !== null && continuesStatement(following, boundary.index + boundary.length)) {
+  if (boundary !== null && continuesStatement(following, boundary.index + boundary.length)) {
     boundary = nextSentenceBoundary(following, boundary.index + boundary.length);
   }
   return boundary === null ? following : following.slice(0, boundary.index);
