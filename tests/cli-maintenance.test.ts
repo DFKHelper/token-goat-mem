@@ -760,6 +760,40 @@ describe("sources table (mem remember/mem suggest never feed it; mem epoch --gc 
   });
 });
 
+describe("mem epoch --gc prunes audit rows stamped in the future", () => {
+  function seedAuditRow(id: string, offsetMs: number): void {
+    const db = openDb(resolveDbPath());
+    try {
+      db.prepare("INSERT INTO audit_log (id, event, fact_id, detail, prior_json, created_at) VALUES (?, 'capture', NULL, 'seeded', NULL, ?)").run(
+        id,
+        new Date(Date.now() + offsetMs).toISOString()
+      );
+    } finally {
+      db.close();
+    }
+  }
+
+  function auditIds(): string[] {
+    const db = openDb(resolveDbPath());
+    try {
+      return (db.prepare("SELECT id FROM audit_log WHERE id LIKE 'seed-%' ORDER BY id").all() as { id: string }[]).map((row) => row.id);
+    } finally {
+      db.close();
+    }
+  }
+
+  it("removes a row stamped a year ahead, keeps a fresh row and one a minute ahead, and reports the count", async () => {
+    seedAuditRow("seed-fresh", 0);
+    seedAuditRow("seed-minute-ahead", 60 * 1000);
+    seedAuditRow("seed-year-ahead", 365 * 24 * 60 * 60 * 1000);
+
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode, gc.stderr).toBe(0);
+    expect(gc.stdout).toMatch(/pruned_audit_log_rows=1\b/u);
+    expect(auditIds()).toEqual(["seed-fresh", "seed-minute-ahead"]);
+  });
+});
+
 describe("mem dream", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
   const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";

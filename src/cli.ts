@@ -975,6 +975,8 @@ const GC_SUPERSEDED_MAX_ROWS = 1000;
 const GC_SOURCES_MAX_AGE_DAYS = 90;
 /** Section 6: "Audit log rotates." Deliberately an *independent* retention window from the superseded-fact/sources GC bounds above -- and intentionally longer -- so that pruning a fact or its source excerpts never silently prunes the audit history describing how that fact was captured, edited, contradicted, and eventually GC'd. Audit rows outlive the rows they describe (design principle 5: "No black box"); only age rotates them, never a fact-side GC decision. */
 const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
+/** How far ahead of now an audit row may be stamped before gc prunes it: an older build could stamp rows in the future after a forward clock jump, which the age cutoff never reaches, and a day of margin keeps ordinary clock skew from deleting a fresh row. */
+const GC_AUDIT_LOG_MAX_FUTURE_DAYS = 1;
 /** The recall log (`recall_log`: which facts were surfaced to which hook session) is session bookkeeping, not history, but it has two live readers, not zero: a `--delta` recall filters against rows for the *same* session id (`listSurfacedFactIds`), and `getUsefulnessCounts` groups every row store-wide, on both recall paths, to feed the usefulness rank list `mem used` confirms into. A coding-tool session does not live for weeks, so the `--delta` reader stops caring about a row long before this window closes; the usefulness reader keeps caring for as long as the row exists, which is exactly what this window bounds. Same age-only shape as the audit-log window above, with a shorter horizon. */
 const GC_RECALL_LOG_MAX_AGE_DAYS = 30;
 
@@ -1013,7 +1015,8 @@ function runRetentionPass(db: Database.Database): string {
   const prunedSources = deleteSourcesOlderThan(db, sourcesCutoff);
 
   const auditCutoff = daysAgoIso(GC_AUDIT_LOG_MAX_AGE_DAYS, now);
-  const prunedAuditRows = db.prepare("DELETE FROM audit_log WHERE created_at < ?").run(auditCutoff).changes;
+  const auditFutureCutoff = daysAgoIso(-GC_AUDIT_LOG_MAX_FUTURE_DAYS, now);
+  const prunedAuditRows = db.prepare("DELETE FROM audit_log WHERE created_at < ? OR created_at > ?").run(auditCutoff, auditFutureCutoff).changes;
 
   const recallLogCutoff = daysAgoIso(GC_RECALL_LOG_MAX_AGE_DAYS, now);
   const prunedRecallLogRows = deleteRecallLogOlderThan(db, recallLogCutoff);
