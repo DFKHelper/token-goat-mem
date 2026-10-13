@@ -188,6 +188,28 @@ describe("credential keywords the veto learned", () => {
   });
 });
 
+describe("a hex value is refused when a credential label follows it, and a directional mark does not hide it", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+  const HEX40 = "0123456789abcdef0123456789abcdef01234567";
+
+  it.each([
+    ["a trailing production API key label", `${HEX32} is the production API key`],
+    ["a trailing token label", `${HEX32} was the token for staging`],
+    ["a hex split by U+200E", `API key: 0123456789abcdef${String.fromCodePoint(0x200e)}0123456789abcdef`],
+    ["a hex split by U+2066", `API key: 0123456789abcdef${String.fromCodePoint(0x2066)}0123456789abcdef`],
+    ["a hex split by U+FE0F", `API key: 0123456789abcdef${String.fromCodePoint(0xfe0f)}0123456789abcdef`],
+  ])("refuses %s", async (_label, text) => {
+    expectRefused(await runCli(["remember", text, "--kind", "fact", "--scope", "global"]));
+  });
+
+  it.each([
+    ["a commit mention", `commit ${HEX40} fixed the parser`],
+    ["a commit sentence", `${HEX40} is the commit that fixed the parser`],
+  ])("stores %s", async (_label, text) => {
+    await remember(text);
+  });
+});
+
 describe("a low-entropy UUID is refused beside a credential keyword whatever its entropy", () => {
   const LOW = "11111111-1111-1111-1111-111111111111";
 

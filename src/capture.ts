@@ -157,8 +157,8 @@ const UUID_IDENTIFIER_WORDS: ReadonlySet<string> = new Set([
   "id", "ids", "uuid", "uuids", "guid", "guids", "identifier", "session", "request", "trace", "span", "correlation", "run", "job", "build", "workflow", "instance", "tenant", "project", "ticket", "issue", "record", "fact", "event", "message", "transcript", "conversation", "device", "container", "deployment",
 ]);
 
-/** Zero-width characters and the soft hyphen, which render as nothing and so can split a keyword (`pass` + U+200B + `word`) without changing what a reader sees. */
-const INVISIBLE_CHARACTERS = /[\u200B-\u200D\u2060\uFEFF\u00AD]/g;
+/** Format characters (`\p{Cf}`: zero-width, soft hyphen, directional marks and isolates, invisible operators), the Mongolian vowel separator and the variation selectors, which render as nothing and so can split a keyword (`pass` + U+200B + `word`) or a secret without changing what a reader sees. Used only to normalise text for screening; the stored text is never altered. */
+const INVISIBLE_CHARACTERS = /[\p{Cf}\p{Variation_Selector}\u180E]/gu;
 
 /** The text as it reads to a person: invisible characters removed, compatibility forms folded (fullwidth letters), and diacritics stripped (`contrase\u00F1a` reads as `contrasena`). */
 function foldForKeywords(text: string): string {
@@ -276,6 +276,20 @@ function isCredentialSentence(value: string, index: number): boolean {
   return credentialIndex !== -1 && credentialIndex > hashIndex;
 }
 
+/** The most words after a hex that `isCredentialLabelledAfter` reads: wide enough for `is the production API key` and `was the webhook signing secret` (five words), narrow enough that a keyword later in a long sentence does not label the hex. */
+const CREDENTIAL_TRAILING_WORDS = 8;
+
+/** Whether a credential keyword among the first few words after `end` (the rest of the hex's line and the next line) labels the hex that ends there (`<hex> is the production API key`), unless a hash word sits before the keyword or directly before the hex, so `<hex> is the commit that fixed the token parser` and `commit <hex> fixed the token parser` are not credential claims. */
+function isCredentialLabelledAfter(value: string, index: number, end: number): boolean {
+  const before = splitWords(value.slice(0, index).split("\n").at(-1) ?? "");
+  if (HASH_WORDS.has(before.at(-1) ?? "")) {
+    return false;
+  }
+  const words = splitWords(value.slice(end).split("\n").slice(0, 2).join("\n")).slice(0, CREDENTIAL_TRAILING_WORDS);
+  const credentialIndex = words.findIndex((word, i) => isCredentialWord(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`)));
+  return credentialIndex !== -1 && !words.slice(0, credentialIndex).some((word) => HASH_WORDS.has(word));
+}
+
 /** Whether a canonical 8-4-4-4-12 UUID (either case) stands alone as its own token, an identifier word directly labels it, and the capture and everything known about the fact as stored has no credential keyword, so a record, session, or fact id is not refused as a secret while `token=<uuid>`, `user:<uuid>@host` and `the session job is done; <uuid>` still are. */
 function isCanonicalUuid(token: string, value: string, index: number, credentialContext: boolean): boolean {
   if (credentialContext || !CANONICAL_UUID.test(token)) {
@@ -377,13 +391,14 @@ function scanField(field: string, rawValue: string, credentialContext: boolean):
       !(exemptField && token.includes("/")) &&
       !isPathShapedToken(token) &&
       !isProseShapedToken(token) &&
-      // The content-hash exemption yields to a credential keyword among the few words just before the value or earlier in its sentence or the line before it with no hash word nearer, to a bare anchor argument under credential context, and to a whole `value` field under credential context (its subject and text label it), so `api key <32 hex>` is refused while `md5 checksum <32 hex>` is stored.
+      // The content-hash exemption yields to a credential keyword among the few words just before the value or earlier in its sentence or the line before it with no hash word nearer, to one in the few words just after it with no hash word nearer, to a bare anchor argument under credential context, and to a whole `value` field under credential context (its subject and text label it), so `api key <32 hex>` is refused while `md5 checksum <32 hex>` is stored.
       !(
         isCanonicalHexHash(token) &&
         !bareAnchorArgument &&
         !(field === "value" && credentialContext && genericValue.trim() === token) &&
         !isCredentialAdjacent(genericValue, g.index) &&
-        !isCredentialSentence(genericValue, g.index)
+        !isCredentialSentence(genericValue, g.index) &&
+        !isCredentialLabelledAfter(genericValue, g.index, g.index + token.length)
       ) &&
       !(!exemptField && isCanonicalUuid(token, genericValue, g.index, credentialContext)) &&
       !DIGITS_ONLY.test(token) &&

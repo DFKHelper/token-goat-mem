@@ -215,3 +215,65 @@ describe("secret-screen corpus: zero-width characters inside a hex value do not 
     expect(screenForSecrets({ text: "the build​ step ran" }, [])).toEqual([]);
   });
 });
+
+describe("secret-screen corpus: directional marks, format characters and variation selectors do not hide a secret", () => {
+  const HALF = "0123456789abcdef";
+  const GITHUB_TOKEN_HEAD = "ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ";
+  const GITHUB_TOKEN_TAIL = "0123456789";
+
+  it.each([
+    ["U+200E", 0x200e],
+    ["U+200F", 0x200f],
+    ["U+202A", 0x202a],
+    ["U+202E", 0x202e],
+    ["U+2061", 0x2061],
+    ["U+2066", 0x2066],
+    ["U+2069", 0x2069],
+    ["U+180E", 0x180e],
+    ["U+061C", 0x61c],
+    ["U+FE00", 0xfe00],
+    ["U+FE0F", 0xfe0f],
+  ])("flags a hex split by %s", (_name, codePoint) => {
+    const text = `API key: ${HALF}${String.fromCodePoint(codePoint)}${HALF}`;
+    expect(patternNamesFor(text)).toContain(GENERIC);
+  });
+
+  it.each([
+    ["U+200E", 0x200e],
+    ["U+202E", 0x202e],
+    ["U+2066", 0x2066],
+    ["U+180E", 0x180e],
+    ["U+FE0F", 0xfe0f],
+  ])("flags a github token split by %s", (_name, codePoint) => {
+    const text = `${GITHUB_TOKEN_HEAD}${String.fromCodePoint(codePoint)}${GITHUB_TOKEN_TAIL}`;
+    expect(patternNamesFor(text)).toContain("github-token");
+  });
+
+  it("passes an emoji variation selector in text with no hex or credential word", () => {
+    expect(screenForSecrets({ text: `the build step ran ${String.fromCodePoint(0x2764, 0xfe0f)}` }, [])).toEqual([]);
+  });
+});
+
+describe("secret-screen corpus: a hex value is read against a credential keyword just after it", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+  const HEX40 = "0123456789abcdef0123456789abcdef01234567";
+
+  it.each([
+    { name: "a trailing production API key label", text: `${HEX32} is the production API key` },
+    { name: "a trailing token label in the past tense", text: `${HEX32} was the token for staging` },
+    { name: "a trailing label on a forty-hex value", text: `${HEX40} is the webhook signing secret` },
+    { name: "a trailing label on the next line", text: `${HEX32}\nthat is the password` },
+  ])("flags $name", ({ text }) => {
+    expect(patternNamesFor(text)).toContain(GENERIC);
+  });
+
+  it.each([
+    { name: "a hash mention before and a commit sentence after", text: `${HEX40} is the commit that fixed the parser` },
+    { name: "a keyword beyond the window", text: `${HEX32} appears in the release notes written by the platform team for the token refresh work` },
+    { name: "a hash word right after the hex before a keyword", text: `${HEX32} md5 checksum of the secret santa list` },
+    { name: "a commit mention before and a keyword in the fix description", text: `commit ${HEX40} fixed the token parser` },
+    { name: "a keyword on a later line", text: `${HEX32}\nsee the notes\nthe api key rotated` },
+  ])("passes $name", ({ text }) => {
+    expect(screenForSecrets({ text }, [])).toEqual([]);
+  });
+});
