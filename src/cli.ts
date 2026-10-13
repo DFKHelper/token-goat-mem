@@ -2747,7 +2747,8 @@ export function buildProgram(): Command {
         "For claude-code the hooks call `mem hook <event>`, so before writing them init probes the `mem` on PATH (or the installed bundle) with `--help` and refuses " +
         "when it has no `hook` command, naming that binary; a probe that gets no answer within the probe budget is reported as such (it could not probe), not as an old binary, and a binary that cannot run at all is reported with the remedy to reinstall token-goat-mem or fix PATH. " +
         "The probe budget is TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS (integer 100-600000, default 10000); a probe that gets no answer is retried once at 3x that budget before init refuses. " +
-        "Re-running `mem init claude-code` also rewrites hooks installed in the older shape, which carried recall flags in the settings file."
+        "Re-running `mem init claude-code` also rewrites hooks installed in the older shape, which carried recall flags in the settings file. " +
+        "The SessionStart and UserPromptSubmit recall hooks get a 45 s timeout (the Stop and PreCompact hooks keep Claude Code's default), and a timeout already on an installed entry is kept."
     )
     .option("--root <path>", "Project root to write project-level config into (default: current directory)")
     .option("--user", "Write to the tool's user-level config instead of project-level, where the tool has both")
