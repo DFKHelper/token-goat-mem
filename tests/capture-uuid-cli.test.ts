@@ -248,6 +248,10 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a label inside an approx. parenthesis", `${HEX32} (approx. the token for staging)`],
     ["a label after cf.", `${HEX32} cf. the deploy token for staging`],
     ["a label after Mr.", `${HEX32}, Mr. Smith's password for staging`],
+    ["a label after a title and a single-letter initial", `${HEX32}. Mr. J. Api Key`],
+    ["a label after a title, an initial and a surname", `${HEX32}. Dr. J. Smith Api Key`],
+    ["a label after the title Prof.", `${HEX32}. Prof. Smith Api Key`],
+    ["a label after a title with no dot", `${HEX32}. Mr Smith Api Key`],
     ...["mr", "mrs", "ms", "dr", "approx", "cf", "no", "vol", "fig", "al", "st", "v"].map((abbreviation): [string, string] => [`a label after the abbreviation ${abbreviation}.`, `${HEX32} ${abbreviation}. the deploy token for staging`]),
     ["a hex split by U+200E", `API key: 0123456789abcdef${String.fromCodePoint(0x200e)}0123456789abcdef`],
     ["a hex split by U+2066", `API key: 0123456789abcdef${String.fromCodePoint(0x2066)}0123456789abcdef`],
@@ -280,6 +284,11 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a label two sentence boundaries after the hex sentence", `Merged ${HEX40}. Done. This is my API key`],
     ["a Said sentence whose later clause names a form", `Merged ${HEX40}. Said Alice, please fix the password form.`],
     ["a commit after an abbreviated title",`Fixed by Dr. Jones in ${HEX40}; the keyboard layout changed`],
+    ["a credential word that is the surname of a titled name", `Merged ${HEX40}. Dr. Key reviewed the release notes.`],
+    ["a credential word that is the middle name of a titled name", `Merged ${HEX40}. Mr. Token Smith signed off the release.`],
+    ["a credential word that is the first name of a titled name", `Merged ${HEX40}. Mrs. Password Jones joined the team.`],
+    ["a titled name with an initial and no label", `Merged ${HEX40}. Prof. J. Smith signed off the release.`],
+    ["a titled name with no dot and no label", `Merged ${HEX40}. Mr Smith signed off the release.`],
     ["cf. before an unrelated phrase", `${HEX40} cf. the release notes`],
   ])("stores %s", async (_label, text) => {
     await remember(text);

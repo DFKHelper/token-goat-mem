@@ -1,7 +1,7 @@
 /** The two-mode capture pipeline (design plan Section 3, principles P1/P7, review findings S7/S9). - `captureExplicit` — the user (or agent, on the user's behalf) said "remember X". Always `source_type: "user"`, always `status: "active"` immediately. This is the primary path. - `captureSuggested` — a conservative extractor proposes a candidate fact. Always `status: "pending"`, no matter what the caller asks for: a pending fact NEVER auto-promotes via time, repetition, or a confidence number alone (S9 — the old "auto-confirm low-risk preferences" carve-out was exactly the injection hole and stays removed). Promotion happens only through an explicit `mem review` / `pin` / `edit` action elsewhere in the codebase; this module has no code path that can write `status: "active"` for a suggested candidate. `source_type: "derived"` facts (extracted from file/tool content, not something the user said) are quarantined hardest: capture defaults to the more suspicious `"derived"` when the caller doesn't say otherwise, and — because both modes force their own status regardless of input — a derived fact can never enter storage as anything but `pending`. Every capture is secret-screened first (design principle 7: "NEVER persisted by default: secrets/credentials, high-entropy tokens... "). Screening is deny-by-default: a match blocks the write outright (not a redact-and-store) unless the exact matched value is listed in the project's `.mem/allowlist`. There is no broad "disable this pattern" escape hatch — the allowlist is a narrow, per-value, auditable override. The actual fact row is written via src/storage.ts's `insertFact` (the canonical typed CRUD entry point per src/types.ts's own doc comments on `NewFact`) rather than raw SQL here, so subject normalization, embedding packing, `scope_root` handling, and epoch bumping all go through the one place that owns them. Every successful or blocked capture is additionally recorded in `audit_log` (design principle 5), which storage.ts does not touch — that stays this module's responsibility. */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 
 import { anchorPathWithinRoot, parseValidUntilDeadline } from "./anchors.js";
@@ -317,7 +317,7 @@ function isCredentialCompound(word: string): boolean {
 const SENTENCE_BOUNDARY = /[.;!?](?:\s|$)/gu;
 
 /** A full stop that ends an abbreviation (`e.g.`, `i.e.`, `etc.`, `vs.`, `Mr.`, `approx.`, `cf.`, `no.`, `fig.`) rather than a sentence, tested against the text up to and including the stop. */
-const ABBREVIATION_BEFORE_STOP = /(?:^|[^a-z])(?:e\.g|i\.e|etc|vs|mr|mrs|ms|dr|approx|cf|no|vol|fig|al|st|v)\.$/iu;
+const ABBREVIATION_BEFORE_STOP = /(?:^|[^a-z])(?:e\.g|i\.e|etc|vs|mr|mrs|ms|dr|prof|approx|cf|no|vol|fig|al|st|v)\.$/iu;
 
 /** Words that open a sentence referring back to the hex before it (`<hex>. This is my API key`). */
 const CREDENTIAL_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["this", "that", "it", "its", "these", "those", "which"]);
@@ -328,8 +328,20 @@ const CREDENTIAL_CLAUSE_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["sa
 /** The end of a clause inside a sentence. */
 const CLAUSE_SEPARATOR = /[,:]/u;
 
-/** A title abbreviation (`Mr.`, `Mrs.`, `Ms.`, `Dr.`, any letter case) with up to three capitalised name words after it, which together are one name and not words of the label that continues a statement unless one of them is a credential word (`collapseTitledName`); the title alone still collapses when no capitalised word follows. */
-const TITLE_ABBREVIATION = /\b(?:[Mm][Rr][Ss]?|[Mm][Ss]|[Dd][Rr])\.(?:\s+\p{Lu}[\p{L}'’-]*){0,3}/gu;
+/** A title with its dot, in any letter case (`Mr.`, `Mrs.`, `Ms.`, `Dr.`, `Prof.`). */
+const DOTTED_TITLE = String.raw`(?:[Mm][Rr][Ss]?|[Mm][Ss]|[Dd][Rr]|[Pp][Rr][Oo][Ff])\.`;
+
+/** A capitalised title with no dot (`Mr`, `Mrs`, `Ms`, `Dr`, `Prof`), which is a title only when a name word follows it. */
+const DOTLESS_TITLE = String.raw`(?:Mr|Mrs|Ms|Dr|Prof)`;
+
+/** One capitalised name word after a title: a single-letter initial with its dot (`J.`) or a word (`Smith`, `O'Neil`). */
+const TITLED_NAME_WORD = String.raw`\s+(?:\p{Lu}\.(?!\p{L})|\p{Lu}[\p{L}'’-]*)`;
+
+/** A title with up to three capitalised name words or initials after it, which together are one name and not words of the label that continues a statement unless one of them is a credential word (`collapseTitledName`); a dotted title alone still collapses, a dotless one needs a name word. */
+const TITLE_ABBREVIATION = new RegExp(String.raw`\b(?:${DOTTED_TITLE}(?:${TITLED_NAME_WORD}){0,3}|${DOTLESS_TITLE}(?:${TITLED_NAME_WORD}){1,3})`, "gu");
+
+/** A full stop that ends a single-letter initial inside a titled name (`Mr. J.`, `Dr J.`, `Mrs. A. B.`), tested against the text up to and including the stop, so the initial is not taken for the end of a sentence. */
+const TITLED_INITIAL_BEFORE_STOP = new RegExp(String.raw`(?:^|[^\p{L}])(?:${DOTTED_TITLE}|${DOTLESS_TITLE})(?:${TITLED_NAME_WORD}){0,3}\s+\p{Lu}\.$`, "u");
 
 /** Two-word openers that refer back to the hex before them (`<hex>. The above is my password`). */
 const CREDENTIAL_BACK_REFERENCE_PHRASES: ReadonlySet<string> = new Set(["the above", "the former", "the latter"]);
@@ -341,7 +353,8 @@ const CREDENTIAL_BARE_LABEL_WORDS = 3;
 function nextSentenceBoundary(text: string, from: number): { readonly index: number; readonly length: number } | null {
   SENTENCE_BOUNDARY.lastIndex = from;
   for (let match = SENTENCE_BOUNDARY.exec(text); match !== null; match = SENTENCE_BOUNDARY.exec(text)) {
-    if (!ABBREVIATION_BEFORE_STOP.test(text.slice(0, match.index + 1))) {
+    const upToStop = text.slice(0, match.index + 1);
+    if (!ABBREVIATION_BEFORE_STOP.test(upToStop) && !TITLED_INITIAL_BEFORE_STOP.test(upToStop)) {
       return { index: match.index, length: match[0].length };
     }
   }
@@ -350,7 +363,7 @@ function nextSentenceBoundary(text: string, from: number): { readonly index: num
 
 /** What a title abbreviation with its name words leaves in the sentence: nothing, unless a name word is a credential word (`Mr. Api Key`, `Mrs. Smith Admin Password`), where the label from that word on stays so it still counts. */
 function collapseTitledName(titledName: string): string {
-  const names = splitWords(titledName.slice(titledName.indexOf(".") + 1));
+  const names = splitWords(titledName.replace(/^\p{L}+\.?/u, ""));
   const label = firstCredentialWordIndex(names);
   return label === -1 ? " " : ` ${names.slice(label).join(" ")}`;
 }
@@ -437,7 +450,7 @@ function isPathShapedToken(token: string): boolean {
 const REFERENCE_POINTER_SUFFIX = /(?::|#turn)\d+\s*$/u;
 
 /** A run of a word-shaped path segment: capitalised or lowercase words joined together (`ApiKeys`, `v2`), or an all-capital acronym (`NOTES`, `C`); a random mixed-case token has capitals mid-run and fails it. */
-const WORD_SHAPED_RUN = /^(?:[A-Z]?[a-z0-9]+)+$|^[A-Z]+$/;
+const WORD_SHAPED_RUN = /^[A-Z]?[a-z0-9]+(?:[A-Z][a-z0-9]+)*$|^[A-Z]+$/;
 
 /** The `.<extension>` at the end of a path segment, set aside so `<UPPERCASE-UUID>.jsonl` is judged as the UUID it carries. */
 const SEGMENT_EXTENSION = /\.[A-Za-z0-9]+$/;
@@ -606,8 +619,8 @@ export function screenForSecrets(
   const allowed = new Set(allowlist);
   const matches: SecretMatch[] = [];
   const credentialContext = hasCredentialContext(fields, extraContext);
-  // The stamp is honoured only for a ref with the stamped shape, so a caller that sets it on a typed secret-shaped ref gains nothing.
-  const stampedReference = options.stampedSourceRef === true && STAMPED_TRANSCRIPT_REF.test(fields["sourceRef"] ?? "");
+  // The stamp is honoured only for a ref with the stamped shape whose path is an absolute regular file on disk now, so a ref that merely looks stamped gets the normal screen.
+  const stampedReference = options.stampedSourceRef === true && isStampedFileRef(fields["sourceRef"] ?? "");
   for (const [field, value] of Object.entries(fields)) {
     if (value === null || value === undefined || value.length === 0) {
       continue;
@@ -883,6 +896,22 @@ export function screenFactFields(fields: ScreenableFactFields, allowlist: readon
 export const TRANSCRIPT_TURN_MARKER = "#turn";
 
 const STAMPED_TRANSCRIPT_REF = new RegExp(`^(?:[A-Za-z]:|/).*(?:${TRANSCRIPT_TURN_MARKER}\\d+|:\\d+)$`, "su");
+
+/** The `#turn<n>` or `:<n>` pointer at the end of a stamped ref. */
+const STAMPED_REF_POINTER = new RegExp(`(?:${TRANSCRIPT_TURN_MARKER}|:)\\d+$`, "u");
+
+/** Whether `ref` has the stamped shape and its path part (before the pointer) is an absolute path to a regular file that exists now, which is what both stamping capture paths hold, having just read that file; a ref that cannot be statted is not one. */
+function isStampedFileRef(ref: string): boolean {
+  if (!STAMPED_TRANSCRIPT_REF.test(ref)) {
+    return false;
+  }
+  const path = ref.replace(STAMPED_REF_POINTER, "");
+  try {
+    return isAbsolute(path) && statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
 
 /** The `<relative path>:<line>: ` head `mem import --from-md` puts on a source excerpt ahead of the bullet's own line; lazy, so the first `:<digits>: ` ends the path. */
 const IMPORT_EXCERPT_HEAD = /^(.+?):\d+: /su;

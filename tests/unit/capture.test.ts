@@ -335,14 +335,45 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
 
   describe("a sourceRef the capture path stamped itself", () => {
     const text = "The AWS secret access key is noted in the source reference";
-    const stamped = "/home/u/.claude/projects/-home-u-FooBARBazQUXQuux/1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl#turn3";
+    const nameAndPointer = "1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl#turn3";
+    const missing = `/home/u/.claude/projects/-home-u-FooBARBazQUXQuux/${nameAndPointer}`;
+
+    function realFile(directoryName: string, fileName: string): string {
+      const directory = join(root, directoryName);
+      mkdirSync(directory, { recursive: true });
+      const path = join(directory, fileName);
+      writeFileSync(path, "x", "utf8");
+      return path;
+    }
 
     it("refuses the same ref when a caller typed it", () => {
+      const stamped = `${realFile("-home-u-FooBARBazQUXQuux", "1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl")}#turn3`;
       expect(screenFactFields({ text, sourceRef: stamped }, []).length).toBeGreaterThan(0);
     });
 
-    it("skips only the entropy heuristic on a stamped ref", () => {
+    it("skips only the entropy heuristic on a stamped ref to a file that exists", () => {
+      const stamped = `${realFile("-home-u-FooBARBazQUXQuux", "1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl")}#turn3`;
       expect(screenFactFields({ text, sourceRef: stamped, stampedSourceRef: true }, [])).toHaveLength(0);
+    });
+
+    it("skips the entropy heuristic on a stamped line pointer to a file that exists", () => {
+      const stamped = `${realFile("-home-u-FooBARBazQUXQuux", "NOTES.md")}:3`;
+      expect(screenFactFields({ text, sourceRef: stamped, stampedSourceRef: true }, [])).toHaveLength(0);
+    });
+
+    it("screens a flagged ref normally when its path does not exist", () => {
+      expect(screenFactFields({ text, sourceRef: missing, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
+    });
+
+    it("screens a flagged ref normally when its path is a directory", () => {
+      const directory = join(root, "-home-u-FooBARBazQUXQuux");
+      mkdirSync(directory, { recursive: true });
+      expect(screenFactFields({ text, sourceRef: `${directory}#turn3`, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
+    });
+
+    it("still refuses a stamped ref to a file in a secret-shaped directory, since the named patterns run on the path", () => {
+      const stamped = `${realFile(`ghp_${"aB3dE9fG1hJ2kL3mN4pQ5rS6tU7vW8xY9zA0"}`, "NOTES.md")}:3`;
+      expect(screenFactFields({ text, sourceRef: stamped, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
     });
 
     it.each([`${AWS_SECRET}:1`, `${AWS_SECRET}#turn3`, AWS_SECRET, `tok=${AWS_SECRET}:1`])("ignores the stamp on a ref without a stamped shape: %s", (sourceRef) => {
@@ -350,10 +381,12 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
     });
 
     it("still runs the named patterns on a stamped ref", () => {
-      expect(screenFactFields({ text, sourceRef: "/home/u/AKIAIOSFODNN7EXAMPLE/FooBARBazQUXQuux.jsonl#turn3", stampedSourceRef: true }, []).length).toBeGreaterThan(0);
+      const stamped = `${realFile("AKIAIOSFODNN7EXAMPLE", "FooBARBazQUXQuux.jsonl")}#turn3`;
+      expect(screenFactFields({ text, sourceRef: stamped, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
     });
 
     it("still screens the fact text of a stamped capture", () => {
+      const stamped = `${realFile("-home-u-FooBARBazQUXQuux", "1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl")}#turn3`;
       expect(screenFactFields({ text: `${text} AKIAIOSFODNN7EXAMPLE`, sourceRef: stamped, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
     });
   });
@@ -370,6 +403,13 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
       "mr. Api Key",
       "Mrs. Smith Admin Password",
       "Dr. Smith's API Key",
+      "Mr. J. Api Key",
+      "Dr. J. Smith Api Key",
+      "Prof. Smith Api Key",
+      "Mrs. A. B. Smith Api Key",
+      "Dr J. Smith Api Key",
+      "Mr Smith Api Key",
+      "Ms Smith Admin Password",
     ])("flags the hex before: %s", (label) => {
       expect(screenForSecrets({ text: `${HEX32}. ${label}.` }, []).length).toBeGreaterThan(0);
     });
@@ -378,6 +418,12 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
       `Built ${HEX40}. Mr. John Smith's password reset email was fixed in the parser.`,
       `The md5 checksum ${HEX32}. Dr. Maria Lopez reviewed the password policy.`,
       `Built ${HEX40}. Mr. John Smith signed off the release.`,
+      `Built ${HEX40}. Dr. Key reviewed the release notes.`,
+      `Built ${HEX40}. Mr. Token Smith signed off the release.`,
+      `Built ${HEX40}. Mrs. Password Jones joined the team.`,
+      `Built ${HEX40}. Mr. J. Smith signed off the release.`,
+      `Built ${HEX40}. Prof. Smith signed off the release.`,
+      `Built ${HEX40}. Mr Smith signed off the release.`,
     ])("stores a hex followed by prose that merely names a person: %s", (text) => {
       expect(screenForSecrets({ text }, [])).toHaveLength(0);
     });
