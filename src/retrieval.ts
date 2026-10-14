@@ -3,6 +3,7 @@
 import { resolve as resolvePath } from "node:path";
 
 import { evaluateAnchor, type AnchorCacheStore, type AnchorVerdict } from "./anchors.js";
+import { budgetNow } from "./budgetClock.js";
 import { screenForSecrets } from "./capture.js";
 import { resolveContradictions, scopeShadowedIds } from "./contradiction.js";
 import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
@@ -514,9 +515,20 @@ export function reciprocalRankFusion(rankLists: ReadonlyArray<readonly string[]>
   return fused;
 }
 
+/** Races `promise` against a budget of `ms` read off the budget clock: the timer only wakes the check, and a wake before the clock reaches the deadline re-arms for what is left. A frozen clock therefore never expires a budget above 0, while a budget of 0 is already exhausted. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((settle, fail) => {
-    const timer = setTimeout(() => fail(new Error("embedding backend timed out")), ms);
+    const deadline = budgetNow() + ms;
+    const arm = (delayMs: number): ReturnType<typeof setTimeout> =>
+      setTimeout(() => {
+        const remaining = deadline - budgetNow();
+        if (remaining <= 0) {
+          fail(new Error("embedding backend timed out"));
+        } else {
+          timer = arm(remaining);
+        }
+      }, delayMs);
+    let timer = arm(ms);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -820,7 +832,7 @@ export function selectVerifiedFacts(
 /** Runs the full hybrid-retrieval + correctness-gate pipeline over `facts` and returns ranked, trust-annotated, self-caveating results. `facts` may be the full store contents — this function does its own status filtering (never surfacing `superseded` facts, recomputing contradictions fresh) so callers do not need to pre-filter by status. */
 export async function retrieve(facts: readonly Fact[], options: RetrievalOptions): Promise<RetrieveOutcome> {
   const now = options.now ?? new Date();
-  const anchorDeadline = Date.now() + (options.anchorTimeBudgetMs ?? DEFAULT_ANCHOR_TIME_BUDGET_MS);
+  const anchorDeadline = budgetNow() + (options.anchorTimeBudgetMs ?? DEFAULT_ANCHOR_TIME_BUDGET_MS);
 
   // Superseded facts are excluded up front — "kept for audit, not surfaced" (P4) is unconditional, unlike pending/contested which can still appear (caveated) outside --hint-format.
   const liveCandidates = facts.filter((fact) => fact.status !== "superseded");

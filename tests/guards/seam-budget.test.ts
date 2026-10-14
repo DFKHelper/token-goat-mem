@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const TESTS_DIR = join(REPO_ROOT, "tests");
 const SHARED_SETUP = "tests/setup/isolate-home.ts";
+const FREEZE_SETUP = "tests/setup/freeze-budget-clock.ts";
 const VITEST_CONFIG = "vitest.config.ts";
 
 /** Every `.ts` file under `tests/`, recursively, as repo-relative paths. */
@@ -148,6 +149,63 @@ describe("test files that reach the seam through the CLI", () => {
     for (const file of candidates) {
       expect(drivesSeamViaCli(readFileSync(file, "utf8"))).toBe(false);
     }
+  });
+});
+
+/** Whether the setup file that freezes the budget clock still mocks `budgetNow` and is wired into vitest. Both are checked, as for the env pin: the mock line missing, commented out (it then runs nothing), or the file dropped from `setupFiles` each leave every anchor and embedding budget racing the real clock again, with no test failing until a slow machine runs one out. */
+function sharedSetupFreezesBudgetClock(freezeText: string, configText: string): boolean {
+  const mocks = /^vi\.mock\("\.\.\/\.\.\/src\/budgetClock\.js", \(\) => \(\{ budgetNow: \(\) => FROZEN_BUDGET_NOW_MS \}\)\);/m.test(freezeText);
+  return mocks && configText.includes(FREEZE_SETUP);
+}
+
+/** Whether a src file reads its deadlines off the budget clock: it imports `budgetNow` and, where `allowWallClock` is false, names no `Date.now(` at all. anchors.ts keeps one legitimate wall-clock read (`valid-until` compares a calendar date), so it is checked on `budgetExceeded` alone. */
+function readsBudgetClock(text: string, allowWallClock: boolean): boolean {
+  const imports = /^import \{ budgetNow \} from "\.\/budgetClock\.js";/m.test(text);
+  return imports && (allowWallClock || !/\bDate\.now\(/.test(text));
+}
+
+describe("the budget clock freeze", () => {
+  const freezeText = readRepoFile(FREEZE_SETUP);
+  const configText = readRepoFile(VITEST_CONFIG);
+  const mockLine = /^vi\.mock\(.*$/m.exec(freezeText)?.[0] ?? "";
+
+  it("accepts the real freeze setup file wired into the real vitest config", () => {
+    expect(mockLine).not.toBe("");
+    expect(sharedSetupFreezesBudgetClock(freezeText, configText)).toBe(true);
+  });
+
+  it("reports the freeze missing when the setup file no longer mocks the clock", () => {
+    const withoutMock = freezeText.replace(mockLine, "");
+    expect(withoutMock).not.toBe(freezeText);
+    expect(sharedSetupFreezesBudgetClock(withoutMock, configText)).toBe(false);
+  });
+
+  it("reports the freeze missing when the mock line is commented out", () => {
+    const commentedOut = freezeText.replace(mockLine, `// ${mockLine}`);
+    expect(commentedOut).not.toBe(freezeText);
+    expect(sharedSetupFreezesBudgetClock(commentedOut, configText)).toBe(false);
+  });
+
+  it("reports the freeze missing when vitest no longer wires the setup file", () => {
+    const unwired = configText.split(FREEZE_SETUP).join("tests/setup/elsewhere.ts");
+    expect(unwired).not.toBe(configText);
+    expect(sharedSetupFreezesBudgetClock(freezeText, unwired)).toBe(false);
+  });
+
+  it("is what every deadline in the retrieval path reads: anchors, retrieval and the seam use budgetNow, not Date.now", () => {
+    const anchorsText = readRepoFile("src/anchors.ts");
+    const budgetExceededBody = /function budgetExceeded\([^)]*\): boolean \{[^}]*\}/.exec(anchorsText)?.[0] ?? "";
+    expect(budgetExceededBody).toContain("budgetNow()");
+    expect(budgetExceededBody).not.toContain("Date.now(");
+    expect(readsBudgetClock(anchorsText, true)).toBe(true);
+    expect(readsBudgetClock(readRepoFile("src/retrieval.ts"), false)).toBe(true);
+    expect(readsBudgetClock(readRepoFile("src/integration-seam.ts"), false)).toBe(true);
+  });
+
+  it("flags a src file that still reads a deadline off the wall clock", () => {
+    const wallClock = ['import { budgetNow } from "./budgetClock.js";', "const deadline = Date.now() + 100;"].join("\n");
+    expect(readsBudgetClock(wallClock, false)).toBe(false);
+    expect(readsBudgetClock("const deadline = Date.now() + 100;", true)).toBe(false);
   });
 });
 

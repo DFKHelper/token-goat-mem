@@ -3,6 +3,7 @@
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { budgetNow } from "./budgetClock.js";
 import type { FreshnessVerdict } from "./types.js";
 
 /** Alias kept for readability within this module; identical to {@link FreshnessVerdict} in src/types.ts (the shared vocabulary recall/review/hint-format also use), so callers may import either name interchangeably. */
@@ -133,7 +134,7 @@ function existsFile(path: string): "exists" | StatOutcome {
 }
 
 function budgetExceeded(deadlineMs: number | undefined): boolean {
-  return deadlineMs !== undefined && Date.now() >= deadlineMs;
+  return deadlineMs !== undefined && budgetNow() >= deadlineMs;
 }
 
 /** Mutable out-of-band signal threaded through a single {@link evaluateAnchor} call: set to `true` only when a `deadlineMs` time-budget check (never the unrelated `MAX_GLOB_ENTRIES_SCANNED` scan cap) is the reason evaluation bailed out to `"unverified"`. `evaluateAnchor` uses this to decide whether the resulting `"unverified"` is a genuine predicate outcome (safe to memoize) or merely "ran out of time this call" (must not be memoized, since a later call with a different/absent deadline could reach a different, real verdict for the same anchor+root). */

@@ -3,6 +3,7 @@
 import { resolve as resolvePath } from "node:path";
 import type Database from "better-sqlite3";
 import { clearAnchorCaches, type AnchorVerdict } from "./anchors.js";
+import { budgetNow } from "./budgetClock.js";
 import { loadAllowlist } from "./capture.js";
 import {
   countEmbeddedFacts,
@@ -247,7 +248,7 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
 }
 
 async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFormatResult> {
-  const start = Date.now();
+  const start = budgetNow();
   // Anchor verdicts are memoized for the lifetime of the process, which is exactly one query for the `mem` CLI but unbounded for an embedder holding this module across calls -- there, a first-ever verdict would be served forever no matter what changed on disk. One logical hint-format query is the correct cache lifetime, so each call starts from a clean slate.
   clearAnchorCaches();
   const root = resolvePath(options.root);
@@ -274,7 +275,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   let graphScores: ReadonlyMap<string, number>;
   let anchorCacheSnapshot: ReadonlyMap<string, { verdict: AnchorVerdict; witness: string | null }>;
   // Decided before the fact query, not after, because it decides the query's row shape: an embedding BLOB is a few kilobytes per fact, and pulling one store-wide inside a ~150ms budget for a signal that is switched off on every install without a configured endpoint is exactly the kind of cost that turns a healthy response into a truncated one. The share-of-remaining-budget rule is EMBEDDING_BUDGET_SHARE's; below MIN_EMBEDDING_BUDGET_MS there is no longer enough time for a round trip and the backend is not wired at all.
-  const embeddingBudgetMs = Math.min(DEFAULT_EMBEDDING_TIMEOUT_MS, Math.floor((budgetMs - (Date.now() - start)) * EMBEDDING_BUDGET_SHARE));
+  const embeddingBudgetMs = Math.min(DEFAULT_EMBEDDING_TIMEOUT_MS, Math.floor((budgetMs - (budgetNow() - start)) * EMBEDDING_BUDGET_SHARE));
   let embeddingBackend: EmbeddingBackend | null;
   let embeddingVectorsIncomparable: boolean;
   try {
@@ -307,7 +308,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // Disconnected from storage by construction (see {@link BufferedAnchorCacheStore}): `retrieve()` below can read and write anchor verdicts through it without ever touching SQLite, so the connection this block already closed does not need to stay open for anchor evaluation to get the persistent-cache benefit.
   const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
 
-  const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (Date.now() - start));
+  const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (budgetNow() - start));
   const { results, withheldCount, zeroSignal, embeddingDegraded } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
@@ -331,7 +332,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
-  const elapsed = Date.now() - start;
+  const elapsed = budgetNow() - start;
   // `>=`, not `>`: a budget of N milliseconds is the time available, so having consumed all of it is already an overrun. The strict `>` made a zero budget mean "no budget, unless the work happened to finish inside a single millisecond" -- on a fast machine a 10-fact anchor-free retrieval does exactly that, `elapsed` reads 0, and `0 > 0` reported a healthy response from a caller that had allotted no time at all. That is not a rounding detail: it made the one deterministic handle callers have on this path (pass 0, get the exhausted contract) depend on the runner's clock, which is how it surfaced -- as an intermittent Linux-only CI failure of the very test written to pin the degradation contract "rather than inferred from a flake".
   const truncated = elapsed >= budgetMs;
   if (truncated) {

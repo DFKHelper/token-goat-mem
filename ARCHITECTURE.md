@@ -174,6 +174,7 @@ discovers every module in `src/` via `git ls-files`, classifies it into a layer 
 | `src/integration-seam.ts` | Integration | The token-goat integration seam (design plan Section 4) | TGMEM_PROTOCOL_VERSION, TGMEM_HEADER, FOLLOW_UP_SHOW_DETAIL, FOLLOW_UP_REVIEW, TGMEM_FOOTER_LINE |
 | `src/probeSpawn.ts` | Integration | Synchronous launch of one probe of the `mem` binary that never leaves a live process behind when the probe budget expire | ProbeSpawnResult, PROBE_HELPER_BUDGET_ARG_INDEX, isSafeProbeToken, PROBE_REFUSED_ERROR_CODE, spawnProbe |
 | `src/wiring.ts` | Integration | Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets | WiringOpts, WiringFileAction, WiringChange, WiringResult, WiringPlanEntry |
+| `src/budgetClock.ts` | Support | The clock every retrieval deadline reads: the anchor time budget, the embedding timer budget and the hint seam's soft bu | budgetNow |
 | `src/factText.ts` | Support | The normalized-text key `storage.ts` and `migrations.ts` both need for fact deduplication | normalizeFactText, hashFactText |
 | `src/fileUtils.ts` | Support | Shared filesystem error handling for imports | MEM_HOME_MODE, MEM_DB_MODE, restrictPermissions, formatBytes, readFileWithErrorMapping |
 | `src/pathUtils.ts` | Support | Case-folds a path for comparison on filesystems that ignore case | normalizePath, isInsideOrEqual |
