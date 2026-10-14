@@ -153,6 +153,10 @@ describe("anchors and source refs get no identifier-word exemption", () => {
     expectRefused(await runCli(["remember", "x", "--kind", "fact", "--scope", "global", "--source-ref", `password for session ${U}`]));
   });
 
+  it("refuses a labelled AWS secret access key in a source ref", async () => {
+    expectRefused(await runCli(["remember", "The AWS secret access key is recorded in the source reference", "--kind", "fact", "--scope", "global", "--source-ref", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"]));
+  });
+
   it("refuses a bare labelled UUID in a source ref", async () => {
     expectRefused(await runCli(["remember", "x", "--kind", "fact", "--scope", "global", "--source-ref", `session id ${U}`]));
   });
@@ -224,6 +228,7 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a label in a sentence that opens with The former", `${HEX32}. The former is the API key`],
     ["a label in a sentence that opens with The latter", `${HEX32}. The latter is the deploy token`],
     ["a label in a sentence that opens with Said", `${HEX32}. Said value is my password`],
+    ["a label after a title abbreviation in the next sentence", `${HEX32}. Mr. Smith's password.`],
     ["a label inside an approx. parenthesis", `${HEX32} (approx. the token for staging)`],
     ["a label after cf.", `${HEX32} cf. the deploy token for staging`],
     ["a label after Mr.", `${HEX32}, Mr. Smith's password for staging`],
@@ -257,6 +262,7 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a bare No. abbreviation followed by a harmless sentence", `${HEX40}. No. Tests are green.`],
     // Pinned trade-off: continuation reaches one sentence boundary past the hex sentence, so a label two boundaries away is stored to keep short harmless chains.
     ["a label two sentence boundaries after the hex sentence", `Merged ${HEX40}. Done. This is my API key`],
+    ["a Said sentence whose later clause names a form", `Merged ${HEX40}. Said Alice, please fix the password form.`],
     ["a commit after an abbreviated title",`Fixed by Dr. Jones in ${HEX40}; the keyboard layout changed`],
     ["cf. before an unrelated phrase", `${HEX40} cf. the release notes`],
   ])("stores %s", async (_label, text) => {

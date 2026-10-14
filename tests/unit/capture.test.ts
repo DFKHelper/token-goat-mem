@@ -244,6 +244,47 @@ describe("screenForSecrets", () => {
   });
 });
 
+describe("screenForSecrets: label windows and the sourceRef exemption", () => {
+  const HEX32 = "0123456789abcdef0123456789abcdef";
+  const HEX40 = "0123456789abcdef0123456789abcdef01234567";
+  const AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+
+  it("flags a hex whose credential label follows a title abbreviation in the next sentence", () => {
+    expect(screenForSecrets({ text: `${HEX32}. Mr. Smith's password.` }, []).length).toBeGreaterThan(0);
+  });
+
+  it("does not read a title abbreviation as a word of the bare label", () => {
+    expect(screenForSecrets({ text: `${HEX40}. Dr. Jones fixed the login page.` }, [])).toHaveLength(0);
+  });
+
+  it("stores a commit hash followed by a sentence that opens with Said and names the label in a later clause", () => {
+    expect(screenForSecrets({ text: `Merged ${HEX40}. Said Alice, please fix the password form.` }, [])).toHaveLength(0);
+  });
+
+  it("flags a hex followed by a Said sentence whose first clause names the label", () => {
+    expect(screenForSecrets({ text: `${HEX32}. Said value is my password` }, []).length).toBeGreaterThan(0);
+  });
+
+  it("flags a labelled AWS secret access key in a sourceRef", () => {
+    const text = "The AWS secret access key is recorded in the source reference";
+    expect(screenForSecrets({ text, sourceRef: AWS_SECRET }, []).length).toBeGreaterThan(0);
+  });
+
+  it("flags the same AWS secret access key in the text", () => {
+    expect(screenForSecrets({ text: `AWS secret access key ${AWS_SECRET}` }, []).length).toBeGreaterThan(0);
+  });
+
+  it("still exempts a mixed-case path:line sourceRef under credential text", () => {
+    const sourceRef = "src/components/very-long-nested-directory-name/AnotherComponent.tsx:42";
+    expect(screenForSecrets({ text: "the api key cache is described there", sourceRef }, [])).toHaveLength(0);
+  });
+
+  it("still exempts a path-shaped sourceRef under credential text", () => {
+    const sourceRef = "docs/agent-self-compaction/superman-state-notes.md:12";
+    expect(screenForSecrets({ text: "the api key cache is described there", sourceRef }, [])).toHaveLength(0);
+  });
+});
+
 describe("loadAllowlist", () => {
   it("returns an empty list when .mem/allowlist does not exist", () => {
     expect(loadAllowlist(root)).toEqual([]);

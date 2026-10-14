@@ -6,6 +6,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **The secret screen no longer lets a credential label hide behind a title abbreviation, refuses ordinary prose after a commit hash, or passes a labelled AWS secret in `--source-ref`.** A hex value followed by `Mr. Smith's password.` is refused again, because `Mr.`, `Mrs.`, `Ms.` and `Dr.` no longer count as words of the label that follows. A sentence opening with `Said` after a hash only counts as a back-reference when a credential word is in its first clause, so `Merged <hash>. Said Alice, please fix the password form.` is stored. A `--source-ref` with a mixed-case slash value is no longer exempt from the entropy check when the fact names a credential, while `<path>:<line>` and transcript references still are.
 - **Two `mem` processes creating the store at the same moment no longer fail with `database is locked`.** The first open of a store that does not exist yet switched the new file to WAL in place, and SQLite fails that switch at once, without waiting out the 30 s busy timeout, when another connection holds the write lock during it. The file is now switched to WAL under a private name and published at the store path only if nothing is there yet, so exactly one creator wins and the other opens the winner's store. The cross-process test shrinks to three workers and nine commands, and the same invariants plus the first-open race are covered by an in-process multi-connection test.
 
 ## [0.5.4] - 2026-10-14

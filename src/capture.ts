@@ -320,7 +320,16 @@ const SENTENCE_BOUNDARY = /[.;!?](?:\s|$)/gu;
 const ABBREVIATION_BEFORE_STOP = /(?:^|[^a-z])(?:e\.g|i\.e|etc|vs|mr|mrs|ms|dr|approx|cf|no|vol|fig|al|st|v)\.$/iu;
 
 /** Words that open a sentence referring back to the hex before it (`<hex>. This is my API key`). */
-const CREDENTIAL_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["this", "that", "it", "its", "these", "those", "which", "said"]);
+const CREDENTIAL_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["this", "that", "it", "its", "these", "those", "which"]);
+
+/** Words that open a back-reference only when a credential label sits in their own clause (`<hex>. Said value is my password`), because they also open ordinary prose (`<hex>. Said Alice, please fix the password form`). */
+const CREDENTIAL_CLAUSE_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["said"]);
+
+/** The end of a clause inside a sentence. */
+const CLAUSE_SEPARATOR = /[,:]/u;
+
+/** A title abbreviation (`Mr.`, `Mrs.`, `Ms.`, `Dr.`), which is part of a name and not a word of the label that continues a statement. */
+const TITLE_ABBREVIATION = /\b(?:mr|mrs|ms|dr)\./giu;
 
 /** Two-word openers that refer back to the hex before them (`<hex>. The above is my password`). */
 const CREDENTIAL_BACK_REFERENCE_PHRASES: ReadonlySet<string> = new Set(["the above", "the former", "the latter"]);
@@ -342,8 +351,9 @@ function nextSentenceBoundary(text: string, from: number): { readonly index: num
 /** Whether the sentence starting at `start` still describes the hex before it: it opens with a back-reference word, or is a bare label of at most a few words. */
 function continuesStatement(text: string, start: number): boolean {
   const boundary = nextSentenceBoundary(text, start);
-  const words = splitWords(text.slice(start, boundary === null ? text.length : boundary.index));
-  return words.length > 0 && (CREDENTIAL_BACK_REFERENCE_WORDS.has(words[0] ?? "") || CREDENTIAL_BACK_REFERENCE_PHRASES.has(`${words[0] ?? ""} ${words[1] ?? ""}`) || words.length <= CREDENTIAL_BARE_LABEL_WORDS);
+  const sentence = text.slice(start, boundary === null ? text.length : boundary.index).replace(TITLE_ABBREVIATION, " ");
+  const words = splitWords(sentence);
+  return words.length > 0 && (CREDENTIAL_BACK_REFERENCE_WORDS.has(words[0] ?? "") || (CREDENTIAL_CLAUSE_BACK_REFERENCE_WORDS.has(words[0] ?? "") && firstCredentialWordIndex(splitWords(sentence.split(CLAUSE_SEPARATOR)[0] ?? "")) !== -1) || CREDENTIAL_BACK_REFERENCE_PHRASES.has(`${words[0] ?? ""} ${words[1] ?? ""}`) || words.length <= CREDENTIAL_BARE_LABEL_WORDS);
 }
 
 /** The part of `following` that can still label the hex: it ends at the first sentence boundary unless the next sentence continues the statement, and then at the boundary after that sentence, so a chain of short sentences never keeps it open further. */
@@ -355,6 +365,11 @@ function labellingWindow(following: string): string {
   return boundary === null ? following : following.slice(0, boundary.index);
 }
 
+/** The index of the first credential word in `words` (a trailing credential word, or the second word of a credential phrase), or -1. */
+function firstCredentialWordIndex(words: readonly string[]): number {
+  return words.findIndex((word, i) => isTrailingCredentialWord(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`)));
+}
+
 /** Whether a credential keyword among the first few words after `end` (the rest of the hex's line and the next line) labels the hex that ends there (`<hex> is the production API key`), unless a hash word sits before the keyword or directly before the hex, so `<hex> is the commit that fixed the token parser` and `commit <hex> fixed the token parser` are not credential claims. */
 function isCredentialLabelledAfter(value: string, index: number, end: number): boolean {
   const before = splitWords(value.slice(0, index).split("\n").at(-1) ?? "");
@@ -363,7 +378,7 @@ function isCredentialLabelledAfter(value: string, index: number, end: number): b
   }
   const following = value.slice(end).split("\n").slice(0, 2).join("\n");
   const words = splitWords(labellingWindow(following)).slice(0, CREDENTIAL_TRAILING_WORDS);
-  const credentialIndex = words.findIndex((word, i) => isTrailingCredentialWord(word) || (i > 0 && UUID_CREDENTIAL_PHRASES.includes(`${words[i - 1] ?? ""} ${word}`)));
+  const credentialIndex = firstCredentialWordIndex(words);
   return credentialIndex !== -1 && !words.slice(0, credentialIndex).some((word) => HASH_WORDS.has(word));
 }
 
@@ -389,7 +404,7 @@ function shannonEntropy(value: string): number {
   return entropy;
 }
 
-/** Fields that legitimately contain long, forward-slash-delimited path-shaped values -- an anchor's fs/git predicate argument, or a `sourceRef` provenance pointer (`<path>:<line>`, but for `mem remember --source-ref` a free-form, user/agent-supplied string, so it is NOT exempt from `SECRET_PATTERNS` or from a slash-free high-entropy token) -- so a slash-containing token is excluded from the *generic* high-entropy-token heuristic below: `GENERIC_TOKEN`'s alphabet includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` or `src/very/long/path.ts:123` argument over ~32 chars can exceed the entropy threshold purely from directory-name variety, with no secret present at all. The exemption only applies to a matched token that contains "/" (a Windows `\` counts as "/" here, since `mem scan-session` stamps a native transcript path) -- a prefix-less high-entropy secret with no path separator (an unlabeled credential with no recognized `SECRET_PATTERNS` prefix) is still caught by the entropy fallback. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields regardless. */
+/** Fields that legitimately contain long, forward-slash-delimited path-shaped values -- an anchor's fs/git predicate argument, or a `sourceRef` provenance pointer (`<path>:<line>`, but for `mem remember --source-ref` a free-form, user/agent-supplied string, so it is NOT exempt from `SECRET_PATTERNS` or from a slash-free high-entropy token) -- so a slash-containing token is excluded from the *generic* high-entropy-token heuristic below: `GENERIC_TOKEN`'s alphabet includes "/", so any plausible, entirely benign `file-exists <long/nested/path.tsx>` or `src/very/long/path.ts:123` argument over ~32 chars can exceed the entropy threshold purely from directory-name variety, with no secret present at all. The exemption only applies to a matched token that contains "/" (a Windows `\` counts as "/" here, since `mem scan-session` stamps a native transcript path) -- a prefix-less high-entropy secret with no path separator (an unlabeled credential with no recognized `SECRET_PATTERNS` prefix) is still caught by the entropy fallback. Named `SECRET_PATTERNS` (aws-access-key-id, etc.) always run against these fields regardless. Under credential context a `sourceRef` slash alone no longer exempts: the token must also pass `isReferencePathToken`, so a labelled `wJalrXUtnFEMI/K7MDENG/...` in a `sourceRef` is caught. */
 const GENERIC_ENTROPY_EXEMPT_FIELDS: ReadonlySet<string> = new Set(["anchor", "sourceRef"]);
 
 /** One `/`-delimited segment of a path-shaped token: a lowercase word (or digits) with `.`/`_`/`-` joining further lowercase words -- `agent-self-compaction`, `session_continuity.md`, `v2`. Deliberately rejects uppercase, `+`, and `=`, which is what separates a filename from a base64/random credential. */
@@ -409,6 +424,15 @@ function isPathShapedToken(token: string): boolean {
   }
   const segments = token.split("/").filter((segment) => segment.length > 0);
   return segments.length >= 2 && segments.every(isPathSegment);
+}
+
+/** The tail of a `sourceRef` that points into a file or a transcript (`<path>:<line>`, `<path>#turn<n>`), which a bare secret value does not carry. */
+const REFERENCE_POINTER_SUFFIX = /(?::|#turn)\d+\s*$/u;
+
+/** Whether a slash-bearing `sourceRef` token is a lowercase path that keeps its entropy exemption under credential context: path-shaped, or with a canonical content hash as a directory name (`docs/<md5>/notes`), but never a mixed-case or digit-laced slash token such as an AWS secret access key. */
+function isReferencePathToken(token: string): boolean {
+  const segments = token.split("/").filter((segment) => segment.length > 0);
+  return segments.length >= 2 && segments.every((segment) => PATH_SEGMENT.test(segment) && segment.split(/[._-]/).every((run) => run.length <= MAX_UNBROKEN_SEGMENT_RUN || isCanonicalHexHash(run)));
 }
 
 /** One `[._-]`-delimited word of a prose-shaped identifier: pure lowercase letters, no digits, no separators of its own -- deliberately narrower than `PATH_SEGMENT` (which allows digits and internal `[._-]` runs), because a slash-less token has no directory-name convention to lean on and so gets no benefit of the doubt beyond plain English words. */
@@ -461,11 +485,13 @@ function scanField(field: string, rawValue: string, credentialContext: boolean):
     const token = g[0];
     // A bare anchor argument (the whole whitespace-delimited argument, no path separator) under credential context gets no UUID or content-hash exemption; a path segment, or a filename such as `<uuid>.jsonl`, is not bare and keeps the path exemption.
     const bareAnchorArgument = field === "anchor" && credentialContext && !token.includes("/") && isStandaloneToken(genericValue, g.index, g.index + token.length);
+    // Under credential context a `sourceRef` slash token keeps the path exemption only inside a `<path>:<line>` or `#turn<n>` pointer or as a lowercase path; a bare mixed-case slash value is entropy-checked.
+    const labelledBareReference = field === "sourceRef" && credentialContext && !REFERENCE_POINTER_SUFFIX.test(genericValue) && !isReferencePathToken(token);
     if (((!exemptField && credentialContext) || bareAnchorArgument) && CANONICAL_UUID.test(token)) {
       // A UUID-shaped token beside a credential keyword is refused whatever its entropy: some services issue API keys as UUIDs, and a run of repeated digits is as plausible a key as a random one.
       matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
     } else if (
-      !(exemptField && token.includes("/")) &&
+      !(exemptField && token.includes("/") && !labelledBareReference) &&
       !isPathShapedToken(token) &&
       !isProseShapedToken(token) &&
       // The content-hash exemption yields to a credential keyword among the few words just before the value or earlier in its sentence or the line before it with no hash word nearer, to one in the few words just after it with no hash word nearer, to a bare anchor argument under credential context, and to a whole `value` field under credential context (its subject and text label it), so `api key <32 hex>` is refused while `md5 checksum <32 hex>` is stored.
