@@ -212,6 +212,10 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a plural refreshtokens compound", `${HEX32} are my refreshtokens`],
     ["a label in a following sentence that opens with This", `Here's the value: ${HEX32}. This is my API key.`],
     ["a label in a following sentence that opens with It", `${HEX32}. It is the deploy token.`],
+    // Pinned trade-off: a label one sentence boundary away stays refused.
+    ["a label in the sentence right after a bare 32-hex sentence", `${HEX32}. This is my API key`],
+    // Pinned trade-off: bare no/st/v/al/vol read as abbreviations everywhere, so this fails closed, and only when a credential word follows.
+    ["a bare label after the bare abbreviation No.", `${HEX40}. No. Password`],
     ["a bare one-word label after a full stop at the end of a line", `${HEX32}. Password`],
     ["a bare two-word label after a full stop", `${HEX32}. Deploy token`],
     ["a label inside an e.g. parenthesis", `${HEX32} (e.g. the token)`],
@@ -249,7 +253,11 @@ describe("a hex value is refused when a credential label follows it, and a direc
     ["a short sentence chain whose last sentence is a long unrelated one", `${HEX40} merged. Done. Tests green. Next the token refresh work`],
     ["a short sentence chain ending in a short sentence that names a token", `${HEX40} merged. Done. Tests green. Token refresh next`],
     ["a short sentence chain ending in a bare password mention", `${HEX40} merged. Done. Password reset next`],
-    ["a commit after an abbreviated title", `Fixed by Dr. Jones in ${HEX40}; the keyboard layout changed`],
+    // Pinned trade-off: the bare abbreviation No. is not a sentence end, but with no credential word after it the text is stored.
+    ["a bare No. abbreviation followed by a harmless sentence", `${HEX40}. No. Tests are green.`],
+    // Pinned trade-off: continuation reaches one sentence boundary past the hex sentence, so a label two boundaries away is stored to keep short harmless chains.
+    ["a label two sentence boundaries after the hex sentence", `Merged ${HEX40}. Done. This is my API key`],
+    ["a commit after an abbreviated title",`Fixed by Dr. Jones in ${HEX40}; the keyboard layout changed`],
     ["cf. before an unrelated phrase", `${HEX40} cf. the release notes`],
   ])("stores %s", async (_label, text) => {
     await remember(text);
