@@ -49,6 +49,8 @@ back in it, and the "config files authored with CRLF stay CRLF" tests hold it to
 below then runs automatically on every commit. To skip it once, `git commit --no-verify`; to disable it
 entirely, `git config --unset core.hooksPath`.
 
+The hook also runs a secret scan first, so [gitleaks](https://github.com/gitleaks/gitleaks#installing) has to be installed and on your `PATH` (`brew install gitleaks`, `scoop install gitleaks`, or a release binary); without it the commit is refused with an install hint rather than skipping the scan. It runs `gitleaks dir . --config=.gitleaks.toml --redact --exit-code 1 --no-banner`, the same command as the `secrets` job in CI. `.gitleaks.toml` allowlists only paths that hold fake secrets by design (`tests/`, build and dependency output), never `src/` or `scripts/`, and `tests/guards/gitleaks-allowlist-scope.test.ts` holds that. When `package-lock.json` is part of the commit, the hook also runs `npm audit signatures`.
+
 - **Before committing (fast):** `npm run lint && npm run typecheck && npm run test:guards`. The guards (`tests/guards/`) are pure-introspection invariants with no I/O — no bundle build, no SQLite DB. They catch the *implemented-but-unregistered / broken-schema* bug class before a commit lands.
 - **Before pushing (full):** `npm test`. Tests set `TOKEN_GOAT_MEM_HOME` to a temp directory via `tests/setup/`, so they never touch your real `~/.mem`. Three tiers run here:
   - **`tests/*.test.ts` (root level)** — end-to-end against the CLI surface, driving the real `run()` entry point in-process against a real (isolated) SQLite database. This is where a new command's coverage belongs.

@@ -17,7 +17,29 @@ set -e
 # its own cwd and write into this repository instead (a stray commit, or core.bare flipped on).
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_PREFIX GIT_COMMON_DIR
 
-echo "pre-commit: lint, typecheck, guards"
+# The secret scan runs first because it is the cheapest step and the one a late failure costs most: a credential that reaches a pushed commit is in the remote's history for good. It mirrors the `secrets` job in .github/workflows/ci.yml (same config, same flags), so a commit that passes here cannot be the one that turns that job red. A missing binary fails the commit rather than skipping the scan, because a hook that quietly checks nothing reads as a pass.
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks is not installed, so the secret scan cannot run." >&2
+  echo "  Install it (https://github.com/gitleaks/gitleaks#installing): brew install gitleaks, scoop install gitleaks, or a release binary on PATH." >&2
+  echo "  To skip deliberately: git commit --no-verify" >&2
+  exit 1
+fi
+
+echo "pre-commit: secrets, lint, typecheck, guards"
+secrets_log=$(mktemp)
+if ! gitleaks dir . --config=.gitleaks.toml --redact --exit-code 1 --no-banner >"$secrets_log" 2>&1; then
+  cat "$secrets_log" >&2
+  rm -f "$secrets_log"
+  echo "pre-commit: gitleaks found a secret-shaped value. Run 'gitleaks dir . --config=.gitleaks.toml --redact -v' to see where, remove it, and rotate the credential if it was real." >&2
+  exit 1
+fi
+rm -f "$secrets_log"
+
+# Only when the lockfile is part of this commit: the check asks the registry, so it is too slow to run on every commit.
+if git diff --cached --name-only | grep -qx 'package-lock.json'; then
+  npm audit signatures
+fi
+
 npm run lint
 npm run typecheck
 npm run test:guards

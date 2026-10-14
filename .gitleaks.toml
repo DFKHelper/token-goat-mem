@@ -1,0 +1,36 @@
+# Gitleaks configuration for the pre-commit hook (.githooks/pre-commit) and the `secrets` job in .github/workflows/ci.yml.
+#
+# The secret screen in src/ refuses to store credential-shaped text, so its tests necessarily carry fake keys, tokens and PEM-looking blocks as the input that feature exists to handle. The allowlist below covers the paths that hold such fixtures by design, and deliberately nothing that ships.
+#
+# `src/`, `scripts/` and every other path in package.json `files` stay scanned: a credential committed there fails the scan. That boundary is held by a test rather than by review, see tests/guards/gitleaks-allowlist-scope.test.ts, which also checks that the hook and CI run this scan -- a config nothing executes suppresses nothing.
+
+title = "token-goat-mem"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Secret-screen fixtures and directories that are not this project's source"
+paths = [
+  # Fixtures for the secret screen: fake values only, the suite needs no account anywhere.
+  '''^tests/''',
+  # Not our code, and not committed.
+  '''^node_modules/''',
+  # Build and coverage output, reproducible from source.
+  '''^dist/''',
+  '''^coverage/''',
+  # Agent worktrees nested in the checkout: untracked full copies of this repository whose fixtures sit beneath a path the root anchors above cannot match.
+  '''^\.claude/worktrees/''',
+]
+
+# SECURITY.md and the changelog quote one made-up assignment, `password = Xk9mP2vL8nQ4wR`, to explain where the secret screen's boundary sits. Scoped three ways on purpose: two files, one rule, and that exact value, so any other credential pasted into either file still fails the scan. A fingerprint in .gitleaksignore was rejected because the changelog grows at the top and its line numbers drift on every release.
+[[allowlists]]
+description = "The documented fake password example in SECURITY.md and the changelog"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+regexes = ['''Xk9mP2vL8nQ4wR''']
+paths = [
+  '''^SECURITY\.md$''',
+  '''^CHANGELOG\.md$''',
+]
