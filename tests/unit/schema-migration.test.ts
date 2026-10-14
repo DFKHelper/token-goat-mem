@@ -1,9 +1,9 @@
 /** Guards the two ways an edit to a `CREATE TABLE IF NOT EXISTS` block can break every database already on disk while leaving a suite that starts from an empty file entirely green. `CREATE TABLE IF NOT EXISTS` is a no-op against a table that already exists. So a schema change reaches an existing user's store only through `migrations.ts`'s `runMigrations` steps, and only for the changes `ALTER TABLE` is capable of expressing: - a new column IS expressible, but only if someone remembers to add the matching ALTER; - a widened `CHECK (... IN (...))` enum is NOT expressible at all, because a CHECK is frozen into the table at creation time and `ALTER TABLE` cannot amend one. Neither failure is visible to a test that creates its database from scratch: `CREATE TABLE` does all the work there, and the migration path is never taken. These tests therefore build their fixtures by *removing* schema from a live database rather than by hand-writing an old one -- a hand-written copy of an old schema drifts from the real one and starts agreeing with whatever migration it was written alongside, which is precisely how this class of defect survives review. */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 
 import { insertFact, openStorage } from "../../src/storage.js";
 
@@ -11,6 +11,20 @@ type Db = Database.Database;
 
 let workDir: string;
 let counter = 0;
+
+let templateDir: string;
+let templatePath: string;
+
+// Building a fully migrated store costs a WAL conversion and a full schema pass with their fsyncs, which dominated the per-column loop on a slow disk; the loop copies this one closed store instead, so each column pays only for the reopen under test.
+beforeAll(() => {
+  templateDir = mkdtempSync(join(tmpdir(), "mem-schema-template-"));
+  templatePath = join(templateDir, "template.db");
+  openStorage(templatePath).close();
+});
+
+afterAll(() => {
+  rmSync(templateDir, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   workDir = mkdtempSync(join(tmpdir(), "mem-schema-"));
@@ -81,7 +95,12 @@ const COLUMNS_WITHOUT_A_MIGRATION: readonly string[] = [
 
 /** Drops `table.column` from a throwaway store, reopens it through the real open path, and reports whether the column came back. Dropping a column is the faithful way to manufacture "a database from before this column existed": it leaves every other artefact of a real store intact -- other tables, indexes, constraints, the seeded epoch row -- where a hand-written fixture would have to reproduce all of them correctly. `null` means SQLite refused the drop (primary key, or backing an index), so the column cannot be tested this way. Callers assert on which columns those are rather than ignoring them. A reopen that throws counts as `false`, and is the worse half of this failure class rather than a separate one: `openDb` writes to `meta.value` unconditionally, so a database missing a column the open path itself touches does not merely answer queries wrong, it cannot be opened at all. */
 function survivesReopenWithoutColumn(table: string, column: string): boolean | null {
-  const { db, path } = freshStore();
+  const path = join(workDir, `mem-${(counter += 1)}.db`);
+  copyFileSync(templatePath, path);
+  // A bare handle rather than `openStorage`: the copy is already migrated, so opening it through the real path here would only repeat the schema pass the reopen below is there to measure.
+  const db = new Database(path);
+  // Every DROP below is its own commit and a full-sync WAL commit costs an fsync, which is the slow part on a loaded Windows disk; this copy is thrown away, so durability buys nothing here.
+  db.pragma("synchronous = OFF");
   try {
     // SQLite refuses to drop an indexed column, which would leave most of the schema untestable. Dropping the table's indexes first is faithful rather than a dodge: `CREATE INDEX IF NOT EXISTS` runs on every open, so a real database is where indexes come from in the first place, and rebuilding one over a missing column fails exactly the way the missing column should.
     for (const { name } of db
