@@ -1216,10 +1216,13 @@ function installedClaudeHooks(before: string): InstalledClaudeHook[] {
         if (!isPlainObject(hook) || typeof hook["command"] !== "string") {
           continue;
         }
+        // The first of each kind, because install keeps and adopts the first, so diagnosis reads the entry install acts on.
         if (isStamped(hook)) {
-          stampedCommand = hook["command"];
-          stampedTimeout = hook["timeout"];
-        } else if (looksLikeMemHookCommand(hook["command"], event)) {
+          if (stampedCommand === undefined) {
+            stampedCommand = hook["command"];
+            stampedTimeout = hook["timeout"];
+          }
+        } else if (adoptableCommand === undefined && looksLikeMemHookCommand(hook["command"], event)) {
           adoptableCommand = hook["command"];
           adoptableTimeout = hook["timeout"];
         }
@@ -1254,6 +1257,26 @@ export function installedClaudeHookCommands(opts?: WiringOpts): readonly Install
     return [];
   }
   return installedClaudeHooks(readFileSync(settingsPath, "utf8"));
+}
+
+/** Removes every stamped hook under `hooks.<event>` except the one at (`keepGroupIdx`, `keepHookIdx`), and a group left with nothing but removed hooks; unstamped hooks and the groups holding them stay as they are. `groups` is the parsed event array `text` was read from. Removed in descending index order so no removal shifts the index of one still to come. */
+function removeDuplicateStampedHooks(text: string, groups: readonly ClaudeHookGroup[], event: string, keepGroupIdx: number, keepHookIdx: number): string {
+  let result = text;
+  for (let groupIdx = groups.length - 1; groupIdx >= 0; groupIdx -= 1) {
+    const groupHooks = groups[groupIdx]?.hooks ?? [];
+    const duplicateIdxs = groupHooks.flatMap((hook, hookIdx) => (isStamped(hook) && !(groupIdx === keepGroupIdx && hookIdx === keepHookIdx) ? [hookIdx] : []));
+    if (duplicateIdxs.length === 0) {
+      continue;
+    }
+    if (duplicateIdxs.length === groupHooks.length) {
+      result = surgicalJsoncRemoveArrayEntry(result, ["hooks", event], groupIdx);
+      continue;
+    }
+    for (const hookIdx of duplicateIdxs.reverse()) {
+      result = surgicalJsoncRemoveArrayEntry(result, ["hooks", event, groupIdx, "hooks"], hookIdx);
+    }
+  }
+  return result;
 }
 
 /** Installs mem's stamped `command` under `hooks.<event>` in `text`, returning `text` unchanged when it is already there verbatim. */
@@ -1305,15 +1328,17 @@ function installClaudeHookEvent(text: string, parsed: ClaudeSettings, event: str
     // An entry an older mem wrote carries no timeout; adding one here upgrades it in place rather than adding a second entry, and a timeout already on the entry (a hand-set value included) is never replaced.
     const withTimeout = (current: string): string =>
       eventTimeout === undefined || stampedHook.timeout !== undefined ? current : surgicalJsoncEdit(current, [...hookPath, "timeout"], eventTimeout);
+    // Every other stamped hook under the event is a duplicate of the one kept here, which `installedClaudeHooks` reads as the first stamped hook too; the in-place edits above never shift an index, so the duplicates are removed by the indices read from `groups`.
+    const collapsed = (edited: string): string => removeDuplicateStampedHooks(edited, groups, event, stampedGroupIdx, stampedHookIdx);
     if (stampedHook.type === "command" && stampedHook.command === command) {
-      return withTimeout(text);
+      return collapsed(withTimeout(text));
     }
     // No downgrade: a stamped `hook <slug>` command is never rewritten back to the flag-carrying shape, whatever wrote the candidate. Migration runs the other way, so a stamped legacy command falls through to the in-place rewrite below.
     if (stampedHook.type === "command" && isCurrentHookShape(stampedHook.command, event) && isLegacyHookShape(command)) {
-      return withTimeout(text);
+      return collapsed(withTimeout(text));
     }
     const retyped = surgicalJsoncEdit(text, [...hookPath, "type"], "command");
-    return withTimeout(surgicalJsoncEdit(retyped, [...hookPath, "command"], command));
+    return collapsed(withTimeout(surgicalJsoncEdit(retyped, [...hookPath, "command"], command)));
   }
 
   // An unstamped hook whose command matches mem's own invocation shape for this event is an orphan left by an install that predates STAMP_KEY (or whose flags have since changed) -- adopt it in place rather than leaving it to run forever alongside the stamped hook this function would otherwise insert, or refusing outright and stranding every older install behind a manual edit.
