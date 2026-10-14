@@ -1,5 +1,5 @@
 /** Unit tests for the OpenAI-compatible embedding backend (src/embeddings.ts). The HTTP half runs against tests/support/embedding-server.ts -- a `node:http` server started inside the test process on an ephemeral loopback port. No new dependency, and no outbound request ever leaves the machine. */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 
 import { defaultVector, startStubEmbeddingServer, type StubEmbeddingServer, type StubEmbeddingServerOptions } from "../support/embedding-server.js";
 
@@ -15,6 +15,8 @@ import {
   readEmbeddingConfig,
   resolveConfiguredEmbeddingBackend,
 } from "../../src/embeddings.js";
+
+const BUDGET_CLOCK_MODULE = "../../src/budgetClock.js";
 
 const openServers: StubEmbeddingServer[] = [];
 
@@ -156,12 +158,21 @@ describe("the HTTP backend against a real local endpoint", () => {
   });
 
   it("aborts a stalled endpoint at its own timeout rather than waiting on it", async () => {
-    const server = await stubServer({ hang: true });
-    const backend = createHttpEmbeddingBackend({ url: server.url, model: "m" }, { timeoutMs: 50 });
+    // The budget clock is frozen for every test, so a budget never runs out; this test alone loads the backend against the real clock, because only a real clock can run the 50ms budget out against an endpoint that never answers.
+    vi.resetModules();
+    vi.doMock(BUDGET_CLOCK_MODULE, () => vi.importActual(BUDGET_CLOCK_MODULE));
+    try {
+      const { createHttpEmbeddingBackend: createOnRealClock } = await import("../../src/embeddings.js");
+      const server = await stubServer({ hang: true });
+      const backend = createOnRealClock({ url: server.url, model: "m" }, { timeoutMs: 50 });
 
-    await expect(backend.embed("x")).rejects.toThrow(/timed out after 50ms/u);
-    // The stub never answers, so the server seeing the socket close is the proof the client aborted, not just that it reported a timeout.
-    await server.clientClosed;
+      await expect(backend.embed("x")).rejects.toThrow(/timed out after 50ms/u);
+      // The stub never answers, so the server seeing the socket close is the proof the client aborted, not just that it reported a timeout.
+      await server.clientClosed;
+    } finally {
+      vi.doUnmock(BUDGET_CLOCK_MODULE);
+      vi.resetModules();
+    }
   });
 
   it("reports an endpoint nobody is listening on as unreachable, not as a crash", async () => {

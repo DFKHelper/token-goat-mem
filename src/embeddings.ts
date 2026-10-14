@@ -1,5 +1,6 @@
-/** A concrete `EmbeddingBackend` (retrieval.ts) speaking the OpenAI `/v1/embeddings` wire shape, plus the config plumbing that decides whether one exists at all. retrieval.ts deliberately owns no concrete backend: it declares a narrow interface and calls whatever the caller injects, under a hard timeout. This module is the one implementation mem ships, and it is off unless `TOKEN_GOAT_MEM_EMBED_URL` is set -- absent that variable every exported resolver returns `null`, no socket is opened, and ranking is byte-for-byte the BM25-only behaviour that shipped before it existed. The OpenAI shape rather than a bundled local model: it is the one embeddings protocol that OpenAI, Ollama, LM Studio, and LiteLLM all already speak, so a user picks their own endpoint (a localhost one keeps mem's zero-network property intact) instead of mem picking a model, a cache path, and a license for them. It also costs zero dependencies -- global `fetch` and `AbortSignal.timeout` are both present on Node 18, this package's `engines` floor. Everything here treats the endpoint as untrusted input (CLAUDE.md, "Validate at system boundaries"): a non-200, a body that is not the documented shape, a vector of the wrong length, or a stalled connection all surface as a thrown `EmbeddingRequestError`, never as a partially populated result a caller could mistake for a complete one. */
+/** A concrete `EmbeddingBackend` (retrieval.ts) speaking the OpenAI `/v1/embeddings` wire shape, plus the config plumbing that decides whether one exists at all. retrieval.ts deliberately owns no concrete backend: it declares a narrow interface and calls whatever the caller injects, under a hard timeout. This module is the one implementation mem ships, and it is off unless `TOKEN_GOAT_MEM_EMBED_URL` is set -- absent that variable every exported resolver returns `null`, no socket is opened, and ranking is byte-for-byte the BM25-only behaviour that shipped before it existed. The OpenAI shape rather than a bundled local model: it is the one embeddings protocol that OpenAI, Ollama, LM Studio, and LiteLLM all already speak, so a user picks their own endpoint (a localhost one keeps mem's zero-network property intact) instead of mem picking a model, a cache path, and a license for them. It also costs zero dependencies -- global `fetch` and `AbortController` are both present on Node 18, this package's `engines` floor. Everything here treats the endpoint as untrusted input (CLAUDE.md, "Validate at system boundaries"): a non-200, a body that is not the documented shape, a vector of the wrong length, or a stalled connection all surface as a thrown `EmbeddingRequestError`, never as a partially populated result a caller could mistake for a complete one. */
 
+import { startBudgetTimeout } from "./budgetTimer.js";
 import type { EmbeddingBackend } from "./retrieval.js";
 
 /** Environment variable naming the full embeddings endpoint. Its presence is what turns the feature on. */
@@ -36,7 +37,7 @@ export class EmbeddingRequestError extends Error {
 }
 
 export interface EmbeddingBackendOptions {
-  /** Per-request wall clock, enforced with `AbortSignal.timeout`. Defaults to {@link DEFAULT_EMBED_REQUEST_TIMEOUT_MS}. */
+  /** Per-request wall clock, enforced by an abort signal on the budget clock (`startBudgetTimeout`). Defaults to {@link DEFAULT_EMBED_REQUEST_TIMEOUT_MS}. */
   readonly timeoutMs?: number;
 }
 
@@ -159,6 +160,15 @@ export function createHttpEmbeddingBackend(config: EmbeddingConfig, options: Emb
     if (texts.length === 0) {
       return [];
     }
+    const deadline = startBudgetTimeout(timeoutMs);
+    try {
+      return await requestVectors(texts, deadline.signal);
+    } finally {
+      deadline.clear();
+    }
+  }
+
+  async function requestVectors(texts: readonly string[], signal: AbortSignal): Promise<Float32Array[]> {
     let response: Response;
     try {
       response = await fetch(config.url, {
@@ -169,8 +179,8 @@ export function createHttpEmbeddingBackend(config: EmbeddingConfig, options: Emb
           ...(config.apiKey !== undefined ? { authorization: `Bearer ${config.apiKey}` } : {}),
         },
         body: JSON.stringify({ model: config.model, input: [...texts] }),
-        // `AbortSignal.timeout` rather than an outer race: a promise the caller stopped waiting on still holds an open socket, and an open socket keeps Node's event loop alive. Without the abort, giving up on a stalled endpoint after 200ms would still leave `mem recall` hanging until the endpoint answered.
-        signal: AbortSignal.timeout(timeoutMs),
+        // An abort signal rather than an outer race: a promise the caller stopped waiting on still holds an open socket, and an open socket keeps Node's event loop alive. Without the abort, giving up on a stalled endpoint after 200ms would still leave `mem recall` hanging until the endpoint answered.
+        signal,
       });
     } catch (error) {
       // The message deliberately names the host, never the URL's userinfo and never the API key.

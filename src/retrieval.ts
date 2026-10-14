@@ -4,6 +4,7 @@ import { resolve as resolvePath } from "node:path";
 
 import { evaluateAnchor, type AnchorCacheStore, type AnchorVerdict } from "./anchors.js";
 import { budgetNow } from "./budgetClock.js";
+import { armBudgetTimer } from "./budgetTimer.js";
 import { screenForSecrets } from "./capture.js";
 import { resolveContradictions, scopeShadowedIds } from "./contradiction.js";
 import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
@@ -518,24 +519,14 @@ export function reciprocalRankFusion(rankLists: ReadonlyArray<readonly string[]>
 /** Races `promise` against a budget of `ms` read off the budget clock: the timer only wakes the check, and a wake before the clock reaches the deadline re-arms for what is left. A frozen clock therefore never expires a budget above 0, while a budget of 0 is already exhausted. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((settle, fail) => {
-    const deadline = budgetNow() + ms;
-    const arm = (delayMs: number): ReturnType<typeof setTimeout> =>
-      setTimeout(() => {
-        const remaining = deadline - budgetNow();
-        if (remaining <= 0) {
-          fail(new Error("embedding backend timed out"));
-        } else {
-          timer = arm(remaining);
-        }
-      }, delayMs);
-    let timer = arm(ms);
+    const clear = armBudgetTimer(ms, () => fail(new Error("embedding backend timed out")), { unref: false });
     promise.then(
       (value) => {
-        clearTimeout(timer);
+        clear();
         settle(value);
       },
       (error: unknown) => {
-        clearTimeout(timer);
+        clear();
         // Forwards the backend's own rejection reason verbatim. `prefer-promise-reject-errors` wants an Error, but this is a pass-through, not an origination: an embedding backend is caller-supplied and may reject with anything, and wrapping it here would bury the original reason the caller needs to diagnose it.
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
         fail(error);

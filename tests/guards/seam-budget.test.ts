@@ -209,6 +209,60 @@ describe("the budget clock freeze", () => {
   });
 });
 
+/** The source with every whole-line comment dropped, so a comment that names `AbortSignal.timeout` to explain why it is not used is not read as a call. */
+function withoutCommentLines(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !/^\s*(\/\/|\/\*\*)/.test(line))
+    .join("\n");
+}
+
+/** Whether the embedding request deadline is read off the budget clock: embeddings.ts takes its abort signal from `startBudgetTimeout` and never builds an `AbortSignal.timeout`, and budgetTimer.ts reads `budgetNow` and names no `Date.now(`. A wall-clock abort in embeddings.ts is the one deadline the frozen clock cannot reach, so a slow machine could still time a localhost round trip out. */
+function embeddingDeadlineOnBudgetClock(embeddingsText: string, timerText: string): boolean {
+  const code = withoutCommentLines(embeddingsText);
+  const takesBudgetSignal = /^import \{ startBudgetTimeout \} from "\.\/budgetTimer\.js";/m.test(code) && /\bstartBudgetTimeout\(/.test(code);
+  const timerReadsClock = /^import \{ budgetNow \} from "\.\/budgetClock\.js";/m.test(timerText) && !/\bDate\.now\(/.test(timerText);
+  return takesBudgetSignal && !/\bAbortSignal\.timeout\(/.test(code) && timerReadsClock;
+}
+
+describe("the embedding request deadline", () => {
+  const embeddingsText = readRepoFile("src/embeddings.ts");
+  const timerText = readRepoFile("src/budgetTimer.ts");
+
+  it("accepts the real embeddings backend and budget timer", () => {
+    expect(embeddingDeadlineOnBudgetClock(embeddingsText, timerText)).toBe(true);
+  });
+
+  it("flags embeddings.ts when it builds an AbortSignal.timeout again", () => {
+    const wallClockAbort = embeddingsText.replace("        signal,\n", "        signal: AbortSignal.timeout(timeoutMs),\n");
+    expect(wallClockAbort).not.toBe(embeddingsText);
+    expect(embeddingDeadlineOnBudgetClock(wallClockAbort, timerText)).toBe(false);
+  });
+
+  it("flags embeddings.ts when it stops reading the budget clock", () => {
+    const withoutImport = embeddingsText.replace('import { startBudgetTimeout } from "./budgetTimer.js";', "");
+    expect(withoutImport).not.toBe(embeddingsText);
+    expect(embeddingDeadlineOnBudgetClock(withoutImport, timerText)).toBe(false);
+    const withoutCall = embeddingsText.split("startBudgetTimeout(").join("startDeadline(");
+    expect(withoutCall).not.toBe(embeddingsText);
+    expect(embeddingDeadlineOnBudgetClock(withoutCall, timerText)).toBe(false);
+  });
+
+  it("flags the budget timer when it reads the wall clock", () => {
+    const wallClock = timerText.replace("budgetNow() + ms", "Date.now() + ms");
+    expect(wallClock).not.toBe(timerText);
+    expect(embeddingDeadlineOnBudgetClock(embeddingsText, wallClock)).toBe(false);
+    const noClockImport = timerText.replace('import { budgetNow } from "./budgetClock.js";', "");
+    expect(noClockImport).not.toBe(timerText);
+    expect(embeddingDeadlineOnBudgetClock(embeddingsText, noClockImport)).toBe(false);
+  });
+
+  it("does not flag a comment that names AbortSignal.timeout", () => {
+    const withComment = `// AbortSignal.timeout(timeoutMs) is not used here.\n${embeddingsText}`;
+    expect(embeddingDeadlineOnBudgetClock(withComment, timerText)).toBe(true);
+  });
+});
+
 describe("the shared pin detection itself", () => {
   const setupText = readRepoFile(SHARED_SETUP);
   const configText = readRepoFile(VITEST_CONFIG);
