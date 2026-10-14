@@ -1325,12 +1325,9 @@ describe("mem remember reaffirms rather than duplicating", () => {
     function makeCheckout(name: string): string {
       const repo = join(work, name);
       mkdirSync(repo, { recursive: true });
+      // Identity is read from .git/config (src/projectIdentity.ts), so a real init and a remote are all a checkout needs; a user config, a commit and a staged file would each cost another process launch, which is seconds apiece on a loaded machine.
       git(repo, "init", "-q");
-      git(repo, "config", "user.email", "t@example.com");
-      git(repo, "config", "user.name", "t");
       writeFileSync(join(repo, "file.txt"), "x", "utf8");
-      git(repo, "add", "-A");
-      git(repo, "commit", "-qm", "init");
       git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
       return repo;
     }
