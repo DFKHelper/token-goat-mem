@@ -328,8 +328,8 @@ const CREDENTIAL_CLAUSE_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["sa
 /** The end of a clause inside a sentence. */
 const CLAUSE_SEPARATOR = /[,:]/u;
 
-/** A title abbreviation (`Mr.`, `Mrs.`, `Ms.`, `Dr.`), which is part of a name and not a word of the label that continues a statement. */
-const TITLE_ABBREVIATION = /\b(?:mr|mrs|ms|dr)\./giu;
+/** A title abbreviation (`Mr.`, `Mrs.`, `Ms.`, `Dr.`, any letter case) with up to three capitalised name words after it, which together are one name and not words of the label that continues a statement; the title alone still collapses when no capitalised word follows. */
+const TITLE_ABBREVIATION = /\b(?:[Mm][Rr][Ss]?|[Mm][Ss]|[Dd][Rr])\.(?:\s+\p{Lu}[\p{L}'’-]*){0,3}/gu;
 
 /** Two-word openers that refer back to the hex before them (`<hex>. The above is my password`). */
 const CREDENTIAL_BACK_REFERENCE_PHRASES: ReadonlySet<string> = new Set(["the above", "the former", "the latter"]);
@@ -426,8 +426,34 @@ function isPathShapedToken(token: string): boolean {
   return segments.length >= 2 && segments.every(isPathSegment);
 }
 
-/** The tail of a `sourceRef` that points into a file or a transcript (`<path>:<line>`, `<path>#turn<n>`), which a bare secret value does not carry. */
+/** The tail of a `sourceRef` that points into a file or a transcript (`<path>:<line>`, `<path>#turn<n>`), which anyone writing a ref can append to a secret, so it exempts a mixed-case slash token only when that token is also word-shaped (`isWordShapedPathToken`). */
 const REFERENCE_POINTER_SUFFIX = /(?::|#turn)\d+\s*$/u;
+
+/** A run of a word-shaped path segment: capitalised or lowercase words joined together (`ApiKeys`, `v2`), or an all-capital acronym (`NOTES`, `C`); a random mixed-case token has capitals mid-run and fails it. */
+const WORD_SHAPED_RUN = /^(?:[A-Z]?[a-z0-9]+)+$|^[A-Z]+$/;
+
+/** The `.<extension>` at the end of a path segment, set aside so `<UPPERCASE-UUID>.jsonl` is judged as the UUID it carries. */
+const SEGMENT_EXTENSION = /\.[A-Za-z0-9]+$/;
+
+/** Longest alphanumeric run of any letter case accepted in a word-shaped segment: the random suffix of a temp directory or a short user name (`mem-import-kFxnGE`) is this long, and a run this short cannot carry a secret on its own. */
+const MAX_OPAQUE_RUN = 6;
+
+function isWordShapedRun(run: string): boolean {
+  return (run.length <= MAX_UNBROKEN_SEGMENT_RUN && WORD_SHAPED_RUN.test(run)) || (run.length <= MAX_OPAQUE_RUN && /^[A-Za-z0-9]+$/.test(run));
+}
+
+function isWordShapedSegment(segment: string): boolean {
+  if (CANONICAL_UUID.test(segment) || CANONICAL_UUID.test(segment.replace(SEGMENT_EXTENSION, ""))) {
+    return true;
+  }
+  return segment.split(/[._-]/).filter((run) => run.length > 0).every(isWordShapedRun);
+}
+
+/** Whether a slash-bearing `sourceRef` token reads as a path of ordinary words (`Users/Zelys/Docs/ApiKeys/NOTES.md`, `<dir>/<UUID>.jsonl`) and not as a mixed-case secret that merely ends in a `:<n>` pointer: two or more segments, each a canonical UUID or a series of short word-shaped runs (or runs of at most `MAX_OPAQUE_RUN` characters). */
+function isWordShapedPathToken(token: string): boolean {
+  const segments = token.split("/").filter((segment) => segment.length > 0);
+  return segments.length >= 2 && segments.every(isWordShapedSegment);
+}
 
 /** Whether a slash-bearing `sourceRef` token is a lowercase path that keeps its entropy exemption under credential context: path-shaped, or with a canonical content hash as a directory name (`docs/<md5>/notes`), but never a mixed-case or digit-laced slash token such as an AWS secret access key. */
 function isReferencePathToken(token: string): boolean {
@@ -485,8 +511,8 @@ function scanField(field: string, rawValue: string, credentialContext: boolean):
     const token = g[0];
     // A bare anchor argument (the whole whitespace-delimited argument, no path separator) under credential context gets no UUID or content-hash exemption; a path segment, or a filename such as `<uuid>.jsonl`, is not bare and keeps the path exemption.
     const bareAnchorArgument = field === "anchor" && credentialContext && !token.includes("/") && isStandaloneToken(genericValue, g.index, g.index + token.length);
-    // Under credential context a `sourceRef` slash token keeps the path exemption only inside a `<path>:<line>` or `#turn<n>` pointer or as a lowercase path; a bare mixed-case slash value is entropy-checked.
-    const labelledBareReference = field === "sourceRef" && credentialContext && !REFERENCE_POINTER_SUFFIX.test(genericValue) && !isReferencePathToken(token);
+    // Under credential context a `sourceRef` slash token keeps the path exemption only as a lowercase path or as a word-shaped path inside a `<path>:<line>` or `#turn<n>` pointer; any other mixed-case slash value is entropy-checked, whatever suffix it carries.
+    const labelledBareReference = field === "sourceRef" && credentialContext && !isReferencePathToken(token) && !(REFERENCE_POINTER_SUFFIX.test(genericValue) && isWordShapedPathToken(token));
     if (((!exemptField && credentialContext) || bareAnchorArgument) && CANONICAL_UUID.test(token)) {
       // A UUID-shaped token beside a credential keyword is refused whatever its entropy: some services issue API keys as UUIDs, and a run of repeated digits is as plausible a key as a random one.
       matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
@@ -1082,7 +1108,7 @@ export function screenInputOrThrow(
   factId: string | null = null
 ): void {
   const allowlist = loadAllowlist(root);
-  // sourceRef is scanned like any other field: for the `mem import --from-md` path it's a programmatically constructed "<resolved path>:<line>" provenance pointer, but `mem remember --source-ref <ref>` accepts an arbitrary user/agent-supplied string, so it must not be excluded outright. It's in GENERIC_ENTROPY_EXEMPT_FIELDS instead (see that comment): named SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy fallback, so the legitimate "<path>:<line>" false-positive is still avoided without leaving a prefix-less secret unscreened.
+  // sourceRef is scanned like any other field: for the `mem import --from-md` path it's a programmatically constructed "<resolved path>:<line>" provenance pointer, but `mem remember --source-ref <ref>` accepts an arbitrary user/agent-supplied string, so it must not be excluded outright. It's in GENERIC_ENTROPY_EXEMPT_FIELDS instead (see that comment): named SECRET_PATTERNS always run, and only a slash-containing token skips the generic entropy fallback, so the legitimate "<path>:<line>" false-positive is still avoided, and under credential context a mixed-case slash token is still entropy-checked unless it is word-shaped inside a pointer suffix.
   refuseSecretsOrThrow(db, screenFactFields(input, allowlist), auditEvent, factId);
 }
 

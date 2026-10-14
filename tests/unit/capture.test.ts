@@ -283,6 +283,49 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
     const sourceRef = "docs/agent-self-compaction/superman-state-notes.md:12";
     expect(screenForSecrets({ text: "the api key cache is described there", sourceRef }, [])).toHaveLength(0);
   });
+
+  describe("a pointer suffix on a sourceRef under credential text", () => {
+    const text = "The AWS secret access key is noted in the source reference";
+    const UUID = "1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a";
+    const BS = String.fromCharCode(92);
+
+    it.each([`${AWS_SECRET}:1`, `${AWS_SECRET}#turn3`, `${AWS_SECRET}.md:1`, `tok=${AWS_SECRET}:1`])("refuses a mixed-case secret that ends in a pointer: %s", (sourceRef) => {
+      expect(screenForSecrets({ text, sourceRef }, []).length).toBeGreaterThan(0);
+    });
+
+    it.each([
+      `/home/u/.claude/projects/-home-u-proj/${UUID}.jsonl:42`,
+      `/home/u/.claude/projects/-home-u-proj/${UUID}.jsonl#turn3`,
+      `C:/Users/Zelys/.claude/projects/C--Projects-x/${UUID}.jsonl:42`,
+      `C:/Users/Zelys/.claude/projects/C--Projects-x/${UUID.toUpperCase()}.jsonl:42`,
+      `C:${BS}Users${BS}Zelys${BS}.claude${BS}projects${BS}C--Projects-x${BS}${UUID}.jsonl#turn3`,
+      "docs/security/notes.md:7",
+      "Users/Zelys/Projects/My-Very-Long-Project-Name/Docs/ApiKeys/NOTES.md:7",
+      "C:/Users/zelys/AppData/Local/Temp/mem-import-kFxnGE/CLAUDE.md:1",
+    ])("stores a word-shaped path pointer: %s", (sourceRef) => {
+      expect(screenForSecrets({ text, sourceRef }, [])).toHaveLength(0);
+    });
+  });
+
+  describe("a title abbreviation with a multi-word name after a hex sentence", () => {
+    it.each([
+      "Mr. John Smith's password",
+      "Dr. Anna Lopez's api key",
+      "Mrs. Jane Smith's password",
+      "Ms. Mary Ann Jones's password",
+      "MR. John Smith's password",
+    ])("flags the hex before: %s", (label) => {
+      expect(screenForSecrets({ text: `${HEX32}. ${label}.` }, []).length).toBeGreaterThan(0);
+    });
+
+    it.each([
+      `Built ${HEX40}. Mr. John Smith's password reset email was fixed in the parser.`,
+      `The md5 checksum ${HEX32}. Dr. Maria Lopez reviewed the password policy.`,
+      `Built ${HEX40}. Mr. John Smith signed off the release.`,
+    ])("stores a hex followed by prose that merely names a person: %s", (text) => {
+      expect(screenForSecrets({ text }, [])).toHaveLength(0);
+    });
+  });
 });
 
 describe("loadAllowlist", () => {

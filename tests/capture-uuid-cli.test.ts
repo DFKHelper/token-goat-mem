@@ -157,8 +157,21 @@ describe("anchors and source refs get no identifier-word exemption", () => {
     expectRefused(await runCli(["remember", "The AWS secret access key is recorded in the source reference", "--kind", "fact", "--scope", "global", "--source-ref", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"]));
   });
 
+  it.each(["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY:1", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY#turn3", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY.md:1"])("refuses a labelled AWS secret access key that carries a pointer suffix: %s", async (sourceRef) => {
+    expectRefused(await runCli(["remember", "The AWS secret access key is noted in the source reference", "--kind", "fact", "--scope", "global", "--source-ref", sourceRef]));
+  });
+
   it("refuses a bare labelled UUID in a source ref", async () => {
     expectRefused(await runCli(["remember", "x", "--kind", "fact", "--scope", "global", "--source-ref", `session id ${U}`]));
+  });
+
+  it.each([
+    "docs/security/notes.md:7",
+    "Users/Zelys/Projects/My-Very-Long-Project-Name/Docs/ApiKeys/NOTES.md:7",
+    `C:/Users/Zelys/.claude/projects/C--Projects-x/${U.toUpperCase()}.jsonl:42`,
+  ])("stores a word-shaped path pointer as a source ref beside a credential phrase: %s", async (sourceRef) => {
+    const result = await runCli(["remember", "The AWS secret access key is noted in the source reference", "--kind", "fact", "--scope", "global", "--source-ref", sourceRef]);
+    expect(result.exitCode, result.stderr).toBe(0);
   });
 
   it.each([
