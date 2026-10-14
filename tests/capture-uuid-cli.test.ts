@@ -169,6 +169,9 @@ describe("anchors and source refs get no identifier-word exemption", () => {
     "docs/security/notes.md:7",
     "Users/Zelys/Projects/My-Very-Long-Project-Name/Docs/ApiKeys/NOTES.md:7",
     `C:/Users/Zelys/.claude/projects/C--Projects-x/${U.toUpperCase()}.jsonl:42`,
+    "/Users/dev/OAuth2Client/src/AuthService.ts:42",
+    "C:/Users/Zelys/GitHub/XMLParserTools/docs/notes.md:3",
+    "/Users/dev/iOSAppProject/Docs/README.md:3",
   ])("stores a word-shaped path pointer as a source ref beside a credential phrase: %s", async (sourceRef) => {
     const result = await runCli(["remember", "The AWS secret access key is noted in the source reference", "--kind", "fact", "--scope", "global", "--source-ref", sourceRef]);
     expect(result.exitCode, result.stderr).toBe(0);
@@ -660,5 +663,39 @@ describe("mem edit --undo screens the state it restores", () => {
     const undone = await runCli(["edit", id, "--undo", "--root", root]);
     expect(undone.exitCode, undone.stderr).toBe(0);
     expect((await runCli(["show", id])).stdout).toContain(`text: the value ${U} here`);
+  });
+});
+
+describe("a project directory name with acronyms or digits does not cost a scan-session or import capture its credential statement", () => {
+  const SESSION_TURN = "Remember that the staging database password is rotated monthly.";
+  const BULLET = "Always rotate the staging database password every month.";
+
+  async function pendingListing(): Promise<string> {
+    return (await runCli(["list", "--status", "pending"])).stdout;
+  }
+
+  it.each(["MyAPIClient", "OAuth2Client", "FooBARBazQUXQuux"])("files a scan-session suggestion from a transcript under %s", async (project) => {
+    const directory = join(home, ".claude", "projects", `C--Projects-${project}`);
+    mkdirSync(directory, { recursive: true });
+    const transcript = join(directory, `${U}.jsonl`);
+    writeFileSync(transcript, JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "text", text: SESSION_TURN }] } }), "utf8");
+    const scanned = await runCli(["scan-session", "--transcript", transcript, "--root", "."]);
+    expect(scanned.exitCode, scanned.stderr).toBe(0);
+    expect(await pendingListing()).toContain("staging database password is rotated monthly");
+  });
+
+  it.each(["MyAPIClient-and-more-directory", "OAuth2Client-service-repo-dir", "FooBARBazQUXQuux-notes-dir"])("imports a credential bullet from NOTES.md under %s", async (directoryName) => {
+    const directory = join(home, directoryName);
+    mkdirSync(directory);
+    const notes = join(directory, "NOTES.md");
+    writeFileSync(notes, `- ${BULLET}\n`, "utf8");
+    const imported = await runCli(["import", "--from-md", notes, "--root", home]);
+    expect(imported.exitCode, imported.stderr).toBe(0);
+    expect(await pendingListing()).toContain("rotate the staging database password every month");
+  });
+
+  it("refuses a typed ref with the stamped shape, since mem suggest never marks a ref as stamped", async () => {
+    const result = await runCli(["suggest", "The AWS secret access key is noted in the source reference", "--kind", "fact", "--scope", "global", "--source-ref", `/home/u/.claude/projects/-home-u-FooBARBazQUXQuux/${U}.jsonl#turn3`]);
+    expectRefused(result);
   });
 });

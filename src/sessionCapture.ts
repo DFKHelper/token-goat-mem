@@ -48,6 +48,7 @@ export function fileTranscriptSuggestions(db: Database.Database, options: FileTr
         root,
         sourceRef: `${transcriptSourceRefPrefix(transcriptPath)}${candidate.turnIndex}`,
         screenContext: candidate.context,
+        stampedSourceRef: true,
         ...(sourceExcerpt !== null ? { sourceExcerpt } : {}),
         ...(candidate.capturedAt !== undefined ? { capturedAt: candidate.capturedAt } : {}),
       });

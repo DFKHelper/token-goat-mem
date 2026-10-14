@@ -331,6 +331,7 @@ export function importFromMarkdown(db: Database.Database, options: ImportFromMar
       kind,
       scope,
       sourceRef: candidate.sourceRef,
+      stampedSourceRef: true,
       sourceType: "derived",
       root: options.root,
       ...(options.boundPath !== undefined ? { path: options.boundPath } : {}),

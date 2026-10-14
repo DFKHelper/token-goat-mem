@@ -328,7 +328,7 @@ const CREDENTIAL_CLAUSE_BACK_REFERENCE_WORDS: ReadonlySet<string> = new Set(["sa
 /** The end of a clause inside a sentence. */
 const CLAUSE_SEPARATOR = /[,:]/u;
 
-/** A title abbreviation (`Mr.`, `Mrs.`, `Ms.`, `Dr.`, any letter case) with up to three capitalised name words after it, which together are one name and not words of the label that continues a statement; the title alone still collapses when no capitalised word follows. */
+/** A title abbreviation (`Mr.`, `Mrs.`, `Ms.`, `Dr.`, any letter case) with up to three capitalised name words after it, which together are one name and not words of the label that continues a statement unless one of them is a credential word (`collapseTitledName`); the title alone still collapses when no capitalised word follows. */
 const TITLE_ABBREVIATION = /\b(?:[Mm][Rr][Ss]?|[Mm][Ss]|[Dd][Rr])\.(?:\s+\p{Lu}[\p{L}'’-]*){0,3}/gu;
 
 /** Two-word openers that refer back to the hex before them (`<hex>. The above is my password`). */
@@ -348,10 +348,17 @@ function nextSentenceBoundary(text: string, from: number): { readonly index: num
   return null;
 }
 
+/** What a title abbreviation with its name words leaves in the sentence: nothing, unless a name word is a credential word (`Mr. Api Key`, `Mrs. Smith Admin Password`), where the label from that word on stays so it still counts. */
+function collapseTitledName(titledName: string): string {
+  const names = splitWords(titledName.slice(titledName.indexOf(".") + 1));
+  const label = firstCredentialWordIndex(names);
+  return label === -1 ? " " : ` ${names.slice(label).join(" ")}`;
+}
+
 /** Whether the sentence starting at `start` still describes the hex before it: it opens with a back-reference word, or is a bare label of at most a few words. */
 function continuesStatement(text: string, start: number): boolean {
   const boundary = nextSentenceBoundary(text, start);
-  const sentence = text.slice(start, boundary === null ? text.length : boundary.index).replace(TITLE_ABBREVIATION, " ");
+  const sentence = text.slice(start, boundary === null ? text.length : boundary.index).replace(TITLE_ABBREVIATION, collapseTitledName);
   const words = splitWords(sentence);
   return words.length > 0 && (CREDENTIAL_BACK_REFERENCE_WORDS.has(words[0] ?? "") || (CREDENTIAL_CLAUSE_BACK_REFERENCE_WORDS.has(words[0] ?? "") && firstCredentialWordIndex(splitWords(sentence.split(CLAUSE_SEPARATOR)[0] ?? "")) !== -1) || CREDENTIAL_BACK_REFERENCE_PHRASES.has(`${words[0] ?? ""} ${words[1] ?? ""}`) || words.length <= CREDENTIAL_BARE_LABEL_WORDS);
 }
@@ -438,8 +445,42 @@ const SEGMENT_EXTENSION = /\.[A-Za-z0-9]+$/;
 /** Longest alphanumeric run of any letter case accepted in a word-shaped segment: the random suffix of a temp directory or a short user name (`mem-import-kFxnGE`) is this long, and a run this short cannot carry a secret on its own. */
 const MAX_OPAQUE_RUN = 6;
 
+/** One component of a camel-cased run that holds an acronym: an all-capital acronym that ends where a capitalised word starts (`API` in `MyAPIClient`), or an optionally capitalised word with trailing digits (`Auth2`, `App`, `i`). */
+const CAMEL_COMPONENT = /[A-Z]+(?![a-z])|[A-Z]?[a-z]+\d*/y;
+
+/** Shape bounds of an acronym-bearing run (`MyAPIClient`, `OAuth2Client`, `iOSAppProject`), which keep a random mixed-case string from reading as camel-cased words: measured on fake random secrets of five charsets, at most 0.37% pass (0.17% before acronyms were allowed), and a secret-shaped name such as `bPxRfiCYEXAMPLEKEY` fails on the acronym length. */
+const ACRONYM_RUN_BOUNDS = { components: 4, acronyms: 1, acronymLength: 5, singleLetters: 1, digits: 2 } as const;
+
+function isAcronymWordRun(run: string): boolean {
+  if ((run.match(/\d/g) ?? []).length > ACRONYM_RUN_BOUNDS.digits) {
+    return false;
+  }
+  CAMEL_COMPONENT.lastIndex = 0;
+  let position = 0;
+  let components = 0;
+  let acronyms = 0;
+  let singleLetters = 0;
+  while (position < run.length) {
+    const component = CAMEL_COMPONENT.exec(run)?.[0];
+    if (component === undefined) {
+      return false;
+    }
+    position += component.length;
+    components += 1;
+    if (/^[A-Z]{2,}$/.test(component)) {
+      acronyms += 1;
+      if (component.length > ACRONYM_RUN_BOUNDS.acronymLength) {
+        return false;
+      }
+    } else if (/^[A-Za-z]$/.test(component)) {
+      singleLetters += 1;
+    }
+  }
+  return components <= ACRONYM_RUN_BOUNDS.components && acronyms <= ACRONYM_RUN_BOUNDS.acronyms && singleLetters <= ACRONYM_RUN_BOUNDS.singleLetters;
+}
+
 function isWordShapedRun(run: string): boolean {
-  return (run.length <= MAX_UNBROKEN_SEGMENT_RUN && WORD_SHAPED_RUN.test(run)) || (run.length <= MAX_OPAQUE_RUN && /^[A-Za-z0-9]+$/.test(run));
+  return (run.length <= MAX_UNBROKEN_SEGMENT_RUN && (WORD_SHAPED_RUN.test(run) || isAcronymWordRun(run))) || (run.length <= MAX_OPAQUE_RUN && /^[A-Za-z0-9]+$/.test(run));
 }
 
 function isWordShapedSegment(segment: string): boolean {
@@ -485,7 +526,7 @@ function isProseShapedToken(token: string): boolean {
   return letterWords.length >= 2 && wordLike && letterWords.length + numberWords.length === words.length && numberWords.length <= Math.min(letterWords.length, MAX_PROSE_NUMBER_WORDS);
 }
 
-function scanField(field: string, rawValue: string, credentialContext: boolean): SecretMatch[] {
+function scanField(field: string, rawValue: string, credentialContext: boolean, stampedReference: boolean): SecretMatch[] {
   const matches: SecretMatch[] = [];
   // Invisible characters split a secret into halves that each fall under the length floors below, so the value is screened as a person reads it.
   const value = rawValue.replace(INVISIBLE_CHARACTERS, "");
@@ -511,8 +552,8 @@ function scanField(field: string, rawValue: string, credentialContext: boolean):
     const token = g[0];
     // A bare anchor argument (the whole whitespace-delimited argument, no path separator) under credential context gets no UUID or content-hash exemption; a path segment, or a filename such as `<uuid>.jsonl`, is not bare and keeps the path exemption.
     const bareAnchorArgument = field === "anchor" && credentialContext && !token.includes("/") && isStandaloneToken(genericValue, g.index, g.index + token.length);
-    // Under credential context a `sourceRef` slash token keeps the path exemption only as a lowercase path or as a word-shaped path inside a `<path>:<line>` or `#turn<n>` pointer; any other mixed-case slash value is entropy-checked, whatever suffix it carries.
-    const labelledBareReference = field === "sourceRef" && credentialContext && !isReferencePathToken(token) && !(REFERENCE_POINTER_SUFFIX.test(genericValue) && isWordShapedPathToken(token));
+    // Under credential context a `sourceRef` slash token keeps the path exemption only as a lowercase path or as a word-shaped path inside a `<path>:<line>` or `#turn<n>` pointer; any other mixed-case slash value is entropy-checked, whatever suffix it carries, unless mem stamped the ref itself from a path it chose.
+    const labelledBareReference = field === "sourceRef" && credentialContext && !stampedReference && !isReferencePathToken(token) && !(REFERENCE_POINTER_SUFFIX.test(genericValue) && isWordShapedPathToken(token));
     if (((!exemptField && credentialContext) || bareAnchorArgument) && CANONICAL_UUID.test(token)) {
       // A UUID-shaped token beside a credential keyword is refused whatever its entropy: some services issue API keys as UUIDs, and a run of repeated digits is as plausible a key as a random one.
       matches.push({ patternName: "generic-high-entropy-token", field, matched: token });
@@ -549,20 +590,29 @@ function redactPreview(matched: string): string {
   return `${matched.slice(0, 4)}${masked}${matched.slice(-2)}`;
 }
 
+/** Options only mem's own capture paths set; no CLI flag or stored value reaches them. */
+export interface ScreenOptions {
+  /** The `sourceRef` is the pointer `mem scan-session` or `mem import --from-md` built from a path it chose, so the generic entropy heuristic is skipped on it; the named secret patterns still run. */
+  readonly stampedSourceRef?: boolean | undefined;
+}
+
 /** Scans a set of named fields against the secret-pattern and entropy heuristics, dropping any match whose exact text is covered by `allowlist`. Exported so a `mem doctor` / `review` command can reuse the same screening logic to audit already-stored allowlist entries. */
 export function screenForSecrets(
   fields: Readonly<Record<string, string | null | undefined>>,
   allowlist: readonly string[],
-  extraContext = ""
+  extraContext = "",
+  options: ScreenOptions = {}
 ): SecretMatch[] {
   const allowed = new Set(allowlist);
   const matches: SecretMatch[] = [];
   const credentialContext = hasCredentialContext(fields, extraContext);
+  // The stamp is honoured only for a ref with the stamped shape, so a caller that sets it on a typed secret-shaped ref gains nothing.
+  const stampedReference = options.stampedSourceRef === true && STAMPED_TRANSCRIPT_REF.test(fields["sourceRef"] ?? "");
   for (const [field, value] of Object.entries(fields)) {
     if (value === null || value === undefined || value.length === 0) {
       continue;
     }
-    for (const match of scanField(field, value, credentialContext)) {
+    for (const match of scanField(field, value, credentialContext, stampedReference && field === "sourceRef")) {
       if (!allowed.has(match.matched)) {
         matches.push(match);
       }
@@ -808,6 +858,8 @@ export interface ScreenableFactFields {
   readonly sourceExcerpt?: string | null | undefined;
   /** Further text that belongs to the fact as it will be stored (the rest of a merged edit, the whole turn or section a candidate came from); read for credential keywords only, never scanned or stored. */
   readonly screenContext?: string | null | undefined;
+  /** See {@link ScreenOptions}: set only by the `mem scan-session` and `mem import --from-md` capture paths. */
+  readonly stampedSourceRef?: boolean | undefined;
 }
 
 export function screenFactFields(fields: ScreenableFactFields, allowlist: readonly string[]): SecretMatch[] {
@@ -822,7 +874,8 @@ export function screenFactFields(fields: ScreenableFactFields, allowlist: readon
       sourceExcerpt: fields.sourceExcerpt,
     },
     allowlist,
-    fields.screenContext ?? ""
+    fields.screenContext ?? "",
+    { stampedSourceRef: fields.stampedSourceRef }
   );
 }
 
@@ -1031,6 +1084,8 @@ export interface CaptureSuggestedInput extends CaptureExplicitInput {
   readonly confidence?: number;
   /** A pre-screened, pre-truncated excerpt of the raw material the candidate was pulled from (see `buildScreenedExcerpt`), stored as one `sources` row alongside the fact in the same transaction. Only `mem scan-session` and `mem import --from-md` set this -- both extract a short candidate from raw material genuinely larger than the fact (a whole user turn, a whole file line), which is exactly the provenance gap the `sources` table exists to close. `mem suggest <text>` must never set this: there the caller's text *is* the fact, so a source row would just echo it back. */
   readonly sourceExcerpt?: string;
+  /** True only for a `sourceRef` that `mem scan-session` or `mem import --from-md` built from a path it chose (see {@link ScreenOptions}); no CLI flag sets it, and `mem suggest --source-ref` never does. */
+  readonly stampedSourceRef?: boolean;
 }
 
 export interface CaptureResult {
@@ -1102,7 +1157,7 @@ function validateCommonInput(input: CaptureExplicitInput): { text: string; root:
 
 export function screenInputOrThrow(
   db: Database.Database,
-  input: CaptureExplicitInput & Pick<CaptureSuggestedInput, "sourceExcerpt">,
+  input: CaptureExplicitInput & Pick<CaptureSuggestedInput, "sourceExcerpt" | "stampedSourceRef">,
   root: string,
   auditEvent: string,
   factId: string | null = null

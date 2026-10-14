@@ -8,6 +8,7 @@ import {
   captureExplicit,
   captureSuggested,
   screenForSecrets,
+  screenFactFields,
   loadAllowlist,
   SecretDetectedError,
   InvalidAnchorError,
@@ -307,6 +308,56 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
     });
   });
 
+  describe("an acronym or digit in a project directory name of a sourceRef pointer", () => {
+    const text = "The AWS secret access key is noted in the source reference";
+
+    it.each([
+      "/Users/dev/OAuth2Client/src/AuthService.ts:42",
+      "C:/Users/Zelys/GitHub/XMLParserTools/docs/notes.md:3",
+      "/Users/dev/iOSAppProject/Docs/README.md:3",
+      "/Users/dev/MyAPIClient/Docs/NOTES.md:3",
+      "C:/Users/JSmithXYZ/Documents/Notes/MyAPINotes.md:12",
+      "C:/Users/Zelys/.claude/projects/C--Projects-MyAPIClient/1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl#turn3",
+    ])("stores a path whose names are words and acronyms: %s", (sourceRef) => {
+      expect(screenForSecrets({ text, sourceRef }, [])).toHaveLength(0);
+    });
+
+    it.each([
+      `/Users/dev/${AWS_SECRET}:1`,
+      "/Users/dev/bPxRfiCYEXAMPLEKEY/notes.md:3",
+      "/Users/dev/zQvJxKtRmWnBcLdFg9H2pY/x7MqEnGpYhAsDw3Zc5Vb/Tn4RkLs8Xe/notes.md:3",
+      "/Users/dev/FooBARBazQUXQuux/notes.md:3",
+      "/Users/dev/AbXYZcDEFghIJKlm/notes.md:3",
+    ])("still refuses a path with a secret-shaped name: %s", (sourceRef) => {
+      expect(screenForSecrets({ text, sourceRef }, []).length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("a sourceRef the capture path stamped itself", () => {
+    const text = "The AWS secret access key is noted in the source reference";
+    const stamped = "/home/u/.claude/projects/-home-u-FooBARBazQUXQuux/1b4e28ba-2fa1-11d2-883f-b30c04fd1f2a.jsonl#turn3";
+
+    it("refuses the same ref when a caller typed it", () => {
+      expect(screenFactFields({ text, sourceRef: stamped }, []).length).toBeGreaterThan(0);
+    });
+
+    it("skips only the entropy heuristic on a stamped ref", () => {
+      expect(screenFactFields({ text, sourceRef: stamped, stampedSourceRef: true }, [])).toHaveLength(0);
+    });
+
+    it.each([`${AWS_SECRET}:1`, `${AWS_SECRET}#turn3`, AWS_SECRET, `tok=${AWS_SECRET}:1`])("ignores the stamp on a ref without a stamped shape: %s", (sourceRef) => {
+      expect(screenFactFields({ text, sourceRef, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
+    });
+
+    it("still runs the named patterns on a stamped ref", () => {
+      expect(screenFactFields({ text, sourceRef: "/home/u/AKIAIOSFODNN7EXAMPLE/FooBARBazQUXQuux.jsonl#turn3", stampedSourceRef: true }, []).length).toBeGreaterThan(0);
+    });
+
+    it("still screens the fact text of a stamped capture", () => {
+      expect(screenFactFields({ text: `${text} AKIAIOSFODNN7EXAMPLE`, sourceRef: stamped, stampedSourceRef: true }, []).length).toBeGreaterThan(0);
+    });
+  });
+
   describe("a title abbreviation with a multi-word name after a hex sentence", () => {
     it.each([
       "Mr. John Smith's password",
@@ -314,6 +365,11 @@ describe("screenForSecrets: label windows and the sourceRef exemption", () => {
       "Mrs. Jane Smith's password",
       "Ms. Mary Ann Jones's password",
       "MR. John Smith's password",
+      "Mr. Password",
+      "Mr. Api Key",
+      "mr. Api Key",
+      "Mrs. Smith Admin Password",
+      "Dr. Smith's API Key",
     ])("flags the hex before: %s", (label) => {
       expect(screenForSecrets({ text: `${HEX32}. ${label}.` }, []).length).toBeGreaterThan(0);
     });
