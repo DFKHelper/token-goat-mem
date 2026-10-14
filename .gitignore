@@ -11,5 +11,6 @@ coverage/
 .vscode/
 .idea/
 *.token-goat-mem.bak
+*.token-goat-mem.lock
 SCRATCH.md
 .bughunt/

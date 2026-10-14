@@ -1,6 +1,6 @@
 /** Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets those guides document (Claude Code's `settings.json` hook + `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and only that. Two idempotency/authorship mechanisms, chosen per file format: - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked block plus the one separator newline install adds, leaving everything else untouched. - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`; `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` -- neither reads `AGENTS.md`, so they share a block in their own file instead of joining the `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of near-duplicate per-tool blocks they share one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole block as it goes -- the body comes from one constant shared by every tool that writes here, so a later tool's install is also what upgrades a body left behind by an older mem. Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other tool remains listed, and only removes the whole block once the last listed tool uninstalls. A project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens. - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped* entry already occupies the same identity (hook `command`, task `label`, keybinding `key`) rather than duplicating or silently overwriting hand-written config. Uninstall removes only stamped entries, so it survives content drift across mem versions (unlike deep-equality matching against a remembered snapshot). Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read used to compute the new content. */
 
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -121,19 +121,139 @@ function looksMemAuthored(content: string): boolean {
   return content.includes("<!-- token-goat-mem:") || content.includes(`"${STAMP_KEY}"`);
 }
 
-/** Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the transform once if the file changed between the initial read and the pre-write check. Exported for direct unit testing of the retry path. `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever capture content mem is about to touch for the first time (install), never a snapshot of mem's own managed content on the way out. `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by uninstall rather than left behind empty. Whenever the write deletes `path`, or `!backup` (the uninstall path) and it leaves `path` holding no mem markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks` / delete-if-empty checks. */
-export function writeManagedFile(
-  op: FileOp,
-  opts: { backup?: boolean; deleteIfEmpty?: boolean; detailFor?: (before: string, after: string) => string | undefined } = {}
-): WiringChange {
-  const backup = opts.backup ?? true;
-  const deleteIfEmpty = opts.deleteIfEmpty ?? false;
+/** Thrown when another mem process held a managed file's lock for the whole wait, so the write was not made. Names the lock file, which is safe to delete only when no mem is running. */
+export class WiringLockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WiringLockError";
+  }
+}
 
-  let before = existsSync(op.path) ? readFileSync(op.path, "utf8") : undefined;
-  let after = op.transform(before);
+/** How a write waits for another process's lock on the same file: `waitMs` is the budget (default `DEFAULT_LOCK_WAIT_MS`), `pause` the wait between attempts (default a blocking sleep). The budget counts the pauses taken, not the clock, so a replaced `pause` makes a test deterministic. */
+interface ManagedFileLockOptions {
+  readonly waitMs?: number;
+  readonly pause?: (ms: number) => void;
+}
+
+interface WriteManagedFileOptions {
+  readonly backup?: boolean;
+  readonly deleteIfEmpty?: boolean;
+  readonly detailFor?: (before: string, after: string) => string | undefined;
+  readonly lock?: ManagedFileLockOptions;
+}
+
+const MANAGED_FILE_LOCK_SUFFIX = ".token-goat-mem.lock";
+
+/** A held lock covers one read, transform and rename, which takes milliseconds; ten seconds covers a process that is slow to be scheduled on a loaded machine. */
+const DEFAULT_LOCK_WAIT_MS = 10_000;
+
+const LOCK_POLL_MS = 25;
+
+/** Dead-holder locks one acquire removes before giving up, so a lock that cannot be removed never loops forever. */
+const MAX_STALE_LOCK_REMOVALS = 5;
+
+function pauseSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** The pid a lock file records, or `undefined` when the file is gone or does not hold a pid (a lock another process created a moment ago and has not written to yet). */
+function readLockPid(lockPath: string): number | undefined {
+  try {
+    const pid = Number.parseInt(readFileSync(lockPath, "utf8").trim(), 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Whether a process with `pid` exists: signal 0 delivers nothing and fails with ESRCH for a pid no process holds, while EPERM means it exists under another user. */
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** Creates `<path>.token-goat-mem.lock` exclusively, recording this process's pid, and returns the function that removes it. A lock held by a live process is waited for within the budget; one whose recorded pid no process holds was left by a crash and is taken over, by liveness and never by age; one with no readable pid counts as held. Past the budget it throws `WiringLockError` rather than write without the lock. Creates the parent directory, since the lock sits beside a file that may not exist yet. */
+function acquireManagedFileLock(path: string, options: ManagedFileLockOptions | undefined): () => void {
+  const lockPath = `${path}${MANAGED_FILE_LOCK_SUFFIX}`;
+  const waitMs = options?.waitMs ?? DEFAULT_LOCK_WAIT_MS;
+  const pause = options?.pause ?? pauseSync;
+  mkdirSync(dirname(path), { recursive: true });
+  let waitedMs = 0;
+  let staleRemovals = 0;
+  for (;;) {
+    try {
+      const handle = openSync(lockPath, "wx");
+      try {
+        writeSync(handle, String(process.pid));
+      } catch (error) {
+        // Closed before removed (Windows cannot remove an open file), so a lock that never got its pid does not stay behind as one no process will ever release.
+        closeSync(handle);
+        rmSync(lockPath, { force: true });
+        throw error;
+      }
+      closeSync(handle);
+      return () => releaseManagedFileLock(lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+    const holder = readLockPid(lockPath);
+    if (holder !== undefined && !processIsAlive(holder) && staleRemovals < MAX_STALE_LOCK_REMOVALS) {
+      // Re-read first so a lock another process has just taken over from the same dead holder is not removed under it.
+      if (readLockPid(lockPath) === holder) {
+        rmSync(lockPath, { force: true });
+        staleRemovals += 1;
+      }
+      continue;
+    }
+    if (waitedMs >= waitMs) {
+      throw new WiringLockError(
+        `${lockPath} is held${holder === undefined ? "" : ` by process ${holder}`}, and the write to ${path} was not made after waiting ${waitMs} ms; re-run once the other mem process finishes, or delete the lock file if no mem is running`
+      );
+    }
+    pause(LOCK_POLL_MS);
+    waitedMs += LOCK_POLL_MS;
+  }
+}
+
+/** Removes a lock this process holds. A lock that now names another pid is that process's and stays. A failed removal is swallowed so it never masks the write's own outcome: the lock then names this pid, which the next run reclaims once this process has exited. */
+function releaseManagedFileLock(lockPath: string): void {
+  try {
+    if (readLockPid(lockPath) === process.pid) {
+      rmSync(lockPath, { force: true });
+    }
+  } catch {
+    // Best-effort release only, for the reason above.
+  }
+}
+
+/** Writes the result of `op.transform` to `op.path` atomically (temp file + rename), retrying the transform once if the file changed between the initial read and the pre-write check. Exported for direct unit testing of the retry path. `opts.backup` (default `true`) takes a one-time `.bak` snapshot of the pre-existing file before its first write -- callers on the uninstall path pass `false`, since a `.bak` should only ever capture content mem is about to touch for the first time (install), never a snapshot of mem's own managed content on the way out. `opts.deleteIfEmpty` (default `false`) unlinks the file instead of writing it when the computed `after` is `isEmptyManagedContent` -- i.e. the file's entire content was mem's. Callers on the uninstall path pass `true`, so a file mem created (and only mem ever wrote to) is removed by uninstall rather than left behind empty. Whenever the write deletes `path`, or `!backup` (the uninstall path) and it leaves `path` holding no mem markers at all, this also removes `<path>.token-goat-mem.bak`: the file itself is now the authoritative record of its pre-mem state, so a snapshot from a previous install/uninstall era is both redundant and, left in place, a source of stale answers for the next cycle's `preInstallHooks` / delete-if-empty checks. */
+export function writeManagedFile(op: FileOp, opts: WriteManagedFileOptions = {}): WiringChange {
+  const before = existsSync(op.path) ? readFileSync(op.path, "utf8") : undefined;
+  const after = op.transform(before);
   if (after === undefined || after === before) {
     return { path: op.path, action: "noop", detail: "already up to date" };
   }
+
+  // A write is due, so hold the file's lock from the re-read through the rename: without it two processes writing one file (`init codex` and `init copilot-cli` on AGENTS.md) each rename a result computed from the same old content, and the second loses the first's update.
+  const releaseLock = acquireManagedFileLock(op.path, opts.lock);
+  try {
+    return writeManagedFileLocked(op, opts, before, after);
+  } finally {
+    releaseLock();
+  }
+}
+
+function writeManagedFileLocked(op: FileOp, opts: WriteManagedFileOptions, firstBefore: string | undefined, firstAfter: string): WiringChange {
+  const backup = opts.backup ?? true;
+  const deleteIfEmpty = opts.deleteIfEmpty ?? false;
+  let before = firstBefore;
+  let after: string | undefined = firstAfter;
 
   // Re-check immediately before writing: if the file changed underneath us since the read above, re-read and recompute once against the fresh content before writing.
   const recheck = existsSync(op.path) ? readFileSync(op.path, "utf8") : undefined;
