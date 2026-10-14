@@ -3,7 +3,7 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { hasPendingMigrations, runMigrations } from "./migrations.js";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -90,6 +90,27 @@ export interface OpenDbOptions {
   autoSnapshot?: boolean;
 }
 
+/** Creates the store at `dbPath` already in WAL mode, or leaves whichever store a concurrent creator published first. Converting a fresh file in place (`PRAGMA journal_mode = WAL` on the shared path) fails at once with "database is locked" when another connection holds the write lock at that moment, because SQLite upgrades that statement's read transaction to a write one without consulting the busy handler, so no busy timeout can absorb the first-open race between concurrent `mem` processes. The conversion therefore happens on a private seed file, and `linkSync` publishes it at `dbPath` only if nothing is there yet (an existing target is `EEXIST`, so exactly one creator wins and the shared path never exists in rollback-journal mode). Every later `journal_mode = WAL` is then a no-op on a store that is already WAL. A filesystem that cannot hard-link falls through to the in-place conversion, which is the behaviour before this existed. */
+function publishFreshStore(dbPath: string): void {
+  const seedPath = `${dbPath}.seed-${process.pid}-${randomUUID()}`;
+  try {
+    const seed = new Database(seedPath);
+    try {
+      restrictPermissions(seedPath, MEM_DB_MODE);
+      seed.pragma("journal_mode = WAL");
+    } finally {
+      seed.close();
+    }
+    linkSync(seedPath, dbPath);
+  } catch {
+    // EEXIST means a concurrent creator won; any other failure leaves the caller to create the store in place.
+  } finally {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      rmSync(`${seedPath}${suffix}`, { force: true });
+    }
+  }
+}
+
 /** Opens (creating if absent) the mem sqlite database at `dbPath` (default: the resolved home's `mem.db`), enables WAL mode (Section 3: durability for a short-lived single-writer CLI process), and ensures the schema (`facts`, `audit_log`, `meta`) exists. Callers are responsible for calling `.close()` when done. */
 export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions = {}): Database.Database {
   const home = dirname(dbPath);
@@ -98,6 +119,9 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
   // `mode` applies only when mkdir actually creates the directory, so an existing home -- including one created 0755 by an earlier version of mem -- is tightened explicitly on the next line.
   mkdirSync(home, { recursive: true, mode: MEM_HOME_MODE });
   restrictPermissions(home, MEM_HOME_MODE);
+  if (!existed) {
+    publishFreshStore(dbPath);
+  }
   const db = new Database(dbPath, { timeout: BUSY_TIMEOUT_MS });
   // Everything past construction is closed on failure. `new Database` connects lazily, so the first statement is what surfaces a damaged file (`SQLITE_NOTADB` on a truncated or non-sqlite path) -- and an escaping error would otherwise leave this handle open with no reference to close it by, which on Windows holds an exclusive lock on the file. That turns a recoverable "your store is corrupt" into an unrecoverable one: the user cannot delete or replace their own database without killing the process, and `mem doctor` -- whose whole job is diagnosing this -- opens through the same path and hangs on the same lock.
   try {

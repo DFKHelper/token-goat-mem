@@ -2,6 +2,12 @@
 
 All notable changes to Token-Goat Mem are documented in this file. **This file is the canonical version history** — `package.json` mirrors the latest release; if a version string anywhere disagrees with this file, this file wins. Format follows Keep a Changelog. Token-Goat Mem follows Semantic Versioning starting at 1.0.
 
+## [Unreleased]
+
+### Fixed
+
+- **Two `mem` processes creating the store at the same moment no longer fail with `database is locked`.** The first open of a store that does not exist yet switched the new file to WAL in place, and SQLite fails that switch at once, without waiting out the 30 s busy timeout, when another connection holds the write lock during it. The file is now switched to WAL under a private name and published at the store path only if nothing is there yet, so exactly one creator wins and the other opens the winner's store. The cross-process test shrinks to three workers and nine commands, and the same invariants plus the first-open race are covered by an in-process multi-connection test.
+
 ## [0.5.4] - 2026-10-14
 
 ### Fixed
