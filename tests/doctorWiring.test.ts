@@ -408,7 +408,8 @@ describe("mem doctor and mem init probe a PATH mem under one shared cache and bu
   it("init retries a probe that got no answer once at 3x the budget, and writes the hooks without --force", async () => {
     const marker = join(binDir, "hung-once.marker");
     writeFakeMem(binDir, HANG_ONCE_MEM_SHIM);
-    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "5000", FAKE_MEM_MARKER: marker }, async () => {
+    // The retry window is 3x this budget and one probe chains two node starts (helper, then the shim); a bare `node -e 0` measured 3-13 s with 120 busy-loop processes running, so a 5 s budget (15 s window) lost the retry under load (1 failure in 3 runs at 250) and 20 s (60 s window) clears two worst-case starts.
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "20000", FAKE_MEM_MARKER: marker }, async () => {
       const result = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(result.exitCode).toBe(0);
       expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(true);
