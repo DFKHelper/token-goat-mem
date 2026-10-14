@@ -1095,7 +1095,7 @@ export function describeProbeRefusal(probed: string): string {
 const REFUSED_COMMAND_QUOTE_LENGTH = 80;
 
 /** The one sentence for a hook whose command's subcommand failed the safety check: it was not run, and nothing is claimed about the binary. */
-export function describeCommandRefusal(command: string): string {
+function describeCommandRefusal(command: string): string {
   const quoted = command.length > REFUSED_COMMAND_QUOTE_LENGTH ? `${command.slice(0, REFUSED_COMMAND_QUOTE_LENGTH)}...` : command;
   return `did not probe this hook: its command \`${quoted}\` looks unsafe or unrecognised, so it was not run to check it`;
 }

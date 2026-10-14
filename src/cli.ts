@@ -779,7 +779,7 @@ export function describeHookHealthRefusal(health: ClaudeHookHealth): string | nu
     ...refusals.map((sentence) => `     ${sentence}`),
     ...unsafe.map((sentence) => `     ${sentence}`),
     ...(gaps.length > 0 ? [`     it does not support: ${gaps.join(", ")}`] : []),
-    `     ${remedies.map((remedy) => `${remedy}, or `).join("")}re-run with --force to write the hooks without the check`,
+    `     ${remedies.map((remedy) => `${remedy}, or `).join("")}${unsafe.length > 0 ? "re-run with --force to write mem's own hook commands over the unsafe ones, without the check" : "re-run with --force to write the hooks without the check"}`,
   ].join("\n");
 }
 

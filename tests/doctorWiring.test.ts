@@ -275,6 +275,17 @@ describe("the init refusal lists the remedy for every kind of problem it reports
     expect(message).toContain("did not probe this hook");
     expect(message).not.toContain("does not support");
   });
+
+  it("names the rewrite remedy for a hook whose command was refused as unsafe, offering --force once", () => {
+    const message = describeHookHealthRefusal({ bin, hooks: [unsafe, timedOut] }) ?? "";
+    expect(message).toContain("less busy");
+    expect(message).toContain("write mem's own hook commands over the unsafe ones");
+    expect(message.match(/--force/gu)).toHaveLength(1);
+  });
+
+  it("keeps the plain --force wording when no hook command was refused as unsafe", () => {
+    expect(describeHookHealthRefusal({ bin, hooks: [timedOut] }) ?? "").not.toContain("over the unsafe ones");
+  });
 });
 
 describe("a hook whose command the safety check refuses is reported as not probed, never as a missing command", () => {
