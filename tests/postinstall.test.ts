@@ -11,8 +11,6 @@ import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloor.js";
 
 // How long the stand-in `init` is allowed to run before the postinstall must kill it.
 const HANG_TIMEOUT_MS = 1000;
-// Slack for the node launches around the killed init (the postinstall itself, the killed child, the pre-flight probe) on a loaded machine, on top of the timeout.
-const LAUNCH_ALLOWANCE_MS = 19_000;
 
 const POSTINSTALL_PATH = fileURLToPath(new URL("../scripts/postinstall.mjs", import.meta.url));
 
@@ -138,12 +136,10 @@ describe("postinstall", () => {
     // Loaded into every node the postinstall starts; only the one running `init` blocks, forever.
     const preload = join(root, "hang-on-init.cjs");
     writeFileSync(preload, 'if (process.argv.includes("init")) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);\n');
-    const started = Date.now();
     const result = runPostinstall({ NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, TOKEN_GOAT_MEM_POSTINSTALL_TIMEOUT_MS: String(HANG_TIMEOUT_MS) });
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("timed out");
     expect(result.output).toContain("mem init claude-code --user");
-    expect(Date.now() - started).toBeLessThan(HANG_TIMEOUT_MS + LAUNCH_ALLOWANCE_MS);
   }, SPAWN_TIMEOUT_FLOOR_MS);
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(

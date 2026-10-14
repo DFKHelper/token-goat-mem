@@ -156,13 +156,12 @@ describe("the HTTP backend against a real local endpoint", () => {
   });
 
   it("aborts a stalled endpoint at its own timeout rather than waiting on it", async () => {
-    const server = await stubServer({ delayMs: 5_000 });
+    const server = await stubServer({ hang: true });
     const backend = createHttpEmbeddingBackend({ url: server.url, model: "m" }, { timeoutMs: 50 });
 
-    const started = Date.now();
     await expect(backend.embed("x")).rejects.toThrow(/timed out after 50ms/u);
-    // The abort is what matters, not the exact number: without `AbortSignal.timeout` the socket stays open and keeps Node's event loop alive long after the caller gave up.
-    expect(Date.now() - started).toBeLessThan(4_000);
+    // The stub never answers, so the server seeing the socket close is the proof the client aborted, not just that it reported a timeout.
+    await server.clientClosed;
   });
 
   it("reports an endpoint nobody is listening on as unreachable, not as a crash", async () => {

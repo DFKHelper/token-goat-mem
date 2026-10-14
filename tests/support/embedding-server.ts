@@ -11,6 +11,8 @@ export interface RecordedRequest {
 export interface StubEmbeddingServer {
   readonly url: string;
   readonly requests: readonly RecordedRequest[];
+  /** Resolves when a client connection closes before the stub answered it, i.e. the client gave up on the request. */
+  readonly clientClosed: Promise<void>;
   close(): Promise<void>;
 }
 
@@ -23,8 +25,8 @@ export interface StubEmbeddingServerOptions {
   readonly embedFor?: (text: string) => number[];
   /** When true, `data` is emitted last-input-first, with each entry still carrying its true `index`. */
   readonly reverseOrder?: boolean;
-  /** Milliseconds to stall before answering, for timeout cases. */
-  readonly delayMs?: number;
+  /** When true, the request is recorded but never answered, so only the client giving up can end it. */
+  readonly hang?: boolean;
   /** Replaces the whole `data` array, for shape-violation cases. Called once per request. */
   readonly dataOverride?: (inputs: readonly string[]) => unknown;
 }
@@ -42,8 +44,17 @@ export function defaultVector(text: string): number[] {
 /** Starts a stub embeddings endpoint. The caller owns `close()`. */
 export async function startStubEmbeddingServer(options: StubEmbeddingServerOptions = {}): Promise<StubEmbeddingServer> {
   const requests: RecordedRequest[] = [];
+  let resolveClientClosed: () => void = () => undefined;
+  const clientClosed = new Promise<void>((resolve) => {
+    resolveClientClosed = resolve;
+  });
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
+    res.on("close", () => {
+      if (!res.writableEnded) {
+        resolveClientClosed();
+      }
+    });
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       let parsed: { model?: unknown; input?: unknown } = {};
@@ -53,6 +64,9 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
         parsed = {};
       }
       requests.push({ authorization: req.headers.authorization, body: parsed });
+      if (options.hang === true) {
+        return;
+      }
 
       const respond = (): void => {
         if (options.rawBody !== undefined) {
@@ -77,11 +91,7 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
         res.end(JSON.stringify({ object: "list", data, model: parsed.model }));
       };
 
-      if (options.delayMs !== undefined) {
-        setTimeout(respond, options.delayMs);
-      } else {
-        respond();
-      }
+      respond();
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -89,6 +99,7 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
   return {
     url: `http://127.0.0.1:${port}/v1/embeddings`,
     requests,
+    clientClosed,
     close: () =>
       new Promise<void>((resolve) => {
         // Without this a client socket left open by an aborted request keeps `close()` pending, and the afterEach hook hangs instead of failing.
