@@ -7,7 +7,7 @@ Shell-out patterns and hook wiring for Claude Code.
 Once `mem` is on PATH (see Installation below), wire it into Claude Code in one command:
 
 ```bash
-mem init claude-code --root .          # writes .claude/settings.json + CLAUDE.md (only CLAUDE.md once user hooks exist)
+mem init claude-code --root .          # writes .claude/settings.json + CLAUDE.md (only CLAUDE.md once user hooks cover every event; a hook for an event they do not cover stays in the project file)
 mem init claude-code --user            # writes ~/.claude/settings.json instead (no CLAUDE.md)
 mem init claude-code --dry-run         # preview what would be written, without touching disk
 mem init claude-code --force           # write hooks even if the PATH mem binary can't run them

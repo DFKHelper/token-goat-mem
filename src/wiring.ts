@@ -1370,7 +1370,7 @@ function preInstallHooks(path: string): { readonly hooksExisted: boolean; readon
   }
 }
 
-function uninstallClaudeSettings(current: string | undefined, path: string): string | undefined {
+function uninstallClaudeSettings(current: string | undefined, path: string, onlyEvents?: ReadonlySet<string>): string | undefined {
   if (isBlank(current)) {
     return undefined;
   }
@@ -1384,10 +1384,12 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
     return current;
   }
   const hooks = parsed.hooks;
+  // Every event by default; a project install beside partial user hooks strips only the events those cover.
+  const eventsToStrip = CLAUDE_HOOK_EVENTS.filter(({ event }) => onlyEvents === undefined || onlyEvents.has(event));
 
   // Plan the removals as JSON paths, then apply them to the text. Rebuilding the object and reserializing it would hand the user back a file reindented to mem's taste. Built in descending index order -- groups first, then hooks within a group -- so applying them in sequence never shifts the index of one still to come.
   const removals: JSONPath[] = [];
-  for (const { event } of CLAUDE_HOOK_EVENTS) {
+  for (const { event } of eventsToStrip) {
     const entries: unknown = hooks[event];
     if (!Array.isArray(entries)) {
       continue;
@@ -1428,7 +1430,7 @@ function uninstallClaudeSettings(current: string | undefined, path: string): str
 
   // Prune the containers mem's own removals just emptied -- but only the ones mem itself created. Install creates `hooks` and `hooks.<event>` when a settings.json has neither, and leaving those behind as an empty husk broke the "uninstall reverses exactly what init wrote" promise. But an event array that is empty now is not proof mem created it: a user's own pre-existing `"hooks": {"SessionStart": []}` looks exactly the same once mem's stamped entries are gone, and deleting that key doesn't restore the file, it destroys hand-written content that predates mem entirely (the CRITICAL bug this snapshot check exists to close). `preInstallHooks` answers the question emptiness alone cannot: did this key exist before mem's first write.
   const pre = preInstallHooks(path);
-  for (const { event } of CLAUDE_HOOK_EVENTS) {
+  for (const { event } of eventsToStrip) {
     const settingsAfter: unknown = parseJsonc(text, [], JSONC_PARSE);
     const hooksAfter: unknown = isPlainObject(settingsAfter) ? settingsAfter["hooks"] : undefined;
     if (!isPlainObject(hooksAfter)) {
@@ -1749,27 +1751,32 @@ export function projectSettingsIsUserSettings(opts?: WiringOpts): boolean {
 
 export const claudeCode: ToolWiring = makeToolWiring(({ root, homeDir, user, hookEvents }) => {
   const settingsPath = user ? join(homeDir, ".claude", "settings.json") : join(root, ".claude", "settings.json");
-  // Claude Code runs project and user hooks both and skips a duplicate only when the command text matches, which the Windows user hook's direct launcher never does, so once user hooks exist a project install drops its own instead of adding a second set.
-  const coveredByUserHooks = !user && !projectSettingsIsUserSettings({ root, homeDir }) && installedClaudeHookCommands({ root, homeDir, user: true }).length > 0;
-  const settingsEntry: ManagedFile = coveredByUserHooks
-    ? {
-        path: settingsPath,
-        install: (current) => uninstallClaudeSettings(current, settingsPath),
-        uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
-        installDetail: () => "removed mem's project hooks: the user-level hooks already run in every project",
-        installDeletesIfEmpty: true,
-      }
-    : {
-        path: settingsPath,
-        install: (current) => installClaudeSettings(current, settingsPath, hookEvents),
-        uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
-        installDetail: (before) => {
-          const adopted = claudeHookAdoptions(before);
-          return adopted.length === 0
-            ? undefined
-            : `updated existing file (adopted a pre-existing ${adopted.join(", ")} hook written by an older mem install)`;
-        },
-      };
+  // Claude Code runs project and user hooks both and skips a duplicate only when the command text matches, which the Windows user hook's direct launcher never does, so a project install drops its own hook for each event the user hooks already cover instead of adding a second one, and writes the rest.
+  const coveredEvents: ReadonlySet<string> =
+    user || projectSettingsIsUserSettings({ root, homeDir }) ? new Set() : new Set(installedClaudeHookCommands({ root, homeDir, user: true }).map((hook) => hook.event));
+  const settingsEntry: ManagedFile =
+    coveredEvents.size > 0
+      ? {
+          path: settingsPath,
+          install: (current) => uninstallClaudeSettings(installClaudeSettings(current, settingsPath, hookEvents.filter(({ event }) => !coveredEvents.has(event))), settingsPath, coveredEvents),
+          uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
+          installDetail: (before) => {
+            const dropped = installedClaudeHooks(before).filter((hook) => hook.stamped && coveredEvents.has(hook.event)).map((hook) => hook.event);
+            return dropped.length === 0 ? undefined : `removed mem's project hooks for ${dropped.join(", ")}: the user-level hooks already run them in every project`;
+          },
+          installDeletesIfEmpty: true,
+        }
+      : {
+          path: settingsPath,
+          install: (current) => installClaudeSettings(current, settingsPath, hookEvents),
+          uninstall: (current) => uninstallClaudeSettings(current, settingsPath),
+          installDetail: (before) => {
+            const adopted = claudeHookAdoptions(before);
+            return adopted.length === 0
+              ? undefined
+              : `updated existing file (adopted a pre-existing ${adopted.join(", ")} hook written by an older mem install)`;
+          },
+        };
   if (user) {
     return [settingsEntry];
   }
