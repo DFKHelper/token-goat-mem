@@ -340,7 +340,7 @@ function resolveCuratedMigrations(curatedGone, renameMap, discoveredSet) {
 const REAL_GIT = { ensureRepo: ensureGitRepo, listComponents, detectRenames };
 
 /** Runs the full compute-and-optionally-write pass. Never throws for expected failure modes -- returns `exitCode` 2 for config/usage/marker errors instead. */
-function runSync(repoRoot, { mode, format, strictCurated, git = REAL_GIT }) {
+export function runSync(repoRoot, { mode, format, strictCurated, git = REAL_GIT }) {
   let config;
   try {
     git.ensureRepo(repoRoot);
@@ -499,7 +499,7 @@ function readDoc(dir, docName = "ARCHITECTURE.md") {
   return readFileSync(join(dir, docName), "utf8");
 }
 
-function selfTest() {
+export function selfTest() {
   // Under a git hook (the pre-commit guards tier) git exports GIT_DIR / GIT_INDEX_FILE, which every spawned `git` below would honour in preference to its temp-repo cwd -- committing "init" onto the real branch. Scrub them so the temp repos stay hermetic.
   for (const name of Object.keys(process.env)) {
     if (name.startsWith("GIT_")) {

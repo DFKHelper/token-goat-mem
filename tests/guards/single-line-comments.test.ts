@@ -1,26 +1,32 @@
-/** Guard that every comment in the tracked sources stays on one line and no doc comment is left stranded on another, by running `scripts/single-line-comments.mjs` -- the engine `npm run comments:check` and `npm run comments:write` invoke. Shells out for the same reason `arch-docs.test.ts` does: the engine's contract is only meaningfully exercised by running it. */
-import { spawnSync } from "node:child_process";
-import type { SpawnSyncReturns } from "node:child_process";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+/** Guard that every comment in the tracked sources stays on one line and no doc comment is left stranded on another, by calling `runCommentCheck` and `runSelfTest` from `scripts/single-line-comments.mjs` in-process -- the engine `npm run comments:check` and `npm run comments:write` invoke, with no node spawn and so no per-test timeout override. */
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const SCRIPT = join(REPO_ROOT, "scripts", "single-line-comments.mjs");
-
-function runScript(args: readonly string[]): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: REPO_ROOT, encoding: "utf8" });
-}
+import { runCommentCheck, runSelfTest } from "../../scripts/single-line-comments.mjs";
 
 describe("comments stay single-line", () => {
   it("no tracked source has a multi-line or stacked doc comment", () => {
-    const result = runScript(["--check"]);
-    expect(result.status, `Comment shape drift. Run 'npm run comments:write'.\n${result.stderr}`).toBe(0);
-  }, 60_000);
+    const result = runCommentCheck({ write: false });
+    expect(result.exitCode, `Comment shape drift. Run 'npm run comments:write'.\n${result.output.join("\n")}`).toBe(0);
+  });
 
   it("the comment engine's own self-test passes", () => {
-    const result = runScript(["--self-test"]);
-    expect(result.status, `Comment engine self-test failed.\n${result.stdout}\n${result.stderr}`).toBe(0);
+    const result = runSelfTest();
+    expect(result.pass, `Comment engine self-test failed.\n${result.failures.join("\n")}\n${result.summary}`).toBe(true);
+  });
+
+  it("a two-line // comment in a scoped file is reported by name", () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-comments-"));
+    try {
+      writeFileSync(join(root, "sample.ts"), "// first line\n// second line\nexport const x = 1;\n", "utf8");
+      const result = runCommentCheck({ write: false, root, files: ["sample.ts"] });
+      expect(result.exitCode, `Scoped check should flag the two-line comment.\n${result.output.join("\n")}`).toBe(1);
+      expect(result.output.join("\n")).toContain("sample.ts");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

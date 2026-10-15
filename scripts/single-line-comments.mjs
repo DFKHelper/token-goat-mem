@@ -97,16 +97,17 @@ export function findStackedDocs(text) {
   return found;
 }
 
-function trackedSources() {
-  return execFileSync("git", ["ls-files", "-z", "--", ...SOURCE_PATTERNS], { cwd: REPO_ROOT, encoding: "utf8" })
+function trackedSources(root) {
+  return execFileSync("git", ["ls-files", "-z", "--", ...SOURCE_PATTERNS], { cwd: root, encoding: "utf8" })
     .split("\0")
     .filter((file) => file !== "" && !file.startsWith("dist/"));
 }
 
-function run(write) {
+/** Runs the comment-shape pass over `files` (default: the tracked sources under `root`); `write` joins multi-line comments in place, and `output` is the stderr lines the CLI prints. */
+export function runCommentCheck({ write = false, root = REPO_ROOT, files } = {}) {
   const findings = [];
-  for (const file of trackedSources()) {
-    const path = join(REPO_ROOT, file);
+  for (const file of files ?? trackedSources(root)) {
+    const path = join(root, file);
     const text = readFileSync(path, "utf8");
     const { out, count } = joinComments(text, file);
     if (count > 0) {
@@ -115,14 +116,19 @@ function run(write) {
     }
     for (const line of findStackedDocs(write ? out : text)) findings.push(`${file}:${line}: doc comment stacked on another doc comment -- move it onto the declaration it describes`);
   }
-  for (const finding of findings) console.error(finding);
-  if (findings.length > 0) {
-    if (!write) console.error("Run 'npm run comments:write' to join multi-line comments.");
-    process.exitCode = 1;
-  }
+  if (findings.length === 0) return { exitCode: 0, output: [] };
+  if (!write) findings.push("Run 'npm run comments:write' to join multi-line comments.");
+  return { exitCode: 1, output: findings };
 }
 
-function selfTest() {
+function run(write) {
+  const { exitCode, output } = runCommentCheck({ write });
+  for (const line of output) console.error(line);
+  process.exitCode = exitCode;
+}
+
+/** Runs the joiner and stacked-doc fixtures and returns the failure lines, the verdict and the summary line the CLI prints. */
+export function runSelfTest() {
   const cases = [
     ["/**\n * Alpha\n * beta.\n */\nexport const a = 1;\n", "/** Alpha beta. */\nexport const a = 1;\n"],
     ["// one\n// two\nconst b = 2;\n", "// one two\nconst b = 2;\n"],
@@ -133,27 +139,29 @@ function selfTest() {
     ["const c = 3; // trailing\n// standalone\n", "const c = 3; // trailing\n// standalone\n"],
     ["const s = \"/**\\n * not a comment\\n */\";\n", "const s = \"/**\\n * not a comment\\n */\";\n"],
   ];
-  let failed = 0;
+  const failures = [];
   for (const [input, expected] of cases) {
     const { out } = joinComments(input, "fixture.ts");
     if (out !== expected) {
-      failed++;
-      console.error(`FAIL\n  input:    ${JSON.stringify(input)}\n  expected: ${JSON.stringify(expected)}\n  got:      ${JSON.stringify(out)}`);
+      failures.push(`FAIL\n  input:    ${JSON.stringify(input)}\n  expected: ${JSON.stringify(expected)}\n  got:      ${JSON.stringify(out)}`);
     }
   }
   const stacked = findStackedDocs("/** Orphan. */\n/** Owner. */\nfunction f() {}\n/** Fine. */\nconst g = 1;\n");
   if (JSON.stringify(stacked) !== "[1]") {
-    failed++;
-    console.error(`FAIL stacked docs: expected [1], got ${JSON.stringify(stacked)}`);
+    failures.push(`FAIL stacked docs: expected [1], got ${JSON.stringify(stacked)}`);
   }
-  console.log(`${cases.length + 1 - failed}/${cases.length + 1} self-test cases passed`);
-  if (failed > 0) process.exitCode = 1;
+  const total = cases.length + 1;
+  return { pass: failures.length === 0, failures, summary: `${total - failures.length}/${total} self-test cases passed` };
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const mode = process.argv[2] ?? "--check";
-  if (mode === "--self-test") selfTest();
-  else if (mode === "--check" || mode === "--write") run(mode === "--write");
+  if (mode === "--self-test") {
+    const result = runSelfTest();
+    for (const line of result.failures) console.error(line);
+    console.log(result.summary);
+    if (!result.pass) process.exitCode = 1;
+  } else if (mode === "--check" || mode === "--write") run(mode === "--write");
   else {
     console.error(`unknown mode ${mode}; expected --check, --write, or --self-test`);
     process.exitCode = 1;
