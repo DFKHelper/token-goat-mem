@@ -3,14 +3,13 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { join, sep } from "node:path";
 
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BUNDLE_PATH, runBundleSync } from "./support/bundle.js";
 import { runCli } from "./support/cli.js";
-import { OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
 import { CAPABLE_PROBE, installProbe, memProbe, OLD_PROBE, probeCalls, resetProbe, writeProbeTarget } from "./support/fakeProbe.js";
 import { deriveHookRoot, MEM_HOOK_IMPLIED_ARGS, registerHookCommand } from "../src/hookCommand.js";
 import { describeHookDivergence } from "../src/doctorWiring.js";
@@ -26,11 +25,8 @@ import {
   MEM_HOOK_INVOCATION_SHAPES,
   parseHookCommandSpec,
 } from "../src/wiring.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
-// Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
-vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
-// Matrix 8 scripts what a probe of the `mem` binary returns with `installProbe`; the other cases install nothing and reach the real `spawnProbe`.
+// A test scripts what a probe of the `mem` binary returns with `installProbe`; none of the cases here launches a real probe.
 vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 const RECALL_FALLBACK = `printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' "$?"`;
@@ -55,6 +51,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  resetProbe();
   vi.unstubAllEnvs();
   for (const dir of [root, home, binDir]) {
     rmSync(dir, { recursive: true, force: true });
@@ -95,18 +92,24 @@ describe("fitness: the frozen slug list", () => {
   });
 });
 
-describe("matrix 1: the new string on an old binary", () => {
-  const bash = spawnSync("bash", ["-c", "true"]).status === 0;
+// One launch at collection tells every bash-driven case whether bash is there.
+const bashOnPath = spawnSync("bash", ["-c", "true"]).status === 0;
 
-  it.skipIf(!bash)("exits 1 bare and prints the fallback, which the host surfaces instead of silence (plain and Windows forms)", () => {
-    writeFakeMem(binDir, OLD_MEM_SHIM);
+describe("matrix 1: the new string on an old binary", () => {
+  // The old binary is a shell function that returns 1, as Commander does for an unknown `hook` command: bash finds it with `command -v mem` and runs it in the same process, where a node shim cost three cold node starts (and an env launch each) on top of the three bash launches.
+  const OLD_MEM_FUNCTION = "mem() { return 1; }\n";
+
+  it.skipIf(!bashOnPath)("exits 1 bare and prints the fallback, which the host surfaces instead of silence (plain and Windows forms)", () => {
+    const oldMem = join(binDir, "old-mem.sh");
+    writeFileSync(oldMem, OLD_MEM_FUNCTION, "utf8");
+    const bashEnv = oldMem.split(sep).join("/");
     const missingBundle = "/nonexistent/token-goat-mem.mjs";
     const commands = [CLAUDE_HOOK_EVENTS[2]?.command, claudeHookEventsFor({ user: true, platform: "win32", bundlePath: missingBundle })[2]?.command] as string[];
     for (const command of commands) {
-      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", env: { ...process.env, PATH: `${binDir}${delimiter}${process.env["PATH"] ?? ""}` } });
+      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", env: { ...process.env, BASH_ENV: bashEnv } });
       expect(result.stdout).toContain("mem reflect failed (exit 1); run mem doctor");
     }
-    const bare = spawnSync("bash", ["-c", "mem hook stop"], { encoding: "utf8", env: { ...process.env, PATH: `${binDir}${delimiter}${process.env["PATH"] ?? ""}` } });
+    const bare = spawnSync("bash", ["-c", "mem hook stop"], { encoding: "utf8", env: { ...process.env, BASH_ENV: bashEnv } });
     expect(bare.status).toBe(1);
   });
 });
@@ -187,6 +190,7 @@ describe("matrix 5: the committed file and the no-downgrade guard", () => {
   });
 
   it("keeps a legacy file byte-stable until mem init runs (nothing but install writes settings)", async () => {
+    installProbe(CAPABLE_PROBE);
     writeSettings(projectSettingsPath(), LEGACY, true);
     const before = readFileSync(projectSettingsPath(), "utf8");
     await runCli(["doctor"]);
@@ -329,10 +333,8 @@ describe("end to end through the built bundle", () => {
     expect(BUNDLE_PATH).toContain("token-goat-mem.mjs");
   });
 
-  const bashOnPath = spawnSync("bash", ["-c", "true"]).status === 0;
-
   // Claude Code runs a hook command through bash on Windows too, so the direct-bundle string a win32 user-level install writes must work as written.
-  it.skipIf(!bashOnPath)("runs the win32 direct-bundle hook command through bash against the built bundle and emits TGMEM/2", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, async () => {
+  it.skipIf(!bashOnPath)("runs the win32 direct-bundle hook command through bash against the built bundle and emits TGMEM/2", async () => {
     const memHome = process.env["TOKEN_GOAT_MEM_HOME"] as string;
     const remembered = await runCli(["remember", "the quokka deploy token lives in vault", "--kind", "fact", "--scope", "project", "--root", root]);
     expect(remembered.exitCode ?? 0).toBe(0);

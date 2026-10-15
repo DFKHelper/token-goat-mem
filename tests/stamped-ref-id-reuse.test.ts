@@ -10,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { listAuditLogForFact } from "../src/db.js";
 import { runCli, type CliResult } from "./support/cli.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 /** Fake session UUID with entropy above the generic threshold, so only the labelled-identifier exemption decides each edit. */
 const U = "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b";
@@ -379,7 +378,7 @@ describe("audit log read order at an exact created_at tie", () => {
   });
 });
 
-describe("the .mem/allowlist remedy unblocks each fail-closed stamped-ref refusal", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("the .mem/allowlist remedy unblocks each fail-closed stamped-ref refusal", () => {
   const SENTENCE = "Remember that the staging box notes live in the wiki.";
   const EDITED_TEXT = `session id ${U}`;
   let root: string;

@@ -17,14 +17,21 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
+// A test scripts what a probe returns with `installProbe`; a test that installs nothing reaches the real `spawnProbe` (the cmd.exe quoting cases).
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
+
 import { spawnProbe } from "../src/probeSpawn.js";
-import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, isLegacyHookShape, parseHookCommandSpec } from "../src/wiring.js";
+import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, isLegacyHookShape, MEM_PROBE_TIMEOUT_MS, parseHookCommandSpec } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
-import { CAPABLE_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+import { CAPABLE_PROBE, installProbe, probeCalls, resetProbe, writeProbeTarget } from "./support/fakeProbe.js";
 
 const isWindows = process.platform === "win32";
-/** A launch budget a loaded machine cannot miss: process starts take several seconds here. */
-const LAUNCH_BUDGET_MS = 120_000;
+/** The budget handed to a probe whose verdict does not depend on it: a scripted probe never reads it, and a refused one never starts a process to spend it. */
+const BUDGET_MS = MEM_PROBE_TIMEOUT_MS;
+/** The budget of a probe that really launches an instant shim: it only bounds a hung launch (reported by the probe, inside the test timeout), and a shim that answers at once never spends it. */
+const HANG_BOUND_MS = 20_000;
+/** A `mem.cmd` that answers `--version` the moment cmd.exe runs it, so a really launched shim needs no second process and no clock decides what it said. */
+const INSTANT_SHIM = "@echo off\r\necho 0.0.0-test-shim\r\n";
 const ROOT_ARG = '--root "$CLAUDE_PROJECT_DIR"';
 const FALLBACK = 'echo "mem failed (exit $?); run mem doctor"';
 
@@ -81,7 +88,7 @@ describe("hook wrapper shapes accept only a plain subcommand word", () => {
   });
 });
 
-describe("a probe is never started for a subcommand that is not a plain token", { timeout: 300_000 }, () => {
+describe("a probe is never started for a subcommand that is not a plain token", () => {
   let dir: string;
 
   beforeEach(() => {
@@ -90,29 +97,33 @@ describe("a probe is never started for a subcommand that is not a plain token", 
   });
 
   afterEach(() => {
+    resetProbe();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
   });
 
   it("checkHookCapability refuses a subcommand carrying shell metacharacters and spawns nothing", () => {
-    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    installProbe(CAPABLE_PROBE);
+    writeProbeTarget(dir);
     const marker = join(dir, "marker.txt");
     const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
-    const result = checkHookCapability(binPath, { subcommand: `x"&echo>${slashed(marker)}&echo`, flags: ["--help"] }, LAUNCH_BUDGET_MS);
+    const result = checkHookCapability(binPath, { subcommand: `x"&echo>${slashed(marker)}&echo`, flags: ["--help"] }, BUDGET_MS);
     expect(result).toEqual({ capable: false, missing: [`x"&echo>${slashed(marker)}&echo`], refused: true });
+    expect(probeCalls()).toEqual([]);
     expect(spawned).toHaveLength(0);
     expect(existsSync(marker)).toBe(false);
   });
 
   it("checkHookCapability still probes an ordinary subcommand", () => {
-    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    installProbe(CAPABLE_PROBE);
+    writeProbeTarget(dir);
     const binPath = join(dir, isWindows ? "mem.cmd" : "mem");
-    expect(checkHookCapability(binPath, { subcommand: "recall", flags: ["--hint-format"] }, LAUNCH_BUDGET_MS)).toEqual({ capable: true, missing: [] });
-    expect(spawned.length).toBeGreaterThan(0);
+    expect(checkHookCapability(binPath, { subcommand: "recall", flags: ["--hint-format"] }, BUDGET_MS)).toEqual({ capable: true, missing: [] });
+    expect(probeCalls()).toEqual([{ bin: binPath, args: ["recall", "--help"], timeoutMs: BUDGET_MS }]);
   });
 
   for (const token of ['a"b', "a&b", "a|b", "a<b", "a>b", "a^b", "a%b", "a!b", "a\nb", "a\rb"]) {
     it.runIf(isWindows)(`spawnProbe refuses the argument ${JSON.stringify(token)} for a .cmd shim before any process starts`, () => {
-      const result = spawnProbe(join(dir, "mem.cmd"), [token, "--help"], 5000);
+      const result = spawnProbe(join(dir, "mem.cmd"), [token, "--help"], BUDGET_MS);
       expect(result.errorCode).toBe("EPROBEREFUSED");
       expect(result.status).toBeNull();
       expect(spawned).toHaveLength(0);
@@ -121,7 +132,7 @@ describe("a probe is never started for a subcommand that is not a plain token", 
 
   for (const char of ['"', "&", "^", "%", "|", "<", ">", "!"]) {
     it.runIf(isWindows)(`spawnProbe refuses a .cmd path carrying ${JSON.stringify(char)} before any process starts`, () => {
-      const result = spawnProbe(join(dir, `me${char}m`, "mem.cmd"), ["--help"], 5000);
+      const result = spawnProbe(join(dir, `me${char}m`, "mem.cmd"), ["--help"], BUDGET_MS);
       expect(result.errorCode).toBe("EPROBEREFUSED");
       expect(result.status).toBeNull();
       expect(spawned).toHaveLength(0);
@@ -131,38 +142,40 @@ describe("a probe is never started for a subcommand that is not a plain token", 
   it.runIf(isWindows)("spawnProbe still runs a .cmd shim whose path holds a space", () => {
     const spaced = join(dir, "with space");
     mkdirSync(spaced);
-    writeFakeMem(spaced, CAPABLE_MEM_SHIM);
-    const result = spawnProbe(join(spaced, "mem.cmd"), ["--version"], 120_000);
+    writeFileSync(join(spaced, "mem.cmd"), INSTANT_SHIM, "utf8");
+    const result = spawnProbe(join(spaced, "mem.cmd"), ["--version"], HANG_BOUND_MS);
     expect(result.errorCode).toBeUndefined();
     expect(result.status).toBe(0);
   });
 
   it.runIf(isWindows)("spawnProbe does not let a quote in an argument run a command through cmd.exe", () => {
-    writeFakeMem(dir, CAPABLE_MEM_SHIM);
+    writeFileSync(join(dir, "mem.cmd"), INSTANT_SHIM, "utf8");
     const marker = join(dir, "marker.txt");
-    const result = spawnProbe(join(dir, "mem.cmd"), [`x"&echo>${slashed(marker)}&echo`, "--help"], 5000);
+    const result = spawnProbe(join(dir, "mem.cmd"), [`x"&echo>${slashed(marker)}&echo`, "--help"], BUDGET_MS);
     expect(result.errorCode).toBe("EPROBEREFUSED");
     expect(existsSync(marker)).toBe(false);
   });
 
   it.runIf(isWindows)("spawnProbe still runs a .cmd shim with ordinary arguments", () => {
-    writeFakeMem(dir, CAPABLE_MEM_SHIM);
-    const result = spawnProbe(join(dir, "mem.cmd"), ["--version"], 120_000);
+    writeFileSync(join(dir, "mem.cmd"), INSTANT_SHIM, "utf8");
+    const result = spawnProbe(join(dir, "mem.cmd"), ["--version"], HANG_BOUND_MS);
     expect(result.errorCode).toBeUndefined();
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("0.0.0-test-shim");
   });
 });
 
-describe("a project hook's bundle is probed with the running node", { timeout: 300_000 }, () => {
+describe("a project hook's bundle is probed with the running node", () => {
   let dir: string;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "mem-bundle-probe-"));
     spawned.length = 0;
+    installProbe(CAPABLE_PROBE);
   });
 
   afterEach(() => {
+    resetProbe();
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
   });
 
@@ -170,25 +183,26 @@ describe("a project hook's bundle is probed with the running node", { timeout: 3
     const bundle = join(dir, "bundle.mjs");
     writeFileSync(bundle, 'process.stdout.write("session-start\\n");\n', "utf8");
     const command = `if [ -f "${slashed(bundle)}" ]; then node "${slashed(bundle)}" hook session-start || ${FALLBACK}; elif command -v mem >/dev/null 2>&1; then mem hook session-start || ${FALLBACK}; fi`;
-    const health = checkClaudeHookHealth([{ event: "SessionStart", command }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: LAUNCH_BUDGET_MS, trustBundles: true });
+    const health = checkClaudeHookHealth([{ event: "SessionStart", command }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: BUDGET_MS, trustBundles: true });
     expect(health.hooks[0]?.capable).toBe(true);
-    const launchers = spawned.map((call) => call[0]);
-    expect(launchers).toContain(process.execPath);
-    expect(launchers).not.toContain("node");
+    const launchers = probeCalls().map((call) => call.bin);
+    expect(launchers.length).toBeGreaterThan(0);
+    expect(launchers.every((launcher) => launcher === process.execPath)).toBe(true);
+    expect(probeCalls().every((call) => call.args[0] === slashed(bundle))).toBe(true);
   });
 
   it("never runs a bundle unless the caller vouches for the commands", () => {
     const marker = join(dir, "marker.txt");
     const bundle = join(dir, "evil.mjs");
     writeMarkerBundle(bundle, marker);
-    const health = checkClaudeHookHealth([{ event: "SessionStart", command: bundleHookCommand(bundle) }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: LAUNCH_BUDGET_MS });
+    const health = checkClaudeHookHealth([{ event: "SessionStart", command: bundleHookCommand(bundle) }], { pathEnv: dir, platform: isWindows ? "win32" : "linux", timeoutMs: BUDGET_MS });
     expect(health.hooks[0]?.capable).toBe(false);
-    expect(spawned.flatMap((call) => (Array.isArray(call[1]) ? call[1] : []))).not.toContain(slashed(bundle));
+    expect(probeCalls()).toEqual([]);
     expect(existsSync(marker)).toBe(false);
   });
 });
 
-describe("mem doctor with a hostile hook in a cloned project's settings.json", { timeout: 300_000 }, () => {
+describe("mem doctor with a hostile hook in a cloned project's settings.json", () => {
   let memHome: string;
   let toolRoot: string;
   let toolHome: string;
@@ -203,13 +217,13 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", {
     process.env["TOKEN_GOAT_MEM_HOME"] = memHome;
     process.env["TOKEN_GOAT_MEM_BACKUP_DIR"] = join(memHome, "backups");
     process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
-    process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"] = String(LAUNCH_BUDGET_MS);
+    installProbe(CAPABLE_PROBE);
     process.env["PATH"] = `${binDir}${delimiter}${dirname(process.execPath)}`;
   });
 
   afterEach(() => {
+    resetProbe();
     process.env["PATH"] = originalPath;
-    delete process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"];
     delete process.env["TOKEN_GOAT_MEM_HOME"];
     delete process.env["TOKEN_GOAT_MEM_BACKUP_DIR"];
     delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
@@ -219,7 +233,7 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", {
   });
 
   it("runs nothing the hook names", async () => {
-    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    writeProbeTarget(binDir);
     const marker = join(toolRoot, "marker.txt");
     const hostile = `mem x"&echo>${slashed(marker)}&echo ${ROOT_ARG}`;
     mkdirSync(join(toolRoot, ".claude"), { recursive: true });
@@ -230,10 +244,11 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", {
     const hooks = report.findings.filter((entry) => entry.check === "hooks");
     expect(hooks.some((entry) => entry.message.includes("SessionStart"))).toBe(true);
     expect(hooks.every((entry) => !entry.message.includes("&echo"))).toBe(true);
+    expect(probeCalls().some((call) => call.bin.includes("&echo") || call.args.some((arg) => arg.includes("&echo")))).toBe(false);
   });
 
   it("never executes a bundle file named by the project settings.json", async () => {
-    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    writeProbeTarget(binDir);
     const marker = join(toolRoot, "marker2.txt");
     const bundle = join(toolRoot, "evil.mjs");
     writeMarkerBundle(bundle, marker);
@@ -241,16 +256,18 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", {
     writeFileSync(join(toolRoot, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", __token_goat_mem: true, command: bundleHookCommand(bundle) }] }] } }), "utf8");
     await runCli(["doctor", "--json", "--root", toolRoot]);
     expect(existsSync(marker)).toBe(false);
+    expect(probeCalls().some((call) => call.bin.includes("evil.mjs") || call.args.some((arg) => arg.includes("evil.mjs")))).toBe(false);
   });
 
   it("still health-checks the bundle a user-level settings.json names", async () => {
-    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
-    const marker = join(toolRoot, "user-marker.txt");
+    writeProbeTarget(binDir);
     const bundle = join(toolRoot, "user-bundle.mjs");
-    writeMarkerBundle(bundle, marker);
+    writeFileSync(bundle, "", "utf8");
     mkdirSync(join(toolHome, ".claude"), { recursive: true });
     writeFileSync(join(toolHome, ".claude", "settings.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", __token_goat_mem: true, command: bundleHookCommand(bundle) }] }] } }), "utf8");
     await runCli(["doctor", "--json", "--root", toolRoot]);
-    expect(existsSync(marker)).toBe(true);
+    const bundleProbes = probeCalls().filter((call) => call.args.includes(slashed(bundle)));
+    expect(bundleProbes.length).toBeGreaterThan(0);
+    expect(bundleProbes.every((call) => call.bin === process.execPath)).toBe(true);
   });
 });

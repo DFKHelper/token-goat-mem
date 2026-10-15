@@ -1,5 +1,5 @@
 /** End-to-end tests for the facet layer's CLI and storage surface: `mem facets`, the write path that populates `fact_terms`, and `mem recall --entity`. Driven through the real `run()` against a real database. The one thing these tests must actually prove is that the layer earns its existence -- that `--entity src/retrieval.ts` distinguishes a fact BM25 cannot -- so that case is pinned twice: once as a positive hit, and once as the demonstration that the lexical query alone does not tell the two facts apart. */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,7 +7,10 @@ import { join } from "node:path";
 import { extractRememberedId, runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, listTermsForFact, openStorage } from "../src/storage.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
+import { CAPABLE_PROBE, installProbe, resetProbe } from "./support/fakeProbe.js";
+
+// A `mem doctor` run probes the `mem` on PATH; a scripted probe answers it, so no process starts and no budget decides a verdict.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let home: string;
 let root: string;
@@ -16,9 +19,11 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-facets-home-"));
   root = mkdtempSync(join(tmpdir(), "mem-facets-root-"));
   process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
+  resetProbe();
   delete process.env["TOKEN_GOAT_MEM_HOME"];
   rmSync(home, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
@@ -180,7 +185,7 @@ describe("fact_terms write path", () => {
   });
 });
 
-describe("mem facets", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem facets", () => {
   it("backfills facts that have no terms and reports what it did", async () => {
     const id = await remember("the ranking lives in src/retrieval.ts");
     // Simulate a store written before the facet layer existed: drop the rows the write path added, and the extraction record with them (terms_checked_at predates the facet layer too).
