@@ -156,7 +156,36 @@ describe("openDb schema commits", () => {
 
     // Read-only hook opens land here constantly: wrapping the no-op schema statements in a transaction would take the write lock for each of them and queue them behind any writer.
     expect(transactionModes).toEqual([]);
-    expect(events.filter((event) => event.kind === "write").length).toBeGreaterThan(0);
     expect(events.filter((event) => event.kind === "write" && event.inTransaction)).toEqual([]);
+  });
+
+  it("issues no statement that takes the write lock when an existing store already has its epoch row", () => {
+    openDb(dbPath(), { autoSnapshot: false }).close();
+
+    const { events } = traceWrites(() => {
+      openDb(dbPath(), { autoSnapshot: false }).close();
+    });
+
+    // A `CREATE ... IF NOT EXISTS` on an object that already exists is a no-op SQLite answers from the schema without the write lock; an `INSERT OR IGNORE` of a row that exists is not, and queued every existing-store open behind any writer.
+    const lockTaking = events.filter((event) => event.kind === "write" && !/^\s*CREATE\s+(TABLE|INDEX)\s+IF\s+NOT\s+EXISTS\b/iu.test(event.sql));
+    expect(lockTaking).toEqual([]);
+  });
+
+  it("seeds the epoch row of an existing store that lacks one", () => {
+    const seed = openDb(dbPath(), { autoSnapshot: false });
+    seed.prepare("DELETE FROM meta WHERE key = 'epoch'").run();
+    seed.close();
+
+    const { events } = traceWrites(() => {
+      openDb(dbPath(), { autoSnapshot: false }).close();
+    });
+
+    expect(events.filter((event) => event.kind === "write" && /INSERT OR IGNORE INTO meta\b/iu.test(event.sql))).toHaveLength(1);
+    const check = new Database(dbPath(), { readonly: true });
+    try {
+      expect(check.prepare("SELECT value FROM meta WHERE key = 'epoch'").get()).toEqual({ value: "0" });
+    } finally {
+      check.close();
+    }
   });
 });
