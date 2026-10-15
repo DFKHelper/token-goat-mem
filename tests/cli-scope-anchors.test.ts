@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
 import { extractRememberedId, runCli } from "./support/cli.js";
+import { writeCheckout } from "./support/gitCheckout.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { insertFact, openStorage } from "../src/storage.js";
 import { clearProjectIdentityCache, PROJECT_IDENTITY_ENV } from "../src/projectIdentity.js";
@@ -885,20 +885,9 @@ describe("regression: mem list distinguishes facts bound to different projects",
 describe("project identity (scope binding across checkouts)", () => {
   let work: string;
 
-  function git(cwd: string, ...args: string[]): void {
-    execFileSync("git", args, { cwd, stdio: "pipe" });
-  }
-
   function makeRepo(name: string, remote: string | null = "https://github.com/acme/widget.git"): string {
-    const repo = join(work, name);
-    mkdirSync(repo, { recursive: true });
-    // Identity is read from .git/config (src/projectIdentity.ts), so a real init and a remote are all a checkout needs; a user config, a commit and a staged file would each cost another process launch, which is seconds apiece on a loaded machine.
-    git(repo, "init", "-q");
-    writeFileSync(join(repo, "file.txt"), "x", "utf8");
-    if (remote !== null) {
-      git(repo, "remote", "add", "origin", remote);
-    }
-    return repo;
+    // Identity is read from .git/config (src/projectIdentity.ts), so a written config with an origin is all a checkout needs.
+    return writeCheckout(join(work, name), remote === null ? {} : { remotes: { origin: remote } });
   }
 
   beforeEach(() => {

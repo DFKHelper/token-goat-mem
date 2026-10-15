@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { execFileSync } from "node:child_process";
 import type Database from "better-sqlite3";
 
 import { findSupersedingFactId } from "../src/db.js";
@@ -11,6 +10,7 @@ import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projec
 import type { NewFact } from "../src/types.js";
 import { importFromJson, JsonImportError, planImportFromJson } from "../src/exportImport.js";
 import type { ImportOutcome } from "../src/import.js";
+import { writeCheckout } from "./support/gitCheckout.js";
 
 /** The `reason` of a `skipped_error` outcome, or "" for any other outcome, so a `toContain` on it fails rather than reading a field the outcome does not carry. */
 function skipReason(outcome: ImportOutcome | undefined): string {
@@ -504,18 +504,10 @@ describe("importFromJson", () => {
     const cloneB = mkdtempSync(join(tmpdir(), "mem-exportimport-cloneb-"));
     const unrelated = mkdtempSync(join(tmpdir(), "mem-exportimport-unrelated-"));
     try {
-      for (const clone of [cloneA, cloneB, unrelated]) {
-        execFileSync("git", ["init", "-q"], { cwd: clone, stdio: "pipe" });
-        execFileSync("git", ["config", "user.email", "t@example.com"], { cwd: clone, stdio: "pipe" });
-        execFileSync("git", ["config", "user.name", "t"], { cwd: clone, stdio: "pipe" });
-        writeFileSync(join(clone, "file.txt"), "x", "utf8");
-        execFileSync("git", ["add", "-A"], { cwd: clone, stdio: "pipe" });
-        execFileSync("git", ["commit", "-qm", "init"], { cwd: clone, stdio: "pipe" });
-      }
       const sharedRemote = "https://github.com/acme/widget.git";
-      execFileSync("git", ["remote", "add", "origin", sharedRemote], { cwd: cloneA, stdio: "pipe" });
-      execFileSync("git", ["remote", "add", "origin", sharedRemote], { cwd: cloneB, stdio: "pipe" });
-      execFileSync("git", ["remote", "add", "origin", "https://github.com/acme/gadget.git"], { cwd: unrelated, stdio: "pipe" });
+      writeCheckout(cloneA, { remotes: { origin: sharedRemote } });
+      writeCheckout(cloneB, { remotes: { origin: sharedRemote } });
+      writeCheckout(unrelated, { remotes: { origin: "https://github.com/acme/gadget.git" } });
       clearProjectIdentityCache();
       const identityOfA = resolveProjectIdentity(cloneA);
       expect(identityOfA).not.toBeNull();

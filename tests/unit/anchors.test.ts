@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { _clearAnchorMemoForTests, clearAnchorCaches, evaluateAnchor, isGenuineAbsence } from "../../src/anchors.js";
 import { validateAnchorSyntax } from "../../src/capture.js";
@@ -20,6 +20,28 @@ afterEach(() => {
 
 function runGit(args: readonly string[], cwd: string): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+let trackedTemplate: string;
+
+beforeAll(() => {
+  // The git anchors read a real index and HEAD, so one real repository is built once (three git launches, seconds apiece on a loaded machine) and each test copies it instead of running its own init and add.
+  trackedTemplate = mkdtempSync(join(tmpdir(), "mem-anchors-template-"));
+  for (const file of ["tracked.txt", "Tracked.ts"]) {
+    writeFileSync(join(trackedTemplate, file), "x");
+  }
+  runGit(["init", "--initial-branch=main"], trackedTemplate);
+  runGit(["add", "tracked.txt", "Tracked.ts"], trackedTemplate);
+  runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], trackedTemplate);
+});
+
+afterAll(() => {
+  rmSync(trackedTemplate, { recursive: true, force: true });
+});
+
+/** Copies the template repository (branch `main`, committed `tracked.txt` and `Tracked.ts`) into `into`. */
+function copyTrackedTemplate(into: string): void {
+  cpSync(trackedTemplate, into, { recursive: true });
 }
 
 describe("evaluateAnchor", () => {
@@ -140,21 +162,15 @@ describe("evaluateAnchor", () => {
     });
 
     it("affirms a tracked file and contradicts an untracked file inside a repo", () => {
-      runGit(["init", "-q"], root);
-      writeFileSync(join(root, "tracked.txt"), "x");
+      copyTrackedTemplate(root);
       writeFileSync(join(root, "untracked.txt"), "y");
-      runGit(["add", "tracked.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
 
       expect(evaluateAnchor("git-tracked tracked.txt", root)).toBe("affirmed");
       expect(evaluateAnchor("git-tracked untracked.txt", root)).toBe("contradicted");
     });
 
     it("returns unverified once the deadline has passed", () => {
-      runGit(["init", "-q"], root);
-      writeFileSync(join(root, "tracked.txt"), "x");
-      runGit(["add", "tracked.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+      copyTrackedTemplate(root);
 
       expect(evaluateAnchor("git-tracked tracked.txt", root, Date.now() - 1)).toBe("unverified");
     });
@@ -206,9 +222,7 @@ describe("case sensitivity of glob-exists / git-tracked", () => {
   });
 
   it("git-tracked matches a differently-cased path exactly where the filesystem does, and is unverified rather than contradicted elsewhere (Item 4)", () => {
-    writeFileSync(join(root, "Tracked.ts"), "x");
-    runGit(["init"], root);
-    runGit(["add", "Tracked.ts"], root);
+    copyTrackedTemplate(root);
     _clearAnchorMemoForTests();
 
     expect(evaluateAnchor("git-tracked Tracked.ts", root)).toBe("affirmed");
@@ -218,10 +232,8 @@ describe("case sensitivity of glob-exists / git-tracked", () => {
   });
 
   it("git-tracked still contradicts a path that is in the tree but not in the index", () => {
-    writeFileSync(join(root, "Tracked.ts"), "x");
+    copyTrackedTemplate(root);
     writeFileSync(join(root, "Untracked.ts"), "x");
-    runGit(["init"], root);
-    runGit(["add", "Tracked.ts"], root);
     _clearAnchorMemoForTests();
 
     expect(evaluateAnchor("git-tracked Untracked.ts", root)).toBe("contradicted");
@@ -251,7 +263,7 @@ describe("git anchors: untrusted .git machinery", () => {
     // A real repository somewhere else on disk, standing in for whatever a planted link would target.
     const elsewhere = mkdtempSync(join(tmpdir(), "mem-anchors-elsewhere-"));
     try {
-      runGit(["init", "--initial-branch=main"], elsewhere);
+      copyTrackedTemplate(elsewhere);
       // Sanity: read directly, the branch is knowable -- so a later "unverified" is the refusal talking, not an unreadable fixture.
       expect(evaluateAnchor("git-branch-is main", elsewhere)).toBe("affirmed");
 
@@ -266,7 +278,7 @@ describe("git anchors: untrusted .git machinery", () => {
   it.skipIf(isWindows)("refuses a .git file whose gitdir: pointer resolves to a symlink", () => {
     const elsewhere = mkdtempSync(join(tmpdir(), "mem-anchors-elsewhere-"));
     try {
-      runGit(["init", "--initial-branch=main"], elsewhere);
+      copyTrackedTemplate(elsewhere);
       const linkPath = join(root, "linked-gitdir");
       symlinkSync(join(elsewhere, ".git"), linkPath, "dir");
       writeFileSync(join(root, ".git"), `gitdir: ${linkPath}\n`);
@@ -281,7 +293,7 @@ describe("git anchors: untrusted .git machinery", () => {
     // A real gitdir the pointer resolves to, so the pre-cap behaviour is a genuine "affirmed" and the post-cap "unverified" can only be the size check talking.
     const elsewhere = mkdtempSync(join(tmpdir(), "mem-anchors-gitdir-"));
     try {
-      runGit(["init", "--initial-branch=main"], elsewhere);
+      copyTrackedTemplate(elsewhere);
       const pointer = `gitdir: ${join(elsewhere, ".git")}\n`;
       writeFileSync(join(root, ".git"), pointer);
       clearAnchorCaches();
@@ -297,9 +309,7 @@ describe("git anchors: untrusted .git machinery", () => {
   });
 
   it("refuses an oversized .git/index instead of reading it whole into memory", () => {
-    runGit(["init", "--initial-branch=main"], root);
-    writeFileSync(join(root, "tracked.txt"), "content");
-    runGit(["add", "tracked.txt"], root);
+    copyTrackedTemplate(root);
     clearAnchorCaches();
     // A genuinely parseable index, so the assertion below is about size alone.
     expect(evaluateAnchor("git-tracked tracked.txt", root)).toBe("affirmed");

@@ -1,7 +1,6 @@
-/** Unit tests for src/projectIdentity.ts. Real repositories on disk rather than mocks: the module's whole job is reading git's own layout (pointer files, `commondir`, config sections), and a mocked filesystem would only assert that the mock matches this file's idea of that layout. `git init` is cheap enough to use the real thing. */
+/** Unit tests for src/projectIdentity.ts. Checkouts written to disk rather than mocks: the module's whole job is reading git's own layout (pointer files, `commondir`, config sections), and tests/support/gitCheckout.ts writes exactly those files with fs, so no test launches a git process (seconds apiece on a loaded machine). */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
@@ -16,27 +15,13 @@ import {
   resolveProjectIdentity,
 } from "../../src/projectIdentity.js";
 import { makeFact } from "../support/fact.js";
+import { writeCheckout, writeWorktree } from "../support/gitCheckout.js";
 
 let dir: string;
 
-function git(cwd: string, ...args: string[]): void {
-  execFileSync("git", args, { cwd, stdio: "pipe" });
-}
-
-/** A repository with one commit and, unless `remote` is null, an `origin` pointing at it. */
+/** A checkout with an `origin` pointing at `remote`, unless it is null. */
 function makeRepo(name: string, remote: string | null = "https://github.com/acme/widget.git"): string {
-  const repo = join(dir, name);
-  mkdirSync(repo, { recursive: true });
-  git(repo, "init", "-q");
-  git(repo, "config", "user.email", "t@example.com");
-  git(repo, "config", "user.name", "t");
-  writeFileSync(join(repo, "file.txt"), "x", "utf8");
-  git(repo, "add", "-A");
-  git(repo, "commit", "-qm", "init");
-  if (remote !== null) {
-    git(repo, "remote", "add", "origin", remote);
-  }
-  return repo;
+  return writeCheckout(join(dir, name), remote === null ? {} : { remotes: { origin: remote } });
 }
 
 beforeEach(() => {
@@ -136,8 +121,7 @@ describe("resolveProjectIdentity", () => {
   it("gives a worktree the same identity as its main checkout", () => {
     // The worktree's own git directory holds no config -- the remote lives in the main repository, reachable only through `commondir`. Without that step every worktree reads as remote-less, and a worktree is one of the three cases this module exists for.
     const repo = makeRepo("repo");
-    const worktree = join(dir, "wt");
-    git(repo, "worktree", "add", "-q", worktree, "-b", "feature");
+    const worktree = writeWorktree(repo, join(dir, "wt"));
     expect(resolveProjectIdentity(worktree)).toBe(resolveProjectIdentity(repo));
   });
 
@@ -163,15 +147,10 @@ describe("resolveProjectIdentity", () => {
 
   it("refuses to guess between several remotes when none is named origin", () => {
     // Picking one would make identity depend on config file ordering.
-    const repo = makeRepo("multi", null);
-    git(repo, "remote", "add", "upstream", "https://github.com/acme/widget.git");
-    git(repo, "remote", "add", "fork", "https://github.com/me/widget.git");
-    clearProjectIdentityCache();
+    const repo = writeCheckout(join(dir, "multi"), { remotes: { upstream: "https://github.com/acme/widget.git", fork: "https://github.com/me/widget.git" } });
     expect(resolveProjectIdentity(repo)).toBeNull();
     // One unambiguous remote is enough, even when it is not called origin.
-    const single = makeRepo("single", null);
-    git(single, "remote", "add", "upstream", "https://github.com/acme/widget.git");
-    clearProjectIdentityCache();
+    const single = writeCheckout(join(dir, "single"), { remotes: { upstream: "https://github.com/acme/widget.git" } });
     expect(resolveProjectIdentity(single)).toBe("github.com/acme/widget#.");
   });
 
@@ -201,9 +180,7 @@ describe("resolveProjectIdentity", () => {
   });
 
   it("prefers origin when several remotes exist", () => {
-    const repo = makeRepo("origin-wins");
-    git(repo, "remote", "add", "fork", "https://github.com/me/widget.git");
-    clearProjectIdentityCache();
+    const repo = writeCheckout(join(dir, "origin-wins"), { remotes: { fork: "https://github.com/me/widget.git", origin: "https://github.com/acme/widget.git" } });
     expect(resolveProjectIdentity(repo)).toBe("github.com/acme/widget#.");
   });
 

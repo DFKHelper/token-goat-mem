@@ -1,6 +1,5 @@
 /** Tests for the token-goat integration seam (src/integration-seam.ts, design plan Section 4). Focus, per the design plan: - happy path: a well-formed TGMEM/<n> hint-format payload for an in-scope, affirmed fact. - fail-open on internal error: buildHintFormat() must never throw -- any internal failure (unreadable db, retrieval exception) resolves to an empty, well-formed result. - contested facts excluded from hint-format (Section 4: "Contested / low-trust / pending facts are excluded from --hint-format entirely"). */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -10,6 +9,7 @@ import { buildHintFormat, STORE_UNREADABLE_FOOTER_LINE, TGMEM_HEADER } from "../
 import type { HintFormatOptions, HintFormatResult } from "../src/integration-seam.js";
 import { clearProjectIdentityCache, resolveProjectIdentity } from "../src/projectIdentity.js";
 import type { Fact } from "../src/types.js";
+import { writeCheckout } from "./support/gitCheckout.js";
 
 /** A soft budget no test machine can exceed. */
 const NO_TRUNCATION_BUDGET_MS = 3_600_000;
@@ -461,22 +461,9 @@ describe("regression: the seam's row mapper projects every column retrieval depe
     // Mirrors the git fixture in tests/cli-scope-anchors.test.ts's "project identity" describe block. Without `scope_repo` in the SELECT, `toFact` leaves `scopeRepo` undefined, `isInScope` calls `identityMatches(undefined, root)`, which is always false, and the fact never surfaces from checkout `b` even though it is the exact case `mem init`'s SessionStart/UserPromptSubmit hooks (the only unprompted consumer of this path) are meant to cover.
     const work = mkdtempSync(join(tmpdir(), "mem-seam-worktree-"));
     try {
-      function git(cwd: string, ...args: string[]): void {
-        execFileSync("git", args, { cwd, stdio: "pipe" });
-      }
-      function makeRepo(name: string): string {
-        const repo = join(work, name);
-        mkdirSync(repo, { recursive: true });
-        // Few git launches on purpose: each costs 1-10 s on a scanned Windows machine, so identity goes in per-command `-c` flags and the commit is empty rather than a config + add + commit chain.
-        git(repo, "init", "-q");
-        git(repo, "-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init");
-        git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
-        return repo;
-      }
-
       clearProjectIdentityCache();
-      const a = makeRepo("a");
-      const b = makeRepo("b");
+      const a = writeCheckout(join(work, "a"), { remotes: { origin: "https://github.com/acme/widget.git" } });
+      const b = writeCheckout(join(work, "b"), { remotes: { origin: "https://github.com/acme/widget.git" } });
       const dbPath = join(work, "mem.db");
 
       const db = openStorage(dbPath);

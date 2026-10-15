@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   _clearAnchorMemoForTests,
@@ -47,6 +47,29 @@ afterEach(() => {
 
 function runGit(args: readonly string[], cwd: string): void {
   execFileSync("git", args, { cwd, stdio: "ignore" });
+}
+
+let trackedTemplate: string;
+
+beforeAll(() => {
+  // The git-tracked anchor reads a real index, so one real repository is built once (three git launches, seconds apiece on a loaded machine) and each test copies it instead of running its own init, add and commit.
+  trackedTemplate = mkdtempSync(join(tmpdir(), "mem-anchors-template-"));
+  mkdirSync(join(trackedTemplate, "src"));
+  for (const file of ["f.txt", "tracked.txt", join("src", "auth.ts")]) {
+    writeFileSync(join(trackedTemplate, file), "x");
+  }
+  runGit(["init", "-q", "-b", "main"], trackedTemplate);
+  runGit(["add", "f.txt", "tracked.txt", "src/auth.ts"], trackedTemplate);
+  runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], trackedTemplate);
+});
+
+afterAll(() => {
+  rmSync(trackedTemplate, { recursive: true, force: true });
+});
+
+/** Copies the template repository (branch `main`, committed `f.txt`, `tracked.txt` and `src/auth.ts`) into `into`. */
+function copyTrackedTemplate(into: string): void {
+  cpSync(trackedTemplate, into, { recursive: true });
 }
 
 function touch(path: string, when: string): void {
@@ -266,10 +289,7 @@ describe("evaluateAnchor", () => {
 
   describe("git-branch-is (happy path)", () => {
     it("affirms the checked-out branch and contradicts a different one", () => {
-      runGit(["init", "-q", "-b", "main"], root);
-      writeFileSync(join(root, "f.txt"), "x");
-      runGit(["add", "f.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+      copyTrackedTemplate(root);
 
       expect(evaluateAnchor("git-branch-is main", root)).toBe("affirmed");
       expect(evaluateAnchor("git-branch-is develop", root)).toBe("contradicted");
@@ -287,44 +307,31 @@ describe("evaluateAnchor", () => {
     });
 
     it("affirms a tracked file and contradicts an untracked file inside a repo", () => {
-      runGit(["init", "-q"], root);
-      writeFileSync(join(root, "tracked.txt"), "x");
+      copyTrackedTemplate(root);
       writeFileSync(join(root, "untracked.txt"), "y");
-      runGit(["add", "tracked.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
 
       expect(evaluateAnchor("git-tracked tracked.txt", root)).toBe("affirmed");
       expect(evaluateAnchor("git-tracked untracked.txt", root)).toBe("contradicted");
     });
 
     it("returns unverified once the deadline has already passed", () => {
-      runGit(["init", "-q"], root);
-      writeFileSync(join(root, "tracked.txt"), "x");
-      runGit(["add", "tracked.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+      copyTrackedTemplate(root);
 
       expect(evaluateAnchor("git-tracked tracked.txt", root, Date.now() - 1)).toBe("unverified");
     });
 
     it("affirms a directory anchor when every file under it is tracked (Item 1: a directory is never itself an index entry)", () => {
       // Before the fix, `paths.has(relPath)` looked `src` up exactly against the index's *file* entries -- a directory is never itself an entry, so this fell straight through to `contradicted` even though `src/auth.ts` was the fixture's only file and was fully tracked.
-      mkdirSync(join(root, "src"), { recursive: true });
-      writeFileSync(join(root, "src", "auth.ts"), "x");
-      runGit(["init", "-q"], root);
-      runGit(["add", "src/auth.ts"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+      copyTrackedTemplate(root);
 
       expect(evaluateAnchor("git-tracked src", root)).toBe("affirmed");
       expect(evaluateAnchor("git-tracked src/auth.ts", root)).toBe("affirmed");
     });
 
     it("still contradicts a directory anchor when nothing under it is tracked", () => {
+      copyTrackedTemplate(root);
       mkdirSync(join(root, "untracked-dir"), { recursive: true });
       writeFileSync(join(root, "untracked-dir", "f.txt"), "x");
-      writeFileSync(join(root, "tracked.txt"), "x");
-      runGit(["init", "-q"], root);
-      runGit(["add", "tracked.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
 
       expect(evaluateAnchor("git-tracked untracked-dir", root)).toBe("contradicted");
     });
@@ -621,10 +628,7 @@ describe("evaluateAnchor", () => {
         "contradicted",
       );
 
-      runGit(["init", "-q"], root);
-      writeFileSync(join(root, "tracked.txt"), "x");
-      runGit(["add", "tracked.txt"], root);
-      runGit(["-c", "user.email=test@test.local", "-c", "user.name=test", "commit", "-q", "-m", "init"], root);
+      copyTrackedTemplate(root);
       expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("affirmed");
       const gitKey = store.get(root, "git-tracked tracked.txt");
       expect(gitKey).toBeDefined();

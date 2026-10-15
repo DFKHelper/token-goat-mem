@@ -4,8 +4,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 import { extractRememberedId, extractSuggestedId, runCli } from "./support/cli.js";
+import { writeCheckout } from "./support/gitCheckout.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
@@ -1317,17 +1317,9 @@ describe("mem remember reaffirms rather than duplicating", () => {
 
   it("reaffirms a project fact restated from a second checkout of the same repository, instead of duplicating it", async () => {
     // AGENTS.md documents reaffirm as keying on "scope binding", not the literal scope_root path -- that stricter wording is reserved there for contradiction bucketing. A project fact survives a second clone/worktree for recall (scope_root OR scope_repo); restating it from that same second checkout has to hit the same fact, not insert a duplicate `mem recall` then lists twice.
-    function git(cwd: string, ...args: string[]): void {
-      execFileSync("git", args, { cwd, stdio: "pipe" });
-    }
     function makeCheckout(name: string): string {
-      const repo = join(work, name);
-      mkdirSync(repo, { recursive: true });
-      // Identity is read from .git/config (src/projectIdentity.ts), so a real init and a remote are all a checkout needs; a user config, a commit and a staged file would each cost another process launch, which is seconds apiece on a loaded machine.
-      git(repo, "init", "-q");
-      writeFileSync(join(repo, "file.txt"), "x", "utf8");
-      git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
-      return repo;
+      // Identity is read from .git/config (src/projectIdentity.ts), so a written config with an origin is all a checkout needs.
+      return writeCheckout(join(work, name), { remotes: { origin: "https://github.com/acme/widget.git" } });
     }
     const work = mkdtempSync(join(tmpdir(), "mem-reaffirm-identity-"));
     try {
