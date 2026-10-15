@@ -42,13 +42,13 @@ describe("mem doctor (read-only health check)", () => {
     originalCwd = process.cwd();
     wiringRoot = mkdtempSync(join(tmpdir(), "mem-cli-doctor-root-"));
     wiringHome = mkdtempSync(join(tmpdir(), "mem-cli-doctor-home-"));
-    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = wiringHome;
+    vi.stubEnv("TOKEN_GOAT_MEM_WIRING_HOME", wiringHome);
     process.chdir(wiringRoot);
   });
 
   afterEach(() => {
     process.chdir(originalCwd);
-    delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    vi.unstubAllEnvs();
     rmSync(wiringRoot, { recursive: true, force: true });
     rmSync(wiringHome, { recursive: true, force: true });
   });
@@ -254,7 +254,7 @@ describe("mem init/uninstall", () => {
     // Separate fixture dirs from `home` (mem's own TOKEN_GOAT_MEM_HOME data dir) -- these are the fake "other tool" config root and home the wiring commands read/write, and must never resolve to the real ~/.claude, real VS Code config, or real project files.
     toolRoot = mkdtempSync(join(tmpdir(), "mem-cli-wiring-root-"));
     toolHome = mkdtempSync(join(tmpdir(), "mem-cli-wiring-home-"));
-    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
+    vi.stubEnv("TOKEN_GOAT_MEM_WIRING_HOME", toolHome);
 
     // `mem init claude-code`'s pre-flight resolves whatever `mem` binary is actually on PATH and checks it against the hooks it's about to write (see wiring.ts's `checkClaudeHookHealth`). These tests are about the config-writing behavior, not that check, so a `mem` file that a capable scripted probe answers for is put ahead of the real PATH -- real end-to-end coverage of the check itself (a shim that *doesn't* support a flag) lives in its own describe block below. Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in this file's PATH-independent init tests still need) resolvable.
     fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-"));
@@ -264,7 +264,7 @@ describe("mem init/uninstall", () => {
   });
 
   afterEach(() => {
-    delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    vi.unstubAllEnvs();
     process.env["PATH"] = originalPath;
     rmSync(fakeMemDir, { recursive: true, force: true });
     rmSync(toolRoot, { recursive: true, force: true });

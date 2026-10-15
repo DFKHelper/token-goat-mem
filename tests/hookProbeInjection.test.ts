@@ -197,7 +197,7 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", (
     binDir = mkdtempSync(join(tmpdir(), "mem-inject-bin-"));
     process.env["TOKEN_GOAT_MEM_HOME"] = memHome;
     process.env["TOKEN_GOAT_MEM_BACKUP_DIR"] = join(memHome, "backups");
-    process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
+    vi.stubEnv("TOKEN_GOAT_MEM_WIRING_HOME", toolHome);
     installProbe(CAPABLE_PROBE);
     process.env["PATH"] = `${binDir}${delimiter}${dirname(process.execPath)}`;
   });
@@ -207,7 +207,7 @@ describe("mem doctor with a hostile hook in a cloned project's settings.json", (
     process.env["PATH"] = originalPath;
     delete process.env["TOKEN_GOAT_MEM_HOME"];
     delete process.env["TOKEN_GOAT_MEM_BACKUP_DIR"];
-    delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
+    vi.unstubAllEnvs();
     for (const path of [memHome, toolRoot, toolHome, binDir]) {
       rmSync(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
     }
