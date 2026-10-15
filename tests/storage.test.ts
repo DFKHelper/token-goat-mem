@@ -47,13 +47,14 @@ import {
 import { hashFactText } from "../src/factText.js";
 import { addColumn } from "../src/migrations.js";
 import type { NewFact } from "../src/types.js";
+import { openTemplateStore } from "./support/templateStore.js";
 
 let root: string;
 let db: Database.Database;
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-storage-test-"));
-  db = openStorage(join(root, "mem.db"));
+  db = openTemplateStore(join(root, "mem.db"));
 });
 
 afterEach(() => {

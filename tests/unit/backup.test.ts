@@ -1,11 +1,11 @@
 /** The automatic snapshot every connection open takes of an existing store (src/backup.ts, called from src/db.ts's `openDb`): where snapshots land, when one is taken or skipped, what is kept, and that a failure to take one never costs the caller its database. Snapshot age is read from the file name, not the file's mtime, so a test ages a snapshot by renaming it rather than by waiting a day. */
 import Database from "better-sqlite3";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { AUTO_SNAPSHOT_CLAIM, AUTO_SNAPSHOTS_KEPT, listSnapshots, snapshotFileName, takeSnapshot } from "../../src/backup.js";
+import { AUTO_SNAPSHOT_CLAIM, AUTO_SNAPSHOTS_KEPT, listSnapshots, snapshotFileName, takeSnapshot, type Snapshot } from "../../src/backup.js";
 import { BACKUP_DIR_ENV, resolveBackupDir } from "../../src/db.js";
 import { describeBackups } from "../../src/doctor.js";
 import { MS_PER_DAY } from "../../src/timeUtils.js";
@@ -131,24 +131,36 @@ describe("automatic snapshot on open", () => {
   });
 
   it(`keeps the newest ${String(AUTO_SNAPSHOTS_KEPT)} automatic snapshots and every explicit one`, () => {
-    writeFacts(1);
+    // Pruning reads only the names in the backup directory (listSnapshots), so the older automatic snapshots are one real copy renamed; the two real snapshots are that copy and the automatic one the final open takes.
     const db = openStorage(dbPath);
+    let manual: Snapshot;
     try {
-      takeSnapshot(db, backupDir, "manual");
+      insertFact(db, { text: "first fact about the build", kind: "fact", scope: "global", source_type: "user" });
+      manual = takeSnapshot(db, backupDir, "manual");
+      insertFact(db, { text: "second fact about the build", kind: "fact", scope: "global", source_type: "user" });
     } finally {
       db.close();
     }
-    for (let i = 0; i < AUTO_SNAPSHOTS_KEPT + 3; i += 1) {
-      ageSnapshots(2);
-      writeFacts(1, `round ${String(i)}`);
+    const now = Date.now();
+    const olderAutos: string[] = [];
+    for (let i = 0; i < AUTO_SNAPSHOTS_KEPT + 2; i += 1) {
+      const name = snapshotFileName(new Date(now - (i + 2) * MS_PER_DAY), manual.epoch, "auto");
+      copyFileSync(manual.path, join(backupDir, name));
+      olderAutos.push(name);
     }
+    // The explicit snapshot is older than every automatic one, so a prune that counted it would drop a different set.
+    renameSync(manual.path, join(backupDir, snapshotFileName(new Date(now - 40 * MS_PER_DAY), manual.epoch, "manual")));
+
+    // The store has changed since the newest snapshot, which is over a day old: this open takes the automatic snapshot and prunes.
+    reopen();
 
     const snapshots = listSnapshots(backupDir);
-    expect(snapshots.filter((snapshot) => snapshot.reason === "auto")).toHaveLength(AUTO_SNAPSHOTS_KEPT);
+    const autos = snapshots.filter((snapshot) => snapshot.reason === "auto");
     expect(snapshots.filter((snapshot) => snapshot.reason === "manual")).toHaveLength(1);
-    // The survivors are the newest: the highest epochs, not the first ones taken.
-    const autoEpochs = snapshots.filter((snapshot) => snapshot.reason === "auto").map((snapshot) => snapshot.epoch);
-    expect(Math.max(...autoEpochs)).toBe(getEpochOf(dbPath) - 1);
+    // The survivors are the newest: the one just taken and the newest copies, not the oldest ones.
+    expect(autos.map((snapshot) => snapshot.name).slice(1)).toEqual(olderAutos.slice(0, AUTO_SNAPSHOTS_KEPT - 1));
+    expect(autos).toHaveLength(AUTO_SNAPSHOTS_KEPT);
+    expect(autos[0]?.epoch).toBe(getEpochOf(dbPath));
   });
 
   it("snapshots the store before a pending migration touches it, even with a fresh snapshot on hand", () => {

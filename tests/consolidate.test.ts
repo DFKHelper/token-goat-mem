@@ -6,6 +6,8 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 
 import { runCli } from "./support/cli.js";
+import { copyTemplateStore, openTemplateStore } from "./support/templateStore.js";
+import { resolveDbPath } from "../src/db.js";
 import {
   DEFAULT_DUPLICATE_THRESHOLD,
   DEFAULT_STALE_AGE_DAYS,
@@ -96,7 +98,7 @@ describe("findDuplicateClusters", () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "mem-consolidate-unit-"));
-    db = openStorage(join(root, "mem.db"));
+    db = openTemplateStore(join(root, "mem.db"));
   });
 
   afterEach(() => {
@@ -313,7 +315,7 @@ describe("findCrossScopeDuplicates", () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "mem-consolidate-cross-scope-"));
-    db = openStorage(join(root, "mem.db"));
+    db = openTemplateStore(join(root, "mem.db"));
   });
 
   afterEach(() => {
@@ -415,7 +417,7 @@ describe("findCrossProjectDuplicates", () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "mem-consolidate-cross-project-"));
-    db = openStorage(join(root, "mem.db"));
+    db = openTemplateStore(join(root, "mem.db"));
   });
 
   afterEach(() => {
@@ -492,7 +494,7 @@ describe("findStaleFacts and the durable last_surfaced_at mark", () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "mem-consolidate-stale-"));
-    db = openStorage(join(root, "mem.db"));
+    db = openTemplateStore(join(root, "mem.db"));
   });
 
   afterEach(() => {
@@ -616,6 +618,7 @@ describe("mem consolidate (end to end)", () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mem-consolidate-e2e-"));
     process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    copyTemplateStore(resolveDbPath());
   });
 
   afterEach(() => {
@@ -885,7 +888,7 @@ describe("findRelatedFactPairs", () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "mem-consolidate-related-unit-"));
-    db = openStorage(join(root, "mem.db"));
+    db = openTemplateStore(join(root, "mem.db"));
   });
 
   afterEach(() => {
@@ -952,7 +955,7 @@ describe("findGraphStaleFacts", () => {
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "mem-consolidate-graph-stale-unit-"));
-    db = openStorage(join(root, "mem.db"));
+    db = openTemplateStore(join(root, "mem.db"));
   });
 
   afterEach(() => {
@@ -1067,6 +1070,7 @@ describe("mem consolidate --related (end to end)", () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mem-consolidate-related-e2e-"));
     process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    copyTemplateStore(resolveDbPath());
   });
 
   afterEach(() => {
@@ -1142,6 +1146,7 @@ describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mem-consolidate-graph-stale-e2e-"));
     process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    copyTemplateStore(resolveDbPath());
   });
 
   afterEach(() => {

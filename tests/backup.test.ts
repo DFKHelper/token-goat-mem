@@ -1,16 +1,20 @@
 /** End-to-end tests for `mem backup` and `mem restore`, and the `backups:` line in `mem doctor`. The backup directory is deliberately outside the mem home -- a sibling of it by default -- so a store survives the deletion of `~/.mem` (or of `~/.claude`, which never held it). Driven through the real `run()` against a real database. */
 import Database from "better-sqlite3";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AUTO_SNAPSHOTS_KEPT, listSnapshots, takeSnapshot } from "../src/backup.js";
+import { AUTO_SNAPSHOTS_KEPT, listSnapshots, snapshotFileName, takeSnapshot, type Snapshot } from "../src/backup.js";
 import { BACKUP_DIR_ENV, resolveDbPath } from "../src/db.js";
 import { LATEST_SCHEMA_VERSION } from "../src/migrations.js";
 import { getEpoch, insertFact, openStorage } from "../src/storage.js";
 import { MS_PER_DAY } from "../src/timeUtils.js";
 import { runCli } from "./support/cli.js";
+import { CAPABLE_PROBE, installProbe, resetProbe } from "./support/fakeProbe.js";
+import { openTemplateStore } from "./support/templateStore.js";
+
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let root: string;
 let home: string;
@@ -24,9 +28,12 @@ beforeEach(() => {
   process.env["TOKEN_GOAT_MEM_HOME"] = home;
   priorBackupDir = process.env[BACKUP_DIR_ENV];
   process.env[BACKUP_DIR_ENV] = backupDir;
+  // The doctor tests read the backups line, not the wiring probe, so the probe is scripted rather than a process started per run.
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
+  resetProbe();
   delete process.env["TOKEN_GOAT_MEM_HOME"];
   if (priorBackupDir === undefined) {
     delete process.env[BACKUP_DIR_ENV];
@@ -36,9 +43,45 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-async function remember(text: string): Promise<void> {
-  const result = await runCli(["remember", text, "--kind", "fact", "--scope", "global"]);
-  expect(result.exitCode, result.stderr).toBe(0);
+type Store = ReturnType<typeof openStorage>;
+
+/** Opens the home's store -- a copy of the template store when none exists yet, because these tests are about backing up and restoring a store, not about creating one. */
+function openHomeStore(): Store {
+  const dbPath = resolveDbPath();
+  return existsSync(dbPath) ? openStorage(dbPath) : openTemplateStore(dbPath);
+}
+
+function addFact(db: Store, text: string): void {
+  insertFact(db, { text, kind: "fact", scope: "global", source_type: "user" });
+}
+
+/** Writes `before` into the home's store, takes a manual snapshot of it, then writes `after`, all in one open: the state `mem remember`, `mem backup`, `mem remember` leave, without a CLI run per step. */
+function seedWithSnapshot(before: readonly string[], after: readonly string[] = [], now: Date = new Date()): Snapshot {
+  const db = openHomeStore();
+  try {
+    before.forEach((text) => {
+      addFact(db, text);
+    });
+    const snapshot = takeSnapshot(db, backupDir, "manual", now);
+    after.forEach((text) => {
+      addFact(db, text);
+    });
+    return snapshot;
+  } finally {
+    db.close();
+  }
+}
+
+/** Writes `texts` into the home's store in one open, with no snapshot. */
+function seed(texts: readonly string[]): void {
+  const db = openHomeStore();
+  try {
+    texts.forEach((text) => {
+      addFact(db, text);
+    });
+  } finally {
+    db.close();
+  }
 }
 
 async function listedTexts(): Promise<string[]> {
@@ -55,7 +98,7 @@ async function epoch(): Promise<number> {
 
 describe("mem backup", () => {
   it("writes a snapshot outside the mem home and prints where", async () => {
-    await remember("the staging database is rebuilt nightly");
+    seed(["the staging database is rebuilt nightly"]);
     const result = await runCli(["backup"]);
     expect(result.exitCode, result.stderr).toBe(0);
 
@@ -72,10 +115,9 @@ describe("mem backup", () => {
   });
 
   it("--list names every snapshot, newest first", async () => {
-    await remember("first fact");
-    await runCli(["backup"]);
-    await remember("second fact");
-    await runCli(["backup"]);
+    const now = Date.now();
+    seedWithSnapshot(["first fact"], [], new Date(now - 60_000));
+    seedWithSnapshot(["second fact"], [], new Date(now));
 
     const result = await runCli(["backup", "--list"]);
     expect(result.exitCode, result.stderr).toBe(0);
@@ -96,10 +138,7 @@ describe("mem backup", () => {
 
 describe("mem restore", () => {
   it("puts a snapshot back, advances the epoch past both stores, and keeps what it replaced", async () => {
-    await remember("kept across the restore");
-    await runCli(["backup"]);
-    const snapshot = listSnapshots(backupDir).find((candidate) => candidate.reason === "manual");
-    await remember("written after the backup");
+    const snapshot = seedWithSnapshot(["kept across the restore"], ["written after the backup"]);
     const before = await epoch();
 
     const result = await runCli(["restore", basename(snapshot?.path ?? "")]);
@@ -119,9 +158,7 @@ describe("mem restore", () => {
   });
 
   it("recovers a live store that is unreadable and says where the unreadable file went", async () => {
-    await remember("recoverable from the snapshot");
-    await runCli(["backup"]);
-    const snapshot = listSnapshots(backupDir).find((candidate) => candidate.reason === "manual");
+    const snapshot = seedWithSnapshot(["recoverable from the snapshot"]);
     const dbPath = resolveDbPath();
     writeFileSync(dbPath, "garbage that is not sqlite ".repeat(80), "utf8");
     rmSync(`${dbPath}-wal`, { force: true });
@@ -137,7 +174,7 @@ describe("mem restore", () => {
   });
 
   it("refuses a file that is not a mem store and leaves the live store untouched", async () => {
-    await remember("must survive a bad restore");
+    seed(["must survive a bad restore"]);
     const bogus = join(root, "not-a-db.db");
     writeFileSync(bogus, "definitely not sqlite", "utf8");
 
@@ -154,7 +191,7 @@ describe("mem restore", () => {
   });
 
   it("refuses a SQLite file whose facts table is not mem's, and leaves the live store untouched", async () => {
-    await remember("must survive a foreign facts table");
+    seed(["must survive a foreign facts table"]);
     const foreign = join(root, "foreign.db");
     const db = new Database(foreign);
     db.exec("CREATE TABLE facts (x TEXT)");
@@ -168,13 +205,10 @@ describe("mem restore", () => {
   });
 
   it("refuses a snapshot written by a newer mem rather than restoring a schema it cannot read", async () => {
-    await remember("kept when the snapshot is from the future");
-    await runCli(["backup"]);
-    const snapshot = listSnapshots(backupDir).find((candidate) => candidate.reason === "manual");
-    const db = new Database(snapshot?.path ?? "");
+    const snapshot = seedWithSnapshot(["kept when the snapshot is from the future"], ["written after the backup"]);
+    const db = new Database(snapshot.path);
     db.pragma(`user_version = ${String(LATEST_SCHEMA_VERSION + 1)}`);
     db.close();
-    await remember("written after the backup");
 
     const result = await runCli(["restore", snapshot?.path ?? ""]);
     expect(result.exitCode).toBe(1);
@@ -183,11 +217,11 @@ describe("mem restore", () => {
   });
 
   it("moves the epoch past a source store whose epoch is ahead of the live one", async () => {
-    await remember("the live store's only fact");
+    seed(["the live store's only fact"]);
     const other = join(root, "other", "mem.db");
-    const db = openStorage(other);
+    const db = openTemplateStore(other);
     for (let i = 0; i < 5; i += 1) {
-      insertFact(db, { text: `fact ${String(i)} from another store`, kind: "fact", scope: "global", source_type: "user" });
+      addFact(db, `fact ${String(i)} from another store`);
     }
     const sourceEpoch = getEpoch(db);
     db.close();
@@ -201,15 +235,17 @@ describe("mem restore", () => {
   });
 
   it("never prunes the automatic snapshot it is restoring from", async () => {
-    // Created by this open, so it takes no automatic snapshot of its own.
-    const db = openStorage(resolveDbPath());
+    // A store at epoch 0 has no automatic snapshot due, so this open takes none of its own.
+    const db = openHomeStore();
     try {
-      insertFact(db, { text: "restored from the oldest automatic snapshot", kind: "fact", scope: "global", source_type: "user" });
-      for (let i = 0; i < AUTO_SNAPSHOTS_KEPT; i += 1) {
-        takeSnapshot(db, backupDir, "auto", new Date(Date.now() - (i + 2) * MS_PER_DAY));
+      addFact(db, "restored from the oldest automatic snapshot");
+      // Pruning reads only the names in the backup directory, so the other automatic snapshots are copies of one real snapshot under older names.
+      const newest = takeSnapshot(db, backupDir, "auto", new Date(Date.now() - 2 * MS_PER_DAY));
+      for (let i = 1; i < AUTO_SNAPSHOTS_KEPT; i += 1) {
+        copyFileSync(newest.path, join(backupDir, snapshotFileName(new Date(Date.now() - (i + 2) * MS_PER_DAY), newest.epoch, "auto")));
       }
       // Written through the same handle, so no open snapshots it: the store has now changed since a newest snapshot two days old, and the next ordinary open would take one and prune the oldest.
-      insertFact(db, { text: "written after the snapshots", kind: "fact", scope: "global", source_type: "user" });
+      addFact(db, "written after the snapshots");
     } finally {
       db.close();
     }
@@ -224,15 +260,14 @@ describe("mem restore", () => {
 
 describe("mem doctor backups line", () => {
   it("reports the backup directory and the newest snapshot", async () => {
-    await remember("doctor should see a backup");
-    await runCli(["backup"]);
+    seedWithSnapshot(["doctor should see a backup"]);
     const result = await runCli(["doctor"]);
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toMatch(new RegExp(`backups: ${escapeRegExp(backupDir)} -- \\d+ snapshots?, newest `));
   });
 
   it("points at `mem backup` when a store with facts has no snapshot", async () => {
-    await remember("no backup yet");
+    seed(["no backup yet"]);
     // Pointing the directory at a file makes every snapshot attempt fail, including doctor's own open.
     writeFileSync(backupDir, "blocked", "utf8");
     const result = await runCli(["doctor"]);

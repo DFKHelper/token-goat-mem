@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openDb } from "../../src/db.js";
@@ -7,6 +7,7 @@ import { markRecallUsed, openStorage, setEmbeddingMeta, updateFact } from "../..
 import { EMBED_MODEL_ENV, EMBED_URL_ENV } from "../../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer } from "../support/embedding-server.js";
 import { makeFact } from "../support/fact.js";
+import { openTemplateStore } from "../support/templateStore.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
 import {
   buildHintFormat,
@@ -66,7 +67,7 @@ interface FactSeed {
 }
 
 function seedFacts(dbPath: string, seeds: readonly FactSeed[]): void {
-  const db = openDb(dbPath);
+  const db = existsSync(dbPath) ? openDb(dbPath) : openTemplateStore(dbPath);
   const insert = db.prepare(
     `INSERT INTO facts (id, text, kind, subject, value, scope, scope_root, source_type, source_ref, captured_at, anchor, status, confidence)
      VALUES (@id, @text, @kind, @subject, @value, @scope, @scopeRoot, @source_type, @source_ref, @captured_at, @anchor, @status, @confidence)`

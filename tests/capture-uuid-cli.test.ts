@@ -6,7 +6,9 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+import { resolveDbPath } from "../src/db.js";
 import { extractRememberedId, extractSuggestedId, runCli } from "./support/cli.js";
+import { copyTemplateStore } from "./support/templateStore.js";
 
 /** Entropy above the 3.8 generic threshold, so the exemption is what decides each case. */
 const U = "3f2b8c1e-9a4d-4e5f-8b7a-1c2d3e4f5a6b";
@@ -16,6 +18,7 @@ let home: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-uuid-cli-"));
   process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  copyTemplateStore(resolveDbPath());
 });
 
 afterEach(() => {
