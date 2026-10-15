@@ -1,8 +1,6 @@
 /** End-to-end CLI tests for inspecting and changing stored facts: show, list, forget, edit, and short id prefixes. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-// Loaded before ./support/cli.js so the child_process mock below is registered first; reaching it only through the CLI import deadlocks the mock factory (every sibling cli test imports it directly).
-import "node:child_process";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,10 +8,7 @@ import { extractRememberedId, runCli, type CliResult } from "./support/cli.js";
 import { findSupersedingFactId, insertAuditLog, resolveDbPath } from "../src/db.js";
 import { insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
-// Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
-vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
 
 let home: string;
 
@@ -1016,7 +1011,7 @@ describe("mem edit keeps the value it is about to destroy", () => {
 });
 
 describe("mem show and mem log hide the stamped-ref audit marker from text", () => {
-  it("keeps [stamped_ref= in --json only, and leaves the source_ref line alone", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, async () => {
+  it("keeps [stamped_ref= in --json only, and leaves the source_ref line alone", async () => {
     const directory = join(home, "transcripts");
     mkdirSync(directory, { recursive: true });
     const transcript = join(directory, "transcript.jsonl");

@@ -9,19 +9,21 @@ import { extractRememberedId, runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { getFactById, insertFact, listSourcesForFact, openStorage } from "../src/storage.js";
 import { MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
+import { CAPABLE_PROBE, installProbe, resetProbe } from "./support/fakeProbe.js";
 
-// Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
-vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
+// A `mem doctor` run probes the `mem` on PATH; a scripted probe answers it, so no process starts and no budget decides a verdict.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-cli-test-"));
   process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
+  resetProbe();
   delete process.env["TOKEN_GOAT_MEM_HOME"];
   rmSync(home, { recursive: true, force: true });
 });
@@ -794,7 +796,7 @@ describe("mem epoch --gc prunes audit rows stamped in the future", () => {
   });
 });
 
-describe("mem dream", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem dream", () => {
   const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
   const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";
   const KEY_ENV = "TOKEN_GOAT_MEM_DREAM_API_KEY";

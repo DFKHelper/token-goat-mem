@@ -7,24 +7,25 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { CAPABLE_MEM_SHIM, OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+import { CAPABLE_PROBE, installProbe, OLD_PROBE, probeCalls, resetProbe, writeProbeTarget } from "./support/fakeProbe.js";
 import { runCli } from "./support/cli.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { DOCTOR_CHECKS } from "../src/doctor.js";
 import { getEpoch } from "../src/epoch.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
-// Process launches on this machine take 1-10 s and stack up under load, so a probe can exceed MEM_PROBE_TIMEOUT_MS in wiring.ts and come back as "version unknown" or "incapable"; the floor keeps capability tests asserting capability logic, not launch latency.
-vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
+// A test scripts what a probe of the `mem` binary returns with `installProbe`, so no process starts and no budget decides a verdict.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-cli-test-"));
   process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
+  resetProbe();
   delete process.env["TOKEN_GOAT_MEM_HOME"];
   rmSync(home, { recursive: true, force: true });
 });
@@ -243,7 +244,7 @@ describe("mem doctor (read-only health check)", () => {
 
 // ─────────────────────────────────────────────────────────────────────────── mem init / uninstall ───────────────────────────────────────────────────────────────────────────
 
-describe("mem init/uninstall", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem init/uninstall", () => {
   let toolRoot: string;
   let toolHome: string;
   let fakeMemDir: string;
@@ -255,9 +256,9 @@ describe("mem init/uninstall", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
     toolHome = mkdtempSync(join(tmpdir(), "mem-cli-wiring-home-"));
     process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
 
-    // `mem init claude-code`'s pre-flight resolves whatever `mem` binary is actually on PATH and checks it against the hooks it's about to write (see wiring.ts's `checkClaudeHookHealth`). These tests are about the config-writing behavior, not that check, so a fake shim that always reports every flag as supported is put ahead of the real PATH -- real end-to-end coverage of the check itself (a shim that *doesn't* support a flag) lives in its own describe block below. Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in this file's PATH-independent init tests still need) resolvable.
+    // `mem init claude-code`'s pre-flight resolves whatever `mem` binary is actually on PATH and checks it against the hooks it's about to write (see wiring.ts's `checkClaudeHookHealth`). These tests are about the config-writing behavior, not that check, so a `mem` file that a capable scripted probe answers for is put ahead of the real PATH -- real end-to-end coverage of the check itself (a shim that *doesn't* support a flag) lives in its own describe block below. Prepending to the real PATH, not replacing it, keeps `bash`/`git`/etc. (which other tests in this file's PATH-independent init tests still need) resolvable.
     fakeMemDir = mkdtempSync(join(tmpdir(), "mem-cli-fake-mem-"));
-    writeFakeMem(fakeMemDir, CAPABLE_MEM_SHIM);
+    writeProbeTarget(fakeMemDir);
     originalPath = process.env["PATH"];
     process.env["PATH"] = `${fakeMemDir}${delimiter}${originalPath ?? ""}`;
   });
@@ -572,22 +573,13 @@ describe("mem init/uninstall", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
     expect(readFileSync(instructionsPath, "utf8")).toBe(original);
   });
 
-  // Each init or doctor runs the PATH-capability probe through cmd.exe and node, 1-10 s a launch on this machine, so the 30 s default is spent on launches.
-  describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", { timeout: 300_000 }, () => {
-    // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session` hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older build that rejects those flags -- every hook then fails, silently, because nothing compared the write against the binary that would actually run it. These tests replace the always- capable fake `mem` this describe block's `beforeEach` puts on PATH with a deliberately incapable (or absent) one, so the refusal path itself is exercised, not just its bypass.
-
-    // The version probe decides these assertions, so its budget is explicit here instead of the test timeout being raised.
-    beforeEach(() => {
-      process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"] = "60000";
-    });
-
-    afterEach(() => {
-      delete process.env["TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS"];
-    });
+  describe("regression: `mem init claude-code` no longer trusts a PATH binary it never checked", () => {
+    // The incident this fix responds to: a newer `mem init` writes `--hook-stdin`/`scan-session` hooks, but the `mem` a real Claude Code session resolves from PATH at hook time is an older build that rejects those flags -- every hook then fails, silently, because nothing compared the write against the binary that would actually run it. These tests script an incapable answer (or leave no `mem` on PATH) in place of the capable one the file-level `beforeEach` installs, so the refusal path itself is exercised, not just its bypass.
 
     function installOldMemShim(dir: string): void {
       // The exact shape of the real incident: an install that predates `--hook-stdin`/`--delta` and `scan-session`.
-      writeFakeMem(dir, OLD_MEM_SHIM);
+      writeProbeTarget(dir);
+      installProbe(OLD_PROBE);
     }
 
     it("refuses to write hooks an old PATH mem can't run, naming the binary and what it can't run", async () => {
@@ -601,6 +593,10 @@ describe("mem init/uninstall", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
       expect(result.stdout).toContain("0.2.5");
       expect(result.stdout).toContain("no `mem hook <event>` entry point");
       expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+      // The verdict came from probing the `mem` found on PATH: its version first, then its help.
+      const calls = probeCalls();
+      expect(calls[0]?.args).toEqual(["--version"]);
+      expect(calls[0]?.bin.startsWith(fakeMemDir)).toBe(true);
     });
 
     it("--force writes the hooks anyway", async () => {
@@ -636,6 +632,7 @@ describe("mem init/uninstall", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("no mem binary found on PATH");
       expect(result.stdout).not.toContain("0.2.5");
+      expect(probeCalls()).toEqual([]);
     });
 
     /** Installs the hooks with the capable shim the outer beforeEach already put on PATH, then swaps in the incapable one and runs `fn` from the project root -- `doctor` checks whatever settings.json already has, not what this build would write, so this is the "already installed, binary downgraded since" case. */

@@ -1,6 +1,6 @@
 /** End-to-end CLI tests for moving facts in and out: import from markdown and JSON, and export. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,8 +8,6 @@ import { extractRememberedId, runCli } from "./support/cli.js";
 import { resolveDbPath } from "../src/db.js";
 import { insertFact, markFactsSurfaced, openStorage, setFactStatus } from "../src/storage.js";
 
-// Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
-vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
 
 let home: string;
 
