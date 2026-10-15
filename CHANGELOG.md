@@ -6,6 +6,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Changed
 
+- **The first open of a new store commits its schema once.** `facts`, `audit_log`, `meta` and the starting epoch were created as seven separate commits, each its own disk flush, on the first `mem` call that created a store; they now share one immediate transaction. Opening a store that already exists is unchanged: it takes no transaction and no extra write lock.
 - **The pre-commit hook and CI scan for committed secrets.** `.githooks/pre-commit` now runs `gitleaks dir . --config=.gitleaks.toml --redact --exit-code 1 --no-banner` before lint, typecheck and the guards, and refuses the commit when `gitleaks` is not on `PATH` instead of skipping the scan. A `secrets` job in `.github/workflows/ci.yml` runs the same command with a pinned gitleaks release. `.gitleaks.toml` allowlists only the paths that hold fake secrets by design (`tests/`, build and dependency output), never `src/` or `scripts/`. See [CONTRIBUTING.md](CONTRIBUTING.md#test-tiers).
 
 ### Fixed

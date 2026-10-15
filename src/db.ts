@@ -131,9 +131,18 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
     // Belt-and-braces: sidecar creation is SQLite-internal, and a confidentiality guarantee should not rest on an implementation detail of a dependency. Absent sidecars are a no-op here.
     restrictPermissions(`${dbPath}-wal`, MEM_DB_MODE);
     restrictPermissions(`${dbPath}-shm`, MEM_DB_MODE);
-    db.exec(FACTS_SCHEMA);
-    db.exec(AUDIT_LOG_SCHEMA);
-    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+    const ensureCoreSchema = (): void => {
+      db.exec(FACTS_SCHEMA);
+      db.exec(AUDIT_LOG_SCHEMA);
+      db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES ('epoch', '0')").run();
+    };
+    if (existed) {
+      // An existing store's statements are normally all no-ops, so they stay autocommit: an up-front write lock here would queue the read-only hook opens behind any writer.
+      ensureCoreSchema();
+    } else {
+      // A store this call created commits its whole schema once instead of once per statement, and `.immediate()` takes the write lock up front so a concurrent creator is waited on by the busy handler rather than failing the read-to-write upgrade.
+      db.transaction(ensureCoreSchema).immediate();
+    }
     // Before migrations, so a store about to be migrated is copied as it was (src/backup.ts). Never throws: a snapshot that cannot be written must not cost the caller its database.
     if (existed && options.autoSnapshot !== false) {
       snapshotOnOpen(db, { dir: resolveBackupDir(home), pendingMigrations: hasPendingMigrations(db) });

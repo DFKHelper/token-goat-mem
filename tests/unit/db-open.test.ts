@@ -72,3 +72,91 @@ describe("openDb on a damaged store", () => {
     }
   });
 });
+
+type TraceEvent = { readonly kind: "write" | "pragma"; readonly sql: string; readonly inTransaction: boolean };
+
+/** Runs `fn` while recording every write statement better-sqlite3 is handed, with whether a transaction was open at that moment, and every `db.transaction` invocation with the mode it began in. */
+function traceWrites(fn: () => void): { readonly events: readonly TraceEvent[]; readonly transactionModes: readonly string[] } {
+  const proto = Database.prototype as unknown as Record<string, (...args: never[]) => unknown>;
+  const events: TraceEvent[] = [];
+  const transactionModes: string[] = [];
+  const isWrite = (sql: string): boolean => /^\s*(CREATE|INSERT|UPDATE|DELETE|ALTER|DROP|REPLACE)\b/iu.test(sql);
+  const original = { exec: proto["exec"], prepare: proto["prepare"], pragma: proto["pragma"], transaction: proto["transaction"] } as Record<string, (this: Database.Database, ...args: never[]) => unknown>;
+  proto["exec"] = function (this: Database.Database, sql: string) {
+    for (const statement of sql.split(";").map((part) => part.trim()).filter((part) => part.length > 0)) {
+      if (isWrite(statement)) {
+        events.push({ kind: "write", sql: statement, inTransaction: this.inTransaction });
+      }
+    }
+    return original["exec"]?.call(this, sql as never);
+  } as never;
+  proto["prepare"] = function (this: Database.Database, sql: string) {
+    const statement = original["prepare"]?.call(this, sql as never) as { run: (...args: unknown[]) => unknown };
+    if (isWrite(sql)) {
+      const run = statement.run.bind(statement);
+      statement.run = (...args: unknown[]) => {
+        events.push({ kind: "write", sql, inTransaction: this.inTransaction });
+        return run(...args);
+      };
+    }
+    return statement;
+  } as never;
+  proto["pragma"] = function (this: Database.Database, sql: string, options?: unknown) {
+    if (/^\s*journal_mode\s*=/iu.test(sql)) {
+      events.push({ kind: "pragma", sql, inTransaction: this.inTransaction });
+    }
+    return original["pragma"]?.call(this, sql as never, options as never);
+  } as never;
+  proto["transaction"] = function (this: Database.Database, body: never) {
+    const wrapped = original["transaction"]?.call(this, body) as unknown as Record<string, (...args: unknown[]) => unknown> & ((...args: unknown[]) => unknown);
+    const traced = ((...args: unknown[]) => {
+      transactionModes.push("deferred");
+      return wrapped(...args);
+    }) as typeof wrapped;
+    for (const mode of ["deferred", "immediate", "exclusive"]) {
+      traced[mode] = (...args: unknown[]) => {
+        transactionModes.push(mode);
+        return wrapped[mode]?.(...args);
+      };
+    }
+    return traced;
+  } as never;
+  try {
+    fn();
+  } finally {
+    Object.assign(proto, original);
+  }
+  return { events, transactionModes };
+}
+
+describe("openDb schema commits", () => {
+  const dbPath = (): string => join(workDir, "mem.db");
+
+  it("commits a fresh store's whole schema in one immediate transaction, not one commit per statement", () => {
+    const { events, transactionModes } = traceWrites(() => {
+      openDb(dbPath(), { autoSnapshot: false }).close();
+    });
+
+    const writes = events.filter((event) => event.kind === "write");
+    expect(writes.some((event) => /CREATE TABLE IF NOT EXISTS facts\b/iu.test(event.sql))).toBe(true);
+    expect(writes.some((event) => /INSERT OR IGNORE INTO meta\b/iu.test(event.sql))).toBe(true);
+    // Every schema statement ran inside a transaction, so none of them was a commit of its own.
+    expect(writes.filter((event) => !event.inTransaction)).toEqual([]);
+    // Immediate, never deferred: a deferred transaction upgrading read-to-write fails "database is locked" without consulting the busy handler.
+    expect(transactionModes.length).toBeGreaterThan(0);
+    expect(transactionModes.filter((mode) => mode !== "immediate")).toEqual([]);
+  });
+
+  it("keeps an existing store's open free of an up-front write transaction", () => {
+    openDb(dbPath(), { autoSnapshot: false }).close();
+
+    const { events, transactionModes } = traceWrites(() => {
+      openDb(dbPath(), { autoSnapshot: false }).close();
+    });
+
+    // Read-only hook opens land here constantly: wrapping the no-op schema statements in a transaction would take the write lock for each of them and queue them behind any writer.
+    expect(transactionModes).toEqual([]);
+    expect(events.filter((event) => event.kind === "write").length).toBeGreaterThan(0);
+    expect(events.filter((event) => event.kind === "write" && event.inTransaction)).toEqual([]);
+  });
+});
