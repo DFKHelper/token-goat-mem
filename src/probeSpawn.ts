@@ -35,16 +35,26 @@ const finish = (status, errorCode) => {
 const child = spawn(command, { shell: true, stdio: ["pipe", "pipe", "pipe"] });
 child.stdout.setEncoding("utf8");
 child.stderr.setEncoding("utf8");
-child.stdout.on("data", (chunk) => { stdout += chunk; });
+child.stdout.on("data", (chunk) => { stdout += chunk; if (startOnOutput) { arm(); } });
 child.stderr.on("data", (chunk) => { stderr += chunk; });
 child.stdin.on("error", () => {});
 child.stdin.end();
-const timer = setTimeout(() => {
-  if (child.pid !== undefined) {
-    spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
+const startOnOutput = process.argv[3] === "output";
+let timer = null;
+const arm = () => {
+  if (timer !== null) {
+    return;
   }
-  finish(null, "ETIMEDOUT");
-}, budget);
+  timer = setTimeout(() => {
+    if (child.pid !== undefined) {
+      spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)], { stdio: "ignore" });
+    }
+    finish(null, "ETIMEDOUT");
+  }, budget);
+};
+if (!startOnOutput) {
+  arm();
+}
 child.on("error", (error) => { clearTimeout(timer); finish(null, error.code || "UNKNOWN"); });
 child.on("close", (code) => { clearTimeout(timer); finish(code, undefined); });
 `;
@@ -69,8 +79,13 @@ function needsWindowsShell(binPath: string): boolean {
   return process.platform === "win32" && (extension === ".cmd" || extension === ".bat");
 }
 
+/** Options of one probe launch. `budgetStartsOnOutput` makes the budget of a Windows `.cmd`/`.bat` launch start when the shell command first writes to stdout instead of when the helper starts it, so a probe whose child announces it is running has a process tree to kill when the budget expires; a launch that needs no shell has no helper to apply it and ignores it. */
+export interface ProbeSpawnOptions {
+  readonly budgetStartsOnOutput?: boolean;
+}
+
 /** Runs `binPath <args>` for at most `timeoutMs` and returns what it produced, synchronously. A binary that needs no shell is spawned from an argv array with `shell` off, so a timeout kills the real process. A Windows `.cmd`/`.bat` shim runs through a shell as one quoted string (an args array together with `shell: true` is Node's DEP0190 footgun) inside a helper process that kills the whole process tree on timeout. */
-export function spawnProbe(binPath: string, args: readonly string[], timeoutMs: number): ProbeSpawnResult {
+export function spawnProbe(binPath: string, args: readonly string[], timeoutMs: number, options: ProbeSpawnOptions = {}): ProbeSpawnResult {
   if (!needsWindowsShell(binPath)) {
     const result = spawnSync(binPath, [...args], { encoding: "utf8", timeout: timeoutMs });
     const errorCode = result.error === undefined ? undefined : String(Reflect.get(result.error, "code") ?? "UNKNOWN");
@@ -80,7 +95,7 @@ export function spawnProbe(binPath: string, args: readonly string[], timeoutMs: 
     return { status: null, stdout: "", stderr: "", errorCode: PROBE_REFUSED_ERROR_CODE };
   }
   const quoted = [binPath, ...args].map((token) => `"${token}"`).join(" ");
-  const helper = spawnSync(process.execPath, ["-e", PROBE_HELPER_SCRIPT, String(timeoutMs), quoted], { encoding: "utf8", timeout: timeoutMs + PROBE_HELPER_GRACE_MS });
+  const helper = spawnSync(process.execPath, ["-e", PROBE_HELPER_SCRIPT, String(timeoutMs), quoted, ...(options.budgetStartsOnOutput === true ? ["output"] : [])], { encoding: "utf8", timeout: timeoutMs + PROBE_HELPER_GRACE_MS });
   return parseHelperResult(helper.stdout ?? "", helper.error === undefined ? undefined : String(Reflect.get(helper.error, "code") ?? "UNKNOWN"));
 }
 

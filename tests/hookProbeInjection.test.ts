@@ -28,9 +28,7 @@ import { CAPABLE_PROBE, installProbe, probeCalls, resetProbe, writeProbeTarget }
 const isWindows = process.platform === "win32";
 /** The budget handed to a probe whose verdict does not depend on it: a scripted probe never reads it, and a refused one never starts a process to spend it. */
 const BUDGET_MS = MEM_PROBE_TIMEOUT_MS;
-/** The budget of a probe that really launches an instant shim: it only bounds a hung launch (reported by the probe, inside the test timeout), and a shim that answers at once never spends it. */
-const HANG_BOUND_MS = 20_000;
-/** A `mem.cmd` that answers `--version` the moment cmd.exe runs it, so a really launched shim needs no second process and no clock decides what it said. */
+/** A `mem.cmd` a refused probe must never run: if the quoting guard failed, it would be launched and the injected marker would exist. */
 const INSTANT_SHIM = "@echo off\r\necho 0.0.0-test-shim\r\n";
 const ROOT_ARG = '--root "$CLAUDE_PROJECT_DIR"';
 const FALLBACK = 'echo "mem failed (exit $?); run mem doctor"';
@@ -139,29 +137,12 @@ describe("a probe is never started for a subcommand that is not a plain token", 
     });
   }
 
-  it.runIf(isWindows)("spawnProbe still runs a .cmd shim whose path holds a space", () => {
-    const spaced = join(dir, "with space");
-    mkdirSync(spaced);
-    writeFileSync(join(spaced, "mem.cmd"), INSTANT_SHIM, "utf8");
-    const result = spawnProbe(join(spaced, "mem.cmd"), ["--version"], HANG_BOUND_MS);
-    expect(result.errorCode).toBeUndefined();
-    expect(result.status).toBe(0);
-  });
-
   it.runIf(isWindows)("spawnProbe does not let a quote in an argument run a command through cmd.exe", () => {
     writeFileSync(join(dir, "mem.cmd"), INSTANT_SHIM, "utf8");
     const marker = join(dir, "marker.txt");
     const result = spawnProbe(join(dir, "mem.cmd"), [`x"&echo>${slashed(marker)}&echo`, "--help"], BUDGET_MS);
     expect(result.errorCode).toBe("EPROBEREFUSED");
     expect(existsSync(marker)).toBe(false);
-  });
-
-  it.runIf(isWindows)("spawnProbe still runs a .cmd shim with ordinary arguments", () => {
-    writeFileSync(join(dir, "mem.cmd"), INSTANT_SHIM, "utf8");
-    const result = spawnProbe(join(dir, "mem.cmd"), ["--version"], HANG_BOUND_MS);
-    expect(result.errorCode).toBeUndefined();
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("0.0.0-test-shim");
   });
 });
 

@@ -5,9 +5,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, rea
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-// The two kill tests at the end really launch a hanging probe and read the pid each launch was given.
-vi.mock("node:child_process", async (importOriginal) => (await import("./support/fakeProbe.js")).withLaunchLog(await importOriginal<typeof import("node:child_process")>()));
-// A test scripts what a probe of the `mem` binary returns with `installProbe`; a test that installs nothing (the kill tests) reaches the real `spawnProbe`.
+// A test scripts what a probe of the `mem` binary returns with `installProbe`; the real launch contract of `spawnProbe` is tested in tests/probeSpawn.test.ts.
 vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 import {
@@ -35,7 +33,7 @@ import {
   WiringUserUnsupportedError,
   writeManagedFile,
 } from "../src/wiring.js";
-import { CAPABLE_PROBE, installProbe, launchedPids, memProbe, NOT_RUNNABLE_PROBE, OLD_PROBE, probeCalls, resetProbe, UNANSWERED_PROBE, writeProbeTarget } from "./support/fakeProbe.js";
+import { CAPABLE_PROBE, installProbe, memProbe, NOT_RUNNABLE_PROBE, OLD_PROBE, probeCalls, resetProbe, UNANSWERED_PROBE, writeProbeTarget } from "./support/fakeProbe.js";
 
 let root: string;
 let home: string;
@@ -2237,65 +2235,6 @@ describe("probe cache, skip after unanswered, and notRunnable (scripted probe)",
     expect(checkHookCapability(process.execPath, hookSpec, 1000, [answerScript], cache)).toEqual({ capable: true, missing: [] });
     expect(checkHookCapability(process.execPath, hookSpec, 1000, [hangScript], cache).probeFailed).toBe(true);
     expect(probeCalls().map((call) => call.args[0])).toEqual([hangScript, answerScript]);
-  });
-});
-
-// These two cases really start a hanging process, so they are the only real launches left in this file; neither depends on how long a process takes to start, because the pid comes from the launch itself and the survivor search is made after the probe has returned.
-describe("a timed-out probe leaves no live process behind", () => {
-  let dir: string;
-  const isWindows = process.platform === "win32";
-  const hookSpec = { subcommand: "hook", flags: ["session-start"] };
-  /** The count a hanging `ping` is told to send, unique to this run so a search for it finds no one else's process. */
-  const HANG_PING_COUNT = String(5_000_000 + process.pid);
-
-  beforeEach(() => {
-    resetProbe();
-    dir = mkdtempSync(join(tmpdir(), "mem-probe-orphan-"));
-    writeFileSync(join(dir, "hang.js"), "setTimeout(() => {}, 120000);\n", "utf8");
-    writeFileSync(join(dir, "mem.cmd"), `@echo off\r\nping -n ${HANG_PING_COUNT} 127.0.0.1 >nul\r\n`, "utf8");
-    writeFileSync(join(dir, "find-hang.ps1"), `Get-CimInstance Win32_Process -Filter "Name = 'PING.EXE'" | Where-Object { $_.CommandLine -like '*${HANG_PING_COUNT}*' } | ForEach-Object { $_.ProcessId }\r\n`, "utf8");
-  });
-
-  afterEach(() => {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
-  });
-
-  function isAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /** The pids of every `ping` still running with this run's count, asked of the process table once, after the probe returned. */
-  function survivingPings(): number[] {
-    const found = spawnSync("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", join(dir, "find-hang.ps1")], { encoding: "utf8" });
-    expect(found.status, `the process search failed: ${found.stderr}`).toBe(0);
-    return found.stdout.split(/\s+/u).filter((token) => token !== "").map(Number);
-  }
-
-  it.runIf(isWindows)("a .cmd shim that hangs is killed with its whole process tree when the probe times out", () => {
-    let survivors: number[] = [];
-    try {
-      expect(checkHookCapability(join(dir, "mem.cmd"), hookSpec, 1000)).toMatchObject({ capable: false, probeFailed: true });
-      survivors = survivingPings();
-      expect(survivors, "a ping started by the shim outlived its probe").toEqual([]);
-    } finally {
-      for (const pid of survivors.length > 0 ? survivors : survivingPings()) {
-        spawnSync("taskkill", ["/T", "/F", "/PID", String(pid)], { stdio: "ignore" });
-      }
-    }
-  });
-
-  it("a direct binary that hangs is killed when the probe times out", () => {
-    expect(checkHookCapability(process.execPath, hookSpec, 1000, [join(dir, "hang.js")])).toMatchObject({ capable: false, probeFailed: true });
-    const pids = launchedPids(process.execPath);
-    expect(pids.length).toBeGreaterThan(0);
-    for (const pid of pids) {
-      expect(isAlive(pid), `pid ${pid} is still alive after its probe timed out`).toBe(false);
-    }
   });
 });
 
