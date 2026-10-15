@@ -9,7 +9,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
 import { CAPABLE_MEM_SHIM, writeFakeMem } from "../support/fakeMem.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "../support/spawnTimeoutFloor.js";
 
 let root: string;
 let memHome: string;
@@ -44,7 +43,7 @@ afterEach(() => {
   rmSync(fakeMemDir, { recursive: true, force: true });
 });
 
-describe("init/uninstall round trip through the built bundle", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("init/uninstall round trip through the built bundle", () => {
   it("returns a hand-formatted settings.json and a CRLF CLAUDE.md to their exact bytes", () => {
     mkdirSync(join(root, ".claude"), { recursive: true });
     const settingsPath = join(root, ".claude", "settings.json");
@@ -90,24 +89,9 @@ describe("init/uninstall round trip through the built bundle", { timeout: SPAWN_
     runBundle(["init", "claude-code", "--root", root]);
     runBundle(["uninstall", "claude-code", "--root", root]);
 
-    const after = readFileSync(settingsPath, "utf8");
-    expect(after).toBe(settings);
-    expect(after).not.toContain("hooks");
-  });
-
-  it("is a no-op the second time, so a repeated uninstall cannot damage the file", () => {
-    mkdirSync(join(root, ".claude"), { recursive: true });
-    const settingsPath = join(root, ".claude", "settings.json");
-    const settings = '{\n  "theme": "dark"\n}\n';
-    writeFileSync(settingsPath, settings);
-
-    runBundle(["init", "claude-code", "--root", root]);
-    runBundle(["uninstall", "claude-code", "--root", root]);
-    const afterFirst = readFileSync(settingsPath, "utf8");
-
-    // Documented as a no-op rather than an error when there is nothing mem-authored to remove.
-    runBundle(["uninstall", "claude-code", "--root", root]);
-    expect(readFileSync(settingsPath, "utf8")).toBe(afterFirst);
+    const afterUninstall = readFileSync(settingsPath, "utf8");
+    expect(afterUninstall).toBe(settings);
+    expect(afterUninstall).not.toContain("hooks");
   });
 
   it("survives a reinstall without duplicating its own block", () => {

@@ -1,20 +1,19 @@
-/** A `mem` process that finds the store's write lock held waits for it, rather than failing with SQLITE_BUSY after better-sqlite3's default five seconds. Another writer can legitimately hold the lock longer than that: on a loaded machine a node start alone takes 5-11 s, so a writer queued behind a stalled sibling process outlives the default. A lock held for longer than the default is simulated deterministically here with one `BEGIN IMMEDIATE` connection, and the waiter is a real bundle process. */
+/** A `mem` process that finds the store's write lock held waits for it, rather than failing with SQLITE_BUSY after better-sqlite3's default five seconds. Another writer can legitimately hold the lock longer than that: on a loaded machine a node start alone takes 5-11 s, so a writer queued behind a stalled sibling process outlives the default. That a waiter outlasts a real lock is SQLite's contract once the connection carries the timeout, and a test could only watch it by holding a lock for longer than five seconds and guessing when the waiter had reached it, which is a sleep that passes vacuously whenever the waiter is late. So the contract is pinned at the connection instead, with no clock: `openDb` sets the timeout, and the connection a real bundle process opens carries it. Several real processes contending for one store are in tests/bundle/concurrency.test.ts. */
 
-import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openDb } from "../../src/db.js";
-import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "../support/spawnTimeoutFloorMs.js";
+import { runBundleSync, withBundleStore } from "../support/bundle.js";
 
-/** Longer than better-sqlite3's five second default, with margin for the waiter to reach the lock after its preload ran. */
-const LOCK_HELD_MS = 9_000;
+/** better-sqlite3's own default busy timeout, in milliseconds. */
+const DEFAULT_BUSY_TIMEOUT_MS = 5_000;
 const SENTENCE = "the busy timeout outlasts a stalled sibling writer";
+const BETTER_SQLITE3 = createRequire(import.meta.url).resolve("better-sqlite3");
 
 let memHome: string;
 let root: string;
@@ -29,67 +28,40 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true });
 });
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-describe("the store's busy timeout", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("the store's busy timeout", () => {
   it("opens every connection with a busy timeout above better-sqlite3's five second default", () => {
     const db = openDb(join(memHome, "mem.db"), { autoSnapshot: false });
     try {
-      expect(db.pragma("busy_timeout", { simple: true })).toBeGreaterThan(5_000);
+      expect(db.pragma("busy_timeout", { simple: true })).toBeGreaterThan(DEFAULT_BUSY_TIMEOUT_MS);
     } finally {
       db.close();
     }
   });
 
-  it("lets a capture wait out a write lock held longer than five seconds", async () => {
-    const dbPath = join(memHome, "mem.db");
-    openDb(dbPath, { autoSnapshot: false }).close();
+  it("gives the connection a real bundle process opens a busy timeout above the default", () => {
+    // Loaded into the bundle's node before it runs: every connection reports its busy timeout as it closes, so what is asserted is what the shipped artifact opened, not what the source says.
+    const log = join(memHome, "busy-timeouts.log");
+    const preload = join(memHome, "record-busy-timeout.cjs");
+    writeFileSync(
+      preload,
+      [
+        `const Database = require(${JSON.stringify(BETTER_SQLITE3)});`,
+        "const close = Database.prototype.close;",
+        `Database.prototype.close = function () { require("node:fs").appendFileSync(${JSON.stringify(log)}, this.pragma("busy_timeout", { simple: true }) + ","); return close.call(this); };`,
+      ].join("\n")
+    );
 
-    // The preload runs before the bundle does, so the marker says when the waiter process is up and about to contend.
-    const marker = join(memHome, "waiter-started");
-    const preload = join(memHome, "preload.cjs");
-    writeFileSync(preload, `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "1");`);
+    // An existing store, so the only connection is the one `openDb` opens (a fresh store also opens a private seed connection that nothing can contend for).
+    withBundleStore(memHome, () => undefined);
+    const result = runBundleSync(["remember", SENTENCE, "--kind", "fact", "--root", root], {
+      home: memHome,
+      env: { NODE_OPTIONS: `--require ${JSON.stringify(preload)}` },
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
 
-    const holder = new Database(dbPath);
-    let stdout = "";
-    let stderr = "";
-    let released = false;
-    try {
-      holder.exec("BEGIN IMMEDIATE");
-      const exitCode = new Promise<number>((resolve, reject) => {
-        const child = spawn(process.execPath, ["-r", preload, BUNDLE, "remember", SENTENCE, "--kind", "fact", "--root", root], {
-          env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome },
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-        child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-        child.on("error", reject);
-        child.on("close", (code) => resolve(code ?? 1));
-      });
-
-      while (!existsSync(marker)) {
-        await sleep(50);
-      }
-      await sleep(LOCK_HELD_MS);
-      holder.exec("COMMIT");
-      released = true;
-
-      expect(await exitCode, `mem remember waited for a lock held ${LOCK_HELD_MS} ms\nstderr: ${stderr}\nstdout: ${stdout}`).toBe(0);
-    } finally {
-      if (!released) {
-        holder.exec("ROLLBACK");
-      }
-      holder.close();
-    }
-
-    const check = new Database(dbPath, { readonly: true });
-    try {
-      const row = check.prepare<[string], { n: number }>("SELECT COUNT(*) AS n FROM facts WHERE text = ?").get(SENTENCE);
-      expect(row?.n).toBe(1);
-    } finally {
-      check.close();
-    }
+    const reported = readFileSync(log, "utf8").split(",").filter((entry) => entry !== "").map(Number);
+    // Non-firing guard: the preload really saw a connection, so the bound below is not satisfied by an empty log.
+    expect(reported.length).toBeGreaterThan(0);
+    expect(Math.min(...reported), `busy timeouts the bundle's connections reported: ${reported.join(", ")}`).toBeGreaterThan(DEFAULT_BUSY_TIMEOUT_MS);
   });
 });

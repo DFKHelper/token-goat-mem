@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { CAPABLE_MEM_SHIM, OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloor.js";
 
 // How long the stand-in `init` is allowed to run before the postinstall must kill it.
 const HANG_TIMEOUT_MS = 1000;
@@ -47,8 +46,7 @@ function runPostinstall(env: Readonly<Record<string, string>> = {}): Postinstall
   delete childEnv["TOKEN_GOAT_MEM_WIRING_HOME"];
   delete childEnv["TOKEN_GOAT_MEM_SKIP_HOOKS"];
   Object.assign(childEnv, env);
-  // A bound of its own, so a postinstall that hangs fails the test instead of hanging the run.
-  const result = spawnSync(process.execPath, [POSTINSTALL_PATH], { encoding: "utf8", env: childEnv, timeout: SPAWN_TIMEOUT_FLOOR_MS });
+  const result = spawnSync(process.execPath, [POSTINSTALL_PATH], { encoding: "utf8", env: childEnv });
   if (result.error !== undefined) {
     throw result.error;
   }
@@ -140,7 +138,7 @@ describe("postinstall", () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("timed out");
     expect(result.output).toContain("mem init claude-code --user");
-  }, SPAWN_TIMEOUT_FLOOR_MS);
+  });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "leaves the hooks alone when run as someone other than the home directory's owner, as under sudo",

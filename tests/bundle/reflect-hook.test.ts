@@ -5,7 +5,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runBundleSync, type BundleResult } from "../support/bundle.js";
+import { fileTranscriptSuggestions } from "../../src/sessionCapture.js";
+import { countFactsWithStatus, runBundleSync, withBundleStore, type BundleResult } from "../support/bundle.js";
 
 let memHome: string;
 let root: string;
@@ -45,8 +46,7 @@ function reflect(stdin: string): BundleResult {
 }
 
 function pendingCount(): number {
-  const listed = runBundleSync(["list", "--status", "pending", "--json"], { home: memHome });
-  return (JSON.parse(listed.stdout) as { facts: unknown[] }).facts.length;
+  return countFactsWithStatus(memHome, "pending");
 }
 
 describe("mem reflect --hook-stdin (built bundle, Stop envelope on stdin)", () => {
@@ -64,7 +64,9 @@ describe("mem reflect --hook-stdin (built bundle, Stop envelope on stdin)", () =
   it("stays silent on the next stop once the same statements were already filed", () => {
     // The dedupe is the store itself: a restated sentence is a sighting of the existing pending fact, not a new one, so there is nothing new to block on and no extra state to keep.
     writeTranscript(["Never commit generated files to the repository."]);
-    expect(reflect(stopEnvelope()).stdout).not.toBe("");
+    // Filed in-process by the very function the hook runs, so the first stop's own blocking is not re-proved here.
+    const filed = withBundleStore(memHome, (db) => fileTranscriptSuggestions(db, { transcriptPath: join(root, "transcript.jsonl"), root, scope: "project" }));
+    expect(filed).toHaveLength(1);
     const again = reflect(stopEnvelope());
     expect(again.exitCode, again.stderr).toBe(0);
     expect(again.stdout).toBe("");

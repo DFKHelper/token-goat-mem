@@ -7,7 +7,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { BUNDLE_PATH as BUNDLE, runBundleSync, type BundleResult } from "../support/bundle.js";
+import { BUNDLE_PATH as BUNDLE, countFactsWithStatus, logSurfacedInSession, runBundleSync, seedFacts, type BundleResult } from "../support/bundle.js";
 
 let memHome: string;
 let root: string;
@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 describe("the shipped bundle runs end to end", () => {
-  it("stores, recalls, and forgets a fact against a real SQLite database", () => {
+  it("stores, recalls, and forgets a fact against a real SQLite database", async () => {
     const remembered = runBundle(["remember", "uses pnpm not npm", "--kind", "preference", "--root", root]);
     expect(remembered.exitCode).toBe(0);
 
@@ -43,12 +43,15 @@ describe("the shipped bundle runs end to end", () => {
     expect(recalled.exitCode).toBe(0);
     expect(recalled.stdout).toContain("uses pnpm not npm");
 
+    // Non-firing guard for the check below: before the forget, an in-process recall over this very store surfaces the fact.
+    expect(await logSurfacedInSession(memHome, root, "before-forget")).toBe(1);
+
     const forgotten = runBundle(["forget", id]);
     expect(forgotten.exitCode).toBe(0);
 
-    const afterForget = runBundle(["recall", "pnpm", "--root", root]);
-    expect(afterForget.exitCode).toBe(0);
-    expect(afterForget.stdout).not.toContain("uses pnpm not npm");
+    // The forget's effect is read from the store and an in-process recall rather than a second recall spawn.
+    expect(countFactsWithStatus(memHome, "superseded")).toBe(1);
+    expect(await logSurfacedInSession(memHome, root, "after-forget")).toBe(0);
   });
 
   it("runs doctor without crashing", () => {
@@ -58,11 +61,15 @@ describe("the shipped bundle runs end to end", () => {
   });
 
   it("emits the hint format token-goat parses, on stdout", () => {
-    runBundle(["remember", "deploys need a changelog entry", "--kind", "decision", "--scope", "global"]);
+    seedFacts(memHome, ["deploys need a changelog entry"], "decision");
 
     const hint = runBundle(["recall", "--hint-format", "--root", root]);
     expect(hint.exitCode).toBe(0);
     expect(hint.stdout.startsWith("TGMEM/")).toBe(true);
+    // A plain, session-less recall never writes a `recall_log` row (see `markSurfaced` vs `recordSurfaced` in src/integration-seam.ts), so no `mem used` call could mark anything: printing the invocation anyway would earn the "never surfaced in session ..." reply it exists to stop producing.
+    const footer = hint.stdout.split("\n").find((line) => line.startsWith("footer  "));
+    expect(footer).toBeDefined();
+    expect(footer).not.toContain("mem used");
   });
 
   it("exits non-zero with the diagnostic on stderr, not stdout, for a bad invocation", () => {
@@ -80,9 +87,7 @@ describe("the shipped bundle runs end to end", () => {
 
   /** Regression: `mem recall | head -1` and `mem recall | grep -q pnpm` close the pipe as soon as the reader is satisfied. Without an EPIPE handler the next write becomes an unhandled `error` event, so a pipeline that did exactly what the user asked dies with a stack trace and exit code 1. Only reachable from this tier: the handler is installed in `main.ts`, which the in-process `run()` tests never load, and it mutates process-global state so it could not be installed anywhere they would see it. */
   it("exits quietly when the reader of its stdout closes the pipe early", async () => {
-    for (let i = 0; i < 5; i += 1) {
-      runBundle(["remember", `piped fact number ${i}`, "--kind", "fact", "--scope", "global"]);
-    }
+    seedFacts(memHome, Array.from({ length: 5 }, (_unused, i) => `piped fact number ${i}`));
 
     const child = spawn(process.execPath, [BUNDLE, "recall"], {
       env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome },

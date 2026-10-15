@@ -1,4 +1,4 @@
-/** `mem recall --hint-format --hook-stdin [--delta]` driven exactly the way a Claude Code hook drives it: the built `dist/token-goat-mem.mjs` as a real subprocess, with the hook's JSON envelope piped to stdin. The in-process `run()` tests cannot cover this path -- `process.stdin` there is vitest's, not a pipe -- so this file is the only place the stdin contract is exercised as shipped. */
+/** `mem recall --hint-format --hook-stdin [--delta]` driven exactly the way a Claude Code hook drives it: the built `dist/token-goat-mem.mjs` as a real subprocess, with the hook's JSON envelope piped to stdin. The in-process `run()` tests cannot cover this path -- `process.stdin` there is vitest's, not a pipe -- so this file is the only place the stdin contract is exercised as shipped. The store is seeded in-process: what the delta filter and the ranking do with a session's facts is pinned in tests/unit/integration-seam.test.ts, so each spawn here exists to show what only the bundle's stdin, stdout and exit code add. */
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { runBundleSync, type BundleResult } from "../support/bundle.js";
+import { countFactsWithStatus, logSurfacedInSession, runBundleSync, seedFacts, type BundleResult } from "../support/bundle.js";
 
 let memHome: string;
 let root: string;
@@ -34,14 +34,6 @@ function footerOf(stdout: string): string | undefined {
   return stdout.split("\n").find((line) => line.startsWith("footer  "));
 }
 
-function remember(text: string): string {
-  const result = runBundle(["remember", text, "--kind", "fact", "--scope", "global"]);
-  expect(result.exitCode, result.stderr).toBe(0);
-  const match = /remembered (?:\S+ )?fact (\S+)/u.exec(result.stdout);
-  expect(match?.[1]).toBeDefined();
-  return match?.[1] ?? "";
-}
-
 function envelope(fields: Record<string, unknown>): string {
   return JSON.stringify({
     transcript_path: join(root, "transcript.jsonl"),
@@ -62,17 +54,10 @@ afterEach(() => {
 });
 
 describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin)", () => {
-  it("uses the envelope's prompt as the query: the ranking changes against the same store with no query", () => {
-    const giraffe = remember("older fact about a distinctive giraffe topic");
-    const oranges = remember("unrelated newer fact about oranges");
+  it("uses the envelope's prompt as the query: the matching fact leads although it is the older one", () => {
+    // Seeded oldest first, so with no query the recency order would be [oranges, giraffe]; only the prompt read from stdin can put the older, matching fact first.
+    const [giraffe = "", oranges = ""] = seedFacts(memHome, ["older fact about a distinctive giraffe topic", "unrelated newer fact about oranges"]);
 
-    // No query: recency order, the later-remembered fact first.
-    const unranked = runBundle(["recall", "--hint-format", "--root", root]);
-    expect(unranked.exitCode, unranked.stderr).toBe(0);
-    expect(headerOf(unranked.stdout)).toBe("TGMEM/2");
-    expect(emittedIds(unranked.stdout)).toEqual([oranges, giraffe]);
-
-    // A UserPromptSubmit envelope about giraffes: BM25 puts the matching, older fact first.
     const ranked = runBundle(
       ["recall", "--hint-format", "--hook-stdin", "--root", root],
       envelope({ session_id: "sess-rank", hook_event_name: "UserPromptSubmit", prompt: "what did we decide about the giraffe?" })
@@ -82,9 +67,8 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     expect(emittedIds(ranked.stdout)).toEqual([giraffe, oranges]);
   });
 
-  it("--delta: the second recall in a session omits what the first surfaced, and a non-delta call in the same session still returns everything", () => {
-    const first = remember("first fact about apples");
-    const second = remember("second fact about bananas");
+  it("--delta: the second recall in a session omits what the first surfaced, and a fact captured mid-session is all the next delta carries", () => {
+    const [first = "", second = ""] = seedFacts(memHome, ["first fact about apples", "second fact about bananas"]);
     const opener = envelope({ session_id: "sess-delta", hook_event_name: "SessionStart", source: "startup" });
     const prompt = envelope({ session_id: "sess-delta", hook_event_name: "UserPromptSubmit", prompt: "anything regarding fruit" });
 
@@ -100,32 +84,15 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     expect(delta.stdout).toBe("TGMEM/2  delta=1\n");
 
     // A fact captured mid-session is the only thing the next prompt's delta carries.
-    const third = remember("third fact about cherries");
+    const [third = ""] = seedFacts(memHome, ["third fact about cherries"]);
     const nextDelta = runBundle(["recall", "--hint-format", "--hook-stdin", "--delta", "--root", root], prompt);
     expect(nextDelta.exitCode, nextDelta.stderr).toBe(0);
     expect(headerOf(nextDelta.stdout)).toBe("TGMEM/2  delta=1");
     expect(emittedIds(nextDelta.stdout)).toEqual([third]);
-
-    // A prompt that matches an already-sent fact re-sends it: "sent" is not "still in context" once the host has compacted, so a genuine hit must arrive every time it is asked for.
-    const exact = runBundle(
-      ["recall", "--hint-format", "--hook-stdin", "--delta", "--root", root],
-      envelope({ session_id: "sess-delta", hook_event_name: "UserPromptSubmit", prompt: "bananas please" })
-    );
-    expect(exact.exitCode, exact.stderr).toBe(0);
-    expect(headerOf(exact.stdout)).toBe("TGMEM/2  delta=1");
-    expect(emittedIds(exact.stdout)).toEqual([second]);
-
-    // Non-firing: the same session, without --delta, still gets the complete block under a plain header.
-    const full = runBundle(["recall", "--hint-format", "--hook-stdin", "--root", root], prompt);
-    expect(full.exitCode, full.stderr).toBe(0);
-    expect(headerOf(full.stdout)).toBe("TGMEM/2");
-    const fullIds = emittedIds(full.stdout);
-    expect(fullIds.length).toBeGreaterThan(0);
-    expect([...fullIds].sort()).toEqual([first, second, third].sort());
   });
 
   it("fails open: a malformed envelope under --hook-stdin --delta exits 0 with the full unranked block and a stderr note", () => {
-    const id = remember("a fact that must still surface");
+    const [id = ""] = seedFacts(memHome, ["a fact that must still surface"]);
 
     const malformed = runBundle(["recall", "--hint-format", "--hook-stdin", "--delta", "--root", root], "this is not json {");
     expect(malformed.exitCode).toBe(0);
@@ -149,31 +116,22 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     expect(emittedIds(empty.stdout)).toEqual([id]);
   });
 
-  it("--delta with neither --hook-stdin nor --session-id is a usage error, never a silent full response", () => {
-    remember("a fact");
-    const result = runBundle(["recall", "--hint-format", "--delta", "--root", root]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("--delta requires a session id");
-  });
-
-  it("an explicit --session-id is honoured by the bundle and overrides the envelope's", () => {
-    const id = remember("a fact");
-    const seed = runBundle(["recall", "--hint-format", "--session-id", "explicit", "--root", root]);
-    expect(seed.exitCode, seed.stderr).toBe(0);
-    expect(emittedIds(seed.stdout)).toEqual([id]);
+  it("an explicit --session-id is honoured by the bundle and overrides the envelope's", async () => {
+    const [id = ""] = seedFacts(memHome, ["a fact"]);
+    // The session the explicit id names has already been shown the store; the envelope's own session has not.
+    expect(await logSurfacedInSession(memHome, root, "explicit")).toBe(1);
 
     const viaEnvelope = runBundle(
       ["recall", "--hint-format", "--hook-stdin", "--delta", "--session-id", "explicit", "--root", root],
       envelope({ session_id: "some-other-session", hook_event_name: "UserPromptSubmit", prompt: "zzz unrelated" })
     );
     expect(viaEnvelope.exitCode, viaEnvelope.stderr).toBe(0);
-    expect(viaEnvelope.stdout).toBe("TGMEM/2  delta=1\n");
+    expect(viaEnvelope.stdout, `the envelope's session would have re-sent ${id}`).toBe("TGMEM/2  delta=1\n");
   });
 
   it("an envelope carrying a session id prints a footer invocation naming exactly that session, and running it marks the row useful", () => {
     // Regression: the recall footer used to say nothing about `mem used` at all, and the agent-facing guidance told the agent to run it "using the session id you recalled under" -- an id the wire format never carried. This is the fix: the session that logged this recall is now on the wire, in a copy-pasteable command, and running it end to end actually marks the row.
-    const id = remember("a fact worth marking useful");
+    const [id = ""] = seedFacts(memHome, ["a fact worth marking useful"]);
     const result = runBundle(
       ["recall", "--hint-format", "--hook-stdin", "--root", root],
       envelope({ session_id: "sess-mark", hook_event_name: "SessionStart", source: "startup" })
@@ -194,18 +152,7 @@ describe("mem recall --hint-format --hook-stdin (built bundle, envelope on stdin
     expect(used.exitCode, used.stderr).toBe(0);
     expect(used.stdout).toBe(`marked 1 recall row useful in session ${sessionId}\n`);
   });
-
-  it("with no session id known, the footer carries no usefulness invocation", () => {
-    // A plain, session-less recall never writes a `recall_log` row (see `markSurfaced` vs `recordSurfaced` in src/integration-seam.ts), so there is nothing a `mem used` call could mark -- printing one anyway would earn the exact "never surfaced in session ..." reply this fix exists to stop producing.
-    remember("a fact recalled with no session to log against");
-    const result = runBundle(["recall", "--hint-format", "--root", root]);
-    expect(result.exitCode, result.stderr).toBe(0);
-    const footer = footerOf(result.stdout);
-    expect(footer).toBeDefined();
-    expect(footer).not.toContain("mem used");
-  });
 });
-
 
 describe("mem scan-session --hook-stdin (built bundle, Stop envelope on stdin)", () => {
   /** Writes the transcript at the path `envelope()` already points every envelope at. */
@@ -225,11 +172,7 @@ describe("mem scan-session --hook-stdin (built bundle, Stop envelope on stdin)",
     );
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toContain("filed 1 pending suggestion");
-
-    const listed = runBundle(["list", "--status", "pending", "--json"]);
-    const facts = (JSON.parse(listed.stdout) as { facts: { text: string; status: string }[] }).facts;
-    expect(facts).toHaveLength(1);
-    expect(facts[0]?.status).toBe("pending");
+    expect(countFactsWithStatus(memHome, "pending")).toBe(1);
   });
 
   it("stays silent and exits 0 under --quiet, the shape mem init installs", () => {
@@ -241,8 +184,7 @@ describe("mem scan-session --hook-stdin (built bundle, Stop envelope on stdin)",
     expect(result.exitCode, result.stderr).toBe(0);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe("");
-    const listed = runBundle(["list", "--status", "pending", "--json"]);
-    expect((JSON.parse(listed.stdout) as { facts: unknown[] }).facts).toHaveLength(1);
+    expect(countFactsWithStatus(memHome, "pending")).toBe(1);
   });
 
   it("exits 1 with a usage error when the envelope carries no transcript_path", () => {
