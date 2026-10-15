@@ -487,7 +487,7 @@ describe("regression: the seam's row mapper projects every column retrieval depe
       clearProjectIdentityCache();
       rmSync(work, { recursive: true, force: true });
     }
-  }, 180_000);
+  });
 });
 
 describe("entity ranking on the hint-format path", () => {
