@@ -1,6 +1,6 @@
 /** End-to-end CLI tests for capture and review: remember, suggest, the pending-review queue, contradiction handling, pin, and the exit-code contract. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,11 +15,11 @@ let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-cli-test-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
 });
 

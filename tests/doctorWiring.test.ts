@@ -31,14 +31,13 @@ beforeEach(() => {
   memHome = mkdtempSync(join(tmpdir(), "mem-dw-mem-"));
   toolRoot = mkdtempSync(join(tmpdir(), "mem-dw-root-"));
   toolHome = mkdtempSync(join(tmpdir(), "mem-dw-home-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = memHome;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", memHome);
   vi.stubEnv("TOKEN_GOAT_MEM_WIRING_HOME", toolHome);
   installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
   resetProbe();
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
   vi.unstubAllEnvs();
   for (const dir of [memHome, toolRoot, toolHome]) {
     rmSync(dir, { recursive: true, force: true });

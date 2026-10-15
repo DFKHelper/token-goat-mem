@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resolveDbPath } from "../src/db.js";
 import { extractRememberedId, extractSuggestedId, runCli } from "./support/cli.js";
@@ -17,12 +17,12 @@ let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-uuid-cli-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
   copyTemplateStore(resolveDbPath());
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
 });
 

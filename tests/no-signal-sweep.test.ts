@@ -1,6 +1,6 @@
 /** A run in which nothing succeeded must be distinguishable from one in which everything did. `src/cli.ts` states the exit-code half of this contract normatively: exit 0 is success, and "nothing found" outcomes are successes rather than errors. That is a deliberate position and it holds -- but it means the exit code deliberately carries *no* signal for an empty result, so the entire burden of distinguishing "found nothing" from "found everything" falls on stdout. Where stdout does not carry it either, the command is silent about having done nothing, which is the same failure class as a seam that withholds facts while claiming to be complete. The sweep at the bottom of this file walks every registered command in that state. Two commands failed it when it was first written, and their regressions are pinned individually above: - `mem recall <query>` returned the entire store for a query that matched nothing, in output byte-identical to `mem recall` with no query at all. A query is a ranking input, not a filter -- BM25 orders the candidate set and never removes from it -- so the existing `results.length === 0` branch could not fire for a non-matching query, and the "no matching facts" outcome `src/cli.ts` documents was unreachable by that path. - `mem list --kind decision` printed "no facts stored" on a store that was not empty. The message is a claim about the whole store; a filter excluding everything is a different fact about the world, and reporting it as an empty store is simply false. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +13,11 @@ let root: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-sweep-home-"));
   root = mkdtempSync(join(tmpdir(), "mem-sweep-root-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });

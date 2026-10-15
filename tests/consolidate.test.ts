@@ -1,5 +1,5 @@
 /** Tests for `mem consolidate` -- the near-duplicate pass and the stale pass -- plus the durable `facts.last_surfaced_at` mark the stale pass depends on. Two layers, both against a real database: unit tests over `src/consolidate.ts`'s clustering rules (which pairs may be compared at all, who survives, what is never touched), and end-to-end tests driving the real `run()` for the parts that only exist at the CLI boundary -- dry-run-by-default, `--apply`'s audit trail, and the flag validation. The one thing these must actually prove is that `--apply` cannot lose anything silently: every loser is still in the store as `superseded`, with an audit row saying which pass moved it and why. */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -617,12 +617,12 @@ describe("mem consolidate (end to end)", () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mem-consolidate-e2e-"));
-    process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
     copyTemplateStore(resolveDbPath());
   });
 
   afterEach(() => {
-    delete process.env["TOKEN_GOAT_MEM_HOME"];
+    vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -1069,12 +1069,12 @@ describe("mem consolidate --related (end to end)", () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mem-consolidate-related-e2e-"));
-    process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
     copyTemplateStore(resolveDbPath());
   });
 
   afterEach(() => {
-    delete process.env["TOKEN_GOAT_MEM_HOME"];
+    vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -1145,12 +1145,12 @@ describe("mem consolidate --stale --include-graph-stale (end to end)", () => {
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), "mem-consolidate-graph-stale-e2e-"));
-    process.env["TOKEN_GOAT_MEM_HOME"] = home;
+    vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
     copyTemplateStore(resolveDbPath());
   });
 
   afterEach(() => {
-    delete process.env["TOKEN_GOAT_MEM_HOME"];
+    vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
   });
 

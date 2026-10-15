@@ -1,5 +1,5 @@
 /** End-to-end tests for the embedding feature's CLI surface: `mem embed`, the post-capture vector write, `mem doctor`'s report, and the dimension/model safety that keeps two vector spaces from being compared. Driven through the real `run()` against a real database, and against a real (loopback) HTTP endpoint (tests/support/embedding-server.ts), for the reason that file gives: mocking `fetch` would test the mock's idea of the wire format. Every test that sets an embedding environment variable restores it afterwards. A leak here is not a local failure: it would turn embeddings on for every later test file in the same worker, which is exactly the byte-identical-when-unconfigured property the first block below exists to pin. */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +10,10 @@ import type { NewFact } from "../src/types.js";
 import { EMBED_API_KEY_ENV, EMBED_MODEL_ENV, EMBED_URL_ENV } from "../src/embeddings.js";
 import { startStubEmbeddingServer, type StubEmbeddingServer, type StubEmbeddingServerOptions } from "./support/embedding-server.js";
 import { buildHintFormat } from "../src/integration-seam.js";
+import { CAPABLE_PROBE, installProbe, resetProbe } from "./support/fakeProbe.js";
+
+// Doctor probes the `mem` on PATH only for an installed hook, and the root below holds none; the scripted probe makes that a guarantee, so no process starts whatever this host has installed.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 /** A budget no runner can exceed, so a slow machine cannot empty the hint set and pass the assertion vacuously. */
 const NO_TRUNCATION_BUDGET_MS = 3_600_000;
@@ -23,11 +27,13 @@ let priorEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-embed-home-"));
   root = mkdtempSync(join(tmpdir(), "mem-embed-root-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
+  installProbe(CAPABLE_PROBE);
   priorEnv = Object.fromEntries(EMBED_ENV_KEYS.map((key) => [key, process.env[key]]));
 });
 
 afterEach(async () => {
+  resetProbe();
   // Record/set/restore, matching tests/setup/isolate-home.ts: `delete` alone would clobber a value an outer harness had set, and leaving one set would silently configure every later test.
   for (const key of EMBED_ENV_KEYS) {
     const prior = priorEnv[key];
@@ -37,7 +43,7 @@ afterEach(async () => {
       process.env[key] = prior;
     }
   }
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   while (openServers.length > 0) {
     await openServers.pop()?.close();
   }
@@ -74,6 +80,12 @@ function storedMeta(): ReturnType<typeof getEmbeddingMeta> {
   }
 }
 
+/** The findings of a `doctor --json` run whose status is `fail`, the ones `--strict` turns into exit 1. */
+function failedFindings(stdout: string): { check: string; message: string }[] {
+  const report = JSON.parse(stdout) as { findings: { check: string; status: string; message: string }[] };
+  return report.findings.filter((entry) => entry.status === "fail");
+}
+
 async function seed(count = 3): Promise<void> {
   const texts = ["uses vitest for tests", "prefers tabs over spaces", "deploys on fridays", "the build is esbuild", "chose sqlite for storage"];
   for (const text of texts.slice(0, count)) {
@@ -101,7 +113,7 @@ describe("with no embedding configuration, behaviour is what it was before the f
   });
 
   it("doctor reports embeddings as off, in a line that does not read as a fault", async () => {
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(new RegExp(`embeddings: off \\(set ${EMBED_URL_ENV} and ${EMBED_MODEL_ENV} to enable\\)`, "u"));
@@ -112,7 +124,7 @@ describe("with no embedding configuration, behaviour is what it was before the f
   it("doctor without --probe-embeddings makes no request to a configured endpoint", async () => {
     const server = await configureEmbeddings();
 
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).not.toMatch(/embedding probe/u);
@@ -122,7 +134,7 @@ describe("with no embedding configuration, behaviour is what it was before the f
   it("doctor --probe-embeddings makes one request and reports ok against a working endpoint", async () => {
     const server = await configureEmbeddings();
 
-    const result = await runCli(["doctor", "--probe-embeddings"]);
+    const result = await runCli(["doctor", "--root", root, "--probe-embeddings"]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/embedding probe: ok/u);
@@ -132,15 +144,20 @@ describe("with no embedding configuration, behaviour is what it was before the f
   it("doctor --probe-embeddings reports the failure against a failing endpoint, and fails under --strict", async () => {
     const server = await configureEmbeddings({ status: 503 });
 
-    const result = await runCli(["doctor", "--probe-embeddings", "--strict"]);
+    const result = await runCli(["doctor", "--root", root, "--probe-embeddings", "--strict", "--json"]);
 
-    expect(result.stdout).toMatch(/embedding probe: failed -- .*HTTP 503/u);
-    expect(result.exitCode).toBe(1);
+    expect(result.exitCode, "--strict exits 1 for the failed embedding probe").toBe(1);
+    const failed = failedFindings(result.stdout);
+    expect(
+      failed.map((entry) => entry.check),
+      "the only failing finding is the embedding one, never a hook finding that depends on the machine"
+    ).toEqual(["embeddings"]);
+    expect(failed[0]?.message).toMatch(/embedding probe: failed -- .*HTTP 503/u);
     expect(server.requests).toHaveLength(1);
   });
 
   it("doctor --probe-embeddings says the probe was skipped when no backend is configured", async () => {
-    const result = await runCli(["doctor", "--probe-embeddings"]);
+    const result = await runCli(["doctor", "--root", root, "--probe-embeddings"]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/embedding probe: skipped, no embedding backend is configured/u);
@@ -178,15 +195,20 @@ describe("with no embedding configuration, behaviour is what it was before the f
     const server = await configureEmbeddings();
     delete process.env[EMBED_MODEL_ENV];
 
-    const result = await runCli(["doctor", "--probe-embeddings", "--strict"]);
+    const result = await runCli(["doctor", "--root", root, "--probe-embeddings", "--strict", "--json"]);
 
-    expect(result.stdout).toMatch(/embedding probe: not run, the embeddings configuration is unusable/u);
+    expect(result.exitCode, "--strict exits 1 for the unusable embeddings configuration").toBe(1);
+    const failed = failedFindings(result.stdout);
+    expect(
+      failed.map((entry) => entry.check),
+      "the only failing finding is the embedding one, never a hook finding that depends on the machine"
+    ).toEqual(["embeddings"]);
+    expect(failed[0]?.message).toMatch(/embedding probe: not run, the embeddings configuration is unusable/u);
     expect(result.stdout).not.toMatch(/embedding probe: skipped/u);
-    expect(result.exitCode).toBe(1);
     expect(server.requests).toHaveLength(0);
 
     process.env[EMBED_URL_ENV] = "not a url://user:hunter2@host";
-    const bad = await runCli(["doctor", "--probe-embeddings"]);
+    const bad = await runCli(["doctor", "--root", root, "--probe-embeddings"]);
     expect(bad.stdout).toMatch(/embedding probe: not run/u);
     expect(bad.stdout).not.toContain("hunter2");
   });
@@ -526,7 +548,7 @@ describe("dimension and model safety at recall", () => {
     const server = await configureEmbeddings({ apiKey: "sk-doctor-secret" });
     await runCli(["embed"]);
 
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/embeddings: 127\.0\.0\.1:\d+, model stub-model, api key configured/u);
@@ -543,7 +565,7 @@ describe("dimension and model safety at recall", () => {
     await runCli(["embed"]);
 
     process.env[EMBED_MODEL_ENV] = "model-b";
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/embedding ranking: disabled -- stored vectors are model-a's/u);
@@ -553,7 +575,7 @@ describe("dimension and model safety at recall", () => {
     process.env[EMBED_URL_ENV] = "http://127.0.0.1:1/v1/embeddings";
     delete process.env[EMBED_MODEL_ENV];
 
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(new RegExp(`embeddings: misconfigured -- .*${EMBED_MODEL_ENV}`, "u"));
@@ -566,7 +588,7 @@ describe("dimension and model safety at recall", () => {
     expect(getEmbeddingMeta(db)).toBeUndefined();
     db.close();
 
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).not.toContain("embedding store: nothing embedded yet");
@@ -583,7 +605,7 @@ describe("dimension and model safety at recall", () => {
     await configureEmbeddings();
     await runCli(["embed"]);
 
-    const result = await runCli(["doctor"]);
+    const result = await runCli(["doctor", "--root", root]);
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toMatch(/embedding coverage: 1\/1 facts/u);

@@ -2,19 +2,25 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { extractRememberedId, runCli } from "./support/cli.js";
+import { CAPABLE_PROBE, installProbe, resetProbe } from "./support/fakeProbe.js";
+
+// Doctor probes the `mem` on PATH only for an installed hook, and the `--root` below (the temp home) holds none; the scripted probe makes that a guarantee, so no process starts whatever this host has installed.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-doctor-why-home-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  resetProbe();
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -25,7 +31,7 @@ async function remember(text: string, kind: string, ...extra: string[]): Promise
 }
 
 async function whyLine(): Promise<string | undefined> {
-  const result = await runCli(["doctor"]);
+  const result = await runCli(["doctor", "--root", home]);
   expect(result.exitCode).toBe(0);
   return result.stdout.split("\n").find((line) => line.startsWith("why coverage:"));
 }

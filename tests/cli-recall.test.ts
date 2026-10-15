@@ -13,11 +13,11 @@ let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-cli-test-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
 });
 

@@ -1,6 +1,6 @@
 /** End-to-end tests for specificity shadowing at recall: when an in-scope fact with a narrower scope shares a `subject` with a broader in-scope fact and their values differ, the narrower one wins and the broader one is withheld from that recall only -- never superseded or edited in the store. Driven through the real CLI (`remember`, `recall`, `recall --hint-format`, `show`) so `mem recall` and the TGMEM/2 seam are asserted to agree, since both reach `retrieve()`. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,7 +13,7 @@ let projectB: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-shadow-test-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
   projectA = join(home, "projA");
   projectB = join(home, "projB");
   mkdirSync(projectA, { recursive: true });
@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
 });
 

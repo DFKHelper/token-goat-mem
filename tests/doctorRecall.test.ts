@@ -3,22 +3,28 @@ import Database from "better-sqlite3";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { openDb, resolveDbPath } from "../src/db.js";
 import { describeLastSurfaced } from "../src/doctor.js";
 import { MIGRATIONS } from "../src/migrations.js";
 import { runCli } from "./support/cli.js";
+import { CAPABLE_PROBE, installProbe, resetProbe } from "./support/fakeProbe.js";
+
+// Doctor probes the `mem` on PATH only for an installed hook, and the `--root` below (the temp home) holds none; the scripted probe makes that a guarantee, so no process starts whatever this host has installed.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let home: string;
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-doctor-recall-home-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  resetProbe();
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -30,7 +36,7 @@ interface RecallFinding {
 }
 
 async function recallFinding(): Promise<RecallFinding | undefined> {
-  const result = await runCli(["doctor", "--json"]);
+  const result = await runCli(["doctor", "--root", home, "--json"]);
   expect(result.exitCode).toBe(0);
   const report = JSON.parse(result.stdout) as { findings: RecallFinding[] };
   return report.findings.find((entry) => entry.message.startsWith("recall:"));
@@ -185,7 +191,7 @@ describe("mem doctor on a store behind the newest schema", () => {
   ])("reports $pending pending migration(s) at user_version $userVersion as a warn that --strict does not count, and does not migrate", async ({ userVersion, pending }) => {
     await runCli(["remember", "a fact stored before the newest schema", "--kind", "fact", "--scope", "global"]);
     rewriteSurfacing(`PRAGMA user_version = ${String(userVersion)}`);
-    const result = await runCli(["doctor", "--json", "--strict"]);
+    const result = await runCli(["doctor", "--root", home, "--json", "--strict"]);
     const report = JSON.parse(result.stdout) as { findings: RecallFinding[] };
     const failed = report.findings.filter((entry) => entry.status === "fail");
     const schemaEntries = report.findings.filter((entry) => entry.check === "schema");
@@ -206,7 +212,7 @@ describe("mem doctor on a store behind the newest schema", () => {
 
   it("emits no schema finding for a store at the newest schema", async () => {
     await runCli(["remember", "a fact stored at the newest schema", "--kind", "fact", "--scope", "global"]);
-    const result = await runCli(["doctor", "--json"]);
+    const result = await runCli(["doctor", "--root", home, "--json"]);
     const report = JSON.parse(result.stdout) as { findings: RecallFinding[] };
     expect(report.findings.some((entry) => entry.check === "integrity" && entry.status === "ok"), "the report did inspect the store").toBe(true);
     expect(report.findings.some((entry) => entry.check === "schema")).toBe(false);

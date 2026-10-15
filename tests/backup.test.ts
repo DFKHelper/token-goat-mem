@@ -25,7 +25,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-backup-e2e-"));
   home = join(root, ".mem");
   backupDir = join(root, "backups");
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
   priorBackupDir = process.env[BACKUP_DIR_ENV];
   process.env[BACKUP_DIR_ENV] = backupDir;
   // The doctor tests read the backups line, not the wiring probe, so the probe is scripted rather than a process started per run.
@@ -34,7 +34,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetProbe();
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   if (priorBackupDir === undefined) {
     delete process.env[BACKUP_DIR_ENV];
   } else {

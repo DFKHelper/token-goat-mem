@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listAuditLogForFact } from "../src/db.js";
 import { runCli, type CliResult } from "./support/cli.js";
@@ -22,19 +22,18 @@ let transcriptCount = 0;
 
 function useFreshHome(): string {
   home = mkdtempSync(join(base, "home-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
   return home;
 }
 
 beforeEach(() => {
   base = mkdtempSync(join(tmpdir(), "mem-stamped-ref-"));
-  process.env["TOKEN_GOAT_MEM_BACKUP_DIR"] = join(base, "backups");
+  vi.stubEnv("TOKEN_GOAT_MEM_BACKUP_DIR", join(base, "backups"));
   useFreshHome();
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
-  delete process.env["TOKEN_GOAT_MEM_BACKUP_DIR"];
+  vi.unstubAllEnvs();
   rmSync(base, { recursive: true, force: true });
 });
 

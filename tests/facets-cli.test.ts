@@ -18,13 +18,13 @@ let root: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-facets-home-"));
   root = mkdtempSync(join(tmpdir(), "mem-facets-root-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
   installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
   resetProbe();
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });

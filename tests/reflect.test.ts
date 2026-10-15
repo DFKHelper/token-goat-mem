@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { extractRememberedId, extractSuggestedId, runCli } from "./support/cli.js";
 
@@ -12,11 +12,11 @@ let root: string;
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "mem-reflect-home-"));
   root = mkdtempSync(join(tmpdir(), "mem-reflect-root-"));
-  process.env["TOKEN_GOAT_MEM_HOME"] = home;
+  vi.stubEnv("TOKEN_GOAT_MEM_HOME", home);
 });
 
 afterEach(() => {
-  delete process.env["TOKEN_GOAT_MEM_HOME"];
+  vi.unstubAllEnvs();
   rmSync(home, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });
