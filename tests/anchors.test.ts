@@ -12,6 +12,7 @@ import {
   type AnchorCacheStore,
   type AnchorVerdict,
 } from "../src/anchors.js";
+import { budgetNow } from "../src/budgetClock.js";
 
 /** In-memory `AnchorCacheStore` test double -- mirrors storage.ts's SQLite-backed implementation's (root, anchor) keying without depending on it, matching anchors.ts's own storage-agnostic seam. */
 class FakeAnchorCacheStore implements AnchorCacheStore {
@@ -583,7 +584,7 @@ describe("evaluateAnchor", () => {
       // Malformed anchor: unverified for a real reason (wrong arity), independent of any budget.
       expect(evaluateAnchor("file-exists", root)).toBe("unverified");
       // A second call with a generous (unexpired) deadline still passes through the top-of-function budget check and reaches the memo lookup — if the fix had disabled memoization wholesale instead of narrowly targeting budget-exhaustion bailouts, this would still pass, but it confirms genuine unverified verdicts are cached and returned the same way as before.
-      expect(evaluateAnchor("file-exists", root, Date.now() + 100_000)).toBe("unverified");
+      expect(evaluateAnchor("file-exists", root, budgetNow() + 100_000)).toBe("unverified");
     });
   });
 

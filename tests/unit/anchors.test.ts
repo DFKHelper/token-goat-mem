@@ -335,12 +335,6 @@ describe("valid-until", () => {
     expect(evaluateAnchor(`valid-until ${yearsFromNow(-5)}`, root)).toBe("contradicted");
   });
 
-  it("reads a bare date as the end of that day, not its midnight start", () => {
-    // Anyone writing `valid-until 2026-12-31` means "through the 31st", not "expired the instant the 31st began". Today's own date must therefore still affirm.
-    const today = new Date().toISOString().slice(0, 10);
-    expect(evaluateAnchor(`valid-until ${today}`, root)).toBe("affirmed");
-  });
-
   it("is unverified for a date it cannot parse, never contradicted", () => {
     // A typo must not read as "this fact has expired" and suppress a true fact.
     expect(evaluateAnchor("valid-until next friday", root)).toBe("unverified");
@@ -371,7 +365,7 @@ describe("valid-until", () => {
     beforeEach(() => {
       // UTC-8 (UTC-7 during DST). A user here reaches local 4pm on the target date at 23:59:59.999Z -- exactly the moment the old `${raw}T23:59:59.999Z` construction expired the fact, hours before this user's own day was over.
       process.env["TZ"] = "America/Los_Angeles";
-      vi.useFakeTimers();
+      vi.useFakeTimers({ toFake: ["Date"] });
     });
 
     afterEach(() => {
@@ -382,6 +376,22 @@ describe("valid-until", () => {
       } else {
         process.env["TZ"] = originalTZ;
       }
+    });
+
+    it("reads a bare date as the end of that day, not its midnight start", () => {
+      // Anyone writing `valid-until 2026-06-15` means "through the 15th", not "expired the instant the 15th began". Local noon on the 15th is 19:00:00.000Z (UTC-7, DST), after the day's midnight start and before its end, so today's own date must still affirm.
+      vi.setSystemTime(new Date("2026-06-15T19:00:00.000Z"));
+      expect(evaluateAnchor("valid-until 2026-06-15", root)).toBe("affirmed");
+    });
+
+    it.each([
+      // Local 23:59:59.999 on the 15th is 2026-06-16T06:59:59.999Z (UTC-7, DST): the deadline itself is inclusive.
+      { now: "2026-06-16T06:59:59.999Z", verdict: "affirmed", when: "the last millisecond of the local day" },
+      // One millisecond later is local midnight starting the 16th.
+      { now: "2026-06-16T07:00:00.000Z", verdict: "contradicted", when: "the first millisecond of the next local day" },
+    ])("is $verdict at $when", ({ now, verdict }) => {
+      vi.setSystemTime(new Date(now));
+      expect(evaluateAnchor("valid-until 2026-06-15", root)).toBe(verdict);
     });
 
     it("is still affirmed after UTC end-of-day has passed, while it is still the 15th locally", () => {

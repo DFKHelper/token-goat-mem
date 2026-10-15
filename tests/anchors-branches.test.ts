@@ -3,9 +3,10 @@
 import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 
 import { _clearAnchorMemoForTests, evaluateAnchor } from "../src/anchors.js";
+import * as budgetClock from "../src/budgetClock.js";
 
 /** `node:fs`'s ESM module namespace is not configurable, so `vi.spyOn` cannot patch its exports directly (see the "a throwing .git/index read" tests below). `vi.hoisted` lets the mock factory (itself hoisted above every import, including `node:fs`'s own) and the test bodies share one mutable override slot that defaults to passing through to the real implementation. */
 type FsOverride = ((real: (...args: unknown[]) => unknown, ...args: unknown[]) => unknown) | null;
@@ -496,24 +497,21 @@ describe("glob-exists does not descend into .git or node_modules", () => {
 
 // ────────────────────────────────────────────────────────────────── budget exhaustion ─────
 
-/** The soft budget is checked once on entry and again inside the expensive predicates. Reaching the inner checks requires time to pass *during* evaluation, which a real clock cannot be made to do on demand -- so the clock is driven directly: the entry check sees a time inside the budget, and everything after it sees a time past the deadline. The verdict is only half of what matters. A budget-limited `unverified` means "ran out of time", not "the predicate said no", so it must not be memoized -- otherwise one slow call would pin a wrong verdict for every later call at that anchor and root, including unbudgeted ones. */
+/** The soft budget is checked once on entry and again inside the expensive predicates, and every check reads `budgetNow` (src/budgetClock.ts), which tests/setup/freeze-budget-clock.ts freezes far past any real deadline for the whole run. Reaching the inner checks requires time to pass *during* evaluation, so this spies on `budgetNow` itself: the entry check sees a time inside the budget, and everything after it sees a time past the deadline. Each test asserts the clock was read more than once, so a spy on a clock the code no longer reads cannot pass it vacuously. The verdict is only half of what matters. A budget-limited `unverified` means "ran out of time", not "the predicate said no", so it must not be memoized -- otherwise one slow call would pin a wrong verdict for every later call at that anchor and root, including unbudgeted ones. */
 describe("a budget exhausted mid-evaluation yields unverified, and is not remembered as one", () => {
-  /** Entry check sees time 0; every subsequent check sees a time past the deadline. */
-  function clockThatExpiresAfterEntry(): void {
-    let call = 0;
-    vi.spyOn(Date, "now").mockImplementation(() => {
-      call += 1;
-      return call === 1 ? 0 : 10_000;
-    });
+  /** Entry check sees time 0; every subsequent check sees a time past the deadline. Restored to the frozen constant by `vi.restoreAllMocks`. */
+  function clockThatExpiresAfterEntry(): MockInstance<typeof budgetClock.budgetNow> {
+    return vi.spyOn(budgetClock, "budgetNow").mockReturnValueOnce(0).mockReturnValue(10_000);
   }
 
   const DEADLINE = 1_000;
 
   it("bails out of package-version", () => {
     writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { pkg: "1.0.0" } }), "utf8");
-    clockThatExpiresAfterEntry();
+    const clock = clockThatExpiresAfterEntry();
 
     expect(evaluateAnchor("package-version package.json pkg@1.0.0", root, DEADLINE)).toBe("unverified");
+    expect(clock.mock.calls.length, "the entry check and the inner package-version check must both have read the budget clock").toBeGreaterThan(1);
 
     vi.restoreAllMocks();
     // Same anchor, same root, no budget: if the bailout had been cached, this would still say unverified. It says affirmed, so the cache was correctly left alone.
@@ -522,9 +520,10 @@ describe("a budget exhausted mid-evaluation yields unverified, and is not rememb
 
   it("bails out of git-tracked", () => {
     writeIndex({ entries: [indexEntry("src/a.ts")] });
-    clockThatExpiresAfterEntry();
+    const clock = clockThatExpiresAfterEntry();
 
     expect(evaluateAnchor("git-tracked src/a.ts", root, DEADLINE)).toBe("unverified");
+    expect(clock.mock.calls.length, "the entry check and the inner git-tracked check must both have read the budget clock").toBeGreaterThan(1);
 
     vi.restoreAllMocks();
     expect(evaluateAnchor("git-tracked src/a.ts", root)).toBe("affirmed");
@@ -533,10 +532,11 @@ describe("a budget exhausted mid-evaluation yields unverified, and is not rememb
   it("bails out of a glob walk, reporting unverified rather than the contradicted it was heading for", () => {
     mkdirSync(join(root, "src"), { recursive: true });
     writeFileSync(join(root, "src", "a.ts"), "x", "utf8");
-    clockThatExpiresAfterEntry();
+    const clock = clockThatExpiresAfterEntry();
 
     // This is the distinction the branch exists for: an interrupted walk found nothing *yet*, which is not the same as having searched everywhere and found nothing.
     expect(evaluateAnchor("glob-exists src/*.ts", root, DEADLINE)).toBe("unverified");
+    expect(clock.mock.calls.length, "the entry check and the glob walk's own check must both have read the budget clock").toBeGreaterThan(1);
 
     vi.restoreAllMocks();
     expect(evaluateAnchor("glob-exists src/*.ts", root)).toBe("affirmed");
@@ -544,9 +544,10 @@ describe("a budget exhausted mid-evaluation yields unverified, and is not rememb
 
   it("bails out of file-contains", () => {
     writeFileSync(join(root, "notes.txt"), "needle", "utf8");
-    clockThatExpiresAfterEntry();
+    const clock = clockThatExpiresAfterEntry();
 
     expect(evaluateAnchor("file-contains notes.txt needle", root, DEADLINE)).toBe("unverified");
+    expect(clock.mock.calls.length, "the entry check and the inner file-contains check must both have read the budget clock").toBeGreaterThan(1);
 
     vi.restoreAllMocks();
     expect(evaluateAnchor("file-contains notes.txt needle", root)).toBe("affirmed");
@@ -554,9 +555,10 @@ describe("a budget exhausted mid-evaluation yields unverified, and is not rememb
 
   it("is unverified when the deadline had already passed before evaluation began", () => {
     writeFileSync(join(root, "a.txt"), "x", "utf8");
-    vi.spyOn(Date, "now").mockReturnValue(10_000);
+    const clock = vi.spyOn(budgetClock, "budgetNow").mockReturnValue(10_000);
 
     expect(evaluateAnchor("file-exists a.txt", root, DEADLINE)).toBe("unverified");
+    expect(clock.mock.calls.length, "the entry check must have read the budget clock").toBeGreaterThan(0);
 
     vi.restoreAllMocks();
     expect(evaluateAnchor("file-exists a.txt", root)).toBe("affirmed");
