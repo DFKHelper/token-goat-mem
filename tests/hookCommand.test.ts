@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
+import { Readable } from "node:stream";
 
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUNDLE_PATH, runBundleSync } from "./support/bundle.js";
 import { runCli } from "./support/cli.js";
 import { CAPABLE_PROBE, installProbe, memProbe, OLD_PROBE, probeCalls, resetProbe, writeProbeTarget } from "./support/fakeProbe.js";
+import { primeHookStdin } from "../src/hook-envelope.js";
 import { deriveHookRoot, MEM_HOOK_IMPLIED_ARGS, registerHookCommand } from "../src/hookCommand.js";
 import { describeHookDivergence } from "../src/doctorWiring.js";
 import {
@@ -104,13 +106,12 @@ describe("matrix 1: the new string on an old binary", () => {
     writeFileSync(oldMem, OLD_MEM_FUNCTION, "utf8");
     const bashEnv = oldMem.split(sep).join("/");
     const missingBundle = "/nonexistent/token-goat-mem.mjs";
-    const commands = [CLAUDE_HOOK_EVENTS[2]?.command, claudeHookEventsFor({ user: true, platform: "win32", bundlePath: missingBundle })[2]?.command] as string[];
-    for (const command of commands) {
-      const result = spawnSync("bash", ["-c", command], { encoding: "utf8", env: { ...process.env, BASH_ENV: bashEnv } });
-      expect(result.stdout).toContain("mem reflect failed (exit 1); run mem doctor");
-    }
-    const bare = spawnSync("bash", ["-c", "mem hook stop"], { encoding: "utf8", env: { ...process.env, BASH_ENV: bashEnv } });
-    expect(bare.status).toBe(1);
+    const plain = CLAUDE_HOOK_EVENTS[2]?.command as string;
+    const windows = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: missingBundle })[2]?.command as string;
+    // One bash evals the three strings in turn and prints each exit status after it: a process start costs seconds on a loaded Windows host, so three launches made the case slow without proving more than one. No subshell around the eval, because an MSYS bash forks by emulation and a subshell per string measured 6 to 19 s against 1 to 4 s without.
+    const result = spawnSync("bash", ["-c", 'for command in "$@"; do eval "$command"; echo "[exit $?]"; done', "bash", plain, windows, "mem hook stop"], { encoding: "utf8", env: { ...process.env, BASH_ENV: bashEnv } });
+    const fallback = "mem reflect failed (exit 1); run mem doctor\n[exit 0]\n";
+    expect(result.stdout).toBe(`${fallback}${fallback}[exit 1]\n`);
   });
 });
 
@@ -319,15 +320,23 @@ describe("end to end through the built bundle", () => {
     const settingsBefore = readFileSync(projectSettingsPath(), "utf8");
     const envelope = JSON.stringify({ session_id: "s-hook-e2e", hook_event_name: "SessionStart", source: "startup", cwd: root });
 
+    // One real launch of the built bundle proves the shipped entry point; the envelope-cwd root and the direct recall run in this process through the same `run()` the bundle's main calls, because each extra process start costs seconds on a loaded Windows host.
     const viaEnv = runBundleSync(["hook", "session-start"], { home: memHome, stdin: envelope, env: { CLAUDE_PROJECT_DIR: root } });
     expect(viaEnv.exitCode).toBe(0);
     expect(viaEnv.stdout.startsWith("TGMEM/2\n")).toBe(true);
     expect(viaEnv.stdout).toContain("zebra deploy token");
 
-    const viaEnvelope = runBundleSync(["hook", "session-start"], { home: memHome, stdin: envelope, env: { CLAUDE_PROJECT_DIR: "" } });
-    expect(viaEnvelope.stdout).toBe(viaEnv.stdout);
+    vi.stubEnv("CLAUDE_PROJECT_DIR", "");
+    const stdinSpy = vi.spyOn(process, "stdin", "get").mockReturnValue(Readable.from([envelope]) as unknown as typeof process.stdin);
+    try {
+      const viaEnvelope = await runCli(["hook", "session-start"]);
+      expect(viaEnvelope.stdout).toBe(viaEnv.stdout);
+    } finally {
+      stdinSpy.mockRestore();
+    }
 
-    const direct = runBundleSync(["recall", "--hint-format", "--hook-stdin", "--root", root], { home: memHome, stdin: envelope });
+    primeHookStdin(envelope);
+    const direct = await runCli(["recall", "--hint-format", "--hook-stdin", "--root", root]);
     expect(viaEnv.stdout).toBe(direct.stdout);
     expect(readFileSync(projectSettingsPath(), "utf8")).toBe(settingsBefore);
     expect(BUNDLE_PATH).toContain("token-goat-mem.mjs");
