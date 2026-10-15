@@ -341,17 +341,27 @@ const REAL_GIT = { ensureRepo: ensureGitRepo, listComponents, detectRenames };
 
 /** Runs the full compute-and-optionally-write pass. Never throws for expected failure modes -- returns `exitCode` 2 for config/usage/marker errors instead. */
 export function runSync(repoRoot, { mode, format, strictCurated, git = REAL_GIT }) {
+  // The work-tree probe is a git start of its own, so it runs only once something has failed, to keep "Not inside a git work tree" the message that wins over any other failure.
+  const refuse = (error) => {
+    let reported = error;
+    try {
+      git.ensureRepo(repoRoot);
+    } catch (notARepo) {
+      reported = notARepo;
+    }
+    return { exitCode: 2, stderr: [reported.message], changed: false, jsonPayload: null };
+  };
+
   let config;
   try {
-    git.ensureRepo(repoRoot);
     config = loadConfig(repoRoot);
   } catch (error) {
-    return { exitCode: 2, stderr: [error.message], changed: false, jsonPayload: null };
+    return refuse(error);
   }
 
   const docPath = join(repoRoot, config.doc);
   if (!existsSync(docPath)) {
-    return { exitCode: 2, stderr: [`Doc not found: ${docPath}`], changed: false, jsonPayload: null };
+    return refuse(new SyncError(`Doc not found: ${docPath}`));
   }
 
   let discovered;
@@ -361,7 +371,7 @@ export function runSync(repoRoot, { mode, format, strictCurated, git = REAL_GIT 
     discovered = git.listComponents(repoRoot, config.patterns, config.exclude);
     markers = locateMarkers(docTextOriginal);
   } catch (error) {
-    return { exitCode: 2, stderr: [error.message], changed: false, jsonPayload: null };
+    return refuse(error);
   }
 
   const eol = detectEol(docTextOriginal);
@@ -389,7 +399,7 @@ export function runSync(repoRoot, { mode, format, strictCurated, git = REAL_GIT 
     }
   }
 
-  const renameMap = git.detectRenames(repoRoot);
+  const renameMap = curatedGone.length > 0 ? git.detectRenames(repoRoot) : new Map();
   const { curatedRoles: migrated, events } = resolveCuratedMigrations(curatedGone, renameMap, discoveredSet);
   for (const [target, role] of migrated) curatedRoles.set(target, role);
 
@@ -477,8 +487,12 @@ function makeTempRepo() {
   return dir;
 }
 
-function gitCommitAll(dir, message) {
+function gitStageAll(dir) {
   spawnSync("git", ["add", "-A"], { cwd: dir });
+}
+
+function gitCommitAll(dir, message) {
+  gitStageAll(dir);
   spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", message], { cwd: dir });
 }
 
@@ -645,61 +659,42 @@ export function selfTest() {
     }
   }
 
-  // Case 9: rename re-keys a curated row.
+  // Cases 9, 10 and 15 share one real git repository, because every git start costs seconds on a slow host. Case 15 checks the committed, synchronized tree; cases 9 and 10 then curate two Roles, rename one module, split the other, stage that, and run the real discovery and rename detection once.
   {
     const dir = makeTempRepo();
     try {
-      writeSrc(dir, "old.ts", "/** Old module. */\nexport function old() {}\n");
-      writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/old.ts"]]], exclude: [] });
+      const moduleBody = (title, fn, detail) => `/** ${title}. */\nexport function ${fn}() {\n  return "${detail}";\n}\n`;
+      const oldNine = moduleBody("Old nine module", "oldNine", "the first of two modules that are about to move, kept apart by a long and entirely unrelated string");
+      const oldTen = moduleBody("Old ten module", "oldTen", "zzz qqq xxx www vvv uuu ttt sss rrr ppp ooo nnn mmm lll kkk jjj iii hhh ggg fff eee ddd ccc bbb aaa");
+      const layout = (modules) => ({ doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", modules]], exclude: [] });
+      writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
+      writeSrc(dir, "old9.ts", oldNine);
+      writeSrc(dir, "old10.ts", oldTen);
+      writeConfig(dir, layout(["src/alpha.ts", "src/old9.ts", "src/old10.ts"]));
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
       runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
-      let text = readDoc(dir);
-      text = text.replace(/\| Old module \|/u, "| CURATED ROLE TEXT |");
-      writeFileSync(join(dir, "ARCHITECTURE.md"), text, "utf8");
-      gitCommitAll(dir, "curate");
-      const oldContent = readFileSync(join(dir, "src", "old.ts"), "utf8");
-      rmSync(join(dir, "src", "old.ts"));
-      writeSrc(dir, "new.ts", oldContent);
-      writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/new.ts"]]], exclude: [] });
-      // git ls-files reports the index, not the raw working tree, so the deletion/addition must be staged (not committed) before discovery sees it -- otherwise old.ts still looks tracked.
-      spawnSync("git", ["add", "-A"], { cwd: dir });
-      const write = runSync(dir, { mode: "write", format: "text", strictCurated: false });
-      const after = readDoc(dir);
-      const rekeyed = /new\.ts`[^\n]*CURATED ROLE TEXT/u.test(after);
-      check("Case 9: rename re-keys curated Role to the new path", rekeyed, `stderr=${write.stderr.join(" | ")}\n${after}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
+      gitCommitAll(dir, "init");
 
-  // Case 10: split duplicates a curated Role to every child.
-  {
-    const dir = makeTempRepo();
-    try {
-      writeSrc(dir, "old.ts", "/** Old module. */\nexport function old() {}\n");
-      writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/old.ts"]]], exclude: [] });
-      writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
-      let text = readDoc(dir);
-      text = text.replace(/\| Old module \|/u, "| CURATED SPLIT TEXT |");
-      writeFileSync(join(dir, "ARCHITECTURE.md"), text, "utf8");
-      gitCommitAll(dir, "curate");
-      const oldContent = readFileSync(join(dir, "src", "old.ts"), "utf8");
-      rmSync(join(dir, "src", "old.ts"));
-      writeSrc(dir, "new1.ts", oldContent);
-      writeSrc(dir, "new2.ts", oldContent);
-      writeConfig(dir, {
-        doc: "ARCHITECTURE.md",
-        patterns: ["src/*.ts"],
-        layers: [["Core", ["src/new1.ts", "src/new2.ts"]]],
-        exclude: [],
-      });
-      spawnSync("git", ["add", "-A"], { cwd: dir });
+      const synced = runSync(dir, { mode: "check", format: "text", strictCurated: false });
+
+      const curated = readDoc(dir).replace(/\| Old nine module \|/u, "| CURATED ROLE TEXT |").replace(/\| Old ten module \|/u, "| CURATED SPLIT TEXT |");
+      writeFileSync(join(dir, "ARCHITECTURE.md"), curated, "utf8");
+      rmSync(join(dir, "src", "old9.ts"));
+      rmSync(join(dir, "src", "old10.ts"));
+      writeSrc(dir, "new9.ts", oldNine);
+      writeSrc(dir, "new10a.ts", oldTen);
+      writeSrc(dir, "new10b.ts", oldTen);
+      writeConfig(dir, layout(["src/alpha.ts", "src/new9.ts", "src/new10a.ts", "src/new10b.ts"]));
+      // git ls-files reports the index, not the raw working tree, so the deletions and additions must be staged (not committed) before discovery sees them -- otherwise old9.ts and old10.ts still look tracked.
+      gitStageAll(dir);
       const write = runSync(dir, { mode: "write", format: "text", strictCurated: false });
       const after = readDoc(dir);
-      const both = /new1\.ts`[^\n]*CURATED SPLIT TEXT \(split from src\/old\.ts\)/u.test(after)
-        && /new2\.ts`[^\n]*CURATED SPLIT TEXT \(split from src\/old\.ts\)/u.test(after);
+      const rekeyed = /new9\.ts`[^\n]*CURATED ROLE TEXT/u.test(after);
+      check("Case 9: rename re-keys curated Role to the new path", rekeyed, `stderr=${write.stderr.join(" | ")}\n${after}`);
+      const both = /new10a\.ts`[^\n]*CURATED SPLIT TEXT \(split from src\/old10\.ts\)/u.test(after)
+        && /new10b\.ts`[^\n]*CURATED SPLIT TEXT \(split from src\/old10\.ts\)/u.test(after);
       check("Case 10: split duplicates curated Role to both children", both, `stderr=${write.stderr.join(" | ")}\n${after}`);
+      check("Case 15: synchronized tree exits 0 with empty stderr", synced.exitCode === 0 && synced.stderr.length === 0, `exitCode=${synced.exitCode} stderr=${JSON.stringify(synced.stderr)}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -774,22 +769,6 @@ export function selfTest() {
       const rowLine = text.split("\n").find((l) => l.includes("src/piped.ts"));
       const escaped = Boolean(rowLine) && rowLine.includes("key\\|value") && parseRowLine(rowLine)?.length === 4;
       check("Case 14: pipe in Role is escaped and row still parses to 4 cells", escaped, rowLine ?? "<no row>");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-
-  // Case 15: exit 0 on a synchronized tree.
-  {
-    const dir = makeTempRepo();
-    try {
-      writeSrc(dir, "alpha.ts", "/** Alpha. */\nexport function alpha() {}\n");
-      writeConfig(dir, { doc: "ARCHITECTURE.md", patterns: ["src/*.ts"], layers: [["Core", ["src/alpha.ts"]]], exclude: [] });
-      writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
-      runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
-      gitCommitAll(dir, "init");
-      const result = runSync(dir, { mode: "check", format: "text", strictCurated: false });
-      check("Case 15: synchronized tree exits 0 with empty stderr", result.exitCode === 0 && result.stderr.length === 0, `exitCode=${result.exitCode} stderr=${JSON.stringify(result.stderr)}`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
