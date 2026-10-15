@@ -10,7 +10,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { BUNDLE_PATH, runBundleSync } from "./support/bundle.js";
 import { runCli } from "./support/cli.js";
-import { CAPABLE_MEM_SHIM, OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+import { OLD_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+import { CAPABLE_PROBE, installProbe, memProbe, OLD_PROBE, probeCalls, resetProbe, writeProbeTarget } from "./support/fakeProbe.js";
 import { deriveHookRoot, MEM_HOOK_IMPLIED_ARGS, registerHookCommand } from "../src/hookCommand.js";
 import { describeHookDivergence } from "../src/doctorWiring.js";
 import {
@@ -29,6 +30,8 @@ import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
 
 // Process launches on this machine take 1-10 s, past the capability probe budget (MEM_PROBE_TIMEOUT_MS in wiring.ts); the floor keeps capability tests from timing out on launch latency.
 vi.mock("node:child_process", async (importOriginal) => (await import("./support/spawnTimeoutFloor.js")).withSpawnTimeoutFloor(await importOriginal<typeof import("node:child_process")>()));
+// Matrix 8 scripts what a probe of the `mem` binary returns with `installProbe`; the other cases install nothing and reach the real `spawnProbe`.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 const RECALL_FALLBACK = `printf 'TGMEM/2\\nfooter  mem recall failed (exit %s); run mem doctor\\n' "$?"`;
 /** The flag-carrying strings an earlier mem stamped, per event. */
@@ -257,17 +260,27 @@ describe("matrix 7: strict input", () => {
   });
 });
 
-describe("matrix 8: doctor and the capability probe", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("matrix 8: doctor and the capability probe", () => {
+  beforeEach(() => {
+    installProbe(CAPABLE_PROBE);
+  });
+
+  afterEach(() => {
+    resetProbe();
+  });
+
   it("fails the probe with `hook` missing on an old binary and passes on a new one", () => {
     const hooks = CLAUDE_HOOK_EVENTS.map(({ event, command }) => ({ event, command }));
-    writeFakeMem(binDir, OLD_MEM_SHIM);
+    writeProbeTarget(binDir);
+    installProbe(OLD_PROBE);
     const old = checkClaudeHookHealth(hooks, { pathEnv: binDir });
     expect(old.hooks.map((hook) => hook.missing)).toEqual(hooks.map(() => ["hook"]));
     // A real old build answers `hook --help` with its root help and exit 0, never naming a slug.
-    writeFakeMem(binDir, '#!/usr/bin/env node\nconst a = process.argv.slice(2);\nif (a[0] === "--version") { console.log("0.5.2"); process.exit(0); }\nif (a.includes("--help")) { console.log("recall reflect scan-session --hint-format --root"); process.exit(0); }\nprocess.exit(1);\n');
+    installProbe(memProbe("0.5.2", () => "recall reflect scan-session --hint-format --root\n"));
     expect(checkClaudeHookHealth(hooks, { pathEnv: binDir }).hooks.map((hook) => hook.missing)).toEqual(hooks.map(() => ["hook"]));
-    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    installProbe(CAPABLE_PROBE);
     expect(checkClaudeHookHealth(hooks, { pathEnv: binDir }).hooks.every((hook) => hook.capable)).toBe(true);
+    expect(probeCalls().map((call) => call.args)).toEqual([["--version"], ["hook", "--help"]]);
   });
 
   it("warns about a legacy hook shape naming mem init claude-code, and not about the current one", async () => {

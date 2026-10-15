@@ -1,6 +1,6 @@
 /** End-to-end tests for `mem doctor`'s wiring checks: whether each supported tool's mem block is present and current (`wiring`), and whether project- and user-level Claude Code hooks disagree (`hook-divergence`). Everything goes through the real CLI against temp roots and homes; doctor itself must never write a file. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -10,8 +10,11 @@ import { describeIncapableHook, hookGapRemedy } from "../src/doctor.js";
 import { probeTimeoutFromEnv } from "../src/doctorWiring.js";
 import { checkClaudeHookHealth, checkHookCapability, CLAUDE_HOOK_EVENTS, describeProbeRefusal, MEM_PROBE_TIMEOUT_MS, toHookCapabilityResult, type HookCapabilityResult } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
-import { CAPABLE_MEM_SHIM, HANG_ONCE_MEM_SHIM, HANGING_MEM_SHIM, NOT_RUNNABLE_MEM_SHIM, writeCountingFakeMem, writeFakeMem } from "./support/fakeMem.js";
-import { SPAWN_TIMEOUT_FLOOR_MS } from "./support/spawnTimeoutFloorMs.js";
+import { CAPABLE_MEM_SHIM, writeFakeMem } from "./support/fakeMem.js";
+import { CAPABLE_PROBE, inOrder, installProbe, NOT_RUNNABLE_PROBE, probeCalls, resetProbe, UNANSWERED_PROBE, writeProbeTarget } from "./support/fakeProbe.js";
+
+// Every probe of a PATH mem is scripted by the test, so no verdict here waits on a process launch or a clock.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 interface JsonFinding {
   readonly check: string;
@@ -30,9 +33,11 @@ beforeEach(() => {
   toolHome = mkdtempSync(join(tmpdir(), "mem-dw-home-"));
   process.env["TOKEN_GOAT_MEM_HOME"] = memHome;
   process.env["TOKEN_GOAT_MEM_WIRING_HOME"] = toolHome;
+  installProbe(CAPABLE_PROBE);
 });
 
 afterEach(() => {
+  resetProbe();
   delete process.env["TOKEN_GOAT_MEM_HOME"];
   delete process.env["TOKEN_GOAT_MEM_WIRING_HOME"];
   for (const dir of [memHome, toolRoot, toolHome]) {
@@ -53,7 +58,7 @@ async function init(tool: string, ...extra: string[]): Promise<void> {
   expect(result.exitCode).toBe(0);
 }
 
-describe("mem doctor wiring drift", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem doctor wiring drift", () => {
   it("reports ok for a tool whose wiring is current", async () => {
     await init("codex");
     await init("claude-code");
@@ -129,7 +134,7 @@ describe("mem doctor wiring drift", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
   });
 });
 
-describe("mem doctor project-vs-user hook divergence", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem doctor project-vs-user hook divergence", () => {
   it("warns when project and user hooks run different mem invocations, naming both fixes", async () => {
     await init("claude-code");
     await init("claude-code", "--user");
@@ -167,7 +172,7 @@ describe("mem doctor project-vs-user hook divergence", { timeout: SPAWN_TIMEOUT_
   });
 });
 
-describe("mem doctor warns about a recall hook timeout that is too low", { timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem doctor warns about a recall hook timeout that is too low", () => {
   /** Installs the hooks, then sets (or removes, for `undefined`) the `timeout` on every hook of `event`. */
   async function installWithTimeout(event: string, timeout: number | string | undefined): Promise<void> {
     await init("claude-code");
@@ -300,9 +305,7 @@ describe("a hook whose command the safety check refuses is reported as not probe
   it("names the event and the command, does not call it unsupported, warns, and launches nothing", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mem-dw-refused-"));
     try {
-      writeCountingFakeMem(binDir, CAPABLE_MEM_SHIM);
-      const counter = join(binDir, "launches.txt");
-      process.env["FAKE_MEM_COUNTER"] = counter;
+      writeProbeTarget(binDir);
       const hook = refusedHook(join(binDir, process.platform === "win32" ? "mem.cmd" : "mem"));
       const entry = describeIncapableHook(hook, true);
       expect(entry.message).toContain(event);
@@ -314,9 +317,8 @@ describe("a hook whose command the safety check refuses is reported as not probe
       expect(entry.remedy).toContain("mem init claude-code");
       expect(entry.remedy).toContain("--user");
       expect(entry.remedy).toContain("--root");
-      expect(existsSync(counter)).toBe(false);
+      expect(probeCalls()).toEqual([]);
     } finally {
-      delete process.env["FAKE_MEM_COUNTER"];
       rmSync(binDir, { recursive: true, force: true });
     }
   });
@@ -329,11 +331,12 @@ describe("a hook whose command the safety check refuses is reported as not probe
   });
 });
 
-describe("mem hook capability probe that gets no answer",{ timeout: SPAWN_TIMEOUT_FLOOR_MS }, () => {
+describe("mem hook capability probe that gets no answer",() => {
   it("reports a probe that timed out as such, not as a mem without the `mem hook <event>` entry point", () => {
     const binDir = mkdtempSync(join(tmpdir(), "mem-dw-bin-"));
     try {
-      writeFakeMem(binDir, HANGING_MEM_SHIM);
+      writeProbeTarget(binDir);
+      installProbe(UNANSWERED_PROBE);
       const isWindows = process.platform === "win32";
       const binPath = join(binDir, isWindows ? "mem.cmd" : "mem");
       expect(checkHookCapability(binPath, { subcommand: "hook", flags: ["session-start"] }, 1000)).toEqual({ capable: false, missing: [], probeFailed: true });
@@ -373,11 +376,7 @@ async function withProbeEnv(binDir: string, env: Readonly<Record<string, string>
   }
 }
 
-function countLaunches(counterPath: string): number {
-  return existsSync(counterPath) ? readFileSync(counterPath, "utf8").split("\n").filter((line) => line.trim().length > 0).length : 0;
-}
-
-describe("mem doctor and mem init probe a PATH mem under one shared cache and budget", { timeout: 300_000 }, () => {
+describe("mem doctor and mem init probe a PATH mem under one shared cache and budget", () => {
   let binDir: string;
 
   beforeEach(() => {
@@ -389,21 +388,19 @@ describe("mem doctor and mem init probe a PATH mem under one shared cache and bu
   });
 
   it("launches a hanging mem at most once per doctor run and reports it as a probe with no answer", async () => {
-    const counter = join(binDir, "launches.txt");
-    writeCountingFakeMem(binDir, HANGING_MEM_SHIM);
+    writeProbeTarget(binDir);
+    installProbe(UNANSWERED_PROBE);
     await init("claude-code");
-    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "1000", FAKE_MEM_COUNTER: counter }, async () => {
-      const started = Date.now();
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "1000" }, async () => {
       const hooks = await doctorFindings("hooks");
-      const elapsedMs = Date.now() - started;
       expect(hooks.some((entry) => entry.status === "fail" && entry.remedy?.includes("less busy") === true)).toBe(true);
-      expect(countLaunches(counter)).toBeLessThanOrEqual(1);
-      expect(elapsedMs).toBeLessThan(10_000);
+      expect(probeCalls()).toHaveLength(1);
     });
   });
 
   it("tells a binary that cannot run at all to reinstall or fix PATH, not that it lacks the hook entry point", async () => {
-    writeFakeMem(binDir, NOT_RUNNABLE_MEM_SHIM);
+    writeProbeTarget(binDir);
+    installProbe(NOT_RUNNABLE_PROBE);
     await init("claude-code");
     await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000" }, async () => {
       const failures = (await doctorFindings("hooks")).filter((entry) => entry.status === "fail");
@@ -417,37 +414,41 @@ describe("mem doctor and mem init probe a PATH mem under one shared cache and bu
   });
 
   it("init retries a probe that got no answer once at 3x the budget, and writes the hooks without --force", async () => {
-    const marker = join(binDir, "hung-once.marker");
-    writeFakeMem(binDir, HANG_ONCE_MEM_SHIM);
-    // The retry window is 3x this budget and one probe chains two node starts (helper, then the shim); a bare `node -e 0` measured 3-13 s with 120 busy-loop processes running, so a 5 s budget (15 s window) lost the retry under load (1 failure in 3 runs at 250) and 20 s (60 s window) clears two worst-case starts.
-    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "20000", FAKE_MEM_MARKER: marker }, async () => {
+    writeProbeTarget(binDir);
+    installProbe(inOrder(UNANSWERED_PROBE, CAPABLE_PROBE));
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "2000" }, async () => {
       const result = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(result.exitCode).toBe(0);
       expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(true);
-      expect(existsSync(marker)).toBe(true);
+      const [first, ...retried] = probeCalls();
+      expect(first?.timeoutMs).toBe(2000);
+      expect(retried.length).toBeGreaterThan(0);
+      expect(retried.map((call) => call.timeoutMs)).toEqual(retried.map(() => 3 * 2000));
     });
   });
 
   it("init still refuses, as before, when the retry gets no answer either", async () => {
-    writeFakeMem(binDir, HANGING_MEM_SHIM);
+    writeProbeTarget(binDir);
+    installProbe(UNANSWERED_PROBE);
     await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "500" }, async () => {
       const result = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("less busy");
       expect(existsSync(join(toolRoot, ".claude", "settings.json"))).toBe(false);
+      expect(probeCalls().map((call) => call.timeoutMs)).toEqual([500, 1500]);
     });
   });
 
   it("init refuses a binary that cannot run with the reinstall-or-fix-PATH remedy, and does not retry it", async () => {
-    const counter = join(binDir, "launches.txt");
-    writeCountingFakeMem(binDir, NOT_RUNNABLE_MEM_SHIM);
-    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000", FAKE_MEM_COUNTER: counter }, async () => {
+    writeProbeTarget(binDir);
+    installProbe(NOT_RUNNABLE_PROBE);
+    await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000" }, async () => {
       const result = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(result.exitCode).toBe(1);
       expect(result.stdout).toContain("fix PATH");
       expect(result.stdout).not.toContain("does not support");
       // Two distinct probes (--version and hook --help), once each; a retry would double it.
-      expect(countLaunches(counter)).toBe(2);
+      expect(probeCalls().map((call) => call.args)).toEqual([["--version"], ["hook", "--help"]]);
     });
   });
 
@@ -455,6 +456,8 @@ describe("mem doctor and mem init probe a PATH mem under one shared cache and bu
     const special = join(binDir, "user&name");
     mkdirSync(special);
     writeFakeMem(special, CAPABLE_MEM_SHIM);
+    // The refusal is decided inside the real `spawnProbe` before any process starts, so this one test lets the real probe run.
+    resetProbe();
     await withProbeEnv(special, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: "30000" }, async () => {
       const init = await runCli(["init", "claude-code", "--root", toolRoot]);
       expect(init.exitCode).toBe(1);
@@ -478,7 +481,7 @@ describe("mem doctor and mem init probe a PATH mem under one shared cache and bu
   });
 
   it.each(["50", "abc", "600001", "1.5"])("rejects TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS=%s naming the variable and the range, for doctor and init", async (value) => {
-    writeFakeMem(binDir, CAPABLE_MEM_SHIM);
+    writeProbeTarget(binDir);
     await withProbeEnv(binDir, { TOKEN_GOAT_MEM_PROBE_TIMEOUT_MS: value }, async () => {
       for (const args of [["doctor"], ["init", "claude-code", "--root", toolRoot]]) {
         const result = await runCli(args);

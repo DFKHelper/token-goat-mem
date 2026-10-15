@@ -1,12 +1,16 @@
 /** Tests for the Windows `--user` Claude Code hook shape: a direct `node <bundle>` launch that skips npm's shell shim, falling back to the plain `command -v mem` guard, plus how doctor compares and times those hooks. Platform and bundle path are injected so every branch runs on any OS. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { describeHookDivergence, describeLaunchTime, describeWiringDrift, LAUNCH_TIME_WARN_MS } from "../src/doctorWiring.js";
 import { checkClaudeHookHealth, claudeCode, claudeHookEventsFor, CLAUDE_HOOK_EVENTS, installedClaudeHookCommands, parseHookCommandSpec } from "../src/wiring.js";
+import { CAPABLE_PROBE, installProbe, probeCalls, resetProbe } from "./support/fakeProbe.js";
+
+// A test scripts what a probe returns with `installProbe`; a test that installs nothing reaches the real `spawnProbe`.
+vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../src/probeSpawn.js")>()));
 
 let root: string;
 let home: string;
@@ -126,14 +130,21 @@ describe("claudeCode user install with the direct launcher", () => {
 });
 
 describe("capability pre-flight with the bundle as launcher", () => {
+  afterEach(() => {
+    resetProbe();
+  });
+
   it("checks the bundle itself when the hook's bundle exists, even with no mem on PATH", () => {
     const bundle = join(home, "dist", "token-goat-mem.mjs").replace(/\\/gu, "/");
     mkdirSync(dirname(bundle), { recursive: true });
-    writeFileSync(bundle, 'console.log(process.argv.slice(2).join(" ") + " session-start user-prompt-submit stop pre-compact");\n', "utf8");
+    writeFileSync(bundle, "", "utf8");
+    installProbe(CAPABLE_PROBE);
     const commands = claudeHookEventsFor({ user: true, platform: "win32", bundlePath: bundle });
     const health = checkClaudeHookHealth(commands, { pathEnv: join(home, "empty"), trustBundles: true });
     expect(health.bin).toBeNull();
     expect(health.hooks.every((hook) => hook.capable)).toBe(true);
+    expect(probeCalls().length).toBeGreaterThan(0);
+    expect(probeCalls().every((call) => call.bin === process.execPath && call.args[0] === bundle)).toBe(true);
   });
 });
 
