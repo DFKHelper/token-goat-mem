@@ -1,4 +1,6 @@
 /** Unit tests for the OpenAI-compatible embedding backend (src/embeddings.ts). The HTTP half runs against tests/support/embedding-server.ts -- a `node:http` server started inside the test process on an ephemeral loopback port. No new dependency, and no outbound request ever leaves the machine. */
+import { once } from "node:events";
+import { connect } from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 
 import { defaultVector, startStubEmbeddingServer, type StubEmbeddingServer, type StubEmbeddingServerOptions } from "../support/embedding-server.js";
@@ -157,22 +159,51 @@ describe("the HTTP backend against a real local endpoint", () => {
     await expect(createHttpEmbeddingBackend({ url: ragged.url, model: "m" }).embedBatch(["a", "b"])).rejects.toThrow(/mixed vector dimensions/u);
   });
 
-  it("aborts a stalled endpoint at its own timeout rather than waiting on it", async () => {
-    // The budget clock is frozen for every test, so a budget never runs out; this test alone loads the backend against the real clock, because only a real clock can run the 50ms budget out against an endpoint that never answers.
+  it("aborts a request in flight once its deadline passes, rather than waiting on the endpoint", async () => {
+    // The budget clock is frozen for every test, so a budget never runs out; this test loads the backend against a clock it moves by hand, and moves it only after the stub holds the request, so no race between a timer and the request's arrival decides the outcome.
+    let clockMs = 1_000;
     vi.resetModules();
-    vi.doMock(BUDGET_CLOCK_MODULE, () => vi.importActual(BUDGET_CLOCK_MODULE));
+    vi.doMock(BUDGET_CLOCK_MODULE, () => ({ budgetNow: () => clockMs }));
     try {
-      const { createHttpEmbeddingBackend: createOnRealClock } = await import("../../src/embeddings.js");
+      const { createHttpEmbeddingBackend: createOnMovableClock } = await import("../../src/embeddings.js");
       const server = await stubServer({ hang: true });
-      const backend = createOnRealClock({ url: server.url, model: "m" }, { timeoutMs: 50 });
+      const backend = createOnMovableClock({ url: server.url, model: "m" }, { timeoutMs: 50 });
 
-      await expect(backend.embed("x")).rejects.toThrow(/timed out after 50ms/u);
-      // The stub never answers, so the server seeing the socket close is the proof the client aborted, not just that it reported a timeout.
+      let settled = false;
+      const outcome = backend.embed("x").then(
+        () => {
+          settled = true;
+          return undefined;
+        },
+        (error: unknown) => {
+          settled = true;
+          return error;
+        },
+      );
+      await server.requestReceived;
+      // Positive control: the stub holds the request and the clock has not moved, so the deadline has not passed and the request is still pending.
+      expect(settled, "a request must stay pending while the budget clock has not reached its deadline").toBe(false);
+
+      clockMs = 1_050;
+      const error = await outcome;
+      expect(error, "the request must reject once the budget clock reaches the deadline").toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/timed out after 50ms/u);
+      // The stub never answers, so the server seeing the socket close is the proof the client tore the request down, not just that it reported a timeout.
       await server.clientClosed;
     } finally {
       vi.doUnmock(BUDGET_CLOCK_MODULE);
       vi.resetModules();
     }
+  });
+
+  it("reports a client that gave up before its request was parsed, which no request handler ever sees", async () => {
+    const server = await stubServer({ hang: true });
+    const socket = connect(Number(new URL(server.url).port), "127.0.0.1");
+    await once(socket, "connect");
+    socket.destroy();
+
+    await server.clientClosed;
+    expect(server.requests, "no request was parsed, so only the socket's own close can have resolved clientClosed").toEqual([]);
   });
 
   it("reports an endpoint nobody is listening on as unreachable, not as a crash", async () => {

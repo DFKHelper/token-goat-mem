@@ -1,6 +1,6 @@
 /** A stub OpenAI-compatible embeddings endpoint, served by `node:http` on an ephemeral loopback port. Shared by tests/unit/embeddings.test.ts and tests/embeddings-cli.test.ts rather than duplicated, and a plain module rather than a `.test.ts` one so importing it does not re-register the importing file's tests. A real socket rather than a mocked `fetch`: src/embeddings.ts exists to talk to a network endpoint, so a mock would exercise the mock's idea of the wire format instead of the parser's handling of a real one -- and the ordering, status, and timeout behaviours these tests care about are precisely the ones a mock cannot reproduce. Loopback only; nothing here leaves the machine. */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 
 /** What the stub endpoint saw, so a test can assert on headers and body rather than only on the reply. */
 export interface RecordedRequest {
@@ -11,7 +11,9 @@ export interface RecordedRequest {
 export interface StubEmbeddingServer {
   readonly url: string;
   readonly requests: readonly RecordedRequest[];
-  /** Resolves when a client connection closes before the stub answered it, i.e. the client gave up on the request. */
+  /** Resolves once the stub has begun handling a request, i.e. the client's request reached the server and a deadline that fires after this cannot race the request's arrival. */
+  readonly requestReceived: Promise<void>;
+  /** Resolves when a client socket closes while it still owes an answer, i.e. the client gave up on the request, including before the request was parsed. */
   readonly clientClosed: Promise<void>;
   close(): Promise<void>;
 }
@@ -48,13 +50,17 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
   const clientClosed = new Promise<void>((resolve) => {
     resolveClientClosed = resolve;
   });
+  let resolveRequestReceived: () => void = () => undefined;
+  const requestReceived = new Promise<void>((resolve) => {
+    resolveRequestReceived = resolve;
+  });
+  // Whether a socket still owes the client an answer: true from connect until its latest response finishes, so a keep-alive socket closed idle after a full answer does not count as the client giving up.
+  const owesAnswer = new WeakMap<Socket, boolean>();
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
-    res.on("close", () => {
-      if (!res.writableEnded) {
-        resolveClientClosed();
-      }
-    });
+    resolveRequestReceived();
+    owesAnswer.set(req.socket, true);
+    res.once("finish", () => owesAnswer.set(req.socket, false));
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
     req.on("end", () => {
       let parsed: { model?: unknown; input?: unknown } = {};
@@ -94,11 +100,21 @@ export async function startStubEmbeddingServer(options: StubEmbeddingServerOptio
       respond();
     });
   });
+  // The raw socket, not the response, reports a client that went away: a client that aborts before the request is parsed never reaches the request handler, so a close listener registered there would never exist to fire.
+  server.on("connection", (socket: Socket) => {
+    owesAnswer.set(socket, true);
+    socket.once("close", () => {
+      if (owesAnswer.get(socket) === true) {
+        resolveClientClosed();
+      }
+    });
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   return {
     url: `http://127.0.0.1:${port}/v1/embeddings`,
     requests,
+    requestReceived,
     clientClosed,
     close: () =>
       new Promise<void>((resolve) => {
