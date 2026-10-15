@@ -88,12 +88,15 @@ describe("mem reflect --hook-stdin (built bundle, Stop envelope on stdin)", () =
     expect(result.stdout).toBe("");
   });
 
-  it("fails open, silently, on an envelope without a transcript_path or naming a missing file", () => {
-    for (const stdin of [JSON.stringify({ session_id: "s1", hook_event_name: "Stop" }), stopEnvelope({ transcript_path: join(root, "gone.jsonl") }), ""]) {
-      const result = reflect(stdin);
-      expect(result.exitCode, result.stderr).toBe(0);
-      expect(result.stdout).toBe("");
-      expect(result.stderr).toBe("");
-    }
+  // One spawn per row: each stdin a Stop hook can deliver that gives reflect nothing to read.
+  it.each([
+    { name: "an envelope without a transcript_path", stdin: () => JSON.stringify({ session_id: "s1", hook_event_name: "Stop" }) },
+    { name: "an envelope naming a missing transcript file", stdin: () => stopEnvelope({ transcript_path: join(root, "gone.jsonl") }) },
+    { name: "an empty pipe", stdin: () => "" },
+  ])("fails open, silently, on $name", ({ stdin }) => {
+    const result = reflect(stdin());
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
   });
 });
