@@ -73,7 +73,7 @@ async function runOpeners(
 
 describe("opening a store that does not exist yet from several connections at once", () => {
   const OPENERS = 4;
-  // Six rounds, not twelve: with the seed-and-link publish bypassed, a round failed 82% of the time (79 of 96 rounds over 8 runs), so six miss a reintroduced in-place conversion with probability about 0.18^6; with it, all four openers contend and three lose the link in every round (60 of 60), so more rounds repeat the same outcome.
+  // Six rounds, not twelve: with the seed-and-link publish bypassed, a round failed 75% of the time without fsync, as the test runs (54 of 72 rounds), so six miss a reintroduced in-place conversion with probability about 0.25^6 (about 2.4e-4); with it, all four openers contend and three lose the link in every round (60 of 60), so more rounds repeat the same outcome.
   const ROUNDS = 6;
 
   it("never fails with a locked database, whichever connection converts the new file to WAL", async () => {

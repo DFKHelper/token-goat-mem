@@ -47,7 +47,11 @@ describe("writeManagedFile lock", () => {
   it("never takes over a lock whose recorded pid belongs to a live process that is not the writer, as when a dead owner's pid was reused", async () => {
     // A child that waits on its stdin stands in for the unrelated process holding the dead owner's reused pid.
     const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
-    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    const exited = new Promise<void>((resolve) => {
+      child.once("exit", () => resolve());
+      // A spawn that failed emits error and never exit.
+      child.once("error", () => resolve());
+    });
     onTestFinished(async () => {
       child.kill();
       await exited;
