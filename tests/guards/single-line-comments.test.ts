@@ -98,10 +98,15 @@ describe("comments stay single-line", () => {
       const config = join(root, ".git", "config");
       writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
       expect(indexedPaths(root, {}), "a config with no work tree key reads").toEqual(["a.ts", "b.md"]);
-      for (const body of ["[core]\n\tworktree = ../elsewhere\n", "[core]\n\tWorkTree=/x\n", "[include]\n\tpath = more\n"]) {
+      for (const body of ["[core]\n\tworktree = ../elsewhere\n", "[core]\n\tWorkTree=/x\n", "[include]\n\tpath = more\n", "[core] worktree = ../../x\n", "[core]worktree=../x\n", "[core]\n\tbare = false\n[includeIf \"gitdir:/\"]\n\tpath = more\n"]) {
         writeFileSync(config, body);
         expect(indexedPaths(root, {}), `a config that could relocate the work tree: ${JSON.stringify(body)}`).toBeUndefined();
       }
+      writeFileSync(config, "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tworktreeConfig = true\n");
+      expect(indexedPaths(root, {}), "a config that enables the per-worktree config file").toBeUndefined();
+      writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n");
+      writeFileSync(join(root, ".git", "config.worktree"), "[core]\n\tworktree = ../elsewhere\n");
+      expect(indexedPaths(root, {}), "a per-worktree config file next to a plain config").toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

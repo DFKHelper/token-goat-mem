@@ -1,7 +1,7 @@
 /** Comment-shape engine and gate: every comment in the repository's tracked TypeScript and JavaScript sources is a single line. A wrapped `/* *\/` or `/** *\/` block is one line, and a run of standalone `//` lines at the same indentation is one `//` line; tool directives (eslint, `@ts-`, prettier, istanbul, c8, `#region`, triple-slash) are exempt. It also refuses a one-line doc comment stacked directly on another doc comment, since only the second documents the declaration below and the first documents nothing (the shape a helper inserted between a doc and its function leaves behind). `--check` (default) is read-only and exits 1 on any finding; `--write` joins multi-line comments in place (stacked docs need a human to say which declaration owns them, so it only reports those); `--self-test` exercises the joiner against inline fixtures. */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -182,15 +182,16 @@ export function readIndexPaths(buf) {
 /** The environment variables that move the index or change how `git ls-files` matches its pathspecs, so a set one means the index file read here is not what git would list: the repository, index, work tree and common directory, and the four pathspec modes (literal, glob, no-glob, case-insensitive). */
 const GIT_LISTING_ENV = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"];
 
-/** Whether the repository's own config could move the work tree or pull in settings from another file, which any `worktree` key or `include` section in it might; a config that is absent counts as plain, one that cannot be read does not. */
+/** Whether the repository's own config could move the work tree or pull in settings from another file: any `worktree` anywhere in it (a key on its own line or after a section header, or the `worktreeConfig` extension that makes git read `config.worktree`), an `include` section, or a `config.worktree` file; a config that is absent counts as plain, one that cannot be read does not. */
 function configMayRelocate(root) {
+  if (existsSync(join(root, ".git", "config.worktree"))) return true;
   let config;
   try {
     config = readFileSync(join(root, ".git", "config"), "utf8");
   } catch (error) {
     return error?.code !== "ENOENT";
   }
-  return /^[ \t]*(?:worktree(?![A-Za-z0-9-])|\[[ \t]*include)/im.test(config);
+  return /worktree|\[[ \t]*include/i.test(config);
 }
 
 /** The tracked paths straight from the repository's own index file, or undefined when `root` is not a plain repository root, one of `GIT_LISTING_ENV` is set in `env`, the repository config could relocate the work tree, or the index is not one `readIndexPaths` fully understands. */
