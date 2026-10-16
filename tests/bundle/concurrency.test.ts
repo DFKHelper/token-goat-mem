@@ -9,6 +9,9 @@ import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { BUNDLE_PATH as BUNDLE } from "../support/bundle.js";
+import { useRealFsync } from "../support/realFsync.js";
+
+useRealFsync();
 
 /** Parallel processes: enough for three writers to meet on a store that does not exist yet. */
 const WORKERS = 3;

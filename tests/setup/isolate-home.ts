@@ -15,7 +15,11 @@ const BACKUP_DIR_ENV = "TOKEN_GOAT_MEM_BACKUP_DIR";
 /** Keeps `mem doctor` and `mem init --user` from reading the real `~/.claude` and spawning the real `mem` on PATH: the wiring home is a temp dir for every test file, and a test that needs its own sets it itself. The default (unset) wiring home is the real home directory, so a test asserting that default must clear this variable first. */
 const WIRING_HOME_ENV = "TOKEN_GOAT_MEM_WIRING_HOME";
 
+/** Turns off commit fsyncs for every store a test opens, in-process or in a spawned `mem` (the child inherits `process.env`); `openDb` honours it only because `TOKEN_GOAT_MEM_HOME` is set explicitly above. A test about durability or cross-process locking calls `useRealFsync` from tests/support/realFsync.ts. */
+const NO_FSYNC_ENV = "TOKEN_GOAT_MEM_TEST_UNSAFE_NO_FSYNC";
+
 let tempDir: string;
+let priorNoFsync: string | undefined;
 let wiringHomeDir: string;
 let priorRetrievalBudget: string | undefined;
 let priorBackupDir: string | undefined;
@@ -31,6 +35,8 @@ beforeAll(() => {
   process.env[RETRIEVAL_BUDGET_ENV] = NO_TRUNCATION_BUDGET_MS;
   priorBackupDir = process.env[BACKUP_DIR_ENV];
   process.env[BACKUP_DIR_ENV] = join(tempDir, "backups");
+  priorNoFsync = process.env[NO_FSYNC_ENV];
+  process.env[NO_FSYNC_ENV] = "1";
   wiringHomeDir = mkdtempSync(join(tmpdir(), "mem-test-wiring-"));
   priorWiringHome = process.env[WIRING_HOME_ENV];
   process.env[WIRING_HOME_ENV] = wiringHomeDir;
@@ -50,6 +56,11 @@ afterAll(() => {
     delete process.env[BACKUP_DIR_ENV];
   } else {
     process.env[BACKUP_DIR_ENV] = priorBackupDir;
+  }
+  if (priorNoFsync === undefined) {
+    delete process.env[NO_FSYNC_ENV];
+  } else {
+    process.env[NO_FSYNC_ENV] = priorNoFsync;
   }
   if (priorWiringHome === undefined) {
     delete process.env[WIRING_HOME_ENV];

@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { captureExplicit } from "../../src/capture.js";
 import { openDb } from "../../src/db.js";
 import { openStorage } from "../../src/storage.js";
+import { useRealFsync } from "../support/realFsync.js";
+
+useRealFsync();
 
 const WORKER_FILE = new URL("../support/openStoreWorker.ts", import.meta.url);
 

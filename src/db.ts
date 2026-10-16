@@ -142,6 +142,11 @@ function removeAbandonedSeeds(dbPath: string): void {
   }
 }
 
+/** Test-only: true when TOKEN_GOAT_MEM_TEST_UNSAFE_NO_FSYNC is exactly `1` and TOKEN_GOAT_MEM_HOME is also set explicitly (a default home never qualifies); `openDb` then runs `synchronous = OFF`, so a commit skips its fsync and is lost on a power cut or OS crash. */
+export function unsafeNoFsyncEnabled(): boolean {
+  return process.env["TOKEN_GOAT_MEM_TEST_UNSAFE_NO_FSYNC"] === "1" && (process.env["TOKEN_GOAT_MEM_HOME"] ?? "") !== "";
+}
+
 /** Opens (creating if absent) the mem sqlite database at `dbPath` (default: the resolved home's `mem.db`), enables WAL mode (Section 3: durability for a short-lived single-writer CLI process), and ensures the schema (`facts`, `audit_log`, `meta`) exists. Callers are responsible for calling `.close()` when done. */
 export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions = {}): Database.Database {
   const home = dirname(dbPath);
@@ -160,6 +165,9 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
     // Order matters: SQLite creates the `-wal` and `-shm` sidecars with the database file's own permissions, so the database has to already be 0600 when the WAL pragma runs or the sidecars -- which hold the same fact rows -- are born world-readable.
     restrictPermissions(dbPath, MEM_DB_MODE);
     db.pragma("journal_mode = WAL");
+    if (unsafeNoFsyncEnabled()) {
+      db.pragma("synchronous = OFF");
+    }
     // Belt-and-braces: sidecar creation is SQLite-internal, and a confidentiality guarantee should not rest on an implementation detail of a dependency. Absent sidecars are a no-op here.
     restrictPermissions(`${dbPath}-wal`, MEM_DB_MODE);
     restrictPermissions(`${dbPath}-shm`, MEM_DB_MODE);

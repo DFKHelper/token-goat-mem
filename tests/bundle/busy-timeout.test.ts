@@ -9,6 +9,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { openDb } from "../../src/db.js";
 import { runBundleSync, withBundleStore } from "../support/bundle.js";
+import { useRealFsync } from "../support/realFsync.js";
+
+useRealFsync();
 
 /** better-sqlite3's own default busy timeout, in milliseconds. */
 const DEFAULT_BUSY_TIMEOUT_MS = 5_000;

@@ -4,6 +4,7 @@ export const PINNED_ENV = [
   "TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS",
   "TOKEN_GOAT_MEM_BACKUP_DIR",
   "TOKEN_GOAT_MEM_WIRING_HOME",
+  "TOKEN_GOAT_MEM_TEST_UNSAFE_NO_FSYNC",
 ] as const;
 
 /** Every other `TOKEN_GOAT_MEM_*` variable `src/` reads: the shared setup deletes each before a test file runs and restores it afterwards, so a variable exported in the developer's shell or the CI runner cannot change what in-process `runCli` does. A test that needs one sets it itself. */
