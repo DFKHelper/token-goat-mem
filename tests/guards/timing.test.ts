@@ -1,5 +1,6 @@
 /** Source-level guard that no test waits on, or asserts about, the wall clock: a fixed delay of 100 ms or more, an elapsed-time assertion, a per-test timeout above the 30 s default in vitest.config.ts, or the retired spawn-timeout floor. All of these pass on a quiet machine and fail on a slow one, and a longer number only moves the failure to the next slower machine. It parses every test source under tests/ with the TypeScript compiler (a dev dependency the comment guard already uses), in-process: it spawns nothing and sets no timeout of its own. The guard file is excluded because its fixtures spell the patterns out. */
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 const TESTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
 const SELF = "guards/timing.test.ts";
-const SOURCE_EXTENSION = /\.(ts|mts|mjs|js)$/u;
+const SOURCE_EXTENSION = /\.(ts|mts|cts|mjs|cjs|js)$/u;
 
 /** A delay at or above this is a real wait, not a yield. */
 const MIN_FLAGGED_DELAY_MS = 100;
@@ -53,7 +54,7 @@ function describeViolation(violation: Violation): string {
 }
 
 /** Evaluates a numeric literal or an arithmetic expression over literals and same-file constants; `undefined` when it is anything else. */
-function evalNumber(node: ts.Node, consts: ReadonlyMap<string, ts.Expression>, depth = 0): number | undefined {
+function evalNumber(node: ts.Node, resolve: Resolver, depth = 0): number | undefined {
   if (depth > 8) {
     return undefined;
   }
@@ -61,15 +62,15 @@ function evalNumber(node: ts.Node, consts: ReadonlyMap<string, ts.Expression>, d
     return Number(node.text);
   }
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
-    return evalNumber(node.expression, consts, depth + 1);
+    return evalNumber(node.expression, resolve, depth + 1);
   }
   if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
-    const operand = evalNumber(node.operand, consts, depth + 1);
+    const operand = evalNumber(node.operand, resolve, depth + 1);
     return operand === undefined ? undefined : -operand;
   }
   if (ts.isBinaryExpression(node)) {
-    const left = evalNumber(node.left, consts, depth + 1);
-    const right = evalNumber(node.right, consts, depth + 1);
+    const left = evalNumber(node.left, resolve, depth + 1);
+    const right = evalNumber(node.right, resolve, depth + 1);
     if (left === undefined || right === undefined) {
       return undefined;
     }
@@ -87,10 +88,75 @@ function evalNumber(node: ts.Node, consts: ReadonlyMap<string, ts.Expression>, d
     }
   }
   if (ts.isIdentifier(node)) {
-    const initializer = consts.get(node.text);
-    return initializer === undefined ? undefined : evalNumber(initializer, consts, depth + 1);
+    const initializer = resolve(node);
+    return initializer === undefined ? undefined : evalNumber(initializer, resolve, depth + 1);
   }
   return undefined;
+}
+
+/** The initializer of the declaration an identifier use resolves to by scope, or `undefined` when that declaration has none (a parameter, a bare `let`, a loop variable) or there is none in the file. */
+type Resolver = (identifier: ts.Identifier) => ts.Expression | undefined;
+
+const BLOCK_SCOPES = (node: ts.Node): boolean =>
+  ts.isBlock(node) || ts.isCaseBlock(node) || ts.isModuleBlock(node) || ts.isSourceFile(node) || ts.isForStatement(node) || ts.isForInStatement(node) || ts.isForOfStatement(node) || ts.isCatchClause(node);
+
+/** The node a declaration is visible in: a `let`/`const`/`using` in its block (or its loop or catch), a `var` or a parameter in the nearest function or file. */
+function scopeOf(declaration: ts.VariableDeclaration | ts.ParameterDeclaration): ts.Node {
+  if (ts.isParameter(declaration)) {
+    return declaration.parent;
+  }
+  const blockScoped = ts.isVariableDeclarationList(declaration.parent) && (declaration.parent.flags & ts.NodeFlags.BlockScoped) !== 0;
+  let node: ts.Node = declaration.parent;
+  while (!ts.isSourceFile(node) && !(blockScoped ? BLOCK_SCOPES(node) : ts.isFunctionLike(node))) {
+    node = node.parent;
+  }
+  return node;
+}
+
+/** Builds the by-scope resolver for one source file: each declared name is bound in the scope that declares it, a use looks outward from itself and takes the first scope that binds the name, so a nested `const t` shadows an outer one and a sibling's `t` is never seen. */
+function buildResolver(sf: ts.SourceFile): Resolver {
+  const scopes = new Map<ts.Node, Map<string, ts.Expression | undefined>>();
+  const bind = (scope: ts.Node, name: string, initializer: ts.Expression | undefined): void => {
+    let names = scopes.get(scope);
+    if (names === undefined) {
+      names = new Map();
+      scopes.set(scope, names);
+    }
+    if (!names.has(name)) {
+      names.set(name, initializer);
+    }
+  };
+  const bindPattern = (pattern: ts.BindingName, scope: ts.Node): void => {
+    if (ts.isIdentifier(pattern)) {
+      bind(scope, pattern.text, undefined);
+      return;
+    }
+    for (const element of pattern.elements) {
+      if (ts.isBindingElement(element)) {
+        bindPattern(element.name, scope);
+      }
+    }
+  };
+  walk(sf, (node) => {
+    if (ts.isVariableDeclaration(node)) {
+      if (ts.isIdentifier(node.name)) {
+        bind(scopeOf(node), node.name.text, node.initializer);
+      } else {
+        bindPattern(node.name, scopeOf(node));
+      }
+    } else if (ts.isParameter(node)) {
+      bindPattern(node.name, scopeOf(node));
+    }
+  });
+  return (identifier) => {
+    for (let node: ts.Node | undefined = identifier; node !== undefined; node = node.parent) {
+      const names = scopes.get(node);
+      if (names?.has(identifier.text) === true) {
+        return names.get(identifier.text);
+      }
+    }
+    return undefined;
+  };
 }
 
 function isClockCall(node: ts.Node): boolean {
@@ -114,6 +180,49 @@ function calleeName(call: ts.CallExpression): string | undefined {
   return ts.isPropertyAccessExpression(callee) ? callee.name.text : undefined;
 }
 
+/** Names bound to the sleep or timer functions by a simple alias, mapped to the function they stand for: an import under another name (`import { setTimeout as wait }`), `const pause = sleep`, a destructured rename (`const { setTimeout: wait } = timers`), and `promisify(setTimeout)`, followed through chains of them. */
+function collectDelayAliases(sf: ts.SourceFile): Map<string, string> {
+  const aliases = new Map<string, string>();
+  const isDelayName = (name: string): boolean => name === "setTimeout" || name === "sleep";
+  const kindOf = (expression: ts.Expression | undefined): string | undefined => {
+    if (expression === undefined) {
+      return undefined;
+    }
+    if (ts.isParenthesizedExpression(expression) || ts.isAsExpression(expression) || ts.isNonNullExpression(expression)) {
+      return kindOf(expression.expression);
+    }
+    if (ts.isIdentifier(expression)) {
+      return aliases.get(expression.text) ?? (isDelayName(expression.text) ? expression.text : undefined);
+    }
+    if (ts.isPropertyAccessExpression(expression)) {
+      return isDelayName(expression.name.text) ? expression.name.text : undefined;
+    }
+    if (ts.isCallExpression(expression) && calleeName(expression) === "promisify") {
+      return kindOf(expression.arguments[0]);
+    }
+    return undefined;
+  };
+  for (let pass = 0; pass < 4; pass++) {
+    const before = aliases.size;
+    walk(sf, (node) => {
+      if (ts.isImportSpecifier(node) && node.propertyName !== undefined && isDelayName(node.propertyName.text)) {
+        aliases.set(node.name.text, node.propertyName.text);
+      } else if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && node.propertyName !== undefined && (ts.isIdentifier(node.propertyName) || ts.isStringLiteral(node.propertyName)) && isDelayName(node.propertyName.text)) {
+        aliases.set(node.name.text, node.propertyName.text);
+      } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+        const kind = kindOf(node.initializer);
+        if (kind !== undefined && node.name.text !== kind) {
+          aliases.set(node.name.text, kind);
+        }
+      }
+    });
+    if (aliases.size === before) {
+      break;
+    }
+  }
+  return aliases;
+}
+
 /** The identifier at the root of `it`, `it.skip`, `it.each(table)` and the like. */
 function calleeRoot(call: ts.CallExpression): string | undefined {
   let node: ts.Expression = call.expression;
@@ -123,7 +232,7 @@ function calleeRoot(call: ts.CallExpression): string | undefined {
   return ts.isIdentifier(node) ? node.text : undefined;
 }
 
-/** Every violation in one test source. Recognised shapes: `setTimeout(fn, ms)`, `setTimeout(ms)` and `sleep(ms)` with a delay of 100 ms or more; a clock difference between two clock reads (`Date.now() - startedAt`, `end - start`) written inside an `expect(...)` chain or held in a variable that reaches one; `timeout`, `testTimeout` and `hookTimeout` object keys and a trailing numeric argument of `it`/`test`/`describe`/a hook above 30 s; any text mention of the spawn timeout floor. Numbers resolve through literals, arithmetic and same-file `const`s; a `timeout:` key whose bare-identifier value cannot be resolved is reported as unresolved, while a call-expression value (a hook entry's `timeout: claudeHookTimeoutSeconds(...)`), an identifier any declaration of which in this file is bound to one, and a parameter type annotation (`timeout: number`) are not vitest options and are left alone. A clock minus a literal or a constant (`Date.now() - 86_400_000`) is fixture arithmetic that builds an old timestamp, not a measurement. */
+/** Every violation in one test source. Recognised shapes: `setTimeout(fn, ms)`, `setTimeout(ms)` and `sleep(ms)` (also under an alias: an import rename, `const pause = sleep`, a destructured rename, `promisify(setTimeout)`) with a delay of 100 ms or more, and an `Atomics.wait` or `Atomics.waitAsync` whose fourth argument, its timeout, is 100 ms or more or unresolvable (one with no timeout is a barrier its releaser ends); a clock difference between two clock reads (`Date.now() - startedAt`, `end - start`) written inside an `expect(...)` chain or held in a variable that reaches one; `timeout`, `testTimeout` and `hookTimeout` object keys and a trailing numeric argument of `it`/`test`/`describe`/a hook above 30 s; any text mention of the spawn timeout floor. Numbers resolve through literals, arithmetic and `const`s by scope (the nearest enclosing declaration, so a shadowing or sibling-scope constant is never mistaken for another); a `timeout:` key whose bare-identifier value cannot be resolved is reported as unresolved, while a call-expression value (a hook entry's `timeout: claudeHookTimeoutSeconds(...)`), an identifier bound to one by scope, and a parameter type annotation (`timeout: number`) are not vitest options and are left alone unless a numeric argument of the call is itself over the ceiling (`Math.max(120_000, x)`), which is reported. A clock minus a literal or a constant (`Date.now() - 86_400_000`) is fixture arithmetic that builds an old timestamp, not a measurement. */
 function scanSource(file: string, text: string): Violation[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const lines = text.split("\n");
@@ -133,16 +242,14 @@ function scanSource(file: string, text: string): Violation[] {
     found.set(`${line}:${rule}`, { file, line, rule, detail, lineText: (lines[line - 1] ?? "").trim() });
   };
 
-  const consts = new Map<string, ts.Expression>();
+  const resolve = buildResolver(sf);
   const declarations: ts.VariableDeclaration[] = [];
   walk(sf, (node) => {
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
       declarations.push(node);
-      if (!consts.has(node.name.text)) {
-        consts.set(node.name.text, node.initializer);
-      }
     }
   });
+  const delayAliases = collectDelayAliases(sf);
 
   const clockVars = new Set<string>();
   for (const declaration of declarations) {
@@ -169,15 +276,46 @@ function scanSource(file: string, text: string): Violation[] {
     }
   }
 
-  const isComputedConst = (identifier: ts.Identifier): boolean =>
-    declarations.some((declaration) => ts.isIdentifier(declaration.name) && declaration.name.text === identifier.text && declaration.initializer !== undefined && ts.isCallExpression(declaration.initializer));
-  const checkTimeoutValue =(value: ts.Expression, keyNode: ts.Node, key: string): void => {
-    const ms = evalNumber(value, consts);
+  /** The call an expression is, or an identifier is bound to by scope: a computed value the guard cannot evaluate, but whose literal arguments it can read. */
+  const callOf = (value: ts.Expression): ts.CallExpression | undefined => {
+    let node: ts.Expression | undefined = value;
+    for (let hops = 0; node !== undefined && hops < 8; hops++) {
+      if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
+        node = node.expression;
+      } else if (ts.isIdentifier(node)) {
+        node = resolve(node);
+      } else {
+        break;
+      }
+    }
+    return node !== undefined && ts.isCallExpression(node) ? node : undefined;
+  };
+  /** The largest number any argument of `call` evaluates to, looking into nested calls (`Math.max(120_000, x)`, `Math.min(clamp(60 * 1000), x)`), or `undefined` when none evaluates. */
+  const largestArgument = (call: ts.CallExpression, depth = 0): number | undefined => {
+    let largest: number | undefined;
+    for (const arg of call.arguments) {
+      const inner = ts.isCallExpression(arg) && depth < 4 ? largestArgument(arg, depth + 1) : evalNumber(arg, resolve);
+      if (inner !== undefined && (largest === undefined || inner > largest)) {
+        largest = inner;
+      }
+    }
+    return largest;
+  };
+  const checkTimeoutValue = (value: ts.Expression, keyNode: ts.Node, key: string): void => {
+    const ms = evalNumber(value, resolve);
     if (ms !== undefined) {
       if (ms > MAX_TIMEOUT_MS) {
         report(keyNode, "timeout", `\`${key}\` of ${ms} ms is above the ${MAX_TIMEOUT_MS} ms ceiling`);
       }
-    } else if (ts.isIdentifier(value) && value.text !== "undefined" && !isComputedConst(value)) {
+      return;
+    }
+    const call = callOf(value);
+    if (call !== undefined) {
+      const largest = largestArgument(call);
+      if (largest !== undefined && largest > MAX_TIMEOUT_MS) {
+        report(keyNode, "timeout", `\`${key}\` is computed by a call with a ${largest} ms argument, above the ${MAX_TIMEOUT_MS} ms ceiling`);
+      }
+    } else if (ts.isIdentifier(value) && value.text !== "undefined") {
       report(keyNode, "timeout", `\`${key}: ${value.text}\` cannot be resolved to a number in this file, so the guard cannot tell it is within the ${MAX_TIMEOUT_MS} ms ceiling`);
     }
   };
@@ -190,13 +328,24 @@ function scanSource(file: string, text: string): Violation[] {
     }
 
     if (ts.isCallExpression(node)) {
-      const name = calleeName(node);
+      const name = ts.isIdentifier(node.expression) ? (delayAliases.get(node.expression.text) ?? calleeName(node)) : calleeName(node);
       const args = node.arguments;
+      const callee = node.expression;
+      if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression) && callee.expression.text === "Atomics" && (callee.name.text === "wait" || callee.name.text === "waitAsync")) {
+        // The fourth argument is the timeout; without one the wait is a barrier that its releaser ends, not a sleep.
+        const limit = args[3];
+        if (limit !== undefined) {
+          const ms = evalNumber(limit, resolve);
+          if (ms === undefined || ms >= MIN_FLAGGED_DELAY_MS) {
+            report(limit, "sleep", `\`Atomics.${callee.name.text}\` waits ${ms === undefined ? `\`${limit.getText(sf)}\`, which cannot be resolved to a number in this file` : `${ms} ms`}`);
+          }
+        }
+      }
       if (name === "setTimeout" || name === "sleep") {
         const first = args[0];
         const delay = name === "sleep" ? first : args.length >= 2 ? args[1] : first !== undefined && !ts.isArrowFunction(first) && !ts.isFunctionExpression(first) && !ts.isIdentifier(first) ? first : undefined;
         if (delay !== undefined) {
-          const ms = evalNumber(delay, consts);
+          const ms = evalNumber(delay, resolve);
           if (ms !== undefined && ms >= MIN_FLAGGED_DELAY_MS) {
             report(delay, "sleep", `\`${name}\` waits ${ms} ms`);
           } else if (ms === undefined && ts.isIdentifier(delay)) {
@@ -208,9 +357,13 @@ function scanSource(file: string, text: string): Violation[] {
       const root = calleeRoot(node);
       const last = args[args.length - 1];
       if (root !== undefined && TEST_CALL_ROOTS.has(root) && args.length >= 2 && last !== undefined) {
-        const ms = evalNumber(last, consts);
+        const ms = evalNumber(last, resolve);
+        const computed = ms === undefined && ts.isIdentifier(last) ? callOf(last) : undefined;
+        const largest = computed === undefined ? undefined : largestArgument(computed);
         if (ms !== undefined && ms > MAX_TIMEOUT_MS) {
           report(last, "timeout", `a trailing ${ms} ms timeout on \`${root}(...)\` is above the ${MAX_TIMEOUT_MS} ms ceiling`);
+        } else if (largest !== undefined && largest > MAX_TIMEOUT_MS) {
+          report(last, "timeout", `a trailing timeout computed by a call with a ${largest} ms argument on \`${root}(...)\` is above the ${MAX_TIMEOUT_MS} ms ceiling`);
         }
       }
 
@@ -492,7 +645,7 @@ function isNameWord(kind: ts.SyntaxKind): boolean {
 
 /** Whether `scanSource` could report something in `text`, answered from one token pass (no syntax tree, a fraction of a parse's cost): `false` only when every rule's trigger is absent, `true` for anything it cannot rule out, so a `false` proves `scanSource` returns nothing for a source that parses. Triggers: the spawn-floor name in the text; a `setTimeout` or `sleep` word; a `timeout`, `testTimeout` or `hookTimeout` key (word or string, read decoded) in a `{` whose value is not a literal or a single-literal constant at or under the ceiling, nor an expression the number evaluator cannot read; a clock read subtracted from a clock read (`Date.now() - startedAt` and its `performance` and variable forms); and a call whose callee may root at a test function (`it`, `describe`, a hook, reached through `.`, `(...)` or anything unreadable) whose last argument is built only from numbers, `+ - * /`, parentheses and names a declaration in the file may give a number. A scanner error or unbalanced bracket means the pass misread the text, so it answers `true` there too. */
 function mayHaveTimingViolation(text: string): boolean {
-  if (text.includes("SPAWN_TIMEOUT_FLOOR")) {
+  if (text.includes("SPAWN_TIMEOUT_FLOOR") || text.includes("Atomics")) {
     return true;
   }
   let misread = false;
@@ -787,6 +940,38 @@ function mayHaveTimingViolation(text: string): boolean {
     }
     return !NON_NUMERIC_START.has(first) && !isWord(first);
   };
+  /** Whether the expression starting at token `start` holds a call and, anywhere in it, a number above the ceiling, a number next to arithmetic, or a name some declaration in the file gives a value: the shapes the scanner reads a ceiling-breaking argument from (`Math.max(120_000, x)`, `Math.min(LIMIT, x)`). It may run on into the next statement, which only makes it say yes more often. */
+  const callCarriesNumbers = (start: number): boolean => {
+    let depth = 0;
+    let called = false;
+    let carries = false;
+    let numbers = false;
+    let arithmetic = false;
+    for (let at = start; at < kinds.length; at++) {
+      const kind = kinds[at] as ts.SyntaxKind;
+      if (kind === KIND_Unknown) {
+        return true;
+      }
+      if (kind === KIND_OpenParenToken || kind === KIND_OpenBracketToken || kind === KIND_OpenBraceToken || kind === KIND_TemplateHead) {
+        called ||= depth === 0 && kind === KIND_OpenParenToken;
+        depth++;
+      } else if (kind === KIND_CloseParenToken || kind === KIND_CloseBracketToken || kind === KIND_CloseBraceToken || kind === KIND_TemplateTail) {
+        if (--depth < 0) {
+          break;
+        }
+      } else if (depth === 0 && (kind === KIND_CommaToken || kind === KIND_SemicolonToken)) {
+        break;
+      } else if (kind === KIND_NumericLiteral) {
+        numbers = true;
+        carries ||= Number(words[at]) > MAX_TIMEOUT_MS;
+      } else if (isWord(kind) && (initializers.has(words[at] as string) || annotated.has(words[at] as string))) {
+        carries = true;
+      } else if (kind === ts.SyntaxKind.PlusToken || kind === ts.SyntaxKind.AsteriskToken || kind === KIND_SlashToken || kind === KIND_MinusToken) {
+        arithmetic = true;
+      }
+    }
+    return called && (carries || (numbers && arithmetic));
+  };
   /** Whether a bare name given as a `timeout` value is certainly fine: a constant with one bare number at or under the ceiling, a name every declaration of which holds something that is no number and one of them a single call, or `undefined` when nothing in the file redefines it. Only an `=` that opens a `const`, `let` or `var` declarator counts (the one shape the scanner reads an initializer from): a parameter or destructuring default, a property or later plain assignment, or a later declarator in a list leaves the name unsettled. */
   const nameIsSettled = (name: string): boolean => {
     if (suspect.has(name)) {
@@ -800,13 +985,13 @@ function mayHaveTimingViolation(text: string): boolean {
       return false;
     }
     const value = literalConstant(name);
-    return (value !== undefined && value <= MAX_TIMEOUT_MS) || (declarations.every((equals) => !mayEvaluateToNumber(equals + 1)) && declarations.some(isCallInitializer));
+    return (value !== undefined && value <= MAX_TIMEOUT_MS) || (declarations.every((equals) => !mayEvaluateToNumber(equals + 1) && !callCarriesNumbers(equals + 1)) && declarations.some(isCallInitializer));
   };
   /** Whether the `setTimeout` or `sleep` word at token `name` could be a call the guard reports: a call whose delay is not a bare number under the flagged minimum and not something the number evaluator cannot read. A mention that is no call is no trigger, and a call it cannot take apart (type arguments, a spread, a type assertion inside) counts. */
   const delayMayBeReported = (name: number): boolean => {
     const opener = kinds[name + 1];
     if (opener !== KIND_OpenParenToken) {
-      return opener === KIND_LessThanToken || opener === KIND_QuestionDotToken;
+      return true; // a mention that is no call may be an alias (const pause = sleep, setTimeout as wait), whose calls the scanner follows
     }
     const args: Array<readonly [number, number]> = [];
     let depth = 0;
@@ -857,7 +1042,7 @@ function mayHaveTimingViolation(text: string): boolean {
       return true;
     }
     if (!mayEvaluateToNumber(start)) {
-      return false;
+      return callCarriesNumbers(start);
     }
     const after = kinds[start + 1];
     if (after === KIND_CommaToken || after === KIND_CloseBraceToken) {
@@ -917,7 +1102,7 @@ function mayHaveTimingViolation(text: string): boolean {
     return true;
   }
 
-  return trailingWords.some((name) => suspect.has(name) || initializers.get(name)?.some((equals) => mayEvaluateToNumber(equals + 1)) === true);
+  return trailingWords.some((name) => suspect.has(name) || initializers.get(name)?.some((equals) => mayEvaluateToNumber(equals + 1) || callCarriesNumbers(equals + 1)) === true);
 }
 
 /** Every test source under tests/ as a forward-slash path relative to it, the guard itself and dot or node_modules directories left out. */
@@ -1000,6 +1185,26 @@ describe("the timing scanner", () => {
     ["a hook entry's small literal timeout", "const hook = { type: 'command', timeout: 45 };", []],
     ["a timeout bound to a call in this file", "const timeout = hookSeconds(event);\nconst entry = { timeout };", []],
     ["a timeout parameter", "function install(timeout: number | undefined) { return timeout; }", []],
+    ["a timeout computed by Math.max with a literal over the ceiling", 'const t = Math.max(120_000, x);\nit("x", { timeout: t }, () => {});', ["timeout"]],
+    ["a timeout computed by Math.min with a literal over the ceiling, written in place", 'it("x", { timeout: Math.min(120_000, x) }, () => {});', ["timeout"]],
+    ["a computed timeout whose argument is a constant over the ceiling", 'const LIMIT = 90_000;\nconst t = Math.max(LIMIT, x);\nit("x", { timeout: t }, () => {});', ["timeout"]],
+    ["a computed timeout whose argument is arithmetic over the ceiling", 'const t = Math.max(60 * 1000, x);\nit("x", { timeout: t }, () => {});', ["timeout"]],
+    ["a computed timeout with only small literal arguments", 'const t = Math.max(1_000, x);\nit("x", { timeout: t }, () => {});', []],
+    ["a trailing timeout computed with a literal over the ceiling", 'const t = Math.max(120_000, x);\nit("x", () => {}, t);', ["timeout"]],
+    ["a shadowing constant over the ceiling declared in an inner scope", 'const t = 10;\ndescribe("a", () => {\n  const t = 120_000;\n  it("b", { timeout: t }, () => {});\n});', ["timeout"]],
+    ["a shadowing small constant in an inner scope over an outer one above the ceiling", 'const t = 120_000;\ndescribe("a", () => {\n  const t = 10;\n  it("b", { timeout: t }, () => {});\n});', []],
+    ["a same-named constant above the ceiling in a sibling scope", 'describe("a", () => {\n  const t = 120_000;\n});\ndescribe("b", () => {\n  const t = 10;\n  it("c", { timeout: t }, () => {});\n});', []],
+    ["an Atomics.wait with a timeout over the flagged minimum", "Atomics.wait(slots, 1, 0, 5000);", ["sleep"]],
+    ["an Atomics.waitAsync with a timeout over the flagged minimum", "await Atomics.waitAsync(slots, 1, 0, 5000).value;", ["sleep"]],
+    ["an Atomics.wait with an unresolvable timeout", "Atomics.wait(slots, 1, 0, Infinity);", ["sleep"]],
+    ["an Atomics.wait with a short timeout", "Atomics.wait(slots, 1, 0, 50);", []],
+    ["an Atomics.wait with no timeout, a barrier its releaser ends", "Atomics.wait(slots, 1, 0);", []],
+    ["a sleep reached through a plain alias", "const pause = sleep;\nawait pause(5000);", ["sleep"]],
+    ["a sleep reached through a chain of aliases", "const a = sleep;\nconst b = a;\nawait b(5000);", ["sleep"]],
+    ["a short delay reached through an alias", "const pause = sleep;\nawait pause(50);", []],
+    ["a promise-timers delay imported under another name", 'import { setTimeout as wait } from "node:timers/promises";\nawait wait(5000);', ["sleep"]],
+    ["a promisified setTimeout", "const wait = promisify(setTimeout);\nawait wait(5000);", ["sleep"]],
+    ["a destructured rename of setTimeout", "const { setTimeout: wait } = timersPromises;\nawait wait(5000);", ["sleep"]],
     ["a trailing it timeout", 'it("x", () => {}, 180_000);', ["timeout"]],
     ["a trailing it timeout at the ceiling", 'it("x", () => {}, 30_000);', []],
     ["a trailing it.each timeout", 'it.each([1])("x", () => {}, 60_000);', ["timeout"]],
@@ -1053,10 +1258,13 @@ describe("the timing scanner", () => {
     ["a small literal timeout", "const o = { 'timeout': 5 };", false],
     ["a delay under the flagged minimum", "setTimeout(r, 99);", false],
     ["a bare callback with no delay", "setTimeout(fn);", false],
-    ["a mention of the delay word that is no call", "const s = setTimeout; vi.spyOn(globalThis, 'setTimeout');", false],
+    ["a mention of the delay word that is no call, which may be an alias the scanner follows", "const s = setTimeout; vi.spyOn(globalThis, 'setTimeout');", true],
     ["a definition of the sleep helper, kept because the scan cannot tell it from a call", "function sleep(ms: number) { return ms; }", true],
     ["a clock read that never meets a subtraction", "const c = Date.now(); log(c);", false],
     ["a fixture timestamp that no clock read minus another", "const c6 = Date.now() - 86_400_000; expect(c6).toBe(1);", false],
+    ["a computed timeout with only small literal arguments, which the scanner leaves alone", "const t = Math.max(1_000, x); it('x', { timeout: t }, f);", false],
+    ["an Atomics.wait barrier with no timeout, kept because the scanner decides it", "Atomics.wait(slots, 1, generation);", true],
+    ["a sleep alias, kept so its calls are followed", "const pause = sleep;", true],
     ["a source with no timing word at all", "export const answer = 6 * 7;\nit('x', () => { expect(answer).toBe(42); });", false],
     ["a regex holding a quote after an if head", "if (x) /'/.test(s); foo({ timeout: 99999 }); // it's", true],
     ["a regex holding a quote after a function body", "function f() {}\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
@@ -1115,6 +1323,18 @@ describe("the timing scanner", () => {
       expect(mayHaveTimingViolation(source), `the scanner reports this, so the prefilter must keep it: ${source}`).toBe(true);
     }
     expect(mayHaveTimingViolation(source), `the prefilter verdict for: ${source}`).toBe(flagged);
+  });
+
+  it("lists test sources of every module flavour, .cjs and .cts included", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mem-timing-list-"));
+    try {
+      const names = ["a.ts", "b.mts", "c.cts", "d.js", "e.mjs", "f.cjs"];
+      names.forEach((name) => writeFileSync(join(dir, name), ""));
+      writeFileSync(join(dir, "g.json"), "");
+      expect(listTestSources(dir).map((path) => path.split("/").pop()), "sources listed").toEqual(names);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("names the file, the line, the rule and the fix, with the line numbered from 1", () => {
