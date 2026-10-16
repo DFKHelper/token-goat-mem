@@ -19,6 +19,8 @@ vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./suppo
 const HANG_TIMEOUT_MS = 1000;
 // A diagnostic bound under vitest's 30 s testTimeout so a hung child fails with its stderr; it is not what makes the tests pass.
 const SPAWN_TIMEOUT_MS = 25_000;
+// The stand-in init must have started its helper before the timeout stops it, and node starting a one-line script under load is the only thing that can outlast this.
+const GRANDCHILD_TIMEOUT_MS = 4000;
 
 const POSTINSTALL_PATH = fileURLToPath(new URL("../scripts/postinstall.mjs", import.meta.url));
 
@@ -78,6 +80,20 @@ function runPostinstall(env: Readonly<Record<string, string>> = {}, script: stri
     throw new Error(`postinstall did not finish (error: ${String(result.error?.message)}, signal: ${String(result.signal)}); stdout: ${result.stdout}; stderr: ${result.stderr}`);
   }
   return { output: `${result.stdout}${result.stderr}`, exitCode: result.status ?? 1 };
+}
+
+/** Whether `pid` is a live process: a zombie still answers signal 0 until its parent or init reaps it, so on Linux its state is read as well. */
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  try {
+    return !/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${String(pid)}/stat`, "utf8"));
+  } catch {
+    return true;
+  }
 }
 
 const settingsPath = (): string => join(home, ".claude", "settings.json");
@@ -175,6 +191,36 @@ describe("postinstall", () => {
     expect(result.exitCode).toBe(0);
     expect(result.output).toContain("timed out");
     expect(result.output).toContain("mem init claude-code --user");
+  });
+
+  it("leaves no process running behind a hook install it stopped on the timeout", () => {
+    const marker = join(root, "grandchild.pid");
+    const grandchild = "require('node:net').createServer().listen(0)";
+    const bundle = [
+      'import { spawn } from "node:child_process";',
+      'import { createServer } from "node:net";',
+      'import { writeFileSync } from "node:fs";',
+      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });`,
+      `writeFileSync(${JSON.stringify(marker)}, String(child.pid));`,
+      "createServer().listen(0);",
+      "",
+    ].join("\n");
+    let pid = Number.NaN;
+    try {
+      const result = runPostinstall({ TOKEN_GOAT_MEM_POSTINSTALL_TIMEOUT_MS: String(GRANDCHILD_TIMEOUT_MS) }, scriptWithBundle(bundle));
+      expect(result.output).toContain("timed out");
+      expect(existsSync(marker), "the stand-in init started its helper before the timeout").toBe(true);
+      pid = Number(readFileSync(marker, "utf8"));
+      expect(processIsRunning(pid), `helper ${String(pid)} still running after the timeout`).toBe(false);
+    } finally {
+      if (Number.isInteger(pid) && processIsRunning(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone, which is what the test asserts.
+        }
+      }
+    }
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(

@@ -27,6 +27,18 @@ function foreignOwner() {
   return uid === owner ? undefined : `running as uid ${String(uid)} but ${home} belongs to uid ${String(owner)}`;
 }
 
+/** Kills what is left of the group init led after its own kill; a no-op on Windows, where init was not detached, and when the group is already gone. */
+function stopProcessGroup(pid) {
+  if (process.platform === "win32" || pid === undefined) {
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // The group has no member left.
+  }
+}
+
 function say(text) {
   const lines = text.trimEnd().split(/\r?\n/).filter((line) => line.length > 0);
   for (const line of lines) {
@@ -54,9 +66,12 @@ function main() {
     encoding: "utf8",
     timeout,
     killSignal: "SIGKILL",
+    // POSIX only: its own process group, so the timeout can stop the helpers init spawned too, which the kill of init alone leaves running; Windows stops them with init, and detaching there opens a console.
+    detached: process.platform !== "win32",
   });
   say(`${result.stdout ?? ""}${result.stderr ?? ""}`);
   if (result.error?.code === "ETIMEDOUT") {
+    stopProcessGroup(result.pid);
     say(`\`mem init claude-code --user\` timed out after ${String(timeout / 1000)}s and was stopped`);
   }
   if (result.error !== undefined || result.status !== 0) {
