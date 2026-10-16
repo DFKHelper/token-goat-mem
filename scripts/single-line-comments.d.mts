@@ -17,3 +17,9 @@ export function runSelfTest(): { pass: boolean; failures: string[]; summary: str
 export function readIndexPaths(index: Buffer): string[] | undefined;
 
 export function trackedSources(root: string): string[];
+
+export function indexedPaths(root: string, env?: Readonly<Record<string, string | undefined>>): string[] | undefined;
+
+export function blockSpansLines(text: string): boolean;
+
+export function joinComments(text: string, fileName: string): { out: string; count: number };

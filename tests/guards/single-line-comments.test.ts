@@ -1,13 +1,13 @@
 /** Guard that every comment in the tracked sources stays on one line and no doc comment is left stranded on another, by calling `runCommentCheck` and `runSelfTest` from `scripts/single-line-comments.mjs` in-process -- the engine `npm run comments:check` and `npm run comments:write` invoke, with no node spawn and so no per-test timeout override. */
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { readIndexPaths, runCommentCheck, runSelfTest, trackedSources } from "../../scripts/single-line-comments.mjs";
+import { blockSpansLines, indexedPaths, joinComments, readIndexPaths, runCommentCheck, runSelfTest, trackedSources } from "../../scripts/single-line-comments.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -83,6 +83,48 @@ describe("comments stay single-line", () => {
     expect(readIndexPaths(futureVersion), "a version this reader does not know").toBeUndefined();
     expect(readIndexPaths(buildIndex(2, [{ path: "a.ts", stage: 2 }])), "an unmerged entry").toBeUndefined();
     expect(readIndexPaths(Buffer.from("not an index")), "bytes that are not an index").toBeUndefined();
+  });
+
+  it("reads the index only when no git variable can make git list something else", () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-index-"));
+    try {
+      mkdirSync(join(root, ".git"));
+      writeFileSync(join(root, ".git", "index"), buildIndex(2, [{ path: "a.ts" }, { path: "b.md" }]));
+      expect(indexedPaths(root, {}), "the control: a plain repository root reads").toEqual(["a.ts", "b.md"]);
+      const variables = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"];
+      for (const name of variables) {
+        expect(indexedPaths(root, { [name]: "1" }), `${name} set: the caller must ask git`).toBeUndefined();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("finds a line break inside a block comment exactly where the pattern it replaced did", () => {
+    const pattern = /\/\*(?:[^*\n]|\*(?!\/))*\n/;
+    const alphabet = ["/", "*", "\n", "a", " "];
+    const inputs: string[] = [""];
+    for (let from = 0, length = 1; length <= 6; length++) {
+      const upto = inputs.length;
+      for (let index = from; index < upto; index++) {
+        for (const letter of alphabet) {
+          inputs.push((inputs[index] as string) + letter);
+        }
+      }
+      from = upto;
+    }
+    const disagreements = inputs.filter((text) => blockSpansLines(text) !== pattern.test(text));
+    expect(disagreements.slice(0, 5).map((text) => JSON.stringify(text)), `${inputs.length} texts compared`).toEqual([]);
+    expect(blockSpansLines("/* a\n b */"), "a wrapped block").toBe(true);
+    expect(blockSpansLines("/* a */\n/* b */\n"), "closed blocks with breaks after them").toBe(false);
+    expect(blockSpansLines("/*/\n"), "a slash right after the opener is not a closer").toBe(true);
+  });
+
+  it("scans a long text with many unclosed block openers without joining anything", () => {
+    const text = "x=1;/*a".repeat(80_000);
+    expect(blockSpansLines(text), "no line break anywhere").toBe(false);
+    expect(joinComments(text, "long.ts"), "nothing to join").toEqual({ out: text, count: 0 });
+    expect(blockSpansLines(text + "\n"), "one break after the last opener").toBe(true);
   });
 
   it("a two-line // comment in a scoped file is reported by name", () => {

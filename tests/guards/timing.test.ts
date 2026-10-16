@@ -271,7 +271,7 @@ const REGEX_AFTER = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.YieldKeyword,
   ts.SyntaxKind.AwaitKeyword,
 ]);
-/** Tokens after which a `/` divides; after any other token, and after the words above, it starts a regular expression (a misread there is caught by the bracket and scanner-error checks). */
+/** Tokens after which a `/` divides; after any other token, and after the words above, it starts a regular expression. A token after which the scan cannot tell (see `SLASH_UNDECIDED_AFTER`) is not guessed at. */
 const DIVISION_AFTER = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.NumericLiteral,
   ts.SyntaxKind.BigIntLiteral,
@@ -279,13 +279,38 @@ const DIVISION_AFTER = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.RegularExpressionLiteral,
   ts.SyntaxKind.NoSubstitutionTemplateLiteral,
   ts.SyntaxKind.TemplateTail,
-  ts.SyntaxKind.CloseParenToken,
   ts.SyntaxKind.CloseBracketToken,
-  ts.SyntaxKind.CloseBraceToken,
   ts.SyntaxKind.PlusPlusToken,
   ts.SyntaxKind.MinusMinusToken,
   ts.SyntaxKind.PrivateIdentifier,
 ]);
+/** Tokens after which only the grammar says whether a `/` divides or opens a regular expression: a `)` may close an `if` or `while` head (`if (x) /'/.test(s)`) or a call or group (`(a + b) / 2`), a `}` a block or an object literal, a `!` a non-null assertion or a negation. A wrong guess can swallow a quote into a regular expression and hide later code, so the prefilter answers `true` there and leaves the verdict to the parse. */
+const SLASH_UNDECIDED_AFTER = new Set<ts.SyntaxKind>([ts.SyntaxKind.CloseParenToken, ts.SyntaxKind.CloseBraceToken, ts.SyntaxKind.ExclamationToken]);
+/** Contextual words that open a regular expression in a statement and are a plain name elsewhere, so a `/` after one is undecided too. */
+const SLASH_UNDECIDED_WORDS = new Set(["of", "yield", "await"]);
+const SLASH_DIVISION = 0;
+const SLASH_REGEX = 1;
+const SLASH_UNDECIDED = 2;
+
+/** What a `/` or `/=` means after the token `previous` (the one before it `beforePrevious`, its text `previousWord`): a regular expression, a division, or undecided. A word straight after a `.` is a property name, so `x.return / 2` divides. */
+function slashMeaning(previous: ts.SyntaxKind | undefined, beforePrevious: ts.SyntaxKind | undefined, previousWord: string | undefined): number {
+  if (previous === undefined) {
+    return SLASH_REGEX;
+  }
+  if (SLASH_UNDECIDED_AFTER.has(previous)) {
+    return SLASH_UNDECIDED;
+  }
+  if (isWord(previous)) {
+    if (beforePrevious === KIND_DotToken || beforePrevious === KIND_QuestionDotToken) {
+      return SLASH_DIVISION;
+    }
+    if (SLASH_UNDECIDED_WORDS.has(previousWord as string)) {
+      return SLASH_UNDECIDED;
+    }
+    return REGEX_AFTER.has(previous) ? SLASH_REGEX : SLASH_DIVISION;
+  }
+  return DIVISION_AFTER.has(previous) ? SLASH_DIVISION : SLASH_REGEX;
+}
 /** The tokens a trailing argument can be made of and still evaluate to a number: literals, constants, `+ - * /` and parentheses. */
 const ARITHMETIC_TOKENS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.NumericLiteral,
@@ -427,6 +452,8 @@ function mayHaveTimingViolation(text: string): boolean {
   const minuses: number[] = [];
   const assignments = new Map<string, number[]>();
   const annotated = new Map<string, number[]>();
+  const declaringSites = new Set<number>();
+  const declaringColons = new Set<number>();
   const trailingWords: string[] = [];
   let rootish = false;
   let endsExpression = false;
@@ -464,8 +491,14 @@ function mayHaveTimingViolation(text: string): boolean {
 
   for (let kind = scanner.scan(); kind !== KIND_EndOfFileToken; kind = scanner.scan()) {
     const previous = kinds[kinds.length - 1];
-    if ((kind === KIND_SlashToken || kind === KIND_SlashEqualsToken) && (previous === undefined || REGEX_AFTER.has(previous) || !(isWord(previous) || DIVISION_AFTER.has(previous)))) {
-      kind = scanner.reScanSlashToken();
+    if (kind === KIND_SlashToken || kind === KIND_SlashEqualsToken) {
+      const slash = slashMeaning(previous, kinds[kinds.length - 2], words[kinds.length - 1]);
+      if (slash === SLASH_UNDECIDED) {
+        return true;
+      }
+      if (slash === SLASH_REGEX) {
+        kind = scanner.reScanSlashToken();
+      }
     } else if (kind === KIND_CloseBraceToken && stack[stack.length - 1]?.kind === KIND_TemplateHead) {
       kind = scanner.reScanTemplateToken(false);
     }
@@ -497,6 +530,10 @@ function mayHaveTimingViolation(text: string): boolean {
     if (previous !== undefined && isWord(previous)) {
       const name = words[index - 1] as string;
       if (kind === KIND_EqualsToken) {
+        const opener = kinds[index - 2];
+        if (opener !== undefined && isWord(opener) && DECLARATION_WORDS.has(words[index - 2] as string)) {
+          declaringSites.add(index);
+        }
         const at = assignments.get(name);
         if (at === undefined) {
           assignments.set(name, [index]);
@@ -505,7 +542,11 @@ function mayHaveTimingViolation(text: string): boolean {
         }
       } else if (kind === KIND_ColonToken) {
         const before = kinds[index - 2];
-        if (before !== undefined && (before === KIND_CommaToken ? (stack[stack.length - 1]?.declares ?? topDeclares) : isWord(before) && DECLARATION_WORDS.has(words[index - 2] as string))) {
+        const directlyDeclared = before !== undefined && isWord(before) && DECLARATION_WORDS.has(words[index - 2] as string);
+        if (before !== undefined && (before === KIND_CommaToken ? (stack[stack.length - 1]?.declares ?? topDeclares) : directlyDeclared)) {
+          if (directlyDeclared) {
+            declaringColons.add(index);
+          }
           const at = annotated.get(name);
           if (at === undefined) {
             annotated.set(name, [index]);
@@ -611,6 +652,9 @@ function mayHaveTimingViolation(text: string): boolean {
         } else if (depth === 0 && kind === KIND_SemicolonToken) {
           break;
         } else if (depth === 0 && kind === KIND_EqualsToken) {
+          if (declaringColons.has(colon)) {
+            declaringSites.add(at);
+          }
           const known = initializers.get(name);
           if (known === undefined) {
             initializers.set(name, [at]);
@@ -673,13 +717,16 @@ function mayHaveTimingViolation(text: string): boolean {
     }
     return !NON_NUMERIC_START.has(first) && !isWord(first);
   };
-  /** Whether a bare name given as a `timeout` value is certainly fine: a constant with one bare number at or under the ceiling, a name every declaration of which holds something that is no number and one of them a single call, or `undefined` when nothing in the file redefines it. */
+  /** Whether a bare name given as a `timeout` value is certainly fine: a constant with one bare number at or under the ceiling, a name every declaration of which holds something that is no number and one of them a single call, or `undefined` when nothing in the file redefines it. Only an `=` that opens a `const`, `let` or `var` declarator counts (the one shape the scanner reads an initializer from): a parameter or destructuring default, a property or later plain assignment, or a later declarator in a list leaves the name unsettled. */
   const nameIsSettled = (name: string): boolean => {
     if (name === "undefined" && !initializers.has(name) && !annotated.has(name)) {
       return true;
     }
-    const value = literalConstant(name);
     const declarations = initializers.get(name) ?? [];
+    if (declarations.some((equals) => !declaringSites.has(equals))) {
+      return false;
+    }
+    const value = literalConstant(name);
     return (value !== undefined && value <= MAX_TIMEOUT_MS) || (declarations.every((equals) => !mayEvaluateToNumber(equals + 1)) && declarations.some(isCallInitializer));
   };
   /** Whether the `setTimeout` or `sleep` word at token `name` could be a call the guard reports: a call whose delay is not a bare number under the flagged minimum and not something the number evaluator cannot read. A mention that is no call is no trigger, and a call it cannot take apart (type arguments, a spread, a type assertion inside) counts. */
@@ -936,6 +983,24 @@ describe("the timing scanner", () => {
     ["a clock read that never meets a subtraction", "const c = Date.now(); log(c);", false],
     ["a fixture timestamp that no clock read minus another", "const c6 = Date.now() - 86_400_000; expect(c6).toBe(1);", false],
     ["a source with no timing word at all", "export const answer = 6 * 7;\nit('x', () => { expect(answer).toBe(42); });", false],
+    ["a regex holding a quote after an if head", "if (x) /'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex holding a quote after a function body", "function f() {}\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex holding a quote after a while head", "while (a) /x'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex holding a double quote after a for head", 'for (;;) /x"/.test(s); foo({ timeout: 99999 }); // it"s', true],
+    ["a regex holding a backtick after an if head", "if (a) /`/.test(s); foo({ timeout: 99999 }); // it`s", true],
+    ["a regex holding a brace after an if head", "if (a) /{/.test(s); foo({ timeout: 99999 }); /}/", true],
+    ["a division after a property named like a regex keyword", "x.return / 2; foo({timeout: 99999}); y = z / w;", true],
+    ["a negated regex holding a quote", "const n = !/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a division after a property named like a regex keyword and nothing else", "x.return / 2; const y = z / w;", false],
+    ["a division after a group, left to the parse", "const half = (a + b) / 2;", true],
+    ["a division after a non-null assertion, left to the parse", "const half = a! / 2;", true],
+    ["a parameter default given as a shorthand timeout", "const helper = (timeout = 5000) => run({ timeout });", true],
+    ["a parameter default that is a call, given as a shorthand timeout", "function f(timeout = getMs()) { return run({ timeout }); }", true],
+    ["a property assigned a number while the parameter is the timeout", "function make(timeout: number) { cfg.timeout = 5000; return start({ timeout }); }", true],
+    ["a name declared bare and assigned later", "let T;\nT = 5000;\nrun({ timeout: T });", true],
+    ["a destructuring default given as a shorthand timeout", "const { timeout = 5000 } = options; run({ timeout });", true],
+    ["a declarator later in a list, kept because only the first is read as a declaration", "const a = 1, timeout = 5000; run({ timeout });", true],
+    ["a timeout from a let declaration of a small number", "let small = 5000; run({ timeout: small });", false],
   ];
 
   it.each(prefilterCases)("the prefilter agrees with the scanner on: %s", (_name, source, flagged) => {

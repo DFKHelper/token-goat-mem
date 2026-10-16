@@ -47,8 +47,18 @@ function joinBlock(raw) {
   return `${isDoc ? "/**" : "/*"} ${words} */`;
 }
 
-/** A `/*` with a line break before the next `*\/`: every multi-line block comment starts that way, so a text without one has none (a string or regex that merely looks like one only costs the parse). */
-const BLOCK_SPANS_LINES = /\/\*(?:[^*\n]|\*(?!\/))*\n/;
+/** Whether a `/*` has a line break before the next `*\/`: every multi-line block comment starts that way, so a text without one has none (a string or regex that merely looks like one only costs the parse). One pass: the next `*\/` and the next line break are looked up again only once the scan has moved past them, so the cost stays linear however many unclosed `/*` the text holds. */
+export function blockSpansLines(text) {
+  let close = -2;
+  let newline = -2;
+  for (let open = text.indexOf("/*"); open !== -1; open = text.indexOf("/*", open + 1)) {
+    if (close !== -1 && close < open + 2) close = text.indexOf("*/", open + 2);
+    if (newline !== -1 && newline < open + 2) newline = text.indexOf("\n", open + 2);
+    if (newline === -1) return false;
+    if (close === -1 || newline < close) return true;
+  }
+  return false;
+}
 /** Two `//` lines in a row at one indentation: the only shape a run of standalone `//` comments can take, so a text without it has no run to join. */
 const COMMENT_RUN = /^([^\S\r\n]*)\/\/[^\r\n]*\r?\n\1\/\//m;
 /** A lone CR or a Unicode line separator ends a `//` comment in the scanner but not in the two patterns above, so a text holding one always takes the parse. */
@@ -57,7 +67,7 @@ const LINE_SEPARATORS = [String.fromCharCode(0x2028), String.fromCharCode(0x2029
 
 /** True when the patterns cannot rule out a joinable comment; a false answer proves `joinComments` has nothing to join, so the parse is skipped. */
 function mayHaveJoinableComment(text) {
-  return LONE_CR.test(text) || LINE_SEPARATORS.some((separator) => text.includes(separator)) || BLOCK_SPANS_LINES.test(text) || COMMENT_RUN.test(text);
+  return LONE_CR.test(text) || LINE_SEPARATORS.some((separator) => text.includes(separator)) || blockSpansLines(text) || COMMENT_RUN.test(text);
 }
 
 /** Joins every multi-line comment in `text` onto one line, returning the rewritten text and how many comments were joined. `fileName` only picks the parser's script kind. */
@@ -169,9 +179,12 @@ export function readIndexPaths(buf) {
   return pos === end ? paths : undefined;
 }
 
-/** The tracked paths straight from the repository's own index file, or undefined when `root` is not a plain repository root or the index is not one `readIndexPaths` fully understands. */
-function indexedPaths(root) {
-  if (process.env.GIT_DIR !== undefined || process.env.GIT_INDEX_FILE !== undefined || process.env.GIT_WORK_TREE !== undefined) return undefined;
+/** The environment variables that move the index or change how `git ls-files` matches its pathspecs, so a set one means the index file read here is not what git would list: the repository, index, work tree and common directory, and the four pathspec modes (literal, glob, no-glob, case-insensitive). */
+const GIT_LISTING_ENV = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"];
+
+/** The tracked paths straight from the repository's own index file, or undefined when `root` is not a plain repository root, one of `GIT_LISTING_ENV` is set in `env`, or the index is not one `readIndexPaths` fully understands. */
+export function indexedPaths(root, env = process.env) {
+  if (GIT_LISTING_ENV.some((name) => env[name] !== undefined)) return undefined;
   try {
     return readIndexPaths(readFileSync(join(root, ".git", "index")));
   } catch {
