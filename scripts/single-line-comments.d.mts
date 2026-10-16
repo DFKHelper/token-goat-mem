@@ -13,3 +13,7 @@ export interface CommentCheckResult {
 export function runCommentCheck(options?: CommentCheckOptions): CommentCheckResult;
 
 export function runSelfTest(): { pass: boolean; failures: string[]; summary: string };
+
+export function readIndexPaths(index: Buffer): string[] | undefined;
+
+export function trackedSources(root: string): string[];
