@@ -6,6 +6,7 @@ import { join } from "node:path";
 import Database from "better-sqlite3";
 
 import { insertFact, openStorage } from "../../src/storage.js";
+import { parseFactColumns } from "../support/factColumns.js";
 
 type Db = Database.Database;
 
@@ -229,6 +230,15 @@ describe("opening a database that predates a schema change", () => {
     expect(pick(false)).toEqual([...COLUMNS_WITHOUT_A_MIGRATION]);
     // The fixture's blind spot, kept empty on purpose: SQLite refuses DROP COLUMN on a PRIMARY KEY or UNIQUE column, and a column that lands here is silently unguarded by the assertion above.
     expect(pick(null)).toEqual([]);
+  });
+
+  it("has a facts column set that the source-text parser in tests/support/factColumns.ts reproduces exactly", () => {
+    const { db } = freshStore();
+    try {
+      expect([...parseFactColumns()].sort()).toEqual([...columnsOf(db, "facts")].sort());
+    } finally {
+      db.close();
+    }
   });
 
   it("keeps the epoch row and the aux tables a legacy store never had", () => {

@@ -2,6 +2,8 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 
+import { parseFactColumns } from "../support/factColumns.js";
+
 const src = (name: string): string => readFileSync(new URL(`../../src/${name}`, import.meta.url), "utf8");
 
 /** The `Fact` field name a `facts` column is carried on. Derived from the `Fact` interface rather than by a naming rule because the interface is not consistent: `scope_root`, `scope_repo` and `capture_root` are camelCased there while `source_type`, `captured_at`, `prior_status` and the rest keep their SQL spelling. Picking whichever form the interface actually declares means this guard keeps working whichever convention a future column follows -- and fails loudly if a column reaches the table with no field to carry it at all. */
@@ -22,20 +24,8 @@ function factInterfaceBody(): string {
   return body.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/\/\/.*/gu, "");
 }
 
-/** Every column of `facts`, gathered from both places one can be introduced: the `CREATE TABLE` for new databases, and the `ALTER TABLE ... ADD COLUMN` migrations that bring existing ones forward. Reading both is the point -- a column added to only one of them is its own defect, and the schema test in tests/unit covers that direction. */
-function factColumns(): string[] {
-  const schema = src("db.ts");
-  const createTable = /CREATE TABLE IF NOT EXISTS facts \(([\s\S]*?)\n\)/u.exec(schema);
-  expect(createTable, "could not find the facts CREATE TABLE in src/db.ts").not.toBeNull();
-  const created = [...(createTable?.[1] ?? "").matchAll(/^\s{2}([a-z_]+)\s/gmu)].map((m) => m[1] ?? "");
-  const altered = [...src("storage.ts").matchAll(/facts ADD COLUMN ([a-z_]+)/gu)].map((m) => m[1] ?? "");
-  const all = [...new Set([...created, ...altered])].filter((name) => name.length > 0);
-  expect(all.length, "no facts columns parsed -- this guard is not looking at what it thinks").toBeGreaterThan(10);
-  return all;
-}
-
 describe("guard: a new facts column reaches every hand-maintained list", () => {
-  const columns = factColumns();
+  const columns = parseFactColumns();
   const factFields = factInterfaceBody();
   const fieldFor = (column: string): string => factFieldFor(column, factFields);
 
@@ -48,8 +38,8 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
   });
 
   it("is selected by the seam's own SELECT and mapped onto the Fact it returns", () => {
-    // Deliberate omissions: the hook path has no reader for these, and `embedding` is appended conditionally by the same SELECT because pulling the blob on a path that runs at every prompt costs more than it returns when no embedding backend is configured. `sightings` joins this set for the same reason `terms_checked_at` is already in it: the hook path (`--hint-format`) only ever surfaces ground truth (active/pinned), and `sightings` exists solely to help a human weigh a `pending` fact in `mem review` -- a status the hook path never reads at all.
-    const notNeededOnHookPath = new Set(["epoch", "status_changed_at", "last_surfaced_at", "embedding", "terms_checked_at", "sightings"]);
+    // Deliberate omissions: the hook path has no reader for these, and `embedding` is appended conditionally by the same SELECT because pulling the blob on a path that runs at every prompt costs more than it returns when no embedding backend is configured. `sightings` joins this set for the same reason `terms_checked_at` is already in it: the hook path (`--hint-format`) only ever surfaces ground truth (active/pinned), and `sightings` exists solely to help a human weigh a `pending` fact in `mem review` -- a status the hook path never reads at all. `text_hash` is a storage-internal dedup key derived from `text`; the Fact interface carries no field for it and no hook-path reader wants it.
+    const notNeededOnHookPath = new Set(["epoch", "status_changed_at", "last_surfaced_at", "embedding", "terms_checked_at", "sightings", "text_hash"]);
     const seam = src("integration-seam.ts");
     const select = /SELECT id, text[\s\S]*?FROM facts/u.exec(seam)?.[0] ?? "";
     expect(select).not.toBe("");
@@ -78,6 +68,8 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
       "terms_checked_at",
       // A restatement count `recordSighting` (src/capture.ts) increments, never a value a user states or corrects -- there is nothing for `mem edit --scope`/`--text`/etc. to mean here.
       "sightings",
+      // A derived hash of `text` that insertFact/updateFact recompute on every write and that only the dedup lookup reads; it is not on the `Fact` interface, so a user edit changes `text` and the hash follows.
+      "text_hash",
     ]);
     const editable = /const EDITABLE_FACT_FIELDS = \[([^\]]*)\]/u.exec(src("cli.ts"))?.[1] ?? "";
     expect(editable).not.toBe("");
@@ -94,8 +86,8 @@ describe("guard: a new facts column reaches every hand-maintained list", () => {
   });
 
   it("survives an export/import round trip, or is deliberately local to one store", () => {
-    // `epoch` and `status_changed_at` are this store's own clocks: a restored row's status is new news to the destination store, so both start fresh there rather than arriving from elsewhere. `sightings` joins this set: its backing evidence (`sources` rows) is never part of export/ import either (`mem export` carries no `sources` field at all), so a restored store importing a bare count with no excerpts behind it would show a number it cannot account for. Starting fresh at 0 in the destination store is the honest state -- a re-import can then earn its own sighting count the same way any project's first capture does.
-    const localToThisStore = new Set(["epoch", "status_changed_at", "terms_checked_at", "sightings"]);
+    // `epoch` and `status_changed_at` are this store's own clocks: a restored row's status is new news to the destination store, so both start fresh there rather than arriving from elsewhere. `sightings` joins this set: its backing evidence (`sources` rows) is never part of export/ import either (`mem export` carries no `sources` field at all), so a restored store importing a bare count with no excerpts behind it would show a number it cannot account for. Starting fresh at 0 in the destination store is the honest state -- a re-import can then earn its own sighting count the same way any project's first capture does. `text_hash` is recomputed from `text` by insertFact on import, so exporting it would only carry a value the destination derives itself.
+    const localToThisStore = new Set(["epoch", "status_changed_at", "terms_checked_at", "sightings", "text_hash"]);
     const exporter = /function factToExportJson[\s\S]*?\n\}/u.exec(src("cli.ts"))?.[0] ?? "";
     expect(exporter).not.toBe("");
     for (const column of columns) {
