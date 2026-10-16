@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
@@ -524,23 +524,18 @@ describe("importFromMarkdown", () => {
 
   // Defect 5: --from-md path has no file size cap
   it("rejects markdown files over the size limit (50 MB), matching the JSON import path", () => {
-    const tempFile = join(tmpdir(), `test-oversized-${Date.now()}.md`);
+    const dir = mkdtempSync(join(tmpdir(), "mem-import-oversized-"));
+    const tempFile = join(dir, "huge.md");
+    // Just over the 50 MB limit (50_000_000 bytes) by setting EOF rather than writing it: the guard in src/import.ts reads `stat.size` and rejects before it opens the file, so only the size the filesystem reports matters, and `truncateSync` makes a sparse file in O(1).
+    writeFileSync(tempFile, "");
+    truncateSync(tempFile, 50_000_001);
 
     try {
-      // Create a file larger than 50 MB (50_000_000 bytes)
-      const sizeLimit = 50_000_000;
-      const oversized = "- " + "x".repeat(sizeLimit + 1);
-      writeFileSync(tempFile, oversized);
-
       expect(() => {
         planImportFromMarkdown({ path: tempFile });
-      }).toThrow(/too large/i);
+      }).toThrow(/is too large \(50000001 bytes, max 50000000 bytes\)/);
     } finally {
-      try {
-        unlinkSync(tempFile);
-      } catch {
-        // Ignore cleanup errors
-      }
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
