@@ -3,7 +3,7 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { hasPendingMigrations, runMigrations } from "./migrations.js";
-import { existsSync, linkSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, linkSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
@@ -105,8 +105,48 @@ function publishFreshStore(dbPath: string): void {
   } catch {
     // EEXIST means a concurrent creator won; any other failure leaves the caller to create the store in place.
   } finally {
-    for (const suffix of ["", "-wal", "-shm"]) {
+    removeSeedFiles(seedPath);
+  }
+}
+
+const SEED_SUFFIXES = ["", "-wal", "-shm"];
+
+/** Removes a seed file and its sidecars. Never throws: this runs in a `finally`, and a seed that cannot be removed now (held open by a scanner on Windows, a read-only directory) must not fail an open that otherwise succeeded; the next open's sweep removes it. */
+function removeSeedFiles(seedPath: string): void {
+  for (const suffix of SEED_SUFFIXES) {
+    try {
       rmSync(`${seedPath}${suffix}`, { force: true });
+    } catch {
+      // Left for the next open's sweep.
+    }
+  }
+}
+
+/** Whether a process with `pid` exists: signal 0 delivers nothing and fails with ESRCH for a pid no process holds, while EPERM means it exists under another user. */
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+/** Removes the `<db>.seed-<pid>-<uuid>` files a creator that crashed between making its seed and cleaning it up left behind. Liveness decides, never age: a seed is removed only when its recorded pid is held by no process, so one a live concurrent opener is still writing (including a worker thread of this very process, which shares the pid) is never touched. A pid reused by an unrelated process keeps its dead owner's seed until that process ends, which only delays the removal. A name that does not parse is left alone. Never throws. */
+function removeAbandonedSeeds(dbPath: string): void {
+  const home = dirname(dbPath);
+  const prefix = `${basename(dbPath)}.seed-`;
+  let names: string[];
+  try {
+    names = readdirSync(home);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const match = name.startsWith(prefix) ? /^([0-9]+)-[0-9a-f-]{36}(?:-wal|-shm)?$/.exec(name.slice(prefix.length)) : null;
+    const pid = match?.[1] === undefined ? Number.NaN : Number(match[1]);
+    if (Number.isSafeInteger(pid) && pid > 0 && !processIsAlive(pid)) {
+      removeSeedFiles(join(home, name));
     }
   }
 }
@@ -119,6 +159,7 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
   // `mode` applies only when mkdir actually creates the directory, so an existing home -- including one created 0755 by an earlier version of mem -- is tightened explicitly on the next line.
   mkdirSync(home, { recursive: true, mode: MEM_HOME_MODE });
   restrictPermissions(home, MEM_HOME_MODE);
+  removeAbandonedSeeds(dbPath);
   if (!existed) {
     publishFreshStore(dbPath);
   }
