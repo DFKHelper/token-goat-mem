@@ -159,13 +159,54 @@ function sinkOf(call: ts.CallExpression): Sink {
   return { kind: "lost", why: "not bound to a name the guard can follow" };
 }
 
-/** Whether `node` runs on every path of a test or file: it sits in a cleanup hook's callback, in a `finally` block, or in a function that is handed to a hook, returned to its caller, or called from such a place. */
-function runsOnEveryPath(node: ts.Node, depth = 0): boolean {
+/** The tests a condition is made of once `&&`, `||`, `??`, `!` and parentheses are taken apart: `a && !b` is `a` and `b`. */
+function conditionLeaves(condition: ts.Expression): ts.Expression[] {
+  const node = unwrap(condition);
+  if (ts.isBinaryExpression(node) && (node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || node.operatorToken.kind === ts.SyntaxKind.BarBarToken || node.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)) {
+    return [...conditionLeaves(node.left), ...conditionLeaves(node.right)];
+  }
+  return ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.ExclamationToken ? conditionLeaves(node.operand) : [node];
+}
+
+/** Whether `child` sits in a branch `parent` takes only when its condition says so, and returns that condition: the branches of an `if` or `?:`, the right operand of `&&`, `||` and `??`. */
+function conditionOfBranch(parent: ts.Node, child: ts.Node): ts.Expression | undefined {
+  if (ts.isIfStatement(parent) && (child === parent.thenStatement || child === parent.elseStatement)) {
+    return parent.expression;
+  }
+  if (ts.isConditionalExpression(parent) && (child === parent.whenTrue || child === parent.whenFalse)) {
+    return parent.condition;
+  }
+  if (ts.isBinaryExpression(parent) && child === parent.right && (parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken || parent.operatorToken.kind === ts.SyntaxKind.BarBarToken || parent.operatorToken.kind === ts.SyntaxKind.QuestionQuestionToken)) {
+    return parent.left;
+  }
+  return undefined;
+}
+
+/** Whether every test in `condition` is about the directory itself: it holds one of the directory's `names` (`existsSync(dir)`, `dir !== undefined`, `dir`), so a condition that also asks about something else (`process.env.KEEP !== "1"`) does not count. */
+function testsTheDirectory(condition: ts.Expression, names: ReadonlySet<string>): boolean {
+  return conditionLeaves(condition).every((leaf) => {
+    let mentioned = false;
+    walk(leaf, (inner) => {
+      if ((ts.isIdentifier(inner) || ts.isPropertyAccessExpression(inner) || ts.isElementAccessExpression(inner)) && names.has(inner.getText())) {
+        mentioned = true;
+      }
+    });
+    return mentioned;
+  });
+}
+
+/** Whether `node` runs on every path of a test or file: it sits in a cleanup hook's callback, in a `finally` block, or in a function that is handed to a hook, returned to its caller, or called from such a place, and no branch between it and that place hangs on a condition that is not about the directory (`names`). */
+function runsOnEveryPath(node: ts.Node, names: ReadonlySet<string>, depth = 0): boolean {
   const sf = node.getSourceFile();
   if (ts.isCallExpression(node.parent) && node.parent.arguments.includes(node as ts.Expression) && CLEANUP_HOOKS.has(calleeRoot(node.parent) ?? "")) {
     return true;
   }
-  for (let current: ts.Node | undefined = node.parent; current !== undefined; current = current.parent) {
+  let child: ts.Node = node;
+  for (let current: ts.Node | undefined = node.parent; current !== undefined; child = current, current = current.parent) {
+    const condition = conditionOfBranch(current, child);
+    if (condition !== undefined && !testsTheDirectory(condition, names)) {
+      return false;
+    }
     if (ts.isBlock(current) && ts.isTryStatement(current.parent) && current.parent.finallyBlock === current) {
       return true;
     }
@@ -188,7 +229,7 @@ function runsOnEveryPath(node: ts.Node, depth = 0): boolean {
         if (ts.isReturnStatement(inner) && inner.expression !== undefined && ts.isIdentifier(inner.expression) && inner.expression.text === name) {
           reached = true;
         } else if (ts.isIdentifier(inner) && inner.text === name && inner !== (current as ts.FunctionLikeDeclaration).name && inner.parent !== current.parent) {
-          reached = runsOnEveryPath(inner, depth + 1);
+          reached = runsOnEveryPath(inner, names, depth + 1);
         }
       });
       if (reached) {
@@ -295,7 +336,7 @@ function unremovedReason(sink: Extract<Sink, { kind: "bound" }>): string | undef
       return;
     }
     removedSomewhere = true;
-    if (runsOnEveryPath(node)) {
+    if (runsOnEveryPath(node, new Set([sink.name, removedPath(argument).getText()]))) {
       everyPath = true;
     } else if (inExitHandler(node)) {
       onlyAtExit = true;
@@ -456,6 +497,15 @@ describe("tests remove every temp directory they create", () => {
     ["a directory created through a plain alias and never removed", 'const mk = fs.mkdtempSync;\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  use(dir);\n});', ["sample.test.ts:3"]],
     ["an async creator renamed on import and never removed", 'import { mkdtemp as makeTemp } from "node:fs/promises";\nit("x", async () => {\n  const dir = await makeTemp(join(tmpdir(), "mem-"));\n  use(dir);\n});', ["sample.test.ts:3"]],
     ["a hook that creates a directory and removes a different one", 'let root;\nbeforeEach(() => {\n  root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  rmSync(join(root, "sub"), { recursive: true, force: true });\n});', ["sample.test.ts:3"]],
+    ["a finally removal under an unrelated environment flag", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (process.env.KEEP !== "1") rmSync(dir, { recursive: true, force: true });\n  }\n});', ["sample.test.ts:2"]],
+    ["a cleanup hook removal under an unrelated flag", 'let root;\nbeforeEach(() => {\n  root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  if (keep === false) {\n    rmSync(root, { recursive: true, force: true });\n  }\n});', ["sample.test.ts:3"]],
+    ["a removal in the else branch of an unrelated condition", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (keep) {\n      log(dir);\n    } else {\n      rmSync(dir, { recursive: true, force: true });\n    }\n  }\n});', ["sample.test.ts:2"]],
+    ["a removal short-circuited by an unrelated flag", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  onTestFinished(() => process.env.KEEP !== "1" && rmSync(dir, { recursive: true, force: true }));\n});', ["sample.test.ts:2"]],
+    ["a removal chosen by an unrelated ternary", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    keep ? log(dir) : rmSync(dir, { recursive: true, force: true });\n  }\n});', ["sample.test.ts:2"]],
+    ["a removal under a condition that tests the directory and something else", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (process.env.KEEP !== "1" && existsSync(dir)) rmSync(dir, { recursive: true, force: true });\n  }\n});', ["sample.test.ts:2"]],
+    ["a removal nested under an unrelated condition inside a related one", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (existsSync(dir)) {\n      if (!keep) rmSync(dir, { recursive: true, force: true });\n    }\n  }\n});', ["sample.test.ts:2"]],
+    ["a cleanup helper called under an unrelated flag from a finally block", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  const cleanup = () => rmSync(dir, { recursive: true, force: true });\n  try {\n    use(dir);\n  } finally {\n    if (!keep) cleanup();\n  }\n});', ["sample.test.ts:2"]],
+    ["a looped removal of pushed directories under an unrelated flag", 'const dirs: string[] = [];\nafterEach(() => {\n  for (const dir of dirs) {\n    if (!keep) rmSync(dir, { recursive: true, force: true });\n  }\n});\nit("x", () => {\n  dirs.push(mkdtempSync(join(tmpdir(), "mem-")));\n});', ["sample.test.ts:8"]],
   ])("reports %s", (_name, source, expected) => {
     expect(scan(source)).toEqual(expected);
   });
@@ -486,7 +536,14 @@ describe("tests remove every temp directory they create", () => {
     ["a directory created through a destructuring rename and removed in onTestFinished", 'const { mkdtempSync: mk } = fs;\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));\n});'],
     ["an aliased call of a name that is no creator", 'const { readFileSync: read } = fs;\nit("x", () => {\n  const dir = read(join(tmpdir(), "mem-"));\n  use(dir);\n});'],
     ["a removal guarded by an if inside the cleanup hook, which counts because the hook itself runs on every path", 'let root;\nbeforeEach(() => {\n  root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  if (root !== undefined) {\n    rmSync(root, { recursive: true, force: true });\n  }\n});'],
-    ["a no-creation source", 'it("x", () => {\n  const dir = join(tmpdir(), "mem-");\n  rmSync(dir, { recursive: true, force: true });\n});'],
+    ["a finally removal guarded by an existence test of the directory", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });\n  }\n});'],
+    ["a finally removal guarded by a comparison of the directory", 'it("x", () => {\n  let dir: string | undefined = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (dir !== undefined) rmSync(dir, { recursive: true, force: true });\n  }\n});'],
+    ["a finally removal guarded by the directory alone", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (dir) rmSync(dir, { recursive: true, force: true });\n  }\n});'],
+    ["a removal short-circuited by a test of the directory", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  onTestFinished(() => existsSync(dir) && rmSync(dir, { recursive: true, force: true }));\n});'],
+    ["a removal guarded by both an existence test and a negated comparison of the directory", 'it("x", () => {\n  const dir = mkdtempSync(join(tmpdir(), "mem-"));\n  try {\n    use(dir);\n  } finally {\n    if (!(dir === undefined) && existsSync(dir)) rmSync(dir, { recursive: true, force: true });\n  }\n});'],
+    ["a removal in a hook guarded by a test of a property holding the directory", 'const ctx = { root: "" };\nbeforeEach(() => {\n  ctx.root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  if (ctx.root) rmSync(ctx.root, { recursive: true, force: true });\n});'],
+    ["a looped removal guarded by an existence test of each directory", 'const dirs: string[] = [];\nafterEach(() => {\n  for (const dir of dirs) {\n    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });\n  }\n});\nit("x", () => {\n  dirs.push(mkdtempSync(join(tmpdir(), "mem-")));\n});'],
+    ["a no-creation source",'it("x", () => {\n  const dir = join(tmpdir(), "mem-");\n  rmSync(dir, { recursive: true, force: true });\n});'],
   ])("accepts %s", (_name, source) => {
     expect(scan(source)).toEqual([]);
   });
