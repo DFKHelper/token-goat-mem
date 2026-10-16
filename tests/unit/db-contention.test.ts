@@ -1,5 +1,5 @@
 /** Concurrent connections to one store, in one test process. `tests/bundle/concurrency.test.ts` once carried this contract with six real `mem` processes; the contract lives here, where a connection costs milliseconds instead of a node start. Two properties: opening a store that does not exist yet from several connections at once never fails (the first-open race: `PRAGMA journal_mode = WAL` fails at once, without waiting out the busy timeout, when another connection holds the write lock while it converts a fresh file), and writes through several connections to one store lose nothing and duplicate no reaffirm. */
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
@@ -9,11 +9,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { captureExplicit } from "../../src/capture.js";
 import { openDb } from "../../src/db.js";
 import { openStorage } from "../../src/storage.js";
-import { useRealFsync } from "../support/realFsync.js";
 
-useRealFsync();
-
+// No real fsync here: with the publish bypassed, rounds failed at about the same rate with synchronous = OFF (54 of 72) as with real fsync (79 of 96), so the race rests on lock timing, not commit durability, and the fsyncs of every fresh open are cost without coverage.
 const WORKER_FILE = new URL("../support/openStoreWorker.ts", import.meta.url);
+const THROWING_WORKER_FILE = new URL("../support/throwingWorker.ts", import.meta.url);
 
 let scratch: string;
 
@@ -26,7 +25,10 @@ afterEach(() => {
 });
 
 /** Runs one worker thread per entry of `pathLists`, each opening its paths in turn, released together at every round. The barrier has no timeout by design: the main thread watches every worker, and the first one to error or exit without reporting releases all the others (slot 2 of the barrier), terminates them, and rejects with that worker's own failure, so a worker that never started cannot strand the rest. */
-async function runOpeners(pathLists: readonly (readonly string[])[]): Promise<string[][]> {
+async function runOpeners(
+  pathLists: readonly (readonly string[])[],
+  workerFileFor: (index: number) => URL = () => WORKER_FILE
+): Promise<string[][]> {
   const barrier = new SharedArrayBuffer(12);
   const slots = new Int32Array(barrier);
   const workers: Worker[] = [];
@@ -44,12 +46,15 @@ async function runOpeners(pathLists: readonly (readonly string[])[]): Promise<st
   const done = pathLists.map(
     (paths, index) =>
       new Promise<void>((resolve) => {
-        const worker = new Worker(WORKER_FILE, { workerData: { paths, barrier, parties: pathLists.length }, execArgv: ["--import", "tsx"] });
+        const worker = new Worker(workerFileFor(index), { workerData: { paths, barrier, parties: pathLists.length }, execArgv: ["--import", "tsx"] });
         workers.push(worker);
         worker.once("message", (reported: string[]) => {
           outcomes[index] = reported;
         });
-        worker.once("error", (error) => fail(error instanceof Error ? error : new Error(String(error))));
+        worker.once("error", (error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          fail(new Error(`worker ${index} failed: ${message}`, { cause: error }));
+        });
         worker.once("exit", (code) => {
           if (outcomes[index] === undefined) {
             fail(new Error(`worker ${index} exited with code ${code} before reporting`));
@@ -68,7 +73,8 @@ async function runOpeners(pathLists: readonly (readonly string[])[]): Promise<st
 
 describe("opening a store that does not exist yet from several connections at once", () => {
   const OPENERS = 4;
-  const ROUNDS = 12;
+  // Six rounds, not twelve: with the seed-and-link publish bypassed, a round failed 82% of the time (79 of 96 rounds over 8 runs), so six miss a reintroduced in-place conversion with probability about 0.18^6; with it, all four openers contend and three lose the link in every round (60 of 60), so more rounds repeat the same outcome.
+  const ROUNDS = 6;
 
   it("never fails with a locked database, whichever connection converts the new file to WAL", async () => {
     const rounds = Array.from({ length: ROUNDS }, (_unused, round) => join(scratch, `round-${round}`, "mem.db"));
@@ -85,6 +91,21 @@ describe("opening a store that does not exist yet from several connections at on
       }
       expect(readdirSync(dirname(dbPath)).filter((name) => name.includes(".seed-"))).toEqual([]);
     }
+  });
+});
+
+describe("a worker that fails to start", () => {
+  it("rejects with the failing worker's index and cause, and releases and ends the workers waiting at the barrier", async () => {
+    const dbPath = join(scratch, "never-opened", "mem.db");
+    const failure = await runOpeners([[dbPath], [dbPath], [dbPath]], (index) => (index === 1 ? THROWING_WORKER_FILE : WORKER_FILE)).then(
+      () => undefined,
+      (error: unknown) => error
+    );
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe("worker 1 failed: start-up failure before the barrier");
+    expect(((failure as Error).cause as Error).message).toBe("start-up failure before the barrier");
+    expect(existsSync(dbPath)).toBe(false);
   });
 });
 
