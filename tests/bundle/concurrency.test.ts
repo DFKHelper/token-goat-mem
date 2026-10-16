@@ -1,6 +1,6 @@
 /** Several real `mem` processes writing and reading one store at the same time. mem has no daemon: every command is a short-lived process that opens the SQLite file, does its work under `BEGIN IMMEDIATE`, and exits. Nothing in-process can exercise the part of that design that matters most -- separate OS processes contending for one WAL database -- because a single `Database` handle serialises everything by construction. The in-process race tests (tests/capture.test.ts, tests/exportImport.test.ts) pin one interleave deterministically; this one is the cross-process smoke (three workers, one iteration, nine commands, no timeout override), and the same invariants over many interleaves, plus the first-open race, are in tests/unit/db-contention.test.ts. The workers start against a store that does not exist yet, so schema creation and migrations race too: the first-open path is where a concurrent `CREATE`/`ALTER` would surface as a SQLITE_BUSY or a "duplicate column" failure. Invariants asserted: - every command exits 0, and nothing on stderr names SQLITE_BUSY or a locked database; - no write is lost: each worker's unique facts are all present exactly once; - the reaffirm path stays atomic across processes: one sentence stated by every worker, several times, is one row, and every statement of it after the first is audited as a reaffirm. */
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,8 @@ const WORKERS = 3;
 /** Commands per worker; each iteration is a unique remember, a shared remember, and a recall. */
 const ITERATIONS = 1;
 const SHARED_SENTENCE = "the build uses esbuild not webpack";
+/** A diagnostic bound under vitest's 30 s testTimeout so a hung worker fails naming its command and stderr; it is not what makes the test pass. */
+const SPAWN_TIMEOUT_MS = 25_000;
 
 interface CommandResult {
   readonly args: readonly string[];
@@ -26,19 +28,40 @@ interface CommandResult {
 let memHome: string;
 let root: string;
 
-/** Runs one bundle command asynchronously, so commands from different workers genuinely overlap. */
+interface TrackedChild {
+  readonly child: ChildProcess;
+  /** Settles once the child's pipes are closed, which on Windows is when its handles on the store are released. */
+  readonly closed: Promise<void>;
+}
+
+/** Every child this test started, so afterEach can end and reap one that a failed assertion or a test timeout left running. */
+const tracked = new Set<TrackedChild>();
+
+/** Runs one bundle command asynchronously, so commands from different workers genuinely overlap; a child that is killed (the spawn time bound, or afterEach) rejects with its command and stderr instead of resolving as a failed exit. */
 function runAsync(args: readonly string[]): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [BUNDLE, ...args], {
       env: { ...process.env, TOKEN_GOAT_MEM_HOME: memHome },
       stdio: ["ignore", "pipe", "pipe"],
+      timeout: SPAWN_TIMEOUT_MS,
     });
+    const closed = new Promise<void>((done) => {
+      child.once("close", () => done());
+      child.once("error", () => done());
+    });
+    tracked.add({ child, closed });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
     child.on("error", reject);
-    child.on("close", (code) => resolve({ args, stdout, stderr, exitCode: code ?? 1 }));
+    child.on("close", (code, signal) => {
+      if (signal !== null) {
+        reject(new Error(`mem ${args.join(" ")} was killed by ${signal} (spawn bound ${SPAWN_TIMEOUT_MS} ms)\nstderr: ${trimmed(stderr)}\nstdout: ${trimmed(stdout)}`));
+        return;
+      }
+      resolve({ args, stdout, stderr, exitCode: code ?? 1 });
+    });
   });
 }
 
@@ -94,7 +117,16 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "mem-concurrency-root-"));
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Kill and reap every child before the rmSync below: a live worker holds the store's files open, and on Windows that fails the removal.
+  const children = [...tracked];
+  tracked.clear();
+  for (const { child } of children) {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill();
+    }
+  }
+  await Promise.all(children.map(({ closed }) => closed));
   rmSync(memHome, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });
