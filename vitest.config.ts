@@ -11,7 +11,7 @@ export default defineConfig({
     // Hooks do strictly more than tests here -- globalSetup runs a full esbuild -- so they get more room.
     hookTimeout: 60_000,
     setupFiles: ["tests/setup/isolate-home.ts", "tests/setup/freeze-budget-clock.ts"],
-    globalSetup: ["tests/setup/build-bundle.ts"],
+    globalSetup: ["tests/setup/build-bundle.ts", "tests/setup/template-store.ts"],
     coverage: {
       provider: "v8",
       reporter: ["text", "json"],

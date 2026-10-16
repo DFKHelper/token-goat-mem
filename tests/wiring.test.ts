@@ -1,5 +1,5 @@
 /** Unit-level tests for src/wiring.ts's install/uninstall/describe behavior across all four tools, plus direct coverage of the low-level building blocks (marker insert/replace/strip, JSON/JSONC stamping, atomic-write retry). Every test uses an isolated `mkdtempSync` fixture for both the project root and the "home" directory -- never the real `~/.claude`, real VS Code config, or real project files. */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { spawnSync } from "node:child_process";
 import { chmodSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -171,12 +171,14 @@ describe("claudeCode wiring", () => {
         const commands: string[] = events.map((event) => settings.hooks[event][0].hooks[0].command);
         expect(events).toEqual(expect.arrayContaining(["SessionStart", "UserPromptSubmit", "Stop", "PreCompact"]));
 
+        const memLessPath = mkdtempSync(join(tmpdir(), "mem-less-path-"));
+        onTestFinished(() => rmSync(memLessPath, { recursive: true, force: true }));
         for (const command of commands) {
           // stdin is a closed pipe, as it would be for a hook host that wrote nothing.
           const result = spawnSync(bashPath as string, ["-c", command], {
             encoding: "utf8",
             input: "",
-            env: { PATH: mkdtempSync(join(tmpdir(), "mem-less-path-")) },
+            env: { PATH: memLessPath },
           });
 
           expect(result.status, command).toBe(0);
@@ -204,6 +206,7 @@ describe("claudeCode wiring", () => {
 
         // A `mem` on PATH that always exits 7 -- present, but broken, the case the old `... || true` shape collapsed into silence alongside "mem absent".
         const fakeMemDir = mkdtempSync(join(tmpdir(), "mem-fails-path-"));
+        onTestFinished(() => rmSync(fakeMemDir, { recursive: true, force: true }));
         writeFileSync(join(fakeMemDir, "mem"), "#!/bin/sh\nexit 7\n", "utf8");
         chmodSync(join(fakeMemDir, "mem"), 0o755);
 

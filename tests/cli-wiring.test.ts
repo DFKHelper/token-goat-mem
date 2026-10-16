@@ -1,6 +1,6 @@
 /** End-to-end CLI tests for health and tool wiring: doctor, init, uninstall, and the reported version. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import Database from "better-sqlite3";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -224,6 +224,7 @@ describe("mem doctor (read-only health check)", () => {
 
   it("reports project-scoped facts whose root no longer exists, which every other line calls healthy", async () => {
     const gone = mkdtempSync(join(tmpdir(), "mem-doctor-gone-"));
+    onTestFinished(() => rmSync(gone, { recursive: true, force: true }));
     await runCli(["remember", "bound to a doomed directory", "--kind", "fact", "--scope", "project", "--root", gone]);
     rmSync(gone, { recursive: true, force: true });
 

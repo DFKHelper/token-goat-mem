@@ -1,6 +1,6 @@
 /** End-to-end CLI tests for moving facts in and out: import from markdown and JSON, and export. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -437,12 +437,12 @@ describe("mem export --format md", () => {
     expect(exported.stdout).not.toContain("##");
 
     const exportDir = mkdtempSync(join(tmpdir(), "mem-export-md-empty-"));
+    onTestFinished(() => rmSync(exportDir, { recursive: true, force: true }));
     const mdPath = join(exportDir, "export.md");
     writeFileSync(mdPath, exported.stdout, "utf8");
     const imported = await runCli(["import", "--from-md", mdPath]);
     expect(imported.exitCode).toBe(0);
     expect(imported.stdout).toContain("no qualifying bullets found");
-    rmSync(exportDir, { recursive: true, force: true });
   });
 
   it("rejects an unrecognized --format value", async () => {

@@ -1,6 +1,6 @@
 /** End-to-end CLI tests for inspecting and changing stored facts: show, list, forget, edit, and short id prefixes. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -712,6 +712,10 @@ describe("mem show --related", () => {
   it("does not leak a related fact across project scope roots", async () => {
     const rootA = mkdtempSync(join(tmpdir(), "mem-related-a-"));
     const rootB = mkdtempSync(join(tmpdir(), "mem-related-b-"));
+    onTestFinished(() => {
+      rmSync(rootA, { recursive: true, force: true });
+      rmSync(rootB, { recursive: true, force: true });
+    });
     const inA = await runCli(["remember", "src/cli.ts drives root a's routing", "--kind", "fact", "--scope", "project", "--root", rootA]);
     const idA = extractRememberedId(inA);
     const inB = await runCli(["remember", "src/cli.ts drives root b's routing", "--kind", "fact", "--scope", "project", "--root", rootB]);
@@ -852,6 +856,7 @@ describe("mem edit --undo", () => {
   // Every path that creates a fact writes an audit row for it -- `capture_explicit` here, `json_import` for an imported one -- so a never-edited fact does not have an *empty* history, it has a history whose last row is not an edit. The refusal names that row rather than saying something generic, which is the difference between "you have not edited this" and "this command does not know what you did". Redacting a secret-shaped prior value on its way into the audit log is the right call -- it stops `mem edit` making a second at-rest copy of a credential that slipped past capture screening. The realistic way a value gets past capture and trips later is the allowlist: it was an accepted exception when the fact was stored, and is not one by the time the fact is edited. But the audit row is also what `--undo` restores from, so a redacted prior value means the original is gone. Restoring it anyway would write the literal marker in as the fact's text and report success; refusing says what actually happened and leaves the current value alone.
   it("refuses to undo an edit whose prior value was redacted, instead of restoring the marker", async () => {
     const root = mkdtempSync(join(tmpdir(), "mem-undo-redacted-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
     const secret = "AKIAIOSFODNN7EXAMPLE";
     mkdirSync(join(root, ".mem"), { recursive: true });
     writeFileSync(join(root, ".mem", "allowlist"), `${secret}
@@ -875,7 +880,6 @@ describe("mem edit --undo", () => {
     expect(shown.stdout).toContain("rotate creds quarterly");
     // The marker DOES appear further down, in the audit history -- that is where it belongs. What must not have happened is the marker being restored in as the fact's own text.
     expect(shown.stdout.split("history")[0]).not.toContain("[redacted: possible secret");
-    rmSync(root, { recursive: true, force: true });
   });
 
   it("names the action it found when the last one was not an edit", async () => {
@@ -927,6 +931,7 @@ describe("mem edit --undo", () => {
 
   it("skips the refused-secret-edit event when finding the last edit to undo", async () => {
     const root = mkdtempSync(join(tmpdir(), "mem-undo-secret-"));
+    onTestFinished(() => rmSync(root, { recursive: true, force: true }));
     const secret = "AKIA1234567890EXAMPLE";
     mkdirSync(join(root, ".mem"), { recursive: true });
 
@@ -944,7 +949,6 @@ describe("mem edit --undo", () => {
 
     const restored = await runCli(["show", id, "--root", root]);
     expect(restored.stdout).toContain("text: we rotate secrets monthly");
-    rmSync(root, { recursive: true, force: true });
   });
 });
 

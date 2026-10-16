@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, onTestFinished } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -694,6 +694,7 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
 
   it("matches scan-session's own bound-match rule: a pending fact scoped to an unrelated project is not sighted", () => {
     const otherRoot = mkdtempSync(join(tmpdir(), "mem-capture-other-root-"));
+    onTestFinished(() => rmSync(otherRoot, { recursive: true, force: true }));
     const { fact: unrelated } = captureSuggested(db, {
       text: "always run migrations before deploy",
       kind: "preference",
@@ -706,7 +707,6 @@ describe("captureSuggested -- a repeat suggestion sights the existing pending fa
     const here = captureSuggested(db, { text: "always run migrations before deploy", kind: "preference", scope: "project", root });
     expect(here.sighted).toBeUndefined();
     expect(here.fact.id).not.toBe(unrelated.id);
-    rmSync(otherRoot, { recursive: true, force: true });
   });
 
   it("does not sight an existing active fact, and files nothing either -- both of import.ts's boundaries at once", () => {
