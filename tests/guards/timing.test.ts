@@ -64,9 +64,10 @@ function evalNumber(node: ts.Node, resolve: Resolver, depth = 0): number | undef
   if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
     return evalNumber(node.expression, resolve, depth + 1);
   }
-  if (ts.isPrefixUnaryExpression(node) && node.operator === ts.SyntaxKind.MinusToken) {
-    const operand = evalNumber(node.operand, resolve, depth + 1);
-    return operand === undefined ? undefined : -operand;
+  if (ts.isPrefixUnaryExpression(node) && (node.operator === ts.SyntaxKind.MinusToken || node.operator === ts.SyntaxKind.PlusToken)) {
+    const text = ts.isStringLiteral(node.operand) ? Number(node.operand.text) : undefined;
+    const operand = text === undefined ? evalNumber(node.operand, resolve, depth + 1) : Number.isFinite(text) ? text : undefined;
+    return operand === undefined ? undefined : node.operator === ts.SyntaxKind.MinusToken ? -operand : operand;
   }
   if (ts.isBinaryExpression(node)) {
     const left = evalNumber(node.left, resolve, depth + 1);
@@ -296,7 +297,7 @@ function calleeRoot(call: ts.CallExpression): string | undefined {
   return ts.isIdentifier(node) ? node.text : undefined;
 }
 
-/** Every violation in one test source. Recognised shapes: `setTimeout(fn, ms)`, `setTimeout(ms)`, `setInterval(fn, ms)` (its period is a wait like a delay; an empty-bodied callback is a keep-alive hang shim and is left alone) and `sleep(ms)` (also under an alias: an import rename, `const pause = sleep`, a destructured rename, `promisify(setTimeout)`) with a delay of 100 ms or more, and an `Atomics.wait` or `Atomics.waitAsync` whose fourth argument, its timeout, is 100 ms or more or unresolvable (one with no timeout is a barrier its releaser ends); a clock difference between two clock reads (`Date.now() - startedAt`, `end - start`) written inside an `expect(...)` chain or held in a variable that reaches one; `timeout`, `testTimeout` and `hookTimeout` object keys and a trailing numeric argument of `it`/`test`/`describe`/a hook above 30 s (also one computed in place, parenthesised or cast, bound to a name, or chosen by a conditional, read through its call arguments and branches as a `timeout:` value is, and likewise a `setTimeout` or `sleep` delay of 100 ms or more); any text mention of the spawn timeout floor. Numbers resolve through literals, arithmetic (`+ - * / **`), `Number("5000")`-style conversions of a string literal, members of array and object literals (`d[0]`, `cfg.wait`, through a spread-free literal) and `const`s by scope (the nearest enclosing declaration, so a shadowing or sibling-scope constant is never mistaken for another); a `timeout:` key whose bare-identifier value cannot be resolved is reported as unresolved, while a call-expression value (a hook entry's `timeout: claudeHookTimeoutSeconds(...)`), an identifier bound to one by scope, and a parameter type annotation (`timeout: number`) are not vitest options and are left alone unless a numeric argument of the call is itself over the ceiling (`Math.max(120_000, x)`), which is reported. A clock minus a literal or a constant (`Date.now() - 86_400_000`) is fixture arithmetic that builds an old timestamp, not a measurement. */
+/** Every violation in one test source. Recognised shapes: `setTimeout(fn, ms)`, `setTimeout(ms)`, `setInterval(fn, ms)` (its period is a wait like a delay; an empty-bodied callback is a keep-alive hang shim and is left alone) and `sleep(ms)` (also under an alias: an import rename, `const pause = sleep`, a destructured rename, `promisify(setTimeout)`) with a delay of 100 ms or more, and an `Atomics.wait` or `Atomics.waitAsync` whose fourth argument, its timeout, is 100 ms or more or unresolvable (one with no timeout is a barrier its releaser ends); a clock difference between two clock reads (`Date.now() - startedAt`, `end - start`) written inside an `expect(...)` chain or held in a variable that reaches one; `timeout`, `testTimeout` and `hookTimeout` object keys and a trailing numeric argument of `it`/`test`/`describe`/a hook above 30 s (also one computed in place, parenthesised or cast, bound to a name, or chosen by a conditional, read through its call arguments and branches as a `timeout:` value is, and likewise a `setTimeout` or `sleep` delay of 100 ms or more); any text mention of the spawn timeout floor. Numbers resolve through literals, arithmetic (`+ - * / **`), `Number("5000")`-style conversions and a unary `+` or `-` of a string literal, members of array and object literals (`d[0]`, `cfg.wait`, through a spread-free literal) and `const`s by scope (the nearest enclosing declaration, so a shadowing or sibling-scope constant is never mistaken for another); a `timeout:` key whose bare-identifier value cannot be resolved is reported as unresolved, while a call-expression value (a hook entry's `timeout: claudeHookTimeoutSeconds(...)`), an identifier bound to one by scope, and a parameter type annotation (`timeout: number`) are not vitest options and are left alone unless a numeric argument of the call is itself over the ceiling (`Math.max(120_000, x)`), which is reported. A clock minus a literal or a constant (`Date.now() - 86_400_000`) is fixture arithmetic that builds an old timestamp, not a measurement. */
 function scanSource(file: string, text: string): Violation[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const lines = text.split("\n");
@@ -524,7 +525,7 @@ const NON_OPERAND_FOLLOW = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.QuestionQuestionToken,
   ts.SyntaxKind.EqualsGreaterThanToken,
 ]);
-/** Tokens that cannot start an expression the number evaluator reads (it reads a number, a parenthesis, a minus sign or a name). */
+/** Tokens that cannot start an expression the number evaluator reads (it reads a number, a parenthesis, a plus or minus sign or a name). */
 const NON_NUMERIC_START = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.StringLiteral,
   ts.SyntaxKind.NoSubstitutionTemplateLiteral,
@@ -533,7 +534,6 @@ const NON_NUMERIC_START = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.OpenBracketToken,
   ts.SyntaxKind.ExclamationToken,
   ts.SyntaxKind.TildeToken,
-  ts.SyntaxKind.PlusToken,
   ts.SyntaxKind.RegularExpressionLiteral,
 ]);
 /** The binary operators whose operands a computed timeout or delay is read from: the logical ones (either side may be the value) and arithmetic. */
@@ -1321,6 +1321,10 @@ describe("the timing scanner", () => {
     ["a delay read from a property of a parameter", "function f(cfg) { setTimeout(r, cfg.wait); }", []],
     ["a delay converted from a numeric string", 'setTimeout(r, Number("5000"));', ["sleep"]],
     ["a delay parsed from a numeric string", 'setTimeout(r, parseInt("5000"));', ["sleep"]],
+    ["a delay made a number by a unary plus on a numeric string", 'setTimeout(r, +"5000");', ["sleep"]],
+    ["a delay negated by a unary minus on a numeric string", 'setTimeout(r, -"5000");', []],
+    ["a delay made a number by a unary plus on a numeric string under the flagged minimum", 'setTimeout(r, +"50");', []],
+    ["a delay made a number by a unary plus on a string that is no number", 'setTimeout(r, +"soon");', []],
     ["a delay converted from a numeric string under the flagged minimum", 'setTimeout(r, Number("50"));', []],
     ["a delay converted from a string that is no number", 'setTimeout(r, Number("soon"));', []],
     ["a timeout written with the exponent operator", 'it("x", { timeout: 2 ** 20 }, () => {});', ["timeout"]],
@@ -1437,6 +1441,7 @@ describe("the timing scanner", () => {
     ["a delay read from an element of a constant array", "const d = [5000];\nsetTimeout(r, d[0]);", "`setTimeout` waits 5000 ms"],
     ["a delay read from a property of a constant object", "const cfg = { wait: 5000 };\nsetTimeout(r, cfg.wait);", "`setTimeout` waits 5000 ms"],
     ["a delay converted from a numeric string", 'setTimeout(r, Number("5000"));', "`setTimeout` waits 5000 ms"],
+    ["a delay made a number by a unary plus on a numeric string", 'setTimeout(r, +"5000");', "`setTimeout` waits 5000 ms"],
     ["a timeout key that is a conditional", 'it("x", { timeout: ci ? 1_000 : 60_000 }, () => {});', "`timeout` is chosen by a conditional with a 60000 ms branch, above the 30000 ms ceiling"],
     ["a timeout key computed in place", 'it("x", { timeout: Math.max(a, 90_000) }, () => {});', "`timeout` is computed by a call with a 90000 ms argument, above the 30000 ms ceiling"],
     ["a timeout key falling back through ??", 'it("x", { timeout: a ?? 90_000 }, () => {});', "`timeout` is built from an expression with a 90000 ms operand, above the 30000 ms ceiling"],
@@ -1478,6 +1483,8 @@ describe("the timing scanner", () => {
     ["a delay converted from a numeric string", 'setTimeout(r, Number("5000"));', true],
     ["a delay converted from a numeric string under the flagged minimum", 'setTimeout(r, Number("50"));', false],
     ["a delay parsed from a numeric string", 'setTimeout(r, parseInt("5000"));', true],
+    ["a delay made a number by a unary plus on a numeric string", 'setTimeout(r, +"5000");', true],
+    ["a delay made a number by a unary plus on a name", "const w = 5000; setTimeout(r, +w);", true],
     ["a delay read from a property of a name no declaration gives a value", "setTimeout(r, opts.wait);", false],
     ["a setInterval period over the flagged minimum", "setInterval(r, 5000);", true],
     ["a setInterval period under the flagged minimum", "setInterval(r, 99);", false],
