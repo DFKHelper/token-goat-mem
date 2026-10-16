@@ -294,29 +294,24 @@ function scanSource(file: string, text: string): Violation[] {
     const node = peel(value);
     return node !== undefined && ts.isCallExpression(node) ? node : undefined;
   };
-  /** The largest number any argument of `call` evaluates to, looking into nested calls (`Math.max(120_000, x)`, `Math.min(clamp(60 * 1000), x)`), or `undefined` when none evaluates. */
-  const largestArgument = (call: ts.CallExpression, depth = 0): number | undefined => {
-    let largest: number | undefined;
-    for (const arg of call.arguments) {
-      const inner = ts.isCallExpression(arg) && depth < 4 ? largestArgument(arg, depth + 1) : evalNumber(arg, resolve);
-      if (inner !== undefined && (largest === undefined || inner > largest)) {
-        largest = inner;
-      }
-    }
-    return largest;
-  };
-  /** The largest number a value the evaluator cannot read is built from: the arguments of the call it is (in place, parenthesised, cast, or bound to a name), or the larger branch of a conditional it is, or `undefined` when none evaluates. */
+  const largestOf = (...parts: Array<number | undefined>): number | undefined =>
+    parts.reduce<number | undefined>((best, part) => (part !== undefined && (best === undefined || part > best) ? part : best), undefined);
+  /** The largest number any argument of `call` is built from, looking into nested calls, conditionals and operands (`Math.max(120_000, x)`, `Math.min(clamp(60 * 1000), x)`, `Math.max(a, ci ? 60_000 : 1)`), or `undefined` when none evaluates. */
+  const largestArgument = (call: ts.CallExpression, depth = 0): number | undefined => largestOf(...call.arguments.map((arg) => largestComputed(arg, depth + 1)));
+  /** The largest number a value the evaluator cannot read is built from: the arguments of the call it is (in place, parenthesised, cast, or bound to a name), the larger branch of a conditional, the larger side of `||`, `??` and `&&`, or the larger operand of `+ - * /` (so a literal operand alone over the ceiling is reported, whatever the other side is), or `undefined` when none evaluates. */
   const largestComputed = (value: ts.Expression, depth = 0): number | undefined => {
     const node = peel(value);
-    if (node === undefined) {
+    if (node === undefined || depth >= 8) {
       return undefined;
     }
     if (ts.isCallExpression(node)) {
-      return largestArgument(node);
+      return largestArgument(node, depth);
     }
-    if (ts.isConditionalExpression(node) && depth < 4) {
-      const branches = [largestComputed(node.whenTrue, depth + 1), largestComputed(node.whenFalse, depth + 1)];
-      return branches.reduce<number | undefined>((best, branch) => (branch !== undefined && (best === undefined || branch > best) ? branch : best), undefined);
+    if (ts.isConditionalExpression(node)) {
+      return largestOf(largestComputed(node.whenTrue, depth + 1), largestComputed(node.whenFalse, depth + 1));
+    }
+    if (ts.isBinaryExpression(node) && OPERAND_OPERATORS.has(node.operatorToken.kind)) {
+      return evalNumber(node, resolve) ?? largestOf(largestComputed(node.left, depth + 1), largestComputed(node.right, depth + 1));
     }
     return evalNumber(node, resolve);
   };
@@ -330,11 +325,13 @@ function scanSource(file: string, text: string): Violation[] {
     }
     const call = callOf(value);
     const peeled = peel(value);
-    if (call !== undefined || (peeled !== undefined && ts.isConditionalExpression(peeled))) {
+    const combined = peeled !== undefined && ts.isBinaryExpression(peeled) && OPERAND_OPERATORS.has(peeled.operatorToken.kind);
+    if (call !== undefined || combined || (peeled !== undefined && ts.isConditionalExpression(peeled))) {
       const largest = largestComputed(value);
       if (largest !== undefined && largest > MAX_TIMEOUT_MS) {
-        const how = call !== undefined ? "computed by a call with a" : "chosen by a conditional with a";
-        report(keyNode, "timeout", `\`${key}\` is ${how} ${largest} ms ${call !== undefined ? "argument" : "branch"}, above the ${MAX_TIMEOUT_MS} ms ceiling`);
+        const how = call !== undefined ? "computed by a call with a" : combined ? "built from an expression with a" : "chosen by a conditional with a";
+        const part = call !== undefined ? "argument" : combined ? "operand" : "branch";
+        report(keyNode, "timeout", `\`${key}\` is ${how} ${largest} ms ${part}, above the ${MAX_TIMEOUT_MS} ms ceiling`);
       }
     } else if (ts.isIdentifier(value) && value.text !== "undefined") {
       report(keyNode, "timeout", `\`${key}: ${value.text}\` cannot be resolved to a number in this file, so the guard cannot tell it is within the ${MAX_TIMEOUT_MS} ms ceiling`);
@@ -472,6 +469,16 @@ const NON_NUMERIC_START = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.TildeToken,
   ts.SyntaxKind.PlusToken,
   ts.SyntaxKind.RegularExpressionLiteral,
+]);
+/** The binary operators whose operands a computed timeout or delay is read from: the logical ones (either side may be the value) and arithmetic. */
+const OPERAND_OPERATORS = new Set<ts.SyntaxKind>([
+  ts.SyntaxKind.BarBarToken,
+  ts.SyntaxKind.QuestionQuestionToken,
+  ts.SyntaxKind.AmpersandAmpersandToken,
+  ts.SyntaxKind.PlusToken,
+  ts.SyntaxKind.MinusToken,
+  ts.SyntaxKind.AsteriskToken,
+  ts.SyntaxKind.SlashToken,
 ]);
 /** Tokens that close a declaration's initializer: the number is then the whole of it. */
 const INITIALIZER_END = new Set<ts.SyntaxKind>([ts.SyntaxKind.SemicolonToken, ts.SyntaxKind.CommaToken, ts.SyntaxKind.CloseParenToken, ts.SyntaxKind.CloseBraceToken]);
@@ -1010,7 +1017,7 @@ function mayHaveTimingViolation(text: string): boolean {
         }
       } else if (depth === 0 && (kind === KIND_CommaToken || kind === KIND_SemicolonToken)) {
         break;
-      } else if (conditional && depth === 0 && kind === KIND_QuestionToken) {
+      } else if (conditional && depth === 0 && (kind === KIND_QuestionToken || kind === ts.SyntaxKind.BarBarToken || kind === ts.SyntaxKind.QuestionQuestionToken || kind === ts.SyntaxKind.AmpersandAmpersandToken)) {
         called = true;
       } else if (kind === KIND_NumericLiteral) {
         numbers = true;
@@ -1253,6 +1260,23 @@ describe("the timing scanner", () => {
     ["a trailing timeout computed in place with a literal over the ceiling", 'it("x", () => {}, Math.max(a, 60_000));', ["timeout"]],
     ["a trailing timeout computed in place with a literal at the ceiling", 'it("x", () => {}, Math.max(a, 30_000));', []],
     ["a trailing timeout computed in place and cast", 'it("x", () => {}, (Math.max(a, 60_000)) as number);', ["timeout"]],
+    ["a timeout key falling back to a literal over the ceiling through ||", 'it("x", { timeout: Number(process.env.X) || 60_000 }, () => {});', ["timeout"]],
+    ["a timeout key falling back to a literal at the ceiling through ||", 'it("x", { timeout: Number(process.env.X) || 30_000 }, () => {});', []],
+    ["a timeout key falling back to a literal over the ceiling through ??", 'it("x", { timeout: a ?? 90_000 }, () => {});', ["timeout"]],
+    ["a timeout key falling back to a literal at the ceiling through ??", 'it("x", { timeout: a ?? 30_000 }, () => {});', []],
+    ["a timeout key gated to a literal over the ceiling through &&", 'it("x", { timeout: ci && 60_000 }, () => {});', ["timeout"]],
+    ["a timeout key scaled from a name by a literal over the ceiling", 'it("x", { timeout: n * 60_000 }, () => {});', ["timeout"]],
+    ["a timeout key scaled from a name by a literal under the ceiling", 'it("x", { timeout: n * 1_000 }, () => {});', []],
+    ["a timeout key offset from a name by a literal over the ceiling", 'it("x", { timeout: base + 60_000 }, () => {});', ["timeout"]],
+    ["a timeout key reduced from a name by a literal over the ceiling", 'it("x", { timeout: base - 60_000 }, () => {});', ["timeout"]],
+    ["a timeout key built on an unresolved name with only small literals", 'it("x", { timeout: base + 1_000 }, () => {});', []],
+    ["a timeout key computed by Math.max over a conditional with a branch over the ceiling", 'it("x", { timeout: Math.max(a, ci ? 60_000 : 1) }, () => {});', ["timeout"]],
+    ["a timeout key computed by Math.max over a conditional with branches at the ceiling", 'it("x", { timeout: Math.max(a, ci ? 30_000 : 1) }, () => {});', []],
+    ["a trailing timeout falling back to a literal over the ceiling through ??", 'it("x", () => {}, a ?? 60_000);', ["timeout"]],
+    ["a trailing timeout falling back to a literal at the ceiling through ??", 'it("x", () => {}, a ?? 30_000);', []],
+    ["a trailing timeout scaled from a name by a literal over the ceiling", 'it("x", () => {}, n * 60_000);', ["timeout"]],
+    ["a sleep delay falling back to a flagged literal through ||", "await sleep(a || 5_000);", ["sleep"]],
+    ["a sleep delay falling back to a literal under the flagged minimum through ||", "await sleep(a || 50);", []],
     ["a trailing timeout computed in place and cast, under the ceiling", 'it("x", () => {}, (Math.max(a, 1_000)) as number);', []],
     ["a trailing timeout computed by a nested call over the ceiling", 'it("x", () => {}, Math.min(clamp(60 * 1000), a));', ["timeout"]],
     ["a trailing timeout that is a conditional with a literal branch over the ceiling", 'it("x", () => {}, ci ? 60_000 : 1_000);', ["timeout"]],
@@ -1315,6 +1339,10 @@ describe("the timing scanner", () => {
     ["a sleep delay computed in place", "await sleep(Math.max(a, 5_000));", "`sleep` waits a computed value with a 5000 ms operand"],
     ["a timeout key that is a conditional", 'it("x", { timeout: ci ? 1_000 : 60_000 }, () => {});', "`timeout` is chosen by a conditional with a 60000 ms branch, above the 30000 ms ceiling"],
     ["a timeout key computed in place", 'it("x", { timeout: Math.max(a, 90_000) }, () => {});', "`timeout` is computed by a call with a 90000 ms argument, above the 30000 ms ceiling"],
+    ["a timeout key falling back through ??", 'it("x", { timeout: a ?? 90_000 }, () => {});', "`timeout` is built from an expression with a 90000 ms operand, above the 30000 ms ceiling"],
+    ["a timeout key falling back through || after a call", 'it("x", { timeout: Number(process.env.X) || 60_000 }, () => {});', "`timeout` is built from an expression with a 60000 ms operand, above the 30000 ms ceiling"],
+    ["a trailing timeout falling back through ??", 'it("x", () => {}, a ?? 60_000);', "a trailing timeout computed from a 60000 ms operand on `it(...)` is above the 30000 ms ceiling"],
+    ["a sleep delay falling back through ||", "await sleep(a || 5_000);", "`sleep` waits a computed value with a 5000 ms operand"],
   ])("reports %s with its message", (_name, source, detail) => {
     expect(scanSource("sample.test.ts", source).map((violation) => violation.detail)).toEqual([detail]);
   });
@@ -1331,6 +1359,16 @@ describe("the timing scanner", () => {
     ["a timeout over the ceiling as a product", "const o = { timeout: 2 * 20000 };", true],
     ["a timeout held in a parenthesised number", "const o = { timeout: (40000) };", true],
     ["a delay whose type arguments hide the call", "setTimeout<void>(r, 500);", true],
+    ["a timeout key falling back to a literal over the ceiling through ||", "const o = { timeout: Number(x) || 60000 };", true],
+    ["a timeout key falling back to a literal over the ceiling through ??", "const o = { timeout: a ?? 90000 };", true],
+    ["a timeout key falling back to a literal at the ceiling through ??", "const o = { timeout: a ?? 30000 };", false],
+    ["a timeout key gated to a literal over the ceiling through &&", "const o = { timeout: ci && 60000 };", true],
+    ["a timeout key scaled by a literal over the ceiling", "const o = { timeout: n * 60000 };", true],
+    ["a timeout key computed by Math.max over a conditional with a branch over the ceiling", "const o = { timeout: Math.max(a, ci ? 60000 : 1) };", true],
+    ["a trailing timeout falling back to a literal over the ceiling through ??", "it('x', fn, a ?? 60000);", true],
+    ["a trailing timeout falling back to a literal at the ceiling through ??", "it('x', fn, a ?? 30000);", false],
+    ["a sleep delay falling back to a flagged literal through ||", "sleep(a || 5000);", true],
+    ["a sleep delay falling back to a literal under the flagged minimum through ||", "sleep(a || 50);", false],
     ["a delay passed through optional call", "setTimeout?.(r, 500);", true],
     ["a delay held in a constant declared after its use", "setTimeout(r, X); const X = 500;", true],
     ["a delay that is a sum of numbers", "setTimeout(r, 50 + 60);", true],

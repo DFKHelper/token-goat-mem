@@ -212,6 +212,37 @@ function inExitHandler(node: ts.Node): boolean {
   return false;
 }
 
+const creatorNamesBySource = new WeakMap<ts.SourceFile, ReadonlySet<string>>();
+
+/** The names a source calls a temp-directory creator by: the creators themselves and every alias bound to one by an import rename (`import { mkdtempSync as mk }`), a destructuring rename (`const { mkdtempSync: mk } = fs`) or a plain binding (`const mk = fs.mkdtempSync`). */
+function creatorNames(sf: ts.SourceFile): ReadonlySet<string> {
+  const known = creatorNamesBySource.get(sf);
+  if (known !== undefined) {
+    return known;
+  }
+  const names = new Set(CREATORS);
+  const namesCreator = (node: ts.Node | undefined): boolean => node !== undefined && ts.isIdentifier(node) && CREATORS.has(node.text);
+  walk(sf, (node) => {
+    if (ts.isImportSpecifier(node) && namesCreator(node.propertyName)) {
+      names.add(node.name.text);
+    } else if (ts.isBindingElement(node) && ts.isIdentifier(node.name) && namesCreator(node.propertyName)) {
+      names.add(node.name.text);
+    } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      const bound = unwrap(node.initializer);
+      if (namesCreator(bound) || (ts.isPropertyAccessExpression(bound) && namesCreator(bound.name))) {
+        names.add(node.name.text);
+      }
+    }
+  });
+  creatorNamesBySource.set(sf, names);
+  return names;
+}
+
+/** Whether `call` creates a temp directory, under the creator's own name or an alias of it in the same source. */
+function isCreator(call: ts.CallExpression): boolean {
+  return creatorNames(call.getSourceFile()).has(calleeName(call) ?? "");
+}
+
 /** The directory a removal's argument deletes: the argument itself, or the parent of a path made inside the created directory (`join(dir, "..")`, `dirname(dir)`). */
 function removedPath(argument: ts.Expression): ts.Expression {
   const target = unwrap(argument);
@@ -297,7 +328,7 @@ function nestedInRemoved(sf: ts.SourceFile, call: ts.CallExpression, seen: Reado
   const parentName = parent.text;
   let covered = false;
   walk(sf, (node) => {
-    if (covered || node === call || seen.has(node) || !ts.isCallExpression(node) || !CREATORS.has(calleeName(node) ?? "")) {
+    if (covered || node === call || seen.has(node) || !ts.isCallExpression(node) || !isCreator(node)) {
       return;
     }
     const sink = sinkOf(node);
@@ -312,7 +343,7 @@ function findLeaks(sources: readonly Source[]): Finding[] {
   const found = new Map<string, Finding>();
   const factories = new Map<string, number>();
   const check = (source: Parsed, call: ts.CallExpression, depth: number): void => {
-    if (CREATORS.has(calleeName(call) ?? "") && nestedInRemoved(source.sf, call)) {
+    if (isCreator(call) && nestedInRemoved(source.sf, call)) {
       return;
     }
     const sink = sinkOf(call);
@@ -336,7 +367,7 @@ function findLeaks(sources: readonly Source[]): Finding[] {
   for (const source of parsed) {
     if (source.text.includes("mkdtemp")) {
       walk(source.sf, (node) => {
-        if (ts.isCallExpression(node) && CREATORS.has(calleeName(node) ?? "")) {
+        if (ts.isCallExpression(node) && isCreator(node)) {
           check(source, node, 0);
         }
       });
@@ -420,6 +451,10 @@ describe("tests remove every temp directory they create", () => {
     ["a removal of a path inside the directory, which leaves the directory", 'let root;\nbeforeEach(() => {\n  root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => rmSync(join(root, "sub"), { recursive: true, force: true }));', ["sample.test.ts:3"]],
     ["a directory made inside a parent that is never removed", 'it("x", () => {\n  const base = mkdtempSync(join(tmpdir(), "mem-"));\n  const home = mkdtempSync(join(base, "home-"));\n  use(home);\n});', ["sample.test.ts:2", "sample.test.ts:3"]],
     ["a loop over an array literal that does not list the directory", 'let a;\nlet b;\nbeforeEach(() => {\n  a = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  for (const dir of [b]) {\n    rmSync(dir, { recursive: true, force: true });\n  }\n});', ["sample.test.ts:4"]],
+    ["a directory created through an import rename and never removed", 'import { mkdtempSync as mk } from "node:fs";\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  use(dir);\n});', ["sample.test.ts:3"]],
+    ["a directory created through a destructuring rename and never removed", 'const { mkdtempSync: mk } = fs;\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  use(dir);\n});', ["sample.test.ts:3"]],
+    ["a directory created through a plain alias and never removed", 'const mk = fs.mkdtempSync;\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  use(dir);\n});', ["sample.test.ts:3"]],
+    ["an async creator renamed on import and never removed", 'import { mkdtemp as makeTemp } from "node:fs/promises";\nit("x", async () => {\n  const dir = await makeTemp(join(tmpdir(), "mem-"));\n  use(dir);\n});', ["sample.test.ts:3"]],
     ["a hook that creates a directory and removes a different one", 'let root;\nbeforeEach(() => {\n  root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  rmSync(join(root, "sub"), { recursive: true, force: true });\n});', ["sample.test.ts:3"]],
   ])("reports %s", (_name, source, expected) => {
     expect(scan(source)).toEqual(expected);
@@ -447,6 +482,10 @@ describe("tests remove every temp directory they create", () => {
     ["a removal through dirname of a path made inside the directory", 'it("x", () => {\n  const home = join(mkdtempSync(join(tmpdir(), "mem-")), "file");\n  onTestFinished(() => rmSync(dirname(home), { recursive: true, force: true }));\n});'],
     ["a loop over an array literal listing the directories", 'let a;\nlet b;\nbeforeEach(() => {\n  a = mkdtempSync(join(tmpdir(), "mem-"));\n  b = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  for (const dir of [a, b]) {\n    rmSync(dir, { recursive: true, force: true });\n  }\n});'],
     ["a directory made inside a parent that is removed in afterEach", 'let base;\nlet home;\nbeforeEach(() => {\n  base = mkdtempSync(join(tmpdir(), "mem-"));\n  home = mkdtempSync(join(base, "home-"));\n});\nafterEach(() => rmSync(base, { recursive: true, force: true }));'],
+    ["a directory created through an import rename and removed in onTestFinished", 'import { mkdtempSync as mk } from "node:fs";\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));\n});'],
+    ["a directory created through a destructuring rename and removed in onTestFinished", 'const { mkdtempSync: mk } = fs;\nit("x", () => {\n  const dir = mk(join(tmpdir(), "mem-"));\n  onTestFinished(() => rmSync(dir, { recursive: true, force: true }));\n});'],
+    ["an aliased call of a name that is no creator", 'const { readFileSync: read } = fs;\nit("x", () => {\n  const dir = read(join(tmpdir(), "mem-"));\n  use(dir);\n});'],
+    ["a removal guarded by an if inside the cleanup hook, which counts because the hook itself runs on every path", 'let root;\nbeforeEach(() => {\n  root = mkdtempSync(join(tmpdir(), "mem-"));\n});\nafterEach(() => {\n  if (root !== undefined) {\n    rmSync(root, { recursive: true, force: true });\n  }\n});'],
     ["a no-creation source", 'it("x", () => {\n  const dir = join(tmpdir(), "mem-");\n  rmSync(dir, { recursive: true, force: true });\n});'],
   ])("accepts %s", (_name, source) => {
     expect(scan(source)).toEqual([]);
