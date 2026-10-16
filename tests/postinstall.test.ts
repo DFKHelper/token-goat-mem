@@ -1,10 +1,11 @@
 /** Tests for `scripts/postinstall.mjs`, the npm lifecycle script that wires Claude Code's user-level hooks on every global install and upgrade (`npm i -g token-goat-mem`), so recall runs in every project without a separate `mem init claude-code --user` step. Exactly one test runs the whole shipped chain as npm drives it (the script, the built bundle's `init`, a fake `mem` on PATH); the script's own branches run it as a child `node` against a stand-in bundle, and what `init --user` writes on a second or stale-PATH run goes through `run()` in-process with a scripted probe. */
-import { spawn, spawnSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { closeSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 import { stopProcessGroup } from "../scripts/postinstall.mjs";
 import { checkClaudeHookHealth, claudeHookEventsFor } from "../src/wiring.js";
@@ -227,6 +228,56 @@ describe("postinstall", () => {
       }
       child.stdout.destroy();
     }
+  });
+
+  // The real script drives the timeout and `main()` must stop the group; Windows stops the helpers with init, so only POSIX has a group to stop.
+  it.skipIf(process.platform === "win32")("stops the helpers a hook install that timed out started, through the real script", async () => {
+    // Event, not clock or probe: the helper alone holds the FIFO's write end, so the reader's EOF is the kernel reporting that it exited (a signal-0 probe also succeeds on a zombie). Its own directory, because the afterEach hook removes `root` before onTestFinished runs.
+    const fifoDir = mkdtempSync(join(tmpdir(), "mem-postinstall-fifo-"));
+    const fifo = join(fifoDir, "helper.fifo");
+    let helperPid = Number.NaN;
+    let helperEnded = false;
+    onTestFinished(() => {
+      if (!helperEnded && Number.isInteger(helperPid)) {
+        try {
+          process.kill(helperPid, "SIGKILL");
+        } catch {
+          // The helper is already gone.
+        }
+      }
+      // Read-write never blocks and satisfies a reader still waiting for a writer, so nothing stays parked in the pool.
+      if (existsSync(fifo)) {
+        closeSync(openSync(fifo, "r+"));
+      }
+      rmSync(fifoDir, { recursive: true, force: true });
+    });
+    execFileSync("mkfifo", [fifo]);
+    // Queued before the script blocks this thread: the open waits in the thread pool until the stand-in init opens the write end.
+    const opening = open(fifo, "r");
+    const init = [
+      'import { spawn } from "node:child_process";',
+      'import { closeSync, openSync, writeSync } from "node:fs";',
+      `const fd = openSync(${JSON.stringify(fifo)}, "w");`,
+      // The helper stays in init's process group and holds only the FIFO, so it does not keep the script's captured stdout open.
+      'const helper = spawn(process.execPath, ["-e", "setInterval(() => {}, 60000)"], { stdio: ["ignore", "ignore", "ignore", fd] });',
+      "writeSync(fd, `${String(helper.pid)}\\n`);",
+      "closeSync(fd);",
+      HANGING_BUNDLE,
+    ].join("\n");
+
+    const result = runPostinstall({ TOKEN_GOAT_MEM_POSTINSTALL_TIMEOUT_MS: String(HANG_TIMEOUT_MS) }, scriptWithBundle(init));
+    expect(result.exitCode, "the script exits 0 after its timeout").toBe(0);
+    expect(result.output, "the script reports the timeout").toContain("timed out");
+
+    // Ends at EOF once the helper exited; a helper left running holds the stream open until the test times out, which is the failure.
+    const handle = await opening;
+    let seen = "";
+    for await (const chunk of handle.createReadStream({ encoding: "utf8" })) {
+      seen += chunk;
+      helperPid = Number.parseInt(seen, 10);
+    }
+    helperEnded = true;
+    expect(Number.isInteger(helperPid), `the stand-in init reported its helper's pid, got ${JSON.stringify(seen)}`).toBe(true);
   });
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(

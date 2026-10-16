@@ -62,6 +62,7 @@ function main() {
     return;
   }
   const timeout = initTimeoutMs();
+  // If this script is itself killed from outside (npm killed), the detached init is orphaned, but it ends on its own within its bounded probes and lock wait (about 2.5 min).
   const result = spawnSync(process.execPath, [BUNDLE, "init", "claude-code", "--user"], {
     encoding: "utf8",
     timeout,
