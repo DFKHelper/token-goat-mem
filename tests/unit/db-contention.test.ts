@@ -22,22 +22,45 @@ afterEach(() => {
   rmSync(scratch, { recursive: true, force: true });
 });
 
-/** Runs one worker thread per entry of `pathLists`, each opening its paths in turn, released together at every round. */
-function runOpeners(pathLists: readonly (readonly string[])[]): Promise<string[][]> {
-  const barrier = new SharedArrayBuffer(8);
-  return Promise.all(
-    pathLists.map(
-      (paths) =>
-        new Promise<string[]>((resolve, reject) => {
-          const worker = new Worker(WORKER_FILE, {
-            workerData: { paths, barrier, parties: pathLists.length },
-            execArgv: ["--import", "tsx"],
-          });
-          worker.once("message", (outcomes: string[]) => resolve(outcomes));
-          worker.once("error", reject);
-        })
-    )
+/** Runs one worker thread per entry of `pathLists`, each opening its paths in turn, released together at every round. The barrier has no timeout by design: the main thread watches every worker, and the first one to error or exit without reporting releases all the others (slot 2 of the barrier), terminates them, and rejects with that worker's own failure, so a worker that never started cannot strand the rest. */
+async function runOpeners(pathLists: readonly (readonly string[])[]): Promise<string[][]> {
+  const barrier = new SharedArrayBuffer(12);
+  const slots = new Int32Array(barrier);
+  const workers: Worker[] = [];
+  const outcomes: (string[] | undefined)[] = pathLists.map(() => undefined);
+  let failure: Error | undefined;
+  const fail = (error: Error): void => {
+    if (failure !== undefined) {
+      return;
+    }
+    failure = error;
+    Atomics.store(slots, 2, 1);
+    Atomics.add(slots, 1, 1);
+    Atomics.notify(slots, 1);
+  };
+  const done = pathLists.map(
+    (paths, index) =>
+      new Promise<void>((resolve) => {
+        const worker = new Worker(WORKER_FILE, { workerData: { paths, barrier, parties: pathLists.length }, execArgv: ["--import", "tsx"] });
+        workers.push(worker);
+        worker.once("message", (reported: string[]) => {
+          outcomes[index] = reported;
+        });
+        worker.once("error", (error) => fail(error instanceof Error ? error : new Error(String(error))));
+        worker.once("exit", (code) => {
+          if (outcomes[index] === undefined) {
+            fail(new Error(`worker ${index} exited with code ${code} before reporting`));
+          }
+          resolve();
+        });
+      })
   );
+  await Promise.all(done);
+  await Promise.all(workers.map((worker) => worker.terminate()));
+  if (failure !== undefined) {
+    throw failure;
+  }
+  return outcomes.map((reported) => reported ?? []);
 }
 
 describe("opening a store that does not exist yet from several connections at once", () => {
