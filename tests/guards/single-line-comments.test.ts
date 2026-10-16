@@ -95,6 +95,13 @@ describe("comments stay single-line", () => {
       for (const name of variables) {
         expect(indexedPaths(root, { [name]: "1" }), `${name} set: the caller must ask git`).toBeUndefined();
       }
+      const config = join(root, ".git", "config");
+      writeFileSync(config, "[core]\n\trepositoryformatversion = 0\n\tbare = false\n");
+      expect(indexedPaths(root, {}), "a config with no work tree key reads").toEqual(["a.ts", "b.md"]);
+      for (const body of ["[core]\n\tworktree = ../elsewhere\n", "[core]\n\tWorkTree=/x\n", "[include]\n\tpath = more\n"]) {
+        writeFileSync(config, body);
+        expect(indexedPaths(root, {}), `a config that could relocate the work tree: ${JSON.stringify(body)}`).toBeUndefined();
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -182,9 +182,20 @@ export function readIndexPaths(buf) {
 /** The environment variables that move the index or change how `git ls-files` matches its pathspecs, so a set one means the index file read here is not what git would list: the repository, index, work tree and common directory, and the four pathspec modes (literal, glob, no-glob, case-insensitive). */
 const GIT_LISTING_ENV = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"];
 
-/** The tracked paths straight from the repository's own index file, or undefined when `root` is not a plain repository root, one of `GIT_LISTING_ENV` is set in `env`, or the index is not one `readIndexPaths` fully understands. */
+/** Whether the repository's own config could move the work tree or pull in settings from another file, which any `worktree` key or `include` section in it might; a config that is absent counts as plain, one that cannot be read does not. */
+function configMayRelocate(root) {
+  let config;
+  try {
+    config = readFileSync(join(root, ".git", "config"), "utf8");
+  } catch (error) {
+    return error?.code !== "ENOENT";
+  }
+  return /^[ \t]*(?:worktree(?![A-Za-z0-9-])|\[[ \t]*include)/im.test(config);
+}
+
+/** The tracked paths straight from the repository's own index file, or undefined when `root` is not a plain repository root, one of `GIT_LISTING_ENV` is set in `env`, the repository config could relocate the work tree, or the index is not one `readIndexPaths` fully understands. */
 export function indexedPaths(root, env = process.env) {
-  if (GIT_LISTING_ENV.some((name) => env[name] !== undefined)) return undefined;
+  if (GIT_LISTING_ENV.some((name) => env[name] !== undefined) || configMayRelocate(root)) return undefined;
   try {
     return readIndexPaths(readFileSync(join(root, ".git", "index")));
   } catch {

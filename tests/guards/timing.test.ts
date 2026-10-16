@@ -255,69 +255,12 @@ function applyAllowlist(violations: readonly Violation[], allowlist: readonly Al
   return { remaining, unused: allowlist.filter((entry) => !used.has(entry)) };
 }
 
-/** Words that start a regular expression, not a division, when a `/` follows them. */
-const REGEX_AFTER = new Set<ts.SyntaxKind>([
-  ts.SyntaxKind.ReturnKeyword,
-  ts.SyntaxKind.TypeOfKeyword,
-  ts.SyntaxKind.InstanceOfKeyword,
-  ts.SyntaxKind.InKeyword,
-  ts.SyntaxKind.NewKeyword,
-  ts.SyntaxKind.DeleteKeyword,
-  ts.SyntaxKind.VoidKeyword,
-  ts.SyntaxKind.ThrowKeyword,
-  ts.SyntaxKind.CaseKeyword,
-  ts.SyntaxKind.DoKeyword,
-  ts.SyntaxKind.ElseKeyword,
-  ts.SyntaxKind.YieldKeyword,
-  ts.SyntaxKind.AwaitKeyword,
-]);
-/** Tokens after which a `/` divides; after any other token, and after the words above, it starts a regular expression. A token after which the scan cannot tell (see `SLASH_UNDECIDED_AFTER`) is not guessed at. */
-const DIVISION_AFTER = new Set<ts.SyntaxKind>([
-  ts.SyntaxKind.NumericLiteral,
-  ts.SyntaxKind.BigIntLiteral,
-  ts.SyntaxKind.StringLiteral,
-  ts.SyntaxKind.RegularExpressionLiteral,
-  ts.SyntaxKind.NoSubstitutionTemplateLiteral,
-  ts.SyntaxKind.TemplateTail,
-  ts.SyntaxKind.CloseBracketToken,
-  ts.SyntaxKind.PlusPlusToken,
-  ts.SyntaxKind.MinusMinusToken,
-  ts.SyntaxKind.PrivateIdentifier,
-]);
-/** Tokens after which only the grammar says whether a `/` divides or opens a regular expression: a `)` may close an `if` or `while` head (`if (x) /'/.test(s)`) or a call or group (`(a + b) / 2`), a `}` a block or an object literal, a `!` a non-null assertion or a negation. A wrong guess can swallow a quote into a regular expression and hide later code, so the prefilter answers `true` there and leaves the verdict to the parse. */
-const SLASH_UNDECIDED_AFTER = new Set<ts.SyntaxKind>([ts.SyntaxKind.CloseParenToken, ts.SyntaxKind.CloseBraceToken, ts.SyntaxKind.ExclamationToken]);
-/** Contextual words that open a regular expression in a statement and are a plain name elsewhere, so a `/` after one is undecided too. */
-const SLASH_UNDECIDED_WORDS = new Set(["of", "yield", "await"]);
-const SLASH_DIVISION = 0;
-const SLASH_REGEX = 1;
-const SLASH_UNDECIDED = 2;
-
-/** What a `/` or `/=` means after the token `previous` (the one before it `beforePrevious`, its text `previousWord`): a regular expression, a division, or undecided. A word straight after a `.` is a property name, so `x.return / 2` divides. */
-function slashMeaning(previous: ts.SyntaxKind | undefined, beforePrevious: ts.SyntaxKind | undefined, previousWord: string | undefined): number {
-  if (previous === undefined) {
-    return SLASH_REGEX;
-  }
-  if (SLASH_UNDECIDED_AFTER.has(previous)) {
-    return SLASH_UNDECIDED;
-  }
-  if (isWord(previous)) {
-    if (beforePrevious === KIND_DotToken || beforePrevious === KIND_QuestionDotToken) {
-      return SLASH_DIVISION;
-    }
-    if (SLASH_UNDECIDED_WORDS.has(previousWord as string)) {
-      return SLASH_UNDECIDED;
-    }
-    return REGEX_AFTER.has(previous) ? SLASH_REGEX : SLASH_DIVISION;
-  }
-  return DIVISION_AFTER.has(previous) ? SLASH_DIVISION : SLASH_REGEX;
-}
-/** The tokens a trailing argument can be made of and still evaluate to a number: literals, constants, `+ - * /` and parentheses. */
+/** The tokens a trailing argument can be made of and still evaluate to a number: literals, constants, `+ - * /` (a slash never reaches the token list, see `opaqueSlashEnd`) and parentheses. */
 const ARITHMETIC_TOKENS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.NumericLiteral,
   ts.SyntaxKind.PlusToken,
   ts.SyntaxKind.MinusToken,
   ts.SyntaxKind.AsteriskToken,
-  ts.SyntaxKind.SlashToken,
   ts.SyntaxKind.OpenParenToken,
   ts.SyntaxKind.CloseParenToken,
 ]);
@@ -372,6 +315,121 @@ const WORD_ROLES = new Map<string, number>([
   ...[...TIMEOUT_KEYS].map((key): [string, number] => [key, ROLE_KEY]),
   ...[...TEST_CALL_ROOTS].map((root): [string, number] => [root, ROLE_ROOT]),
 ]);
+/** Every keyword's text, kept out of a skipped slash span: a word like `return` or `typeof` makes the next slash open a regular expression, and a role word is one the scan acts on. */
+const SPAN_FORBIDDEN_WORDS = new Set<string>(WORD_ROLES.keys());
+for (let kind = ts.SyntaxKind.FirstKeyword; kind <= ts.SyntaxKind.LastKeyword; kind++) {
+  const text = ts.tokenToString(kind);
+  if (text !== undefined) {
+    SPAN_FORBIDDEN_WORDS.add(text);
+  }
+}
+/** The ASCII characters a skipped slash span may hold: 1 is a letter, digit, `_` or `$`, 2 is a space, tab, `.`, `+`, `*`, `^`, `|`, `%`, `&` or `~`; everything else (quotes, backtick, brackets, `,` `;` `:` `=` `-` `<` `>` `!` `?`, backslash, `#`, `@`, line breaks) is 0. */
+const SPAN_CHARS = new Uint8Array(128);
+for (let code = 0; code < 128; code++) {
+  const char = String.fromCharCode(code);
+  SPAN_CHARS[code] = /[A-Za-z0-9_$]/u.test(char) ? 1 : " \t.+*^|%&~".includes(char) ? 2 : 0;
+}
+const CHAR_SLASH = 47;
+const CHAR_STAR = 42;
+const CHAR_EQUALS = 61;
+const CHAR_BACKSLASH = 92;
+
+const CHAR_TAB = 9;
+const CHAR_SPACE = 32;
+const CHAR_UPPER_U_LOWER = 117;
+/** The characters no expression starts with, so a division operator followed by one is a syntax error: `)` `]` `}` `,` `;` `:` `?` `>` `^` `|` `%` `&`, and a `.` that no digit follows. */
+const NO_OPERAND_START = new Set([41, 93, 125, 44, 59, 58, 63, 62, 94, 124, 37, 38]);
+
+// The lexer's one grammar-dependent choice is a slash (division, or the start of a regular expression; a template `}` is told by the bracket stack), so the pass never guesses it from the token before: a slash is read as a regular expression only when the division reading cannot lex or parse (the answer is then about a source that parses, the one `false` is proven for), which two grammar-free witnesses show, an operand-less start (the first character after the slash cannot start an expression) or a backslash reached through plain characters (no quote, backtick, slash or `#` that could open a string, comment or private name, no `}` that could close a template substitution) that the scanner rejects outside a string; every other slash goes to `opaqueSlashEnd` or answers `true`.
+/** Whether a `/` at `slash` cannot be a division operator in a source that lexes and parses, so it opens a regular expression; `inTemplate` is whether the innermost open bracket is a template substitution. */
+function divisionIsImpossible(text: string, slash: number, inTemplate: boolean): boolean {
+  let at = slash + 1;
+  while (text.charCodeAt(at) === CHAR_SPACE || text.charCodeAt(at) === CHAR_TAB) {
+    at++;
+  }
+  const first = text.charCodeAt(at);
+  if (NO_OPERAND_START.has(first)) {
+    return true;
+  }
+  if (first === 46) {
+    const digit = text.charCodeAt(at + 1);
+    if (!(digit >= 48 && digit <= 57)) {
+      return true;
+    }
+  }
+  let braces = 0;
+  for (; at < text.length; at++) {
+    const code = text.charCodeAt(at);
+    if (code === CHAR_BACKSLASH) {
+      return text.charCodeAt(at + 1) !== CHAR_UPPER_U_LOWER;
+    }
+    if (code === 39 || code === 34 || code === 96 || code === CHAR_SLASH || code === 35 || code === 10 || code === 13 || code >= 128) {
+      return false;
+    }
+    if (code === 123) {
+      braces++;
+    } else if (code === 125) {
+      if (braces === 0) {
+        if (inTemplate) {
+          return false;
+        }
+      } else {
+        braces--;
+      }
+    }
+  }
+  return false;
+}
+
+// A slash that is not provably a regular expression is skipped only when both readings leave the pass in the same state: the span to the next slash on its line holds only the characters of SPAN_CHARS (so no token the pass acts on, no bracket, comma, colon, `=`, `-` or quote), no keyword or role word (so no word can make the closing slash open a regex), and ends in a word or number (so the closing slash divides in the division reading), and the closing slash is not run into an identifier character, `=`, `/` or `*`, unless that is a flag word of regular expression flag letters that is no keyword and is followed by `)` `;` `,` `]` or `}` (so both readings resume lexing at the same character, the flag word being one more word that ends the span); a regex literal and a closing slash are both a non-word, which resets the same three flags, so the span becomes one `Unknown` token, a kind no set the readers consult holds, and the two readers that would take it for a non-number (`trailingArgumentIsNumeric`, `delayMayBeReported`) answer `true` on it.
+/** The letters a regular expression flag can be. */
+const FLAG_LETTERS = "dgimsuvy";
+/** The characters a flag word may be followed by (`)` `;` `,` `]` `}`), which end the span in both readings without a call, member access or assignment on the word. */
+const FLAG_FOLLOWERS = new Set([41, 59, 44, 93, 125]);
+/** The index just past the closing slash of the span that starts at the slash at `slash`, or -1 when this slash is one the pass cannot prove harmless. */
+function opaqueSlashEnd(text: string, slash: number): number {
+  let wordStart = -1;
+  let at = slash + 1;
+  for (; at < text.length; at++) {
+    const code = text.charCodeAt(at);
+    if (code === CHAR_SLASH) {
+      break;
+    }
+    const kind = code < 128 ? (SPAN_CHARS[code] as number) : 0;
+    if (kind === 1) {
+      if (wordStart < 0) {
+        wordStart = at;
+      }
+      continue;
+    }
+    if (kind === 0) {
+      return -1;
+    }
+    if (wordStart >= 0) {
+      if (SPAN_FORBIDDEN_WORDS.has(text.slice(wordStart, at))) {
+        return -1;
+      }
+      wordStart = -1;
+    }
+  }
+  if (at >= text.length || wordStart < 0 || SPAN_FORBIDDEN_WORDS.has(text.slice(wordStart, at))) {
+    return -1;
+  }
+  let flagEnd = at + 1;
+  while (FLAG_LETTERS.includes(text.charAt(flagEnd)) && flagEnd < text.length) {
+    flagEnd++;
+  }
+  if (flagEnd > at + 1) {
+    const after = text.charCodeAt(flagEnd);
+    return SPAN_FORBIDDEN_WORDS.has(text.slice(at + 1, flagEnd)) || !FLAG_FOLLOWERS.has(after) ? -1 : flagEnd;
+  }
+  const next = text.charCodeAt(at + 1);
+  if (next >= 128 || next === CHAR_SLASH || next === CHAR_STAR || next === CHAR_EQUALS || next === CHAR_BACKSLASH || SPAN_CHARS[next] === 1) {
+    return -1;
+  }
+  return at + 1;
+}
+
 /** Tokens that end a bare-word type after `as` or `satisfies`: the type has no comma inside. */
 const TYPE_END = new Set<ts.SyntaxKind>([ts.SyntaxKind.CloseParenToken, ts.SyntaxKind.CommaToken, ts.SyntaxKind.SemicolonToken, ts.SyntaxKind.CloseBracketToken, ts.SyntaxKind.CloseBraceToken]);
 /** The words that open a variable declaration, so a name annotated right after one is a declaration that may carry a number. */
@@ -421,6 +479,7 @@ const KIND_StringLiteral = ts.SyntaxKind.StringLiteral;
 const KIND_TemplateHead = ts.SyntaxKind.TemplateHead;
 const KIND_Unknown = ts.SyntaxKind.Unknown;
 const KIND_LessThanToken = ts.SyntaxKind.LessThanToken;
+const KIND_QuestionToken = ts.SyntaxKind.QuestionToken;
 const KIND_DotDotDotToken = ts.SyntaxKind.DotDotDotToken;
 const KIND_SemicolonToken = ts.SyntaxKind.SemicolonToken;
 const KIND_TemplateTail = ts.SyntaxKind.TemplateTail;
@@ -454,6 +513,7 @@ function mayHaveTimingViolation(text: string): boolean {
   const annotated = new Map<string, number[]>();
   const declaringSites = new Set<number>();
   const declaringColons = new Set<number>();
+  const suspect = new Set<string>();
   const trailingWords: string[] = [];
   let rootish = false;
   let endsExpression = false;
@@ -474,6 +534,9 @@ function mayHaveTimingViolation(text: string): boolean {
     const names: string[] = [];
     for (let index = start; index < stop; index++) {
       const kind = kinds[index] as ts.SyntaxKind;
+      if (kind === KIND_Unknown) {
+        return true;
+      }
       if (isWord(kind)) {
         names.push(words[index] as string);
       } else if (ARITHMETIC_TOKENS.has(kind)) {
@@ -491,13 +554,18 @@ function mayHaveTimingViolation(text: string): boolean {
 
   for (let kind = scanner.scan(); kind !== KIND_EndOfFileToken; kind = scanner.scan()) {
     const previous = kinds[kinds.length - 1];
+    const precedingBreak = scanner.hasPrecedingLineBreak();
     if (kind === KIND_SlashToken || kind === KIND_SlashEqualsToken) {
-      const slash = slashMeaning(previous, kinds[kinds.length - 2], words[kinds.length - 1]);
-      if (slash === SLASH_UNDECIDED) {
-        return true;
-      }
-      if (slash === SLASH_REGEX) {
+      const start = scanner.getTokenStart();
+      if (divisionIsImpossible(text, start, stack[stack.length - 1]?.kind === KIND_TemplateHead)) {
         kind = scanner.reScanSlashToken();
+      } else {
+        const end = opaqueSlashEnd(text, start);
+        if (end < 0) {
+          return true;
+        }
+        scanner.resetTokenState(end);
+        kind = KIND_Unknown;
       }
     } else if (kind === KIND_CloseBraceToken && stack[stack.length - 1]?.kind === KIND_TemplateHead) {
       kind = scanner.reScanTemplateToken(false);
@@ -556,12 +624,15 @@ function mayHaveTimingViolation(text: string): boolean {
         }
       }
     }
+    if ((kind === KIND_ExclamationToken || kind === KIND_QuestionToken) && previous !== undefined && isWord(previous)) {
+      suspect.add(words[index - 1] as string);
+    }
     if (kind === KIND_MinusToken) {
       minuses.push(index);
     }
     kinds.push(kind);
     words.push(word);
-    breaks.push(scanner.hasPrecedingLineBreak());
+    breaks.push(precedingBreak);
 
     let nextRootish = false;
     let nextEnds = false;
@@ -643,7 +714,9 @@ function mayHaveTimingViolation(text: string): boolean {
       let depth = 0;
       for (let at = colon + 1; at < kinds.length; at++) {
         const kind = kinds[at] as ts.SyntaxKind;
-        if (kind === KIND_OpenParenToken || kind === KIND_OpenBracketToken || kind === KIND_OpenBraceToken || kind === KIND_TemplateHead) {
+        if (kind === KIND_LessThanToken || kind === KIND_ExclamationToken || kind === KIND_QuestionToken || kind === KIND_QuestionDotToken) {
+          suspect.add(name);
+        } else if (kind === KIND_OpenParenToken || kind === KIND_OpenBracketToken || kind === KIND_OpenBraceToken || kind === KIND_TemplateHead) {
           depth++;
         } else if (kind === KIND_CloseParenToken || kind === KIND_CloseBracketToken || kind === KIND_CloseBraceToken || kind === KIND_TemplateTail) {
           if (--depth < 0) {
@@ -719,6 +792,9 @@ function mayHaveTimingViolation(text: string): boolean {
   };
   /** Whether a bare name given as a `timeout` value is certainly fine: a constant with one bare number at or under the ceiling, a name every declaration of which holds something that is no number and one of them a single call, or `undefined` when nothing in the file redefines it. Only an `=` that opens a `const`, `let` or `var` declarator counts (the one shape the scanner reads an initializer from): a parameter or destructuring default, a property or later plain assignment, or a later declarator in a list leaves the name unsettled. */
   const nameIsSettled = (name: string): boolean => {
+    if (suspect.has(name)) {
+      return false;
+    }
     if (name === "undefined" && !initializers.has(name) && !annotated.has(name)) {
       return true;
     }
@@ -740,7 +816,7 @@ function mayHaveTimingViolation(text: string): boolean {
     let start = name + 2;
     for (let at = name + 1; at < kinds.length; at++) {
       const kind = kinds[at] as ts.SyntaxKind;
-      if (kind === KIND_LessThanToken || kind === KIND_GreaterThanToken || kind === KIND_DotDotDotToken || (isWord(kind) && (words[at] === "as" || words[at] === "satisfies"))) {
+      if (kind === KIND_Unknown || kind === KIND_LessThanToken || kind === KIND_GreaterThanToken || kind === KIND_DotDotDotToken || (isWord(kind) && (words[at] === "as" || words[at] === "satisfies"))) {
         return true;
       }
       if (kind === KIND_OpenParenToken || kind === KIND_OpenBracketToken || kind === KIND_OpenBraceToken || kind === KIND_TemplateHead) {
@@ -807,6 +883,8 @@ function mayHaveTimingViolation(text: string): boolean {
       if (after === KIND_EqualsToken || !nameIsSettled(words[key] as string)) {
         return true;
       }
+    } else if (after !== KIND_OpenParenToken) {
+      return true;
     }
   }
 
@@ -814,7 +892,7 @@ function mayHaveTimingViolation(text: string): boolean {
     return true;
   }
 
-  const clockVariables = new Set<string>();
+  const clockVariables = new Set<string>(suspect);
   const isClockOwner = (index: number): boolean => {
     const owner = words[index];
     return kinds[index] !== undefined && isWord(kinds[index] as ts.SyntaxKind) && (owner === "Date" || owner === "performance");
@@ -842,7 +920,7 @@ function mayHaveTimingViolation(text: string): boolean {
     return true;
   }
 
-  return trailingWords.some((name) => initializers.get(name)?.some((equals) => mayEvaluateToNumber(equals + 1)) === true);
+  return trailingWords.some((name) => suspect.has(name) || initializers.get(name)?.some((equals) => mayEvaluateToNumber(equals + 1)) === true);
 }
 
 /** Every test source under tests/ as a forward-slash path relative to it, the guard itself and dot or node_modules directories left out. */
@@ -972,7 +1050,7 @@ describe("the timing scanner", () => {
     ["a timeout under the ceiling in a constant", "const small = 5000; const o = { timeout: small, hookTimeout: small };", false],
     ["a timeout bound to a call", "const timeout = compute(); const o = { timeout };", false],
     ["a timeout bound to a member call", "const timeout = a.b.compute(1, 2); const o = { timeout };", false],
-    ["a timeout key in a type", "type T = { timeout?: number };", false],
+    ["a timeout key marked optional in a type, kept because the scan cannot tell it from a key given a value", "type T = { timeout?: number };", true],
     ["a destructured timeout parameter, kept because the scan cannot tell it from a key", "function f({ timeout }: { timeout: number }) {}", true],
     ["a timeout key given undefined", "const o = { timeout: undefined };", false],
     ["a small literal timeout", "const o = { 'timeout': 5 };", false],
@@ -991,7 +1069,7 @@ describe("the timing scanner", () => {
     ["a regex holding a brace after an if head", "if (a) /{/.test(s); foo({ timeout: 99999 }); /}/", true],
     ["a division after a property named like a regex keyword", "x.return / 2; foo({timeout: 99999}); y = z / w;", true],
     ["a negated regex holding a quote", "const n = !/'/.test(s); foo({ timeout: 99999 }); // it's", true],
-    ["a division after a property named like a regex keyword and nothing else", "x.return / 2; const y = z / w;", false],
+    ["a division after a property named like a regex keyword and nothing else, kept because the scan cannot tell it from a regex", "x.return / 2; const y = z / w;", true],
     ["a division after a group, left to the parse", "const half = (a + b) / 2;", true],
     ["a division after a non-null assertion, left to the parse", "const half = a! / 2;", true],
     ["a parameter default given as a shorthand timeout", "const helper = (timeout = 5000) => run({ timeout });", true],
@@ -1001,6 +1079,33 @@ describe("the timing scanner", () => {
     ["a destructuring default given as a shorthand timeout", "const { timeout = 5000 } = options; run({ timeout });", true],
     ["a declarator later in a list, kept because only the first is read as a declaration", "const a = 1, timeout = 5000; run({ timeout });", true],
     ["a timeout from a let declaration of a small number", "let small = 5000; run({ timeout: small });", false],
+    ["a division after an as type with type arguments", "const h = v as Big<number> / 2; foo({ timeout: 99999 }); const z = w / 3;", true],
+    ["a division after a satisfies type with type arguments", "const h = v satisfies X<Y> / 2; foo({ timeout: 99999 }); const z = w / 3;", true],
+    ["a division after a call with type arguments", "const h = f<number> / 2; foo({ timeout: 99999 }); const z = w / 3;", true],
+    ["a regex after a bare let", "let x\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a let with a type", "let x: number\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a let with an array type", "let x: number[]\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a type alias", "type A = string\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after an ambient declaration", "declare const q: Q\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a break", "for (;;) { break\n}\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a continue", "for (;;) { continue\n}\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a debugger statement", "debugger\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after an export default", "export default /'/.source; foo({ timeout: 99999 }); // it's", true],
+    ["a regex after an increment", "let i = 0; ++/'/.lastIndex; foo({ timeout: 99999 }); // it's", true],
+    ["a regex after extends", "class A extends /'/.constructor {} foo({ timeout: 99999 }); // it's", true],
+    ["a regex after a bare import", "import \"m\"\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a regex after an instanceof operand", "const b = a instanceof\n/'/.constructor; foo({ timeout: 99999 }); // it's", true],
+    ["a regex after in", "const b = 'a' in\n/'/; foo({ timeout: 99999 }); // it's", true],
+    ["a regex after case", "switch (a) { case\n/'/.source: break; } foo({ timeout: 99999 }); // it's", true],
+    ["a regex after typeof", "const t = typeof\n/'/; foo({ timeout: 99999 }); // it's", true],
+    ["a regex after else", "if (a) b(); else\n/'/.test(s); foo({ timeout: 99999 }); // it's", true],
+    ["a number held under a generic function type annotation", "const T: <X = {}>() => void = 99999 as any; it('x', () => {}, T);", true],
+    ["a number held in a block name shadowed in the next block", "{ const T: <X = {}>() => number = 99999 as any; run({ timeout: T }); }\n{ const T = make(); use(T); }", true],
+    ["a definite assignment name given a number", "let T! = 99999; run({ timeout: T });", true],
+    ["a timeout key marked optional", "run({ timeout?: 99999 });", true],
+    ["a timeout key marked definite", "run({ timeout!: 99999 });", true],
+    ["a regex with flags and no quote, decided without the parse", "const a = 1;\nexpect(m).toMatch(/remember|check/u);\nconst b = 2;", false],
+    ["a chain of divisions, kept because the scan cannot tell it from a regex", "const share = used / total / count;", true],
   ];
 
   it.each(prefilterCases)("the prefilter agrees with the scanner on: %s", (_name, source, flagged) => {
