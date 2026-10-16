@@ -1,11 +1,12 @@
 /** Tests for `scripts/postinstall.mjs`, the npm lifecycle script that wires Claude Code's user-level hooks on every global install and upgrade (`npm i -g token-goat-mem`), so recall runs in every project without a separate `mem init claude-code --user` step. Exactly one test runs the whole shipped chain as npm drives it (the script, the built bundle's `init`, a fake `mem` on PATH); the script's own branches run it as a child `node` against a stand-in bundle, and what `init --user` writes on a second or stale-PATH run goes through `run()` in-process with a scripted probe. */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { stopProcessGroup } from "../scripts/postinstall.mjs";
 import { checkClaudeHookHealth, claudeHookEventsFor } from "../src/wiring.js";
 import { runCli } from "./support/cli.js";
 import { writeCheapCapableMem } from "./support/fakeMem.js";
@@ -19,8 +20,6 @@ vi.mock("../src/probeSpawn.js", async (importOriginal) => (await import("./suppo
 const HANG_TIMEOUT_MS = 1000;
 // A diagnostic bound under vitest's 30 s testTimeout so a hung child fails with its stderr; it is not what makes the tests pass.
 const SPAWN_TIMEOUT_MS = 25_000;
-// The stand-in init must have started its helper before the timeout stops it, and node starting a one-line script under load is the only thing that can outlast this.
-const GRANDCHILD_TIMEOUT_MS = 4000;
 
 const POSTINSTALL_PATH = fileURLToPath(new URL("../scripts/postinstall.mjs", import.meta.url));
 
@@ -193,33 +192,40 @@ describe("postinstall", () => {
     expect(result.output).toContain("mem init claude-code --user");
   });
 
-  it("leaves no process running behind a hook install it stopped on the timeout", () => {
-    const marker = join(root, "grandchild.pid");
-    const grandchild = "require('node:net').createServer().listen(0)";
-    const bundle = [
-      'import { spawn } from "node:child_process";',
-      'import { createServer } from "node:net";',
-      'import { writeFileSync } from "node:fs";',
-      `const child = spawn(process.execPath, ["-e", ${JSON.stringify(grandchild)}], { stdio: "ignore" });`,
-      `writeFileSync(${JSON.stringify(marker)}, String(child.pid));`,
-      "createServer().listen(0);",
-      "",
-    ].join("\n");
-    let pid = Number.NaN;
+  // Windows stops the helpers with init (its install is not detached), so only POSIX has a group to stop; the real timeout path there is covered by the hang test above.
+  it.skipIf(process.platform === "win32")("stops the helpers a hook install started, not only the install itself", async () => {
+    // The helper shares the stand-in init's stdout, so the pipe closes only once both are gone: the test waits on that event and on the helper's own ready line, never on a clock.
+    const helper = "require('node:net').createServer().listen(0, () => console.log('ready ' + process.pid))";
+    const init = `const { spawn } = require('node:child_process'); spawn(process.execPath, ['-e', ${JSON.stringify(helper)}], { stdio: ['ignore', 'inherit', 'inherit'] }); require('node:net').createServer().listen(0);`;
+    const child = spawn(process.execPath, ["-e", init], { detached: true, stdio: ["ignore", "pipe", "inherit"] });
+    let helperPid = Number.NaN;
     try {
-      const result = runPostinstall({ TOKEN_GOAT_MEM_POSTINSTALL_TIMEOUT_MS: String(GRANDCHILD_TIMEOUT_MS) }, scriptWithBundle(bundle));
-      expect(result.output).toContain("timed out");
-      expect(existsSync(marker), "the stand-in init started its helper before the timeout").toBe(true);
-      pid = Number(readFileSync(marker, "utf8"));
-      expect(processIsRunning(pid), `helper ${String(pid)} still running after the timeout`).toBe(false);
+      const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
+      helperPid = await new Promise<number>((resolve, reject) => {
+        let seen = "";
+        child.stdout.on("data", (chunk: Buffer) => {
+          seen += chunk.toString("utf8");
+          const match = /ready (\d+)/.exec(seen);
+          if (match?.[1] !== undefined) {
+            resolve(Number(match[1]));
+          }
+        });
+        child.once("error", reject);
+        child.once("close", () => reject(new Error(`the stand-in init ended before its helper was ready: ${seen}`)));
+      });
+      expect(processIsRunning(helperPid), "the helper runs before the timeout path").toBe(true);
+
+      // What the timeout does: spawnSync kills init, then the group is stopped.
+      child.kill("SIGKILL");
+      stopProcessGroup(child.pid);
+      await closed;
+      expect(processIsRunning(helperPid), `helper ${String(helperPid)} still running`).toBe(false);
     } finally {
-      if (Number.isInteger(pid) && processIsRunning(pid)) {
-        try {
-          process.kill(pid, "SIGKILL");
-        } catch {
-          // Already gone, which is what the test asserts.
-        }
+      stopProcessGroup(child.pid);
+      if (Number.isInteger(helperPid) && processIsRunning(helperPid)) {
+        process.kill(helperPid, "SIGKILL");
       }
+      child.stdout.destroy();
     }
   });
 
