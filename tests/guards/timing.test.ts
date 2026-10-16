@@ -329,10 +329,12 @@ function scanSource(file: string, text: string): Violation[] {
       return;
     }
     const call = callOf(value);
-    if (call !== undefined) {
-      const largest = largestArgument(call);
+    const peeled = peel(value);
+    if (call !== undefined || (peeled !== undefined && ts.isConditionalExpression(peeled))) {
+      const largest = largestComputed(value);
       if (largest !== undefined && largest > MAX_TIMEOUT_MS) {
-        report(keyNode, "timeout", `\`${key}\` is computed by a call with a ${largest} ms argument, above the ${MAX_TIMEOUT_MS} ms ceiling`);
+        const how = call !== undefined ? "computed by a call with a" : "chosen by a conditional with a";
+        report(keyNode, "timeout", `\`${key}\` is ${how} ${largest} ms ${call !== undefined ? "argument" : "branch"}, above the ${MAX_TIMEOUT_MS} ms ceiling`);
       }
     } else if (ts.isIdentifier(value) && value.text !== "undefined") {
       report(keyNode, "timeout", `\`${key}: ${value.text}\` cannot be resolved to a number in this file, so the guard cannot tell it is within the ${MAX_TIMEOUT_MS} ms ceiling`);
@@ -1091,7 +1093,7 @@ function mayHaveTimingViolation(text: string): boolean {
       return true;
     }
     if (!mayEvaluateToNumber(start)) {
-      return callCarriesNumbers(start);
+      return callCarriesNumbers(start, MAX_TIMEOUT_MS, true);
     }
     const after = kinds[start + 1];
     if (after === KIND_CommaToken || after === KIND_CloseBraceToken) {
@@ -1239,6 +1241,14 @@ describe("the timing scanner", () => {
     ["a computed timeout whose argument is a constant over the ceiling", 'const LIMIT = 90_000;\nconst t = Math.max(LIMIT, x);\nit("x", { timeout: t }, () => {});', ["timeout"]],
     ["a computed timeout whose argument is arithmetic over the ceiling", 'const t = Math.max(60 * 1000, x);\nit("x", { timeout: t }, () => {});', ["timeout"]],
     ["a computed timeout with only small literal arguments", 'const t = Math.max(1_000, x);\nit("x", { timeout: t }, () => {});', []],
+    ["a timeout key chosen by a conditional with a branch over the ceiling", 'const slow = true;\nit("x", { timeout: slow ? 120_000 : 5_000 }, () => {});', ["timeout"]],
+    ["a timeout key chosen by a conditional with branches at the ceiling", 'it("x", { timeout: ci ? 30_000 : 5_000 }, () => {});', []],
+    ["a timeout key computed in place by Math.max with a literal over the ceiling", 'it("x", { timeout: Math.max(a, 90_000) }, () => {});', ["timeout"]],
+    ["a timeout key computed in place by Math.max with a literal at the ceiling", 'it("x", { timeout: Math.max(a, 30_000) }, () => {});', []],
+    ["a timeout key that is a parenthesised, cast conditional over the ceiling", 'it("x", { timeout: (ci ? 1_000 : 60_000) as number }, () => {});', ["timeout"]],
+    ["a timeout key that is a conditional with a computed branch over the ceiling", 'it("x", { testTimeout: ci ? 1_000 : Math.max(a, 60_000) }, () => {});', ["timeout"]],
+    ["a timeout key held in a name bound to a conditional over the ceiling", 'const t = ci ? 60_000 : 1_000;\nit("x", { timeout: t }, () => {});', ["timeout"]],
+    ["a timeout key held in a name bound to a conditional under the ceiling", 'const t = ci ? 2_000 : 1_000;\nit("x", { timeout: t }, () => {});', []],
     ["a trailing timeout computed with a literal over the ceiling", 'const t = Math.max(120_000, x);\nit("x", () => {}, t);', ["timeout"]],
     ["a trailing timeout computed in place with a literal over the ceiling", 'it("x", () => {}, Math.max(a, 60_000));', ["timeout"]],
     ["a trailing timeout computed in place with a literal at the ceiling", 'it("x", () => {}, Math.max(a, 30_000));', []],
@@ -1303,6 +1313,8 @@ describe("the timing scanner", () => {
     ["a trailing timeout computed in place", 'it("x", () => {}, Math.max(a, 60_000));', "a trailing timeout computed from a 60000 ms operand on `it(...)` is above the 30000 ms ceiling"],
     ["a trailing timeout that is a conditional", 'it("x", () => {}, ci ? 1_000 : 60_000);', "a trailing timeout computed from a 60000 ms operand on `it(...)` is above the 30000 ms ceiling"],
     ["a sleep delay computed in place", "await sleep(Math.max(a, 5_000));", "`sleep` waits a computed value with a 5000 ms operand"],
+    ["a timeout key that is a conditional", 'it("x", { timeout: ci ? 1_000 : 60_000 }, () => {});', "`timeout` is chosen by a conditional with a 60000 ms branch, above the 30000 ms ceiling"],
+    ["a timeout key computed in place", 'it("x", { timeout: Math.max(a, 90_000) }, () => {});', "`timeout` is computed by a call with a 90000 ms argument, above the 30000 ms ceiling"],
   ])("reports %s with its message", (_name, source, detail) => {
     expect(scanSource("sample.test.ts", source).map((violation) => violation.detail)).toEqual([detail]);
   });
@@ -1345,6 +1357,11 @@ describe("the timing scanner", () => {
     ["a trailing timeout that is a handler with a computed value in its body", "it('x', (a, b) => { run(Math.max(a, 60_000)); });", false],
     ["a setTimeout delay computed in place under the flagged minimum", "setTimeout(r, Math.max(a, 50));", false],
     ["a sleep delay that is a conditional of small literals", "sleep(ci ? 50 : 10);", false],
+    ["a timeout key that is a conditional of small literals", "it('x', { timeout: ci ? 1_000 : 2_000 }, f);", false],
+    ["a timeout key computed in place with only small literal arguments", "it('x', { timeout: Math.max(a, 1_000) }, f);", false],
+    ["a timeout key that is a conditional with a literal over the ceiling", "it('x', { timeout: ci ? 60_000 : 1 }, f);", true],
+    ["a timeout key that is a conditional with a computed branch over the ceiling", "it('x', { timeout: ci ? 1 : Math.max(a, 60_000) }, f);", true],
+    ["a timeout key computed in place over the ceiling", "it('x', { timeout: Math.max(a, 90_000) }, f);", true],
     ["a trailing timeout computed in place over the ceiling", "it('x', fn, Math.max(a, 60_000));", true],
     ["a trailing timeout that is a conditional with a literal over the ceiling", "it('x', fn, ci ? 60_000 : 1);", true],
     ["a trailing timeout held in a name bound to a conditional", "const t = ci ? 60_000 : 1; it('x', fn, t);", true],
