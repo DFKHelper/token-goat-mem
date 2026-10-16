@@ -340,9 +340,9 @@ const CHAR_UPPER_U_LOWER = 117;
 /** The characters no expression starts with, so a division operator followed by one is a syntax error: `)` `]` `}` `,` `;` `:` `?` `>` `^` `|` `%` `&`, and a `.` that no digit follows. */
 const NO_OPERAND_START = new Set([41, 93, 125, 44, 59, 58, 63, 62, 94, 124, 37, 38]);
 
-// The lexer's one grammar-dependent choice is a slash (division, or the start of a regular expression; a template `}` is told by the bracket stack), so the pass never guesses it from the token before: a slash is read as a regular expression only when the division reading cannot lex or parse (the answer is then about a source that parses, the one `false` is proven for), which two grammar-free witnesses show, an operand-less start (the first character after the slash cannot start an expression) or a backslash reached through plain characters (no quote, backtick, slash or `#` that could open a string, comment or private name, no `}` that could close a template substitution) that the scanner rejects outside a string; every other slash goes to `opaqueSlashEnd` or answers `true`.
-/** Whether a `/` at `slash` cannot be a division operator in a source that lexes and parses, so it opens a regular expression; `inTemplate` is whether the innermost open bracket is a template substitution. */
-function divisionIsImpossible(text: string, slash: number, inTemplate: boolean): boolean {
+// The lexer's one grammar-dependent choice is a slash (division, or the start of a regular expression; a template `}` is told by the bracket stack), so the pass never guesses it from the token before: a slash is read as a regular expression only when the division reading cannot lex or parse (the answer is then about a source that parses, the one `false` is proven for), which two grammar-free witnesses show, an operand-less start (the first character after the slash cannot start an expression) or a backslash reached through plain characters (no quote, backtick, slash or `#` that could open a string, comment or private name, no `}` that does not close a `{` the walk itself opened, which could close a template substitution whatever bracket is innermost) that the scanner rejects outside a string; every other slash goes to `opaqueSlashEnd` or answers `true`.
+/** Whether a `/` at `slash` cannot be a division operator in a source that lexes and parses, so it opens a regular expression. */
+function divisionIsImpossible(text: string, slash: number): boolean {
   let at = slash + 1;
   while (text.charCodeAt(at) === CHAR_SPACE || text.charCodeAt(at) === CHAR_TAB) {
     at++;
@@ -370,12 +370,9 @@ function divisionIsImpossible(text: string, slash: number, inTemplate: boolean):
       braces++;
     } else if (code === 125) {
       if (braces === 0) {
-        if (inTemplate) {
-          return false;
-        }
-      } else {
-        braces--;
+        return false;
       }
+      braces--;
     }
   }
   return false;
@@ -557,7 +554,7 @@ function mayHaveTimingViolation(text: string): boolean {
     const precedingBreak = scanner.hasPrecedingLineBreak();
     if (kind === KIND_SlashToken || kind === KIND_SlashEqualsToken) {
       const start = scanner.getTokenStart();
-      if (divisionIsImpossible(text, start, stack[stack.length - 1]?.kind === KIND_TemplateHead)) {
+      if (divisionIsImpossible(text, start)) {
         kind = scanner.reScanSlashToken();
       } else {
         const end = opaqueSlashEnd(text, start);
@@ -1106,6 +1103,10 @@ describe("the timing scanner", () => {
     ["a timeout key marked definite", "run({ timeout!: 99999 });", true],
     ["a regex with flags and no quote, decided without the parse", "const a = 1;\nexpect(m).toMatch(/remember|check/u);\nconst b = 2;", false],
     ["a chain of divisions, kept because the scan cannot tell it from a regex", "const share = used / total / count;", true],
+    ["a division in parentheses inside a template substitution, then an escape past the substitution's close", "const s = `${(a / 2)}\\n/ ${'`'}`; foo({ timeout: 99999 }); const z = `)}`;", true],
+    ["a division in brackets inside a template substitution, then an escape past the substitution's close", "const s = `${[a / 2]}\\n/ ${'`'}`; foo({ timeout: 99999 }); const z = `]}`;", true],
+    ["a division in braces inside a template substitution, then an escape past the substitution's close", "const s = `${{ k: a / 2 }.k}\\t/ ${'`'}`; foo({ timeout: 99999 }); const z = `}}`;", true],
+    ["a division inside a template substitution hiding a delay call", "const s = `${(a / 2)}\\n/ ${'`'}`; setTimeout(f, 5000); const z = `)}`;", true],
   ];
 
   it.each(prefilterCases)("the prefilter agrees with the scanner on: %s", (_name, source, flagged) => {
