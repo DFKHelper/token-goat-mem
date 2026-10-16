@@ -1,6 +1,7 @@
 /** Tests for the advisory lockfile `writeManagedFile` holds beside a managed file while it reads, transforms and renames it, so two `mem init` processes writing one file cannot lose each other's update. The lock is held from the test (a live pid, the test's own, or a dead one) and the writer is called in process, so nothing here races or sleeps. */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished } from "vitest";
+import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -41,6 +42,30 @@ describe("writeManagedFile lock", () => {
     expect((thrown as Error).message).toContain(lockPath);
     expect(readFileSync(target, "utf8")).toBe("original\n");
     expect(readFileSync(lockPath, "utf8")).toBe(String(process.pid));
+  });
+
+  it("never takes over a lock whose recorded pid belongs to a live process that is not the writer, as when a dead owner's pid was reused", async () => {
+    // A child that waits on its stdin stands in for the unrelated process holding the dead owner's reused pid.
+    const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"] });
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    onTestFinished(async () => {
+      child.kill();
+      await exited;
+    });
+    expect(child.pid, "the child started and has a pid").toBeGreaterThan(0);
+    expect(child.pid, "the holder is not this process").not.toBe(process.pid);
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, String(child.pid), "utf8");
+    const pauses: number[] = [];
+
+    expect(() =>
+      writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0, pause: (ms) => pauses.push(ms) } })
+    ).toThrow(WiringLockError);
+
+    expect(readFileSync(lockPath, "utf8"), "the live holder's lock is untouched").toBe(String(child.pid));
+    expect(readFileSync(target, "utf8"), "the file was not written").toBe("original\n");
+    expect(lockFilesIn(dir), "no aside copy of the lock was left by a takeover attempt").toEqual([basename(lockPath)]);
+    expect(pauses, "a zero budget takes no pause").toEqual([]);
   });
 
   it("waits for a held lock and writes once it is released, leaving no lock behind", () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { assertNonNegativeFlag, assertPositiveFlag, UsageError } from "../../src/cliRuntime.js";
+import { assertNonNegativeFlag, assertPositiveFlag, EXIT_INTERNAL_ERROR, EXIT_USER_ERROR, exitCodeForError, UsageError } from "../../src/cliRuntime.js";
+import { WiringConflictError, WiringLockError } from "../../src/wiring.js";
 
 describe("assertPositiveFlag", () => {
   it("passes an omitted flag and any value of at least 1", () => {
@@ -30,5 +31,15 @@ describe("assertNonNegativeFlag", () => {
     expect(() => assertNonNegativeFlag("--since-epoch", value)).toThrow(
       new UsageError("--since-epoch must be a non-negative integer")
     );
+  });
+});
+
+describe("exitCodeForError", () => {
+  it("exits 2 for a held managed-file lock, which is neither a bad invocation nor a user-fixable conflict: re-running once the other writer finishes is the fix", () => {
+    expect(exitCodeForError(new WiringLockError("x.token-goat-mem.lock is held by process 1"))).toBe(EXIT_INTERNAL_ERROR);
+  });
+
+  it("exits 1 for a wiring conflict, so the lock error's 2 is a distinction and not the default for every wiring error", () => {
+    expect(exitCodeForError(new WiringConflictError("conflict"))).toBe(EXIT_USER_ERROR);
   });
 });
