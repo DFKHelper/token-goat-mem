@@ -1582,7 +1582,7 @@ export function buildProgram(): Command {
     .option("--value <value>", "Value for the subject (requires --subject)")
     .option("--anchor <predicate>", "Read-only anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "global, project, or path", "global")
-    .option("--source-ref <ref>", "Reference to the originating conversation/message")
+    .option("--source-ref <ref>", "Where the fact came from (a file:line, a message id), stored as its source_ref; 1-500 characters, secret-screened like the fact text, and a credential word in it makes the capture's screening stricter")
     .option("--why <reason>", "Why this holds -- the reason a later session should not relitigate it (shown beside the fact on recall)")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
     .option("--path <file>", "File or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
@@ -1638,7 +1638,7 @@ export function buildProgram(): Command {
     .option("--value <value>", "Value for the subject (requires --subject)")
     .option("--anchor <predicate>", "Read-only anchor predicate: file-exists, file-absent, file-newer-than, file-contains, file-not-contains, glob-exists, git-branch-is, git-tracked, package-version, valid-until, newest-of")
     .option("--scope <scope>", "global, project, or path", "global")
-    .option("--source-ref <ref>", "Reference to the originating conversation/message")
+    .option("--source-ref <ref>", "Where the fact came from (a file:line, a message id), stored as its source_ref; 1-500 characters, secret-screened like the fact text, and a credential word in it makes the capture's screening stricter")
     .option("--why <reason>", "Why this holds -- the reason a later session should not relitigate it (shown beside the fact on recall)")
     .option("--root <path>", "Project root for .mem/allowlist and scope binding (default: current directory)")
     .option("--path <file>", "File or directory this fact is bound to, resolved against --root (required when --scope path, rejected otherwise)")
@@ -2744,7 +2744,10 @@ export function buildProgram(): Command {
         "A tool with more than one managed file computes every file's next content before writing any of them, so a " +
         "hand-written entry that conflicts with mem's aborts the whole install before a single file is touched -- never a " +
         "partial write. Add `*.token-goat-mem.bak` to this project's .gitignore: install takes a one-time snapshot of any " +
-        "pre-existing file before its first write. Installing both an AGENTS.md tool (codex/copilot-cli/copilot-vscode/opencode) and " +
+        "pre-existing file before its first write. Each write is atomic (a temp file renamed into place) and, when a write is due, holds " +
+        "`<file>.token-goat-mem.lock` beside the file so two mem processes cannot overwrite each other's update: the lock is removed when the write finishes, " +
+        "a lock left by a process that is gone (or one with no pid and older than 5 s) is taken over safely, and a write that cannot get the lock within 10 s fails naming the file. " +
+        "Installing both an AGENTS.md tool (codex/copilot-cli/copilot-vscode/opencode) and " +
         "a copilot-instructions.md tool (copilot-visual-studio/copilot-jetbrains) writes mem's block into both files, which " +
         "VS Code and Copilot CLI both read -- harmless, just redundant tokens. " +
         "For claude-code the hooks call `mem hook <event>`, so before writing them init probes the `mem` on PATH (or the installed bundle) with `--help` and refuses " +
