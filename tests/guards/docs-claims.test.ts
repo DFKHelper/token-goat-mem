@@ -1,6 +1,7 @@
 /** Guard tests over documentation claims to catch inconsistencies between docs and the actual implementation. */
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "fs";
+import { readFileSync, statSync } from "fs";
+import { spawnSync } from "child_process";
 import { join } from "path";
 import { buildProgram } from "../../src/cli.js";
 import { TOOL_NAMES } from "../../src/wiring.js";
@@ -134,10 +135,17 @@ describe("documentation consistency guards", () => {
       expect(pkgJson.scripts?.prepare).toMatch(/\.githooks/);
     });
 
-    it(".githooks/pre-commit exists and is executable", () => {
+    it(".githooks/pre-commit is tracked executable with an sh shebang and LF endings", () => {
       const preCommitPath = join(REPO_ROOT, ".githooks", "pre-commit");
+      // POSIX git silently skips a hook whose index mode is not 100755, so the secret scan would never run there.
+      const staged = spawnSync("git", ["ls-files", "-s", ".githooks/pre-commit"], { cwd: REPO_ROOT, encoding: "utf8", timeout: 20_000 });
+      expect(staged.stdout.split(" ")[0], ".githooks/pre-commit must be tracked with index mode 100755 (git update-index --chmod=+x)").toBe("100755");
       const content = readFileSync(preCommitPath, "utf8");
-      expect(content.length).toBeGreaterThan(0);
+      expect(content.split("\n")[0]).toBe("#!/bin/sh");
+      expect(content).not.toContain("\r");
+      if (process.platform !== "win32") {
+        expect(statSync(preCommitPath).mode & 0o111, "working-tree mode must have an execute bit").not.toBe(0);
+      }
     });
   });
 
