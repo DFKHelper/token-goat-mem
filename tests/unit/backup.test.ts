@@ -224,8 +224,12 @@ describe("doctor's backups line", () => {
   it("reports the newest snapshot and stays quiet while it is current", () => {
     writeFacts(1);
     reopen();
-    const line = describeBackups(backupDir, 1);
-    expect(line).toMatch(/-- 1 snapshot, newest <1m ago \(epoch 1\)$/);
+    const newest = listSnapshots(backupDir)[0];
+    expect(newest, "the open that wrote the facts took a snapshot").toBeDefined();
+    // Age is measured against a `now` passed in, five seconds after the snapshot's own timestamp, so no amount of real time between taking it and this line can age it out of the `<1m` bucket.
+    const takenAtMs = newest?.takenAt.getTime() ?? 0;
+    expect(describeBackups(backupDir, 1, new Date(takenAtMs + 5_000)), "five seconds after the snapshot").toMatch(/-- 1 snapshot, newest <1m ago \(epoch 1\)$/);
+    expect(describeBackups(backupDir, 1, new Date(takenAtMs + 70_000)), "the age follows the `now` passed, not the real clock").toMatch(/-- 1 snapshot, newest 1m ago \(epoch 1\)$/);
   });
 
   it("warns when the newest snapshot is overdue and the store has changed since", () => {
