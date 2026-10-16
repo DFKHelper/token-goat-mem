@@ -93,56 +93,132 @@ const COLUMNS_WITHOUT_A_MIGRATION: readonly string[] = [
   "sources.stored_at",
 ];
 
-/** Drops `table.column` from a throwaway store, reopens it through the real open path, and reports whether the column came back. Dropping a column is the faithful way to manufacture "a database from before this column existed": it leaves every other artefact of a real store intact -- other tables, indexes, constraints, the seeded epoch row -- where a hand-written fixture would have to reproduce all of them correctly. `null` means SQLite refused the drop (primary key, or backing an index), so the column cannot be tested this way. Callers assert on which columns those are rather than ignoring them. A reopen that throws counts as `false`, and is the worse half of this failure class rather than a separate one: `openDb` writes to `meta.value` unconditionally, so a database missing a column the open path itself touches does not merely answer queries wrong, it cannot be opened at all. */
-function survivesReopenWithoutColumn(table: string, column: string): boolean | null {
+type ColumnRef = { table: string; column: string; name: string; indexed: boolean };
+
+/** What one reopen reported: the columns SQLite refused to drop, and which of the rest are present afterwards (`null` when the reopen itself threw, so nothing can be read, with the thrown error in `failure`). */
+type ReopenResult = { refused: string[]; kept: string[] | null; failure: string | null };
+
+/** Drops every given column from one throwaway copy of the migrated store, resets `user_version`, reopens through the real open path once, and reports what came back. Dropping a column is the faithful way to manufacture "a database from before this column existed": it leaves every other artefact of a real store intact -- other tables, indexes, constraints, the seeded epoch row -- where a hand-written fixture would have to reproduce all of them correctly. */
+function reopenWithoutColumns(entries: readonly ColumnRef[]): ReopenResult {
   const path = join(workDir, `mem-${(counter += 1)}.db`);
   copyFileSync(templatePath, path);
   // A bare handle rather than `openStorage`: the copy is already migrated, so opening it through the real path here would only repeat the schema pass the reopen below is there to measure.
   const db = new Database(path);
   // Every DROP below is its own commit and a full-sync WAL commit costs an fsync, which is the slow part on a loaded Windows disk; this copy is thrown away, so durability buys nothing here.
   db.pragma("synchronous = OFF");
+  const refused: string[] = [];
   try {
     // SQLite refuses to drop an indexed column, which would leave most of the schema untestable. Dropping the table's indexes first is faithful rather than a dodge: `CREATE INDEX IF NOT EXISTS` runs on every open, so a real database is where indexes come from in the first place, and rebuilding one over a missing column fails exactly the way the missing column should.
-    for (const { name } of db
-      .prepare<[string], { name: string }>(
-        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL"
-      )
-      .all(table)) {
-      db.exec(`DROP INDEX ${name}`);
+    const tables = [...new Set(entries.map((entry) => entry.table))];
+    const dropped = new Set<string>();
+    for (const table of tables) {
+      try {
+        for (const { name } of db
+          .prepare<[string], { name: string }>(
+            "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND sql IS NOT NULL"
+          )
+          .all(table)) {
+          db.exec(`DROP INDEX ${name}`);
+        }
+        dropped.add(table);
+      } catch {
+        // A table whose indexes cannot be dropped leaves its columns untestable, the same as a refused DROP COLUMN.
+      }
     }
-    db.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+    for (const entry of entries) {
+      try {
+        if (!dropped.has(entry.table)) {
+          throw new Error("indexes not dropped");
+        }
+        db.exec(`ALTER TABLE ${entry.table} DROP COLUMN ${entry.column}`);
+      } catch {
+        refused.push(entry.name);
+      }
+    }
     // `freshStore()` already ran every migration, so `user_version` sits at the latest version and migrations.ts's `runMigrations` would otherwise see nothing pending on reopen and skip every step -- including the one that would restore `column`. Resetting it to `0` here is what makes this fixture a faithful "database that predates this column" rather than "a database with a column missing that nothing will ever look at again": every real pre-phase-1 database reads `user_version = 0` too, since nothing set it before this phase existed.
     db.pragma("user_version = 0");
-  } catch {
-    return null;
   } finally {
     db.close();
   }
   let reopened: Db;
   try {
     reopened = openStorage(path);
-  } catch {
-    return false;
+  } catch (error) {
+    return { refused, kept: null, failure: String(error) };
   }
   try {
-    return columnsOf(reopened, table).includes(column);
+    const kept = entries
+      .filter((entry) => !refused.includes(entry.name) && columnsOf(reopened, entry.table).includes(entry.column))
+      .map((entry) => entry.name);
+    return { refused, kept, failure: null };
   } finally {
     reopened.close();
   }
 }
 
+/** Drops `table.column` alone and reports whether it came back on reopen. `null` means SQLite refused the drop (primary key, or backing an index), so the column cannot be tested this way. Callers assert on which columns those are rather than ignoring them. A reopen that throws counts as `false`, and is the worse half of this failure class rather than a separate one: `openDb` writes to `meta.value` unconditionally, so a database missing a column the open path itself touches does not merely answer queries wrong, it cannot be opened at all. */
+function survivesReopenWithoutColumn(entry: ColumnRef): boolean | null {
+  const { refused, kept } = reopenWithoutColumns([entry]);
+  if (refused.length > 0) {
+    return null;
+  }
+  return kept !== null && kept.length === 1;
+}
+
+/** Measures every planned column in as few reopens as is sound: one reopen over every column still unmeasured, and one reopen per column otherwise. A batch is conclusive only when its reopen did not throw and the result is exactly the expectation (a column with a migration came back, one without did not), and that implies the per-column answers because restoring a column is independent of which others are missing: `migrations.ts`'s `addColumn` asks `hasColumn` about that one column alone, `CREATE TABLE IF NOT EXISTS` never fires for a table that still exists, and a missing column can only add failures to a reopen, never remove them, so a column that came back with everything else missing also comes back alone and one that stayed missing also stays missing alone. A batch whose reopen throws names one missing column ("no such column: x", from an index or backfill over it) and says nothing about the rest, so every column of that name is measured alone, exactly as before, and dropped from the batch before it is retried; a reopen that names nothing usable, a column SQLite would not drop in the batch, or a mismatch sends the unmeasured columns to the per-column walk, so a failure still names the offending column. The error text only chooses which columns to measure alone and can never make an answer weaker. */
+function measureColumns(plan: readonly ColumnRef[]): { kept: boolean | null; name: string }[] {
+  const answers = new Map<string, boolean | null>();
+  const expected = (entry: ColumnRef): boolean => !COLUMNS_WITHOUT_A_MIGRATION.includes(entry.name);
+  // An indexed column is the usual thrower, since the reopen rebuilds its index over the missing column, so those go straight to the per-column walk instead of costing a failed batch each.
+  for (const entry of plan.filter((candidate) => candidate.indexed)) {
+    answers.set(entry.name, survivesReopenWithoutColumn(entry));
+  }
+  let remaining = plan.filter((entry) => !answers.has(entry.name));
+  while (remaining.length > 0) {
+    const batch = reopenWithoutColumns(remaining);
+    let alone: ColumnRef[];
+    if (batch.kept === null) {
+      const named = /no such column: (\w+)/.exec(batch.failure ?? "")?.[1];
+      alone = remaining.filter((entry) => batch.refused.includes(entry.name) || entry.column === named);
+    } else if (remaining.every((entry) => batch.refused.includes(entry.name) || batch.kept?.includes(entry.name) === expected(entry))) {
+      for (const entry of remaining.filter((candidate) => !batch.refused.includes(candidate.name))) {
+        answers.set(entry.name, expected(entry));
+      }
+      alone = remaining.filter((entry) => batch.refused.includes(entry.name));
+    } else {
+      alone = remaining;
+    }
+    if (alone.length === 0 && remaining.some((entry) => !answers.has(entry.name))) {
+      alone = remaining.filter((entry) => !answers.has(entry.name));
+    }
+    for (const entry of alone) {
+      answers.set(entry.name, survivesReopenWithoutColumn(entry));
+    }
+    remaining = remaining.filter((entry) => !answers.has(entry.name));
+  }
+  return plan.map((entry) => ({ name: entry.name, kept: answers.get(entry.name) ?? null }));
+}
+
 describe("opening a database that predates a schema change", () => {
   it("restores exactly the columns a migration is responsible for, with nothing out of reach", () => {
     const { db } = freshStore();
+    const indexedNames = new Set(
+      db
+        .prepare<[], { name: string }>(
+          "SELECT m.tbl_name || '.' || i.name AS name FROM sqlite_master AS m, pragma_index_info(m.name) AS i WHERE m.type = 'index' AND m.sql IS NOT NULL"
+        )
+        .all()
+        .map((row) => row.name)
+    );
     const plan = userTables(db).flatMap((table) =>
       (db.pragma(`table_info(${table})`) as { name: string; pk: number }[])
         .filter((column) => column.pk === 0)
-        .map((column) => ({ table, column: column.name, name: `${table}.${column.name}` }))
+        .map((column) => ({ table, column: column.name, name: `${table}.${column.name}`, indexed: indexedNames.has(`${table}.${column.name}`) }))
     );
     db.close();
 
-    // One measurement, two assertions: the partition is a single fact about the schema, and re-deriving it per assertion would double 30-odd database builds for nothing.
-    const outcomes = plan.map((entry) => ({ ...entry, kept: survivesReopenWithoutColumn(entry.table, entry.column) }));
+    // One measurement, two assertions: the partition is a single fact about the schema, and re-deriving it per assertion would double the database builds for nothing.
+    const outcomes = measureColumns(plan);
     const pick = (kept: boolean | null): string[] =>
       outcomes
         .filter((entry) => entry.kept === kept)
@@ -159,7 +235,7 @@ describe("opening a database that predates a schema change", () => {
     const { db, path } = freshStore();
     db.exec("DROP TABLE fact_terms");
     db.exec("DELETE FROM meta");
-    // See the comment in `survivesReopenWithoutColumn`: without this, `user_version` still reads the latest version from `freshStore()`'s own migration run, and `runMigrations` would see nothing pending on reopen -- masking exactly the loss this test manufactures.
+    // See the comment in `reopenWithoutColumns`: without this, `user_version` still reads the latest version from `freshStore()`'s own migration run, and `runMigrations` would see nothing pending on reopen -- masking exactly the loss this test manufactures.
     db.pragma("user_version = 0");
     db.close();
 
@@ -177,7 +253,7 @@ describe("opening a database that predates a schema change", () => {
     // A store built before `capture_root TEXT` existed on `facts` -- the generic column-by-column check above already proves this survives reopen; this test additionally proves the reopened store can actually insert and read a fact through it, not just carry the column.
     const { db, path } = freshStore();
     db.exec("ALTER TABLE facts DROP COLUMN capture_root");
-    // See the comment in `survivesReopenWithoutColumn`.
+    // See the comment in `reopenWithoutColumns`.
     db.pragma("user_version = 0");
     db.close();
 
