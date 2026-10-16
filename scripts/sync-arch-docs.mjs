@@ -104,15 +104,10 @@ function listComponents(repoRoot, patterns, excludePatterns) {
   return applyExclude(unique, excludePatterns);
 }
 
-/** `oldPath -> [{ target, type: "R"|"C" }]`, from renames/copies since the last commit. Empty (never throws) when there is no HEAD yet or git errors. */
-function detectRenames(repoRoot) {
+/** `oldPath -> [{ target, type: "R"|"C" }]` from the text of `git diff --name-status -M -C HEAD`; only rename and copy lines count. */
+function parseRenameStatus(stdout) {
   const map = new Map();
-  const result = spawnSync("git", ["diff", "--name-status", "-M", "-C", "HEAD"], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) return map;
-  const lines = result.stdout.split(/\r?\n/).filter(Boolean);
+  const lines = stdout.split(/\r?\n/).filter(Boolean);
   for (const line of lines) {
     const parts = line.split("\t");
     const status = parts[0];
@@ -125,6 +120,16 @@ function detectRenames(repoRoot) {
     map.set(oldPath, arr);
   }
   return map;
+}
+
+/** Renames and copies since the last commit, read from git. Empty (never throws) when there is no HEAD yet or git errors. */
+function detectRenames(repoRoot) {
+  const result = spawnSync("git", ["diff", "--name-status", "-M", "-C", "HEAD"], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  if (result.error || result.status !== 0) return new Map();
+  return parseRenameStatus(result.stdout);
 }
 
 function layerFor(layers, modulePath) {
@@ -481,19 +486,12 @@ const fsGit = {
   detectRenames: () => new Map(),
 };
 
-function makeTempRepo() {
-  const dir = mkdtempSync(join(tmpdir(), "arch-sync-selftest-"));
-  spawnSync("git", ["init", "-q"], { cwd: dir });
-  return dir;
-}
+/** The exact text real git printed for the rename-and-split scenario of cases 9 and 10 (`git diff --name-status -M -C HEAD`, observed, tab-separated). */
+const RENAME_AND_SPLIT_DIFF = "C100\tsrc/old10.ts\tsrc/new10a.ts\nR100\tsrc/old10.ts\tsrc/new10b.ts\nR100\tsrc/old9.ts\tsrc/new9.ts\n";
 
-function gitStageAll(dir) {
-  spawnSync("git", ["add", "-A"], { cwd: dir });
-}
-
-function gitCommitAll(dir, message) {
-  gitStageAll(dir);
-  spawnSync("git", ["-c", "user.email=test@example.com", "-c", "user.name=Test", "commit", "-q", "-m", message], { cwd: dir });
+/** Like `fsGit`, but reports the renames and copies in `diffText` the way `detectRenames` would after reading them from git. */
+function fsGitWithDiff(diffText) {
+  return { ...fsGit, detectRenames: () => parseRenameStatus(diffText) };
 }
 
 function writeConfig(dir, config) {
@@ -513,13 +511,8 @@ function readDoc(dir, docName = "ARCHITECTURE.md") {
   return readFileSync(join(dir, docName), "utf8");
 }
 
+/** Runs every case against temp directories with no process start at all (a spawn costs seconds on a loaded host, and the guards tier bounds this run), so git is never reached and no GIT_* variable matters. */
 export function selfTest() {
-  // Under a git hook (the pre-commit guards tier) git exports GIT_DIR / GIT_INDEX_FILE, which every spawned `git` below would honour in preference to its temp-repo cwd -- committing "init" onto the real branch. Scrub them so the temp repos stay hermetic.
-  for (const name of Object.keys(process.env)) {
-    if (name.startsWith("GIT_")) {
-      delete process.env[name];
-    }
-  }
   const results = [];
   const check = (name, condition, detail) => {
     results.push({ name, pass: Boolean(condition), detail: condition ? "" : detail });
@@ -659,9 +652,9 @@ export function selfTest() {
     }
   }
 
-  // Cases 9, 10 and 15 share one real git repository, because every git start costs seconds on a slow host. Case 15 checks the committed, synchronized tree; cases 9 and 10 then curate two Roles, rename one module, split the other, stage that, and run the real discovery and rename detection once.
+  // Cases 9, 10 and 15 share one temp directory and no git: case 15 checks the synchronized tree, then cases 9 and 10 curate two Roles, rename one module, split the other, and feed the rename detection the text real git printed for exactly that change.
   {
-    const dir = makeTempRepo();
+    const dir = makeTempDir();
     try {
       const moduleBody = (title, fn, detail) => `/** ${title}. */\nexport function ${fn}() {\n  return "${detail}";\n}\n`;
       const oldNine = moduleBody("Old nine module", "oldNine", "the first of two modules that are about to move, kept apart by a long and entirely unrelated string");
@@ -673,9 +666,8 @@ export function selfTest() {
       writeConfig(dir, layout(["src/alpha.ts", "src/old9.ts", "src/old10.ts"]));
       writeFileSync(join(dir, "ARCHITECTURE.md"), baseDoc("\n"), "utf8");
       runSync(dir, { git: fsGit, mode: "write", format: "text", strictCurated: false });
-      gitCommitAll(dir, "init");
 
-      const synced = runSync(dir, { mode: "check", format: "text", strictCurated: false });
+      const synced = runSync(dir, { git: fsGit, mode: "check", format: "text", strictCurated: false });
 
       const curated = readDoc(dir).replace(/\| Old nine module \|/u, "| CURATED ROLE TEXT |").replace(/\| Old ten module \|/u, "| CURATED SPLIT TEXT |");
       writeFileSync(join(dir, "ARCHITECTURE.md"), curated, "utf8");
@@ -685,9 +677,7 @@ export function selfTest() {
       writeSrc(dir, "new10a.ts", oldTen);
       writeSrc(dir, "new10b.ts", oldTen);
       writeConfig(dir, layout(["src/alpha.ts", "src/new9.ts", "src/new10a.ts", "src/new10b.ts"]));
-      // git ls-files reports the index, not the raw working tree, so the deletions and additions must be staged (not committed) before discovery sees them -- otherwise old9.ts and old10.ts still look tracked.
-      gitStageAll(dir);
-      const write = runSync(dir, { mode: "write", format: "text", strictCurated: false });
+      const write = runSync(dir, { git: fsGitWithDiff(RENAME_AND_SPLIT_DIFF), mode: "write", format: "text", strictCurated: false });
       const after = readDoc(dir);
       const rekeyed = /new9\.ts`[^\n]*CURATED ROLE TEXT/u.test(after);
       check("Case 9: rename re-keys curated Role to the new path", rekeyed, `stderr=${write.stderr.join(" | ")}\n${after}`);
