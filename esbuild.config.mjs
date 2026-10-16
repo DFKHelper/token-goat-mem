@@ -21,11 +21,21 @@ const config = {
   },
 };
 
+// The test setup builds under a private name and renames it into place, so a second process never opens a half-written bundle.
+const outfileFlag = process.argv.indexOf("--outfile");
+if (outfileFlag !== -1) {
+  const requested = process.argv[outfileFlag + 1];
+  if (requested === undefined) {
+    throw new Error("--outfile needs a path");
+  }
+  config.outfile = requested;
+}
+
 if (isWatch) {
   const context = await esbuild.context(config);
   await context.watch();
   console.log("Watching for changes...");
 } else {
   await esbuild.build(config);
-  console.log("Built dist/token-goat-mem.mjs");
+  console.log(`Built ${config.outfile}`);
 }
