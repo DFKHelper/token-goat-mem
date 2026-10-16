@@ -230,6 +230,23 @@ describe("postinstall", () => {
     }
   });
 
+  it("never signals a group for a pid that is not above 1, and signals the negated pid for one that is", () => {
+    // The spy is installed before any call so no value below reaches the real kill, and the platform is pinned to POSIX so the guard under test is the one that decides.
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
+    const platform = vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+    try {
+      for (const pid of [0, -5, Number.NaN, 1, 2.5, Number.POSITIVE_INFINITY]) {
+        stopProcessGroup(pid);
+      }
+      expect(kill).not.toHaveBeenCalled();
+      stopProcessGroup(4242);
+      expect(kill).toHaveBeenCalledExactlyOnceWith(-4242, "SIGKILL");
+    } finally {
+      platform.mockRestore();
+      kill.mockRestore();
+    }
+  });
+
   // The real script drives the timeout and `main()` must stop the group; Windows stops the helpers with init, so only POSIX has a group to stop.
   it.skipIf(process.platform === "win32")("stops the helpers a hook install that timed out started, through the real script", async () => {
     // Event, not clock or probe: the helper alone holds the FIFO's write end, so the reader's EOF is the kernel reporting that it exited (a signal-0 probe also succeeds on a zombie). Its own directory, because the afterEach hook removes `root` before onTestFinished runs.
@@ -254,6 +271,10 @@ describe("postinstall", () => {
     execFileSync("mkfifo", [fifo]);
     // Queued before the script blocks this thread: the open waits in the thread pool until the stand-in init opens the write end.
     const opening = open(fifo, "r");
+    // A failed assertion before the await leaves the opened handle unclaimed, so it is closed here once it resolves.
+    onTestFinished(() => {
+      void opening.then((handle) => handle.close(), () => undefined);
+    });
     const init = [
       'import { spawn } from "node:child_process";',
       'import { closeSync, openSync, writeSync } from "node:fs";',

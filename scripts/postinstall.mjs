@@ -32,6 +32,10 @@ export function stopProcessGroup(pid) {
   if (process.platform === "win32" || pid === undefined) {
     return;
   }
+  // A pid of 0 or below would make -pid address this process's own group, and 1 every process.
+  if (!Number.isInteger(pid) || pid <= 1) {
+    return;
+  }
   try {
     process.kill(-pid, "SIGKILL");
   } catch {
