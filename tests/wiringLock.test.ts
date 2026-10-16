@@ -1,9 +1,9 @@
 /** Tests for the advisory lockfile `writeManagedFile` holds beside a managed file while it reads, transforms and renames it, so two `mem init` processes writing one file cannot lose each other's update. The lock is held from the test (a live pid, the test's own, or a dead one) and the writer is called in process, so nothing here races or sleeps. */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { codex, copilotCli, WiringLockError, writeManagedFile } from "../src/wiring.js";
 
@@ -86,6 +86,48 @@ describe("writeManagedFile lock", () => {
     expect(() => writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0 } })).toThrow(WiringLockError);
     expect(readFileSync(target, "utf8")).toBe("original\n");
     expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it("takes over a lock with no pid once it is old, without waiting, and leaves no lock behind", () => {
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, "", "utf8");
+    const longAgo = new Date(Date.now() - 60_000);
+    utimesSync(lockPath, longAgo, longAgo);
+    const pauses: number[] = [];
+
+    const change = writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0, pause: (ms) => pauses.push(ms) } });
+
+    expect(change.action).toBe("update");
+    expect(readFileSync(target, "utf8")).toBe("changed\n");
+    expect(pauses).toEqual([]);
+    expect(lockFilesIn(dir)).toEqual([]);
+  });
+
+  it("does not let a second taker that judged the same stale lock replace the live lock the first one recreated", () => {
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, String(DEAD_PID), "utf8");
+    const rivalLock = String(process.pid);
+
+    // The rival takes the stale lock over and holds its own in the window between this taker's judgement and its removal.
+    const beforeTakeover = (): void => {
+      rmSync(lockPath, { force: true });
+      writeFileSync(lockPath, rivalLock, "utf8");
+    };
+    expect(() => writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0, beforeTakeover } })).toThrow(WiringLockError);
+
+    expect(readFileSync(target, "utf8")).toBe("original\n");
+    expect(readFileSync(lockPath, "utf8")).toBe(rivalLock);
+    expect(lockFilesIn(dir)).toEqual([basename(lockPath)]);
+  });
+
+  it("lets a taker whose rival already removed the stale lock create its own", () => {
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, String(DEAD_PID), "utf8");
+
+    const change = writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0, beforeTakeover: () => rmSync(lockPath, { force: true }) } });
+
+    expect(change.action).toBe("update");
+    expect(lockFilesIn(dir)).toEqual([]);
   });
 
   it("leaves no lock behind after a write, a delete, or a transform that throws under the lock", () => {

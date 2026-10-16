@@ -9,6 +9,7 @@ import { basename, dirname, join } from "node:path";
 
 import { snapshotOnOpen } from "./backup.js";
 import { MEM_DB_MODE, MEM_HOME_MODE, restrictPermissions } from "./fileUtils.js";
+import { processIsAlive } from "./processAlive.js";
 
 const DB_FILE_NAME = "mem.db";
 // better-sqlite3 waits 5 s for a held write lock by default, which a writer queued behind a stalled sibling process outlives on a loaded machine (a node start alone takes 5-11 s), so the wait is stated here and is long enough to span that.
@@ -119,16 +120,6 @@ function removeSeedFiles(seedPath: string): void {
     } catch {
       // Left for the next open's sweep.
     }
-  }
-}
-
-/** Whether a process with `pid` exists: signal 0 delivers nothing and fails with ESRCH for a pid no process holds, while EPERM means it exists under another user. */
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 

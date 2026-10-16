@@ -1,10 +1,12 @@
 /** Automates what docs/integrations/*.md currently ask a human to hand-copy: `install()` writes exactly the config snippets those guides document (Claude Code's `settings.json` hook + `CLAUDE.md` instructions, Codex/Copilot CLI/opencode's `AGENTS.md` instructions (opencode's also at user level, in `~/.config/opencode/AGENTS.md`), Copilot VS Code's `.vscode/tasks.json` + user `keybindings.json` + `AGENTS.md`, Visual Studio/JetBrains Copilot's `.github/copilot-instructions.md`); `uninstall()` reverses exactly what `install()` wrote, and only that. Two idempotency/authorship mechanisms, chosen per file format: - **Markdown, single-owner file** (`CLAUDE.md`, written only by `claude-code`): the inserted block is wrapped in a per-tool marker pair, `<!-- token-goat-mem:<tool>:start -->` / `<!-- token-goat-mem:<tool>:end -->` (see `upsertMarkedBlock`/`stripMarkedBlock`). Install replaces everything between an existing pair (upgrade in place) or appends a new marked block at end of file; uninstall strips the marked block plus the one separator newline install adds, leaving everything else untouched. - **Markdown, shared file** (`AGENTS.md` for `codex`, `copilot-cli`, `copilot-vscode`, and `opencode`; `.github/copilot-instructions.md` for `copilot-visual-studio` and `copilot-jetbrains` -- neither reads `AGENTS.md`, so they share a block in their own file instead of joining the `AGENTS.md` one): tools sharing a file want the same "## Memory" prose in it, so instead of near-duplicate per-tool blocks they share one reference-counted block, `<!-- token-goat-mem:start tools=<sorted,deduped,csv> -->` / `<!-- token-goat-mem:end -->` (see `upsertSharedMarkedBlock`/`stripSharedMarkedBlock`). Install creates the block on the first tool to install and adds each subsequent tool's name to the `tools=` list, regenerating the whole block as it goes -- the body comes from one constant shared by every tool that writes here, so a later tool's install is also what upgrades a body left behind by an older mem. Uninstall drops a tool from the `tools=` list (rewriting only the marker line) while any other tool remains listed, and only removes the whole block once the last listed tool uninstalls. A project installing both an `AGENTS.md` tool and a `copilot-instructions.md` tool gets the block in both files, which VS Code and Copilot CLI both read -- harmless, just redundant tokens. - **JSON/JSONC** (`settings.json` hooks, VS Code `tasks.json`/`keybindings.json`): every object mem writes is stamped with an inert sentinel key, `__token_goat_mem: true`. Install upgrades/skips only stamped entries and aborts with `WiringConflictError` if an *unstamped* entry already occupies the same identity (hook `command`, task `label`, keybinding `key`) rather than duplicating or silently overwriting hand-written config. Uninstall removes only stamped entries, so it survives content drift across mem versions (unlike deep-equality matching against a remembered snapshot). Every write goes through `writeManagedFile`: atomic (temp file + rename), takes a `.bak` snapshot of the pre-existing file on its first-ever write (never overwritten by a later re-init), removes that snapshot once an uninstall deletes the file or fully strips mem's content back out (so a stale snapshot from an earlier install/uninstall era can't outlive the content it recorded and mislead a later cycle), and re-reads + recomputes once if the file changed underneath the read used to compute the new content. */
 
-import { chmodSync, closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
+import { processIsAlive } from "./processAlive.js";
 import { isSafeProbeToken, PROBE_REFUSED_ERROR_CODE, probeSkipKey, spawnProbe, type ProbeSpawnResult } from "./probeSpawn.js";
 import { applyEdits, findNodeAtLocation, modify, parse as parseJsonc, parseTree, type JSONPath, type ModificationOptions, type Node } from "jsonc-parser";
 
@@ -133,6 +135,8 @@ export class WiringLockError extends Error {
 interface ManagedFileLockOptions {
   readonly waitMs?: number;
   readonly pause?: (ms: number) => void;
+  /** Runs once a lock is judged stale and just before it is taken over, so a test can place a second taker in that window. */
+  readonly beforeTakeover?: () => void;
 }
 
 interface WriteManagedFileOptions {
@@ -148,6 +152,9 @@ const MANAGED_FILE_LOCK_SUFFIX = ".token-goat-mem.lock";
 const DEFAULT_LOCK_WAIT_MS = 10_000;
 
 const LOCK_POLL_MS = 25;
+
+/** How old a lock file with no readable pid must be before it counts as abandoned: the gap between creating the file and writing its pid is microseconds, so half the wait bound allows for a creator that was descheduled there on a loaded machine. */
+const PIDLESS_LOCK_STALE_MS = 5_000;
 
 /** Dead-holder locks one acquire removes before giving up, so a lock that cannot be removed never loops forever. */
 const MAX_STALE_LOCK_REMOVALS = 5;
@@ -166,17 +173,42 @@ function readLockPid(lockPath: string): number | undefined {
   }
 }
 
-/** Whether a process with `pid` exists: signal 0 delivers nothing and fails with ESRCH for a pid no process holds, while EPERM means it exists under another user. */
-function processIsAlive(pid: number): boolean {
+/** Whether the lock at `lockPath`, recorded as held by `holder`, was abandoned: its pid is held by no process, or it records no pid and has not been touched for `PIDLESS_LOCK_STALE_MS`. */
+function lockIsStale(lockPath: string, holder: number | undefined): boolean {
+  if (holder !== undefined) {
+    return !processIsAlive(holder);
+  }
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    return Date.now() - statSync(lockPath).mtimeMs > PIDLESS_LOCK_STALE_MS;
+  } catch {
+    return false;
   }
 }
 
-/** Creates `<path>.token-goat-mem.lock` exclusively, recording this process's pid, and returns the function that removes it. A lock held by a live process is waited for within the budget; one whose recorded pid no process holds was left by a crash and is taken over, by liveness and never by age; one with no readable pid counts as held. Past the budget it throws `WiringLockError` rather than write without the lock. Creates the parent directory, since the lock sits beside a file that may not exist yet. */
+/** Removes a stale lock by renaming it to a name only this call holds, so of several takers racing for one stale lock exactly one rename succeeds and the rest fail with ENOENT. The renamed file is judged again: a taker that renamed a lock another process had just recreated live puts it back with a link, which fails rather than replace a newer lock. Returns whether a stale lock was removed. */
+function takeOverStaleLock(lockPath: string): boolean {
+  const claimed = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+  try {
+    renameSync(lockPath, claimed);
+  } catch {
+    return false;
+  }
+  try {
+    if (lockIsStale(claimed, readLockPid(claimed))) {
+      return true;
+    }
+    try {
+      linkSync(claimed, lockPath);
+    } catch {
+      // A newer lock already stands at the path, so the one just moved is not restored over it.
+    }
+    return false;
+  } finally {
+    rmSync(claimed, { force: true });
+  }
+}
+
+/** Creates `<path>.token-goat-mem.lock` exclusively, recording this process's pid, and returns the function that removes it. A lock held by a live process is waited for within the budget; one whose recorded pid no process holds was left by a crash and is taken over, by liveness and not by age; one with no readable pid is held while fresh and taken over once `PIDLESS_LOCK_STALE_MS` old. A takeover renames the stale lock aside, so only one of several racing takers proceeds. A pid reused by an unrelated live process keeps its dead owner's lock held until that process ends, since telling them apart needs a platform process query. Past the budget it throws `WiringLockError` rather than write without the lock. Creates the parent directory, since the lock sits beside a file that may not exist yet. */
 function acquireManagedFileLock(path: string, options: ManagedFileLockOptions | undefined): () => void {
   const lockPath = `${path}${MANAGED_FILE_LOCK_SUFFIX}`;
   const waitMs = options?.waitMs ?? DEFAULT_LOCK_WAIT_MS;
@@ -203,12 +235,10 @@ function acquireManagedFileLock(path: string, options: ManagedFileLockOptions | 
       }
     }
     const holder = readLockPid(lockPath);
-    if (holder !== undefined && !processIsAlive(holder) && staleRemovals < MAX_STALE_LOCK_REMOVALS) {
-      // Re-read first so a lock another process has just taken over from the same dead holder is not removed under it.
-      if (readLockPid(lockPath) === holder) {
-        rmSync(lockPath, { force: true });
-        staleRemovals += 1;
-      }
+    if (staleRemovals < MAX_STALE_LOCK_REMOVALS && lockIsStale(lockPath, holder)) {
+      options?.beforeTakeover?.();
+      takeOverStaleLock(lockPath);
+      staleRemovals += 1;
       continue;
     }
     if (waitedMs >= waitMs) {
