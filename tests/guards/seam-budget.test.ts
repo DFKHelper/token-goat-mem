@@ -249,7 +249,7 @@ describe("the embedding request deadline", () => {
   });
 
   it("flags the budget timer when it reads the wall clock", () => {
-    const wallClock = timerText.replace("budgetNow() + ms", "Date.now() + ms");
+    const wallClock = timerText.replace("budgetNow() + budgetMs", "Date.now() + budgetMs");
     expect(wallClock).not.toBe(timerText);
     expect(embeddingDeadlineOnBudgetClock(embeddingsText, wallClock)).toBe(false);
     const noClockImport = timerText.replace('import { budgetNow } from "./budgetClock.js";', "");

@@ -1,4 +1,4 @@
-/** The timers that enforce a retrieval deadline on the budget clock: the race around an embedding backend and the abort signal on an embedding HTTP request. Both read `budgetNow` (src/budgetClock.ts), so a test that freezes that clock never runs a budget out, while in production they fire at the wall-clock budget. */
+/** The timers that enforce a retrieval deadline on the budget clock: the race around an embedding backend and the abort signal on an embedding HTTP request. Both read `budgetNow` (src/budgetClock.ts), so a test that freezes that clock never runs a budget out, while in production they fire at the budget on a monotonic clock. */
 
 import { budgetNow } from "./budgetClock.js";
 
@@ -13,9 +13,16 @@ export interface BudgetTimeout {
   readonly clear: () => void;
 }
 
-/** Runs `onExpire` once `ms` have passed on the budget clock, and returns the call that cancels the timer. The timer only wakes the check: a wake before the clock reaches the deadline re-arms for what is left, so a frozen clock never expires a budget above 0 while a budget of 0 is already exhausted. In production the clock is the wall clock and this fires at `ms`. */
+/** The longest delay `setTimeout` accepts; a longer one is run after 1 ms, so a larger budget waits in slices of this size. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Runs `onExpire` once `ms` have passed on the budget clock, and returns the call that cancels the timer. The timer only wakes the check: a wake before the clock reaches the deadline re-arms for what is left, so a frozen clock never expires a budget above 0 while a budget of 0 is already exhausted. A budget that is NaN or negative is exhausted like 0, and an infinite one never expires and arms no timer. In production the clock is monotonic and this fires at `ms`. */
 export function armBudgetTimer(ms: number, onExpire: () => void, options: BudgetTimerOptions): () => void {
-  const deadline = budgetNow() + ms;
+  if (ms === Infinity) {
+    return () => undefined;
+  }
+  const budgetMs = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  const deadline = budgetNow() + budgetMs;
   let timer: ReturnType<typeof setTimeout>;
   const arm = (delayMs: number): void => {
     timer = setTimeout(() => {
@@ -25,12 +32,12 @@ export function armBudgetTimer(ms: number, onExpire: () => void, options: Budget
       } else {
         arm(remaining);
       }
-    }, delayMs);
+    }, Math.min(delayMs, MAX_TIMER_DELAY_MS));
     if (options.unref) {
       timer.unref();
     }
   };
-  arm(ms);
+  arm(budgetMs);
   return () => {
     clearTimeout(timer);
   };

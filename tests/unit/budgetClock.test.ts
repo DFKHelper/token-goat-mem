@@ -27,12 +27,16 @@ describe("the budget clock under the test setup", () => {
     expect(budgetNow()).toBeGreaterThanOrEqual(Date.now() - 1);
   });
 
-  it("is the wall clock in production: the real module reads Date.now", async () => {
+  it("is the monotonic clock in production: the real module reads performance.now, not Date.now", async () => {
     const actual = await vi.importActual<typeof import("../../src/budgetClock.js")>("../../src/budgetClock.js");
-    const before = Date.now();
-    const read = actual.budgetNow();
-    expect(read).toBeGreaterThanOrEqual(before);
-    expect(read).toBeLessThanOrEqual(Date.now());
+    const monotonic = vi.spyOn(performance, "now").mockReturnValue(42);
+    const wall = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      expect(actual.budgetNow()).toBe(42);
+    } finally {
+      monotonic.mockRestore();
+      wall.mockRestore();
+    }
   });
 
   it("never expires the embedding budget while frozen, even for a backend that answers on a later timer", async () => {
@@ -54,6 +58,7 @@ describe("the budget timer under the test setup", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.restoreAllMocks();
     vi.doUnmock(BUDGET_CLOCK_MODULE);
     vi.resetModules();
   });
@@ -63,6 +68,14 @@ describe("the budget timer under the test setup", () => {
     vi.useFakeTimers();
     vi.resetModules();
     vi.doMock(BUDGET_CLOCK_MODULE, () => ({ budgetNow: () => clockMs }));
+    return import("../../src/budgetTimer.js");
+  }
+
+  /** Loads the timer against the real budget clock, with only the timer functions faked so `Date` and `performance.now` are the test's to move. */
+  async function loadTimerOnRealClock(): Promise<typeof import("../../src/budgetTimer.js")> {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.resetModules();
+    vi.doMock(BUDGET_CLOCK_MODULE, () => vi.importActual(BUDGET_CLOCK_MODULE));
     return import("../../src/budgetTimer.js");
   }
 
@@ -121,5 +134,56 @@ describe("the budget timer under the test setup", () => {
     const [requestTimer, raceTimer] = spy.mock.results.map((result) => result.value as { hasRef: () => boolean });
     expect(requestTimer?.hasRef()).toBe(false);
     expect(raceTimer?.hasRef()).toBe(true);
+  });
+
+  it("keeps the real clock monotonic: a wall-clock jump forward does not fire a budget that has not elapsed", async () => {
+    const { startBudgetTimeout } = await loadTimerOnRealClock();
+    const mono = vi.spyOn(performance, "now").mockReturnValue(5_000);
+    const deadline = startBudgetTimeout(50);
+
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 3_600_000);
+    mono.mockReturnValue(5_010);
+    vi.advanceTimersByTime(50);
+
+    expect(deadline.signal.aborted).toBe(false);
+    deadline.clear();
+  });
+
+  it("keeps the real clock monotonic: a wall-clock jump back does not stall a budget that has elapsed", async () => {
+    const { startBudgetTimeout } = await loadTimerOnRealClock();
+    const mono = vi.spyOn(performance, "now").mockReturnValue(5_000);
+    const deadline = startBudgetTimeout(50);
+
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() - 3_600_000);
+    mono.mockReturnValue(5_050);
+    vi.advanceTimersByTime(50);
+
+    expect(deadline.signal.aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([Number.NaN, -5])("treats a budget of %s as exhausted: it expires once and never re-arms", async (ms) => {
+    const { armBudgetTimer } = await loadTimerOnMovableClock();
+    clockMs = 1_000;
+    const onExpire = vi.fn();
+    armBudgetTimer(ms, onExpire, { unref: false });
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(onExpire).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("never expires an infinite budget and arms no timer for it", async () => {
+    const { armBudgetTimer } = await loadTimerOnMovableClock();
+    clockMs = 1_000;
+    const onExpire = vi.fn();
+    const clear = armBudgetTimer(Number.POSITIVE_INFINITY, onExpire, { unref: false });
+
+    vi.advanceTimersByTime(1_000);
+
+    expect(onExpire).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    clear();
   });
 });
