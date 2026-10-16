@@ -82,18 +82,22 @@ function runPostinstall(env: Readonly<Record<string, string>> = {}, script: stri
   return { output: `${result.stdout}${result.stderr}`, exitCode: result.status ?? 1 };
 }
 
-/** Whether `pid` is a live process: a zombie still answers signal 0 until its parent or init reaps it, so on Linux its state is read as well. */
+/** Whether `pid` still runs code: a dying process answers signal 0 until it is reaped, and the kernel closes its fds (the stdout pipe's EOF) before it turns zombie, so on Linux /proc/<pid>/stat is read too: state Z or X, or a vsize of 0 (the address space is released in do_exit before the fds), means it is gone. */
 function processIsRunning(pid: number): boolean {
   try {
     process.kill(pid, 0);
   } catch {
     return false;
   }
+  let stat: string;
   try {
-    return !/^\d+ \(.*\) Z /.test(readFileSync(`/proc/${String(pid)}/stat`, "utf8"));
+    stat = readFileSync(`/proc/${String(pid)}/stat`, "utf8");
   } catch {
     return true;
   }
+  // Fields after the parenthesised comm start at field 3 (state); vsize is field 23, so index 20 here.
+  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  return !(fields[0] === "Z" || fields[0] === "X" || fields[20] === "0");
 }
 
 const settingsPath = (): string => join(home, ".claude", "settings.json");
