@@ -137,6 +137,8 @@ interface ManagedFileLockOptions {
   readonly pause?: (ms: number) => void;
   /** Runs once a lock is judged stale and just before it is taken over, so a test can place a second taker in that window. */
   readonly beforeTakeover?: () => void;
+  /** Runs the moment a lock file appears at its path, so a test can read what a rival would find there. */
+  readonly afterCreate?: () => void;
 }
 
 interface WriteManagedFileOptions {
@@ -153,7 +155,7 @@ const DEFAULT_LOCK_WAIT_MS = 10_000;
 
 const LOCK_POLL_MS = 25;
 
-/** How old a lock file with no readable pid must be before it counts as abandoned: the gap between creating the file and writing its pid is microseconds, so half the wait bound allows for a creator that was descheduled there on a loaded machine. */
+/** How old a lock file with no readable pid must be before it counts as abandoned (only an older mem's wx-then-write lock can be pidless now): the gap between creating the file and writing its pid is microseconds, so half the wait bound allows for a creator that was descheduled there on a loaded machine. */
 const PIDLESS_LOCK_STALE_MS = 5_000;
 
 /** Dead-holder locks one acquire removes before giving up, so a lock that cannot be removed never loops forever. */
@@ -171,6 +173,44 @@ function readLockPid(lockPath: string): number | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Creates the lock file at `lockPath` holding this process's pid, throwing EEXIST when it exists. The pid is written to a private file first and `linkSync` publishes it, so the lock never exists without its content. A filesystem that cannot hard-link falls back to creating the lock in place, as before. */
+function createLockFile(lockPath: string, afterCreate: (() => void) | undefined): void {
+  const pending = `${lockPath}.pending-${process.pid}-${randomUUID()}`;
+  try {
+    writeFileSync(pending, String(process.pid), { flag: "wx" });
+    try {
+      linkSync(pending, lockPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw error;
+      }
+      createLockFileInPlace(lockPath, afterCreate);
+      return;
+    }
+    afterCreate?.();
+  } finally {
+    try {
+      rmSync(pending, { force: true });
+    } catch {
+      // A leftover private file is harmless; it is never the lock.
+    }
+  }
+}
+
+function createLockFileInPlace(lockPath: string, afterCreate: (() => void) | undefined): void {
+  const handle = openSync(lockPath, "wx");
+  try {
+    afterCreate?.();
+    writeSync(handle, String(process.pid));
+  } catch (error) {
+    // Closed before removed (Windows cannot remove an open file), so a lock that never got its pid does not stay behind as one no process will ever release.
+    closeSync(handle);
+    rmSync(lockPath, { force: true });
+    throw error;
+  }
+  closeSync(handle);
 }
 
 /** Whether the lock at `lockPath`, recorded as held by `holder`, was abandoned: its pid is held by no process, or it records no pid and has not been touched for `PIDLESS_LOCK_STALE_MS`. */
@@ -218,16 +258,7 @@ function acquireManagedFileLock(path: string, options: ManagedFileLockOptions | 
   let staleRemovals = 0;
   for (;;) {
     try {
-      const handle = openSync(lockPath, "wx");
-      try {
-        writeSync(handle, String(process.pid));
-      } catch (error) {
-        // Closed before removed (Windows cannot remove an open file), so a lock that never got its pid does not stay behind as one no process will ever release.
-        closeSync(handle);
-        rmSync(lockPath, { force: true });
-        throw error;
-      }
-      closeSync(handle);
+      createLockFile(lockPath, options?.afterCreate);
       return () => releaseManagedFileLock(lockPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") {

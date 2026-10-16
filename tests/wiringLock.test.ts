@@ -120,6 +120,17 @@ describe("writeManagedFile lock", () => {
     expect(lockFilesIn(dir)).toEqual([basename(lockPath)]);
   });
 
+  it("never lets a lock exist without its pid, so a rival finds it held and not empty", () => {
+    writeFileSync(target, "original\n", "utf8");
+    const seen: string[] = [];
+
+    writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { afterCreate: () => seen.push(readFileSync(lockPath, "utf8")) } });
+
+    expect(seen).toEqual([String(process.pid)]);
+    expect(lockFilesIn(dir)).toEqual([]);
+    expect(readdirSync(dir).filter((name) => name.includes(".pending-"))).toEqual([]);
+  });
+
   it("lets a taker whose rival already removed the stale lock create its own", () => {
     writeFileSync(target, "original\n", "utf8");
     writeFileSync(lockPath, String(DEAD_PID), "utf8");
