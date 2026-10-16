@@ -232,7 +232,7 @@ function calleeRoot(call: ts.CallExpression): string | undefined {
   return ts.isIdentifier(node) ? node.text : undefined;
 }
 
-/** Every violation in one test source. Recognised shapes: `setTimeout(fn, ms)`, `setTimeout(ms)` and `sleep(ms)` (also under an alias: an import rename, `const pause = sleep`, a destructured rename, `promisify(setTimeout)`) with a delay of 100 ms or more, and an `Atomics.wait` or `Atomics.waitAsync` whose fourth argument, its timeout, is 100 ms or more or unresolvable (one with no timeout is a barrier its releaser ends); a clock difference between two clock reads (`Date.now() - startedAt`, `end - start`) written inside an `expect(...)` chain or held in a variable that reaches one; `timeout`, `testTimeout` and `hookTimeout` object keys and a trailing numeric argument of `it`/`test`/`describe`/a hook above 30 s; any text mention of the spawn timeout floor. Numbers resolve through literals, arithmetic and `const`s by scope (the nearest enclosing declaration, so a shadowing or sibling-scope constant is never mistaken for another); a `timeout:` key whose bare-identifier value cannot be resolved is reported as unresolved, while a call-expression value (a hook entry's `timeout: claudeHookTimeoutSeconds(...)`), an identifier bound to one by scope, and a parameter type annotation (`timeout: number`) are not vitest options and are left alone unless a numeric argument of the call is itself over the ceiling (`Math.max(120_000, x)`), which is reported. A clock minus a literal or a constant (`Date.now() - 86_400_000`) is fixture arithmetic that builds an old timestamp, not a measurement. */
+/** Every violation in one test source. Recognised shapes: `setTimeout(fn, ms)`, `setTimeout(ms)` and `sleep(ms)` (also under an alias: an import rename, `const pause = sleep`, a destructured rename, `promisify(setTimeout)`) with a delay of 100 ms or more, and an `Atomics.wait` or `Atomics.waitAsync` whose fourth argument, its timeout, is 100 ms or more or unresolvable (one with no timeout is a barrier its releaser ends); a clock difference between two clock reads (`Date.now() - startedAt`, `end - start`) written inside an `expect(...)` chain or held in a variable that reaches one; `timeout`, `testTimeout` and `hookTimeout` object keys and a trailing numeric argument of `it`/`test`/`describe`/a hook above 30 s (also one computed in place, parenthesised or cast, bound to a name, or chosen by a conditional, read through its call arguments and branches as a `timeout:` value is, and likewise a `setTimeout` or `sleep` delay of 100 ms or more); any text mention of the spawn timeout floor. Numbers resolve through literals, arithmetic and `const`s by scope (the nearest enclosing declaration, so a shadowing or sibling-scope constant is never mistaken for another); a `timeout:` key whose bare-identifier value cannot be resolved is reported as unresolved, while a call-expression value (a hook entry's `timeout: claudeHookTimeoutSeconds(...)`), an identifier bound to one by scope, and a parameter type annotation (`timeout: number`) are not vitest options and are left alone unless a numeric argument of the call is itself over the ceiling (`Math.max(120_000, x)`), which is reported. A clock minus a literal or a constant (`Date.now() - 86_400_000`) is fixture arithmetic that builds an old timestamp, not a measurement. */
 function scanSource(file: string, text: string): Violation[] {
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
   const lines = text.split("\n");
@@ -277,7 +277,7 @@ function scanSource(file: string, text: string): Violation[] {
   }
 
   /** The call an expression is, or an identifier is bound to by scope: a computed value the guard cannot evaluate, but whose literal arguments it can read. */
-  const callOf = (value: ts.Expression): ts.CallExpression | undefined => {
+  const peel = (value: ts.Expression): ts.Expression | undefined => {
     let node: ts.Expression | undefined = value;
     for (let hops = 0; node !== undefined && hops < 8; hops++) {
       if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
@@ -288,6 +288,10 @@ function scanSource(file: string, text: string): Violation[] {
         break;
       }
     }
+    return node;
+  };
+  const callOf = (value: ts.Expression): ts.CallExpression | undefined => {
+    const node = peel(value);
     return node !== undefined && ts.isCallExpression(node) ? node : undefined;
   };
   /** The largest number any argument of `call` evaluates to, looking into nested calls (`Math.max(120_000, x)`, `Math.min(clamp(60 * 1000), x)`), or `undefined` when none evaluates. */
@@ -300,6 +304,21 @@ function scanSource(file: string, text: string): Violation[] {
       }
     }
     return largest;
+  };
+  /** The largest number a value the evaluator cannot read is built from: the arguments of the call it is (in place, parenthesised, cast, or bound to a name), or the larger branch of a conditional it is, or `undefined` when none evaluates. */
+  const largestComputed = (value: ts.Expression, depth = 0): number | undefined => {
+    const node = peel(value);
+    if (node === undefined) {
+      return undefined;
+    }
+    if (ts.isCallExpression(node)) {
+      return largestArgument(node);
+    }
+    if (ts.isConditionalExpression(node) && depth < 4) {
+      const branches = [largestComputed(node.whenTrue, depth + 1), largestComputed(node.whenFalse, depth + 1)];
+      return branches.reduce<number | undefined>((best, branch) => (branch !== undefined && (best === undefined || branch > best) ? branch : best), undefined);
+    }
+    return evalNumber(node, resolve);
   };
   const checkTimeoutValue = (value: ts.Expression, keyNode: ts.Node, key: string): void => {
     const ms = evalNumber(value, resolve);
@@ -350,6 +369,11 @@ function scanSource(file: string, text: string): Violation[] {
             report(delay, "sleep", `\`${name}\` waits ${ms} ms`);
           } else if (ms === undefined && ts.isIdentifier(delay)) {
             report(delay, "sleep", `\`${name}\` waits \`${delay.text}\`, which cannot be resolved to a number in this file`);
+          } else if (ms === undefined) {
+            const largest = largestComputed(delay);
+            if (largest !== undefined && largest >= MIN_FLAGGED_DELAY_MS) {
+              report(delay, "sleep", `\`${name}\` waits a computed value with a ${largest} ms operand`);
+            }
           }
         }
       }
@@ -358,12 +382,11 @@ function scanSource(file: string, text: string): Violation[] {
       const last = args[args.length - 1];
       if (root !== undefined && TEST_CALL_ROOTS.has(root) && args.length >= 2 && last !== undefined) {
         const ms = evalNumber(last, resolve);
-        const computed = ms === undefined && ts.isIdentifier(last) ? callOf(last) : undefined;
-        const largest = computed === undefined ? undefined : largestArgument(computed);
+        const largest = ms === undefined ? largestComputed(last) : undefined;
         if (ms !== undefined && ms > MAX_TIMEOUT_MS) {
           report(last, "timeout", `a trailing ${ms} ms timeout on \`${root}(...)\` is above the ${MAX_TIMEOUT_MS} ms ceiling`);
         } else if (largest !== undefined && largest > MAX_TIMEOUT_MS) {
-          report(last, "timeout", `a trailing timeout computed by a call with a ${largest} ms argument on \`${root}(...)\` is above the ${MAX_TIMEOUT_MS} ms ceiling`);
+          report(last, "timeout", `a trailing timeout computed from a ${largest} ms operand on \`${root}(...)\` is above the ${MAX_TIMEOUT_MS} ms ceiling`);
         }
       }
 
@@ -608,6 +631,7 @@ const KIND_ColonToken = ts.SyntaxKind.ColonToken;
 const KIND_CommaToken = ts.SyntaxKind.CommaToken;
 const KIND_DotToken = ts.SyntaxKind.DotToken;
 const KIND_EndOfFileToken = ts.SyntaxKind.EndOfFileToken;
+const KIND_EqualsGreaterThanToken = ts.SyntaxKind.EqualsGreaterThanToken;
 const KIND_EqualsToken = ts.SyntaxKind.EqualsToken;
 const KIND_ExclamationToken = ts.SyntaxKind.ExclamationToken;
 const KIND_FirstKeyword = ts.SyntaxKind.FirstKeyword;
@@ -643,7 +667,7 @@ function isNameWord(kind: ts.SyntaxKind): boolean {
   return isWord(kind) && !(kind >= KIND_FirstReservedWord && kind <= KIND_LastReservedWord);
 }
 
-/** Whether `scanSource` could report something in `text`, answered from one token pass (no syntax tree, a fraction of a parse's cost): `false` only when every rule's trigger is absent, `true` for anything it cannot rule out, so a `false` proves `scanSource` returns nothing for a source that parses. Triggers: the spawn-floor name in the text; a `setTimeout` or `sleep` word; a `timeout`, `testTimeout` or `hookTimeout` key (word or string, read decoded) in a `{` whose value is not a literal or a single-literal constant at or under the ceiling, nor an expression the number evaluator cannot read; a clock read subtracted from a clock read (`Date.now() - startedAt` and its `performance` and variable forms); and a call whose callee may root at a test function (`it`, `describe`, a hook, reached through `.`, `(...)` or anything unreadable) whose last argument is built only from numbers, `+ - * /`, parentheses and names a declaration in the file may give a number. A scanner error or unbalanced bracket means the pass misread the text, so it answers `true` there too. */
+/** Whether `scanSource` could report something in `text`, answered from one token pass (no syntax tree, a fraction of a parse's cost): `false` only when every rule's trigger is absent, `true` for anything it cannot rule out, so a `false` proves `scanSource` returns nothing for a source that parses. Triggers: the spawn-floor name in the text; a `setTimeout` or `sleep` word; a `timeout`, `testTimeout` or `hookTimeout` key (word or string, read decoded) in a `{` whose value is not a literal or a single-literal constant at or under the ceiling, nor an expression the number evaluator cannot read; a clock read subtracted from a clock read (`Date.now() - startedAt` and its `performance` and variable forms); and a call whose callee may root at a test function (`it`, `describe`, a hook, reached through `.`, `(...)` or anything unreadable) whose last argument is built only from numbers, `+ - * /`, parentheses and names a declaration in the file may give a number, or is a call or a conditional (not a function, object, array or string) holding a number above the ceiling or a name some declaration gives a value; and a `setTimeout` or `sleep` delay that is a call or a conditional holding a number of 100 or more or such a name. A scanner error or unbalanced bracket means the pass misread the text, so it answers `true` there too. */
 function mayHaveTimingViolation(text: string): boolean {
   if (text.includes("SPAWN_TIMEOUT_FLOOR") || text.includes("Atomics")) {
     return true;
@@ -665,6 +689,7 @@ function mayHaveTimingViolation(text: string): boolean {
   const declaringColons = new Set<number>();
   const suspect = new Set<string>();
   const trailingWords: string[] = [];
+  const trailingValues: number[] = [];
   let rootish = false;
   let endsExpression = false;
   let afterDot = false;
@@ -672,6 +697,25 @@ function mayHaveTimingViolation(text: string): boolean {
   const isComplexType = (at: number): boolean => {
     const after = kinds[at + 2];
     return !(isWord(kinds[at + 1] ?? KIND_Unknown) && (after === undefined || TYPE_END.has(after)));
+  };
+  /** Whether the argument in tokens `start` to `stop` is a function (an arrow, `function`, `async`), an object, an array, a string or a template, none of which can hold a ceiling-breaking number. */
+  const isFunctionOrLiteral = (start: number, stop: number): boolean => {
+    const first = kinds[start] as ts.SyntaxKind;
+    if (first === KIND_OpenBraceToken || first === KIND_OpenBracketToken || first === KIND_StringLiteral || first === KIND_TemplateHead || first === KIND_NoSubstitutionTemplateLiteral || words[start] === "function" || words[start] === "async") {
+      return true;
+    }
+    let depth = 0;
+    for (let index = start; index < stop; index++) {
+      const kind = kinds[index] as ts.SyntaxKind;
+      if (kind === KIND_OpenParenToken || kind === KIND_OpenBracketToken || kind === KIND_OpenBraceToken || kind === KIND_TemplateHead) {
+        depth++;
+      } else if (kind === KIND_CloseParenToken || kind === KIND_CloseBracketToken || kind === KIND_CloseBraceToken || kind === KIND_TemplateTail) {
+        depth--;
+      } else if (depth === 0 && kind === KIND_EqualsGreaterThanToken) {
+        return true;
+      }
+    }
+    return false;
   };
   const trailingArgumentIsNumeric = (open: Bracket, close: number): boolean => {
     let start = open.argStart;
@@ -692,6 +736,9 @@ function mayHaveTimingViolation(text: string): boolean {
       } else if (ARITHMETIC_TOKENS.has(kind)) {
         hasNumber ||= kind === KIND_NumericLiteral;
       } else {
+        if (!isFunctionOrLiteral(start, stop)) {
+          trailingValues.push(start);
+        }
         return false;
       }
     }
@@ -941,7 +988,7 @@ function mayHaveTimingViolation(text: string): boolean {
     return !NON_NUMERIC_START.has(first) && !isWord(first);
   };
   /** Whether the expression starting at token `start` holds a call and, anywhere in it, a number above the ceiling, a number next to arithmetic, or a name some declaration in the file gives a value: the shapes the scanner reads a ceiling-breaking argument from (`Math.max(120_000, x)`, `Math.min(LIMIT, x)`). It may run on into the next statement, which only makes it say yes more often. */
-  const callCarriesNumbers = (start: number): boolean => {
+  const callCarriesNumbers = (start: number, floor = MAX_TIMEOUT_MS, conditional = false): boolean => {
     let depth = 0;
     let called = false;
     let carries = false;
@@ -961,9 +1008,11 @@ function mayHaveTimingViolation(text: string): boolean {
         }
       } else if (depth === 0 && (kind === KIND_CommaToken || kind === KIND_SemicolonToken)) {
         break;
+      } else if (conditional && depth === 0 && kind === KIND_QuestionToken) {
+        called = true;
       } else if (kind === KIND_NumericLiteral) {
         numbers = true;
-        carries ||= Number(words[at]) > MAX_TIMEOUT_MS;
+        carries ||= Number(words[at]) > floor;
       } else if (isWord(kind) && (initializers.has(words[at] as string) || annotated.has(words[at] as string))) {
         carries = true;
       } else if (kind === ts.SyntaxKind.PlusToken || kind === ts.SyntaxKind.AsteriskToken || kind === KIND_SlashToken || kind === KIND_MinusToken) {
@@ -1033,7 +1082,7 @@ function mayHaveTimingViolation(text: string): boolean {
     if (delay[1] - delay[0] === 1 && kinds[delay[0]] === KIND_NumericLiteral) {
       return !(Number(words[delay[0]]) < MIN_FLAGGED_DELAY_MS);
     }
-    return mayEvaluateToNumber(delay[0]);
+    return mayEvaluateToNumber(delay[0]) || callCarriesNumbers(delay[0], MIN_FLAGGED_DELAY_MS - 1, true);
   };
   /** Whether a `timeout` key whose value starts at token `start` could be reported: a number above the ceiling, or a bare name that does not settle. */
   const valueMayBeReported = (start: number): boolean => {
@@ -1102,7 +1151,7 @@ function mayHaveTimingViolation(text: string): boolean {
     return true;
   }
 
-  return trailingWords.some((name) => suspect.has(name) || initializers.get(name)?.some((equals) => mayEvaluateToNumber(equals + 1) || callCarriesNumbers(equals + 1)) === true);
+  return trailingValues.some((start) => callCarriesNumbers(start, MAX_TIMEOUT_MS, true)) || trailingWords.some((name) => suspect.has(name) || initializers.get(name)?.some((equals) => mayEvaluateToNumber(equals + 1) || callCarriesNumbers(equals + 1, MAX_TIMEOUT_MS, true)) === true);
 }
 
 /** Every test source under tests/ as a forward-slash path relative to it, the guard itself and dot or node_modules directories left out. */
@@ -1191,6 +1240,26 @@ describe("the timing scanner", () => {
     ["a computed timeout whose argument is arithmetic over the ceiling", 'const t = Math.max(60 * 1000, x);\nit("x", { timeout: t }, () => {});', ["timeout"]],
     ["a computed timeout with only small literal arguments", 'const t = Math.max(1_000, x);\nit("x", { timeout: t }, () => {});', []],
     ["a trailing timeout computed with a literal over the ceiling", 'const t = Math.max(120_000, x);\nit("x", () => {}, t);', ["timeout"]],
+    ["a trailing timeout computed in place with a literal over the ceiling", 'it("x", () => {}, Math.max(a, 60_000));', ["timeout"]],
+    ["a trailing timeout computed in place with a literal at the ceiling", 'it("x", () => {}, Math.max(a, 30_000));', []],
+    ["a trailing timeout computed in place and cast", 'it("x", () => {}, (Math.max(a, 60_000)) as number);', ["timeout"]],
+    ["a trailing timeout computed in place and cast, under the ceiling", 'it("x", () => {}, (Math.max(a, 1_000)) as number);', []],
+    ["a trailing timeout computed by a nested call over the ceiling", 'it("x", () => {}, Math.min(clamp(60 * 1000), a));', ["timeout"]],
+    ["a trailing timeout that is a conditional with a literal branch over the ceiling", 'it("x", () => {}, ci ? 60_000 : 1_000);', ["timeout"]],
+    ["a trailing timeout that is a conditional with literal branches under the ceiling", 'it("x", () => {}, ci ? 1_000 : 2_000);', []],
+    ["a trailing timeout that is a conditional with a computed branch over the ceiling", 'it("x", () => {}, ci ? 1_000 : Math.max(a, 60_000));', ["timeout"]],
+    ["a trailing timeout held in a name bound to a conditional over the ceiling", 'const t = ci ? 60_000 : 1_000;\nit("x", () => {}, t);', ["timeout"]],
+    ["a trailing timeout computed in place on a hook", "beforeAll(() => {}, Math.max(a, 90_000));", ["timeout"]],
+    ["a setTimeout delay computed in place over the flagged minimum", "setTimeout(r, Math.max(a, 5_000));", ["sleep"]],
+    ["a setTimeout delay computed in place under the flagged minimum", "setTimeout(r, Math.max(a, 50));", []],
+    ["a setTimeout delay computed in place at the flagged minimum", "setTimeout(r, Math.max(a, 100));", ["sleep"]],
+    ["a promise-timers delay computed in place", "await setTimeout(Math.max(a, 5_000));", ["sleep"]],
+    ["a sleep delay computed in place over the flagged minimum", "await sleep(Math.max(a, 5_000));", ["sleep"]],
+    ["a sleep delay computed in place and cast", "await sleep((Math.max(a, 5_000)) as number);", ["sleep"]],
+    ["a sleep delay computed in place under the flagged minimum", "await sleep(Math.max(a, 50));", []],
+    ["a sleep delay that is a conditional with a branch over the flagged minimum", "await sleep(ci ? 5_000 : 10);", ["sleep"]],
+    ["a sleep delay that is a conditional with branches under the flagged minimum", "await sleep(ci ? 50 : 10);", []],
+    ["an aliased sleep delay computed in place", "const pause = sleep;\nawait pause(Math.max(a, 5_000));", ["sleep"]],
     ["a shadowing constant over the ceiling declared in an inner scope", 'const t = 10;\ndescribe("a", () => {\n  const t = 120_000;\n  it("b", { timeout: t }, () => {});\n});', ["timeout"]],
     ["a shadowing small constant in an inner scope over an outer one above the ceiling", 'const t = 120_000;\ndescribe("a", () => {\n  const t = 10;\n  it("b", { timeout: t }, () => {});\n});', []],
     ["a same-named constant above the ceiling in a sibling scope", 'describe("a", () => {\n  const t = 120_000;\n});\ndescribe("b", () => {\n  const t = 10;\n  it("c", { timeout: t }, () => {});\n});', []],
@@ -1230,6 +1299,14 @@ describe("the timing scanner", () => {
     expect(mayHaveTimingViolation(source), `a source the scanner reports must reach it: ${source}`).toBe(true);
   });
 
+  it.each([
+    ["a trailing timeout computed in place", 'it("x", () => {}, Math.max(a, 60_000));', "a trailing timeout computed from a 60000 ms operand on `it(...)` is above the 30000 ms ceiling"],
+    ["a trailing timeout that is a conditional", 'it("x", () => {}, ci ? 1_000 : 60_000);', "a trailing timeout computed from a 60000 ms operand on `it(...)` is above the 30000 ms ceiling"],
+    ["a sleep delay computed in place", "await sleep(Math.max(a, 5_000));", "`sleep` waits a computed value with a 5000 ms operand"],
+  ])("reports %s with its message", (_name, source, detail) => {
+    expect(scanSource("sample.test.ts", source).map((violation) => violation.detail)).toEqual([detail]);
+  });
+
   /** Each row's last column is the prefilter's verdict: `true` for every source the scanner reports and for the clean ones it cannot rule out, `false` for the clean ones it skips. */
   const prefilterCases: ReadonlyArray<readonly [string, string, boolean]> = [
     ["a type assertion around a trailing timeout", "it('x', fn, (40000 as Map<a, b>));", true],
@@ -1263,6 +1340,16 @@ describe("the timing scanner", () => {
     ["a clock read that never meets a subtraction", "const c = Date.now(); log(c);", false],
     ["a fixture timestamp that no clock read minus another", "const c6 = Date.now() - 86_400_000; expect(c6).toBe(1);", false],
     ["a computed timeout with only small literal arguments, which the scanner leaves alone", "const t = Math.max(1_000, x); it('x', { timeout: t }, f);", false],
+    ["a trailing timeout computed in place with only small literal arguments", "it('x', fn, Math.max(a, 1_000));", false],
+    ["a trailing timeout that is a conditional of small literals", "it('x', fn, ci ? 1_000 : 2_000);", false],
+    ["a trailing timeout that is a handler with a computed value in its body", "it('x', (a, b) => { run(Math.max(a, 60_000)); });", false],
+    ["a setTimeout delay computed in place under the flagged minimum", "setTimeout(r, Math.max(a, 50));", false],
+    ["a sleep delay that is a conditional of small literals", "sleep(ci ? 50 : 10);", false],
+    ["a trailing timeout computed in place over the ceiling", "it('x', fn, Math.max(a, 60_000));", true],
+    ["a trailing timeout that is a conditional with a literal over the ceiling", "it('x', fn, ci ? 60_000 : 1);", true],
+    ["a trailing timeout held in a name bound to a conditional", "const t = ci ? 60_000 : 1; it('x', fn, t);", true],
+    ["a setTimeout delay computed in place over the flagged minimum", "setTimeout(r, Math.max(a, 5_000));", true],
+    ["a sleep delay that is a conditional with a branch over the flagged minimum", "sleep(ci ? 5_000 : 10);", true],
     ["an Atomics.wait barrier with no timeout, kept because the scanner decides it", "Atomics.wait(slots, 1, generation);", true],
     ["a sleep alias, kept so its calls are followed", "const pause = sleep;", true],
     ["a source with no timing word at all", "export const answer = 6 * 7;\nit('x', () => { expect(answer).toBe(42); });", false],
