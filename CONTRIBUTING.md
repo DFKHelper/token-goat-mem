@@ -12,6 +12,8 @@ npm run typecheck            # type check (tsc --noEmit on src, then on src + te
 npm run lint                 # ESLint
 npm run build                # bundle to dist/token-goat-mem.mjs
 npm run dev                  # run the CLI from source (tsx src/main.ts)
+npm run eval -- --check      # fail on ranking regressions against eval/expected.json (CI runs this)
+npm run eval -- --write-expected  # regenerate eval/expected.json after an intended ranking change
 ```
 
 ## Two TypeScripts
