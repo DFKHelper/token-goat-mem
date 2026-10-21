@@ -17,6 +17,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A stale-lock takeover can no longer let two `mem init` runs write one file at once.** A taker that judged a managed file's lock stale used to rename it aside and put it back if it turned out live, but a third writer could take the empty path in between, so the live holder lost its lock and the last write dropped the other tool's marker. The taker now re-judges the lock under a sibling `.takeover` lock and removes it only if it is still stale, never moving a lock out of its path.
 - **`--stable` now orders the pins a timed-out hint run emits.** The time-out response kept rank order for its pinned facts while a healthy run sorted them by fact id.
 - **The hint-run outcome log no longer loses its retained history to a concurrent rotation.** A process that read the live log as over 256 KiB could rename another process's fresh, small log over `hook-outcomes.log.1`; the live file is now claimed first and only promoted to `.1` if it is still over the cap, otherwise merged back.
 - **A file rewritten at the same size and mtime no longer keeps its cached verdict.** The cache witness for `file-contains`, `file-not-contains` and `package-version` now includes a hash of the bytes evaluated, and the witness for the git index also includes ctime and inode, so content replaced with the same size and a restored mtime is re-checked instead of surfacing the old `affirmed`.
