@@ -14,6 +14,7 @@ import {
   anchorBudgetFor,
   buildHintFormat,
   BUDGET_EXHAUSTED_FOOTER_LINE,
+  BUDGET_EXHAUSTED_PINNED_FOOTER_LINE,
   HINT_LINE_CEILING,
   INTERNAL_ERROR_FOOTER_LINE,
   MIN_POST_ANCHOR_TAIL_MS,
@@ -1770,5 +1771,47 @@ describe("the anchor deadline leaves room for the steps after it", () => {
     expect(factLines(next).filter((line) => line.includes("fresh=affirmed"))).toHaveLength(4);
     expect(cachedAnchors()).toHaveLength(4);
     expect(cachedAnchors()).toEqual(expect.arrayContaining([...kept]));
+  });
+
+  it("keeps the pinned reserve when the run times out, behind a footer saying the rest was cut for time", async () => {
+    seedAnchored(4, "decision");
+    seedFacts(
+      dbPath,
+      ["pin-a", "pin-b", "pin-c"].map((id) => ({
+        id,
+        text: `pinned fact ${id}`,
+        kind: "preference" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: "2026-07-01T00:00:00.000Z",
+        status: "pinned" as const,
+      }))
+    );
+    scriptedClock(10, 1_000_000);
+    const timedOut = await buildHintFormat({ root, dbPath, sessionId: "pin-session", retrievalBudgetMs: 100 });
+    vi.restoreAllMocks();
+    expect(timedOut.truncated).toBe(true);
+    expect(timedOut.header).toBe(TGMEM_HEADER);
+    const grammar = /^(pref|dec|fact|corr) {2}fresh=(affirmed|unverified|contradicted) {2}id=(\S+) {2}display=(".*")$/u;
+    const pinLines = factLines(timedOut);
+    expect(pinLines, "exactly the two reserved pins, nothing ranked").toHaveLength(2);
+    for (const line of pinLines) {
+      expect(grammar.exec(line), `line does not match the fact-line grammar: ${line}`).not.toBeNull();
+    }
+    expect(pinLines.map((line) => grammar.exec(line)?.[3]).sort()).toEqual(["pin-a", "pin-b"]);
+    expect(timedOut.lines.at(-1)).toBe(BUDGET_EXHAUSTED_PINNED_FOOTER_LINE);
+    expect(BUDGET_EXHAUSTED_PINNED_FOOTER_LINE).not.toBe(BUDGET_EXHAUSTED_FOOTER_LINE);
+    expect(timedOut.lines).toHaveLength(3);
+
+    const db = openDb(dbPath);
+    try {
+      const logged = db
+        .prepare<[string], { fact_id: string }>("SELECT fact_id FROM recall_log WHERE session_id = ? ORDER BY fact_id")
+        .all("pin-session")
+        .map((row) => row.fact_id);
+      expect(logged).toEqual(["pin-a", "pin-b"]);
+    } finally {
+      db.close();
+    }
   });
 });

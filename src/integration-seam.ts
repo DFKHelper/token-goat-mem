@@ -95,7 +95,7 @@ function tgmemHeaderFor(protocolVersion: number, delta = false): string {
   return delta ? `TGMEM/${protocolVersion}  delta=1` : `TGMEM/${protocolVersion}`;
 }
 
-/** Self-imposed soft time budget (ms) for a hint-format retrieval (design plan Section 4: the token-goat side applies its own ~150ms hard timeout around the whole subprocess call; this is mem's internal budget for the work it does, so it degrades gracefully well before that outer timeout would fire). Once exceeded, this module returns an empty hint set rather than trusting an unbounded result set — "do not hang". It returns *empty* rather than a smaller slice because there is nowhere in TGMEM/2 to say "this is partial". The grammar below is closed: an off-grammar line is dropped by a conforming consumer, and adding one bumps the version, at which point consumers that have not upgraded fail open to no hints at all. So a reduced slice is indistinguishable on the wire from a complete one, and a consumer told to surface `display` verbatim would present 2 of 12 facts as though they were all of them -- the exact opposite of the self-caveating guarantee this seam is documented to provide. An empty set is already this module's shape for "I could not deliver" (see the catch in `buildHintFormat`), and the consumer's documented fail-open path already handles it correctly. */
+/** Self-imposed soft time budget (ms) for a hint-format retrieval (design plan Section 4: the token-goat side applies its own ~150ms hard timeout around the whole subprocess call; this is mem's internal budget for the work it does, so it degrades gracefully well before that outer timeout would fire). Once exceeded, this module stops ranking and returns only the user's pinned reserve (the same `PINNED_RESERVE` selection the normal path makes) behind a footer-line saying in prose that the rest was cut for time, or just that footer-line when nothing is pinned. It does not return a smaller slice of the ranked facts: the line grammar is closed (an off-grammar line is dropped by a conforming consumer, and adding one bumps the version), so a reduced slice would be indistinguishable from a complete one, but the footer-line is free prose and can already say partial. Pins are the exception worth keeping because the user said they must always be present, and the footer-line is what keeps the response self-caveating. */
 const RETRIEVAL_BUDGET_MS = 150;
 
 /** Minimum budget handed to `retrieve()`'s own anchor-evaluation deadline, even if most of the soft budget is already spent. */
@@ -204,7 +204,7 @@ export interface HintFormatResult {
   readonly header: string;
   /** Fully formatted, ready-to-print lines, one per surfaced fact. */
   readonly lines: readonly string[];
-  /** True if the soft time budget was exceeded, in which case `lines` is empty. The name is historical: this once selected a smaller set of caps, which put a partial response on a wire that cannot express partialness. It now means "this response carries nothing because the budget blew", and it exists for callers inside this process (the CLI logs against it); on the wire the condition is expressed by the absence of fact-lines, which the consumer's fail-open path already reads correctly. */
+  /** True if the soft time budget was exceeded, in which case `lines` holds at most the pinned reserve followed by a footer-line saying the rest was cut for time (TGMEM/2), or nothing at all (TGMEM/1, which has no footer-line to say so). The name is historical: it once selected a smaller set of caps, and now marks a response whose ranked facts were dropped for time; it exists for callers inside this process (the CLI logs against it), and on the wire the condition is carried by the footer-line. */
   readonly truncated: boolean;
   /** True when this response was filtered against the session's recall log (header carries `delta=1`). */
   readonly delta: boolean;
@@ -229,11 +229,17 @@ const STORE_UNREADABLE_CLAUSE = "store could not be read; mem doctor shows the u
 /** The complete footer-line for a response whose store could not be opened. Exported, like `TGMEM_FOOTER_LINE`, so a test pins it against the composer instead of duplicating its bytes. */
 export const STORE_UNREADABLE_FOOTER_LINE = `${FOOTER_PREFIX}${STORE_UNREADABLE_CLAUSE}`;
 
-/** The footer clause for a response cut short by the retrieval time budget. Does not promise a partial result -- see the comment above `const truncated` in `buildHintFormatUnsafe`, which is why the payload is empty rather than a slice: a partial response is byte-indistinguishable from a complete one in TGMEM/2, so this clause only explains the emptiness, it does not offer one. `mem recall` runs with no budget at all, so it is the command that can actually show what this call ran out of time to send. */
+/** The footer clause for a response cut short by the retrieval time budget with no pinned fact to send. Says the hint set is empty because time ran out, not because facts did; the line grammar stays closed, but this prose is how the footer says a response is partial. `mem recall` runs with no budget at all, so it is the command that can actually show what this call ran out of time to send. */
 const BUDGET_EXHAUSTED_CLAUSE = "hint set empty; retrieval ran out of its time budget, not out of facts -- mem recall shows them";
 
-/** The complete footer-line for a budget-exhausted response. Exported for the same reason as `STORE_UNREADABLE_FOOTER_LINE`. */
+/** The complete footer-line for a budget-exhausted response that carries no pinned fact. Exported for the same reason as `STORE_UNREADABLE_FOOTER_LINE`. */
 export const BUDGET_EXHAUSTED_FOOTER_LINE = `${FOOTER_PREFIX}${BUDGET_EXHAUSTED_CLAUSE}`;
+
+/** The footer clause for a budget-exhausted response that still carries the pinned reserve: the fact-lines above it are the user's pins only, and every other fact was cut for time. */
+const BUDGET_EXHAUSTED_PINNED_CLAUSE = "pinned facts only; retrieval ran out of its time budget and the rest was cut for time -- mem recall shows them";
+
+/** The complete footer-line for a budget-exhausted response that carries the pinned reserve. Exported so a test pins the exact bytes. */
+export const BUDGET_EXHAUSTED_PINNED_FOOTER_LINE = `${FOOTER_PREFIX}${BUDGET_EXHAUSTED_PINNED_CLAUSE}`;
 
 /** The footer clause for a response whose store opened fine but some other step in retrieval threw. Unlike `STORE_UNREADABLE_CLAUSE`, `mem doctor` here is not re-running the call that failed -- it is a broader read-only health check (schema, embedding coverage, hint-budget projection) that can still surface a wrong count or a broken invariant even when `openStorage` itself succeeded. */
 const INTERNAL_ERROR_CLAUSE = "hints unavailable; an internal error stopped retrieval -- mem doctor shows the store state";
@@ -359,14 +365,20 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // `>=`, not `>`: a budget of N milliseconds is the time available, so having consumed all of it is already an overrun. The strict `>` made a zero budget mean "no budget, unless the work happened to finish inside a single millisecond" -- on a fast machine a 10-fact anchor-free retrieval does exactly that, `elapsed` reads 0, and `0 > 0` reported a healthy response from a caller that had allotted no time at all. That is not a rounding detail: it made the one deterministic handle callers have on this path (pass 0, get the exhausted contract) depend on the runner's clock, which is how it surfaced -- as an intermittent Linux-only CI failure of the very test written to pin the degradation contract "rather than inferred from a flake".
   const truncated = elapsed >= budgetMs;
   if (truncated) {
-    // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is byte-indistinguishable from a complete one in TGMEM/2, so emitting one would hand the consumer a subset while its own contract says it received everything.
+    // Only the pinned reserve, not a smaller slice of the ranked facts: see RETRIEVAL_BUDGET_MS. The footer-line is what tells the consumer the rest was cut, so a response that carries pins always carries it; TGMEM/1 has no footer-line to say so, which is why it stays empty there.
     logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning a budget-exhausted footer`);
-    // No fact ids, so nothing is marked surfaced, but the anchor verdicts this run already computed (cut-short ones never reach the buffer) are kept for the next run instead of paid for twice.
-    recordEmission([]);
+    const pins = protocolVersion === 2 ? wireSafeOnly(pinnedReserveOf(results)) : [];
+    // With no pin this records no fact ids, so nothing is marked surfaced, but the anchor verdicts this run already computed (cut-short ones never reach the buffer) are kept for the next run instead of paid for twice.
+    recordEmission(pins.map((result) => result.fact.id));
     // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget exhaustion on that version is silently identical to an empty one -- the same limitation the other two failure branches in this file already accept for the same reason.
     return {
       header: tgmemHeaderFor(protocolVersion, delta),
-      lines: protocolVersion === 2 ? [BUDGET_EXHAUSTED_FOOTER_LINE] : [],
+      lines:
+        protocolVersion !== 2
+          ? []
+          : pins.length > 0
+            ? [...pins.map(formatLine), BUDGET_EXHAUSTED_PINNED_FOOTER_LINE]
+            : [BUDGET_EXHAUSTED_FOOTER_LINE],
       truncated: true,
       delta,
     };
@@ -378,7 +390,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     : results;
 
   // The reserve is taken before the kind caps see the list, and the reserved facts are then removed from what the caps rank -- otherwise a pinned preference would consume one of its own eight aggressive slots and the reserve would guarantee nothing it did not already have.
-  const reserved = unseen.filter(isPinned).slice(0, PINNED_RESERVE);
+  const reserved = pinnedReserveOf(unseen);
   const reservedIds = new Set(reserved.map((result) => result.fact.id));
   const contested = unseen.filter((result) => !reservedIds.has(result.fact.id));
   // The elbow runs after the cap slice, not before: it can only shrink what the cap already authorized, never widen the pool it is choosing from. Applied per kind group, not to the two concatenated, because `aggressive` and `precision` are independently ranked pools (the caps exist precisely so one pool's scores don't compete with the other's) -- merging them first would let a legitimate precision-kind score gap get compared against an unrelated aggressive-kind one.
@@ -390,13 +402,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     ordered.sort((a, b) => a.fact.id.localeCompare(b.fact.id));
   }
 
-  const emittable = ordered.filter((result) => {
-    if (isWireSafeId(result.fact.id)) {
-      return true;
-    }
-    logWarning(`dropped a fact whose id is not wire-safe for the TGMEM line format: ${JSON.stringify(result.fact.id)}`);
-    return false;
-  });
+  const emittable = wireSafeOnly(ordered);
 
   const lines = emittable.map(formatLine);
   const emittedIds = emittable.map((result) => result.fact.id);
@@ -579,6 +585,22 @@ function isWireSafeId(id: string): boolean {
 /** Whether a result holds a user pin, the predicate both `PINNED_RESERVE` and the delta exemption key on. One function rather than two inline `=== "pinned"` comparisons so the two can never disagree about what a pin is -- a reserve that admitted a status the delta filter still suppressed would hand out a slot and then drop the fact that was meant to fill it. */
 function isPinned(result: RetrievedFact): boolean {
   return result.fact.status === "pinned";
+}
+
+/** The pinned reserve: the first `PINNED_RESERVE` pins of a ranked list. One function for the normal path and the time-out path, so the two can never select different pins. */
+function pinnedReserveOf(results: readonly RetrievedFact[]): RetrievedFact[] {
+  return results.filter(isPinned).slice(0, PINNED_RESERVE);
+}
+
+/** Drops, with a warning, any fact whose id cannot be written into a TGMEM line. Shared by the normal and the time-out path so both refuse the same ids. */
+function wireSafeOnly(results: readonly RetrievedFact[]): RetrievedFact[] {
+  return results.filter((result) => {
+    if (isWireSafeId(result.fact.id)) {
+      return true;
+    }
+    logWarning(`dropped a fact whose id is not wire-safe for the TGMEM line format: ${JSON.stringify(result.fact.id)}`);
+    return false;
+  });
 }
 
 function formatLine(result: RetrievedFact): string {
