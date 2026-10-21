@@ -1475,18 +1475,19 @@ describe("buildHintFormat", () => {
       { id: "pin-a", text: "pinned fact about apples", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "pinned" },
     ]);
     const unlocked = await buildHintFormat({ root, dbPath, sessionId: "sess-free", retrievalBudgetMs: 0 });
-    const holder = openDb(dbPath);
-    holder.exec("BEGIN IMMEDIATE");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let holder: ReturnType<typeof openDb> | undefined;
     let locked: HintFormatResult;
     let warnings: string[];
     try {
+      holder = openDb(dbPath);
+      holder.exec("BEGIN IMMEDIATE");
       locked = await buildHintFormat({ root, dbPath, sessionId: "sess-locked", retrievalBudgetMs: 0 });
       warnings = warnSpy.mock.calls.map((call) => String(call[0]));
     } finally {
       warnSpy.mockRestore();
-      holder.exec("ROLLBACK");
-      holder.close();
+      holder?.exec("ROLLBACK");
+      holder?.close();
     }
     expect(locked.outcome).toBe("out-of-time");
     expect({ header: locked.header, lines: locked.lines }).toEqual({ header: unlocked.header, lines: unlocked.lines });

@@ -262,7 +262,7 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
   const protocolVersion = resolveProtocolVersion(options.protocolVersion);
   const delta = options.delta === true && typeof options.sessionId === "string" && options.sessionId.length > 0;
   const header = tgmemHeaderFor(protocolVersion, delta);
-  // Read once here and handed down, so the failure branches below report the same elapsed time the success path does without the run reading the clock a second time.
+  // Read once here and handed down, so the failure branches below report the same elapsed time the success path does; the success path reads the clock once more, after its bookkeeping write, to cover that write too.
   const start = budgetNow();
   try {
     const result = await buildHintFormatUnsafe(options, start);
