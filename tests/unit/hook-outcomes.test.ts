@@ -1,5 +1,5 @@
 /** Tests for the hook outcome log (src/hookOutcomes.ts) and the `mem doctor` line built from it. Every timestamp and duration is passed in, so nothing here reads a clock. The doctor cases run through the real `run()` in an isolated temp home. */
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +22,22 @@ import { CAPABLE_PROBE, installProbe, resetProbe } from "../support/fakeProbe.js
 // Doctor probes the `mem` on PATH only for an installed hook, and the `--root` below (the temp home) holds none; the scripted probe makes that a guarantee.
 vi.mock("../../src/probeSpawn.js", async (importOriginal) => (await import("../support/fakeProbe.js")).withFakeProbe(await importOriginal<typeof import("../../src/probeSpawn.js")>()));
 
+// A pass-through wrapper so one case can run another process's rotation at the exact moment this process has read the live file's size.
+const fsHooks = vi.hoisted(() => ({ afterStat: null as null | (() => void) }));
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    statSync: ((...args: Parameters<typeof actual.statSync>) => {
+      const seen = actual.statSync(...args);
+      const hook = fsHooks.afterStat;
+      fsHooks.afterStat = null;
+      hook?.();
+      return seen;
+    }) as typeof actual.statSync,
+  };
+});
+
 let home: string;
 let dbPath: string;
 
@@ -31,6 +47,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  fsHooks.afterStat = null;
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -62,6 +79,20 @@ describe("appendHookOutcome", () => {
     appendHookOutcome(dbPath, record({ ms: 7 }));
     expect(readFileSync(join(home, HOOK_OUTCOMES_ROTATED_FILE), "utf8")).toBe("x".repeat(HOOK_OUTCOMES_MAX_BYTES));
     expect(readFileSync(livePath(), "utf8")).toBe(`${JSON.stringify(record({ ms: 7 }))}\n`);
+  });
+
+  it("keeps the rotated history when another process rotated between this one's size check and its rename", () => {
+    const history = "x".repeat(HOOK_OUTCOMES_MAX_BYTES);
+    writeFileSync(livePath(), history);
+    // This process reads the over-the-cap size, then the other one rotates the live file and appends its own line before this one renames.
+    fsHooks.afterStat = () => {
+      appendHookOutcome(dbPath, record({ ms: 1 }));
+    };
+    appendHookOutcome(dbPath, record({ ms: 2 }));
+    expect(readFileSync(join(home, HOOK_OUTCOMES_ROTATED_FILE), "utf8"), "the retained history is still the rotated file").toBe(history);
+    const live = readFileSync(livePath(), "utf8").split("\n").filter((line) => line.length > 0);
+    expect(live.map((line) => (JSON.parse(line) as HookOutcomeRecord).ms), "both fresh lines are in the live file, nothing lost").toEqual([1, 2]);
+    expect(readdirSync(home).sort(), "no private rotation file is left behind").toEqual([HOOK_OUTCOMES_FILE, HOOK_OUTCOMES_ROTATED_FILE]);
   });
 
   it("does not rotate a file one byte under the cap", () => {

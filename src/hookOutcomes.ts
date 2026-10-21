@@ -1,6 +1,6 @@
 /** The hook outcome log: a tiny, best-effort JSONL file beside the store that records how each hook run ended, so `mem doctor` can say how often a hook ran out of time, met an unreadable store, or failed inside. A file rather than a table on purpose: a hook must never wait on the store's busy timeout, and an unreadable store cannot be written at all. A record holds no query, fact id, or session id. */
 
-import { appendFileSync, readFileSync, renameSync, statSync } from "node:fs";
+import { appendFileSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { MEM_DB_MODE } from "./fileUtils.js";
@@ -27,6 +27,18 @@ export const HOOK_OUTCOMES_ROTATED_FILE = "hook-outcomes.log.1";
 /** The size at which the live file is renamed over the rotated one before the next append: at most about twice this is ever on disk. */
 export const HOOK_OUTCOMES_MAX_BYTES = 256 * 1024;
 
+/** Moves the live file to the rotated name only if it is still over the cap once it is ours. The size seen before this call can be stale (another process may have rotated in between), and renaming a fresh small file over the rotated one would erase the retained history, so the live file is first renamed to a private name, re-measured, and either promoted to the rotated name or merged back into a new live file. */
+function rotateLive(dir: string, live: string): void {
+  const claimed = join(dir, `${HOOK_OUTCOMES_ROTATED_FILE}.${process.pid}.tmp`);
+  renameSync(live, claimed);
+  if (statSync(claimed).size >= HOOK_OUTCOMES_MAX_BYTES) {
+    renameSync(claimed, join(dir, HOOK_OUTCOMES_ROTATED_FILE));
+    return;
+  }
+  appendFileSync(live, readFileSync(claimed), { mode: MEM_DB_MODE });
+  unlinkSync(claimed);
+}
+
 /** Appends one record next to the store at `dbPath`. Never throws and never logs: a hook has a hard time budget, and a log that cannot be written (missing directory, read-only disk, a rename lost to another process) is not worth failing it for. */
 export function appendHookOutcome(dbPath: string, record: HookOutcomeRecord): void {
   try {
@@ -39,7 +51,7 @@ export function appendHookOutcome(dbPath: string, record: HookOutcomeRecord): vo
       // No live file yet: nothing to rotate.
     }
     if (size >= HOOK_OUTCOMES_MAX_BYTES) {
-      renameSync(live, join(dir, HOOK_OUTCOMES_ROTATED_FILE));
+      rotateLive(dir, live);
     }
     appendFileSync(live, `${JSON.stringify(record)}\n`, { mode: MEM_DB_MODE });
   } catch {
