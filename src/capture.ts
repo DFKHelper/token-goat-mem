@@ -1206,6 +1206,11 @@ function refuseSecretsOrThrow(
   if (matches.length === 0) {
     return;
   }
+  refuseSecrets(db, matches, auditEvent, factId);
+}
+
+/** The refusal itself: the audit row, then the throw. Split from {@link refuseSecretsOrThrow} so a caller that already holds a non-empty match list can end its path on a call typed `never`. */
+function refuseSecrets(db: Database.Database, matches: readonly SecretMatch[], auditEvent: string, factId: string | null = null): never {
   insertAuditLog(db, {
     event: `${auditEvent}_blocked_secret`,
     factId,
@@ -1252,6 +1257,24 @@ function restatementUpdates(newFact: NewFact, prior: Fact): { updates: Restateme
     }
   }
   return { updates, changed };
+}
+
+/** Screens the fact a restatement will leave stored: the prior row's text, subject, value and source excerpts with the restated anchor, source ref and why laid over it, in the contexts a single capture of those fields together would be screened in, so two captures that each pass alone cannot assemble a fact the one capture would refuse. A restated source ref is typed text (never a stamped pointer): it is scanned as the source ref and, as `mem remember` does, read as keyword context; a prior ref the restatement keeps is keyword context only, as `screenMergedFactOrThrow` does. Returns the matches rather than throwing: the caller runs inside a transaction, and a refusal must leave its audit row after the rollback, not be undone by it. */
+function screenRestatement(db: Database.Database, prior: Fact, restated: RestatementUpdates, root: string): SecretMatch[] {
+  const excerpts = keywordExcerpts(db, prior);
+  return screenFactFields(
+    {
+      text: prior.text,
+      subject: prior.subject,
+      value: prior.value,
+      anchor: restated.anchor ?? prior.anchor,
+      sourceRef: restated.sourceRef,
+      why: restated.why ?? prior.why,
+      sourceExcerpt: excerpts.length > 0 ? excerpts.join("\n") : null,
+      screenContext: restated.sourceRef ?? storedSourceRefContext(db, prior),
+    },
+    loadAllowlist(root)
+  );
 }
 
 /** Layers a capture's optional fields (subject, anchor, sourceRef, why, scopeRoot) onto the shared `NewFact` base -- kept as plain conditional assignment (rather than spreading possibly-`undefined` values into the literal) because `NewFact`'s optional fields are typed without an explicit `| undefined`, and `exactOptionalPropertyTypes` (tsconfig.json) rejects writing `undefined` into them. */
@@ -1356,11 +1379,15 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
   applyOptionalFields(newFact, input, scope, root);
 
   // Saying the same thing again reaffirms it rather than duplicating it. Without this, a repeated preference wrote a second row while the first one's decay clock kept running -- so the facts a user cared enough to restate were precisely the ones drifting below the ground-truth floor, and `mem recall` showed the same sentence twice with two different confidences. Explicit capture only. `captureSuggested` deliberately does not reaffirm: its candidates come from file and transcript content, and letting derived text refresh a user-stated fact's clock would hand a `CLAUDE.md` the power to keep a fact alive that the user never restated. The lookup and the reaffirm-or-insert it decides between must be one atomic unit: read outside the transaction (as this used to do) let two concurrent `mem remember` of the same sentence both see "nothing to reaffirm" and both insert -- the exact duplicate reaffirm exists to prevent.
-  const tx = db.transaction((): CaptureResult => {
+  const tx = db.transaction((): CaptureResult | SecretMatch[] => {
     const existing = findReaffirmableFact(db, newFact);
     if (existing !== undefined) {
       // The user's latest statement wins: an anchor or source-ref carried on this restatement replaces whatever the existing row had, rather than being silently discarded (see reaffirmFact's doc comment). Omitted here means "say nothing new" -- the existing value, anchor included, is left untouched.
       const restated = restatementUpdates(newFact, existing);
+      const refused = screenRestatement(db, existing, restated.updates, root);
+      if (refused.length > 0) {
+        return refused;
+      }
       const refreshed = reaffirmFact(db, existing.id, new Date(), restated.updates);
       if (refreshed === undefined) {
         throw new CaptureValidationError(`fact ${existing.id} vanished while being reaffirmed`);
@@ -1378,6 +1405,10 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
     const [primary, ...duplicates] = findReaffirmablePendingFacts(db, newFact);
     if (primary !== undefined) {
       const restated = restatementUpdates(newFact, primary);
+      const refused = screenRestatement(db, primary, restated.updates, root);
+      if (refused.length > 0) {
+        return refused;
+      }
       // Explicit capture is always source_type "user"; a promoted suggestion was filed as "derived" and would otherwise lose contradiction precedence to an older user fact.
       const refreshed = reaffirmFact(db, primary.id, new Date(), { ...restated.updates, sourceType: "user" });
       if (refreshed === undefined) {
@@ -1420,7 +1451,11 @@ export function captureExplicit(db: Database.Database, input: CaptureExplicitInp
     return { fact: writeFact(db, newFact, "capture_explicit", (f) => `stored active ${factNounPhrase(f.kind)} (scope=${f.scope})`) };
   });
   // BEGIN IMMEDIATE, for the same reason as `writeFact`: this reads (`findReaffirmableFact`) before it writes, and once this outer transaction is open, the nested `writeFact` transaction it may call degrades to a savepoint -- so this outer invocation is the one that decides whether the read-then-write pair is safe against a concurrent writer under WAL.
-  return tx.immediate();
+  const outcome = tx.immediate();
+  if (!Array.isArray(outcome)) {
+    return outcome;
+  }
+  return refuseSecrets(db, outcome, "capture_explicit");
 }
 
 /** Suggested capture: a conservative extractor proposes a candidate fact. Always stored `pending` — there is no parameter to request `active`, so no caller (however it phrases the request) can make a suggested candidate skip human confirmation (S9). `source_type` defaults to `"derived"`, the more heavily quarantined option, when the caller does not specify it. */

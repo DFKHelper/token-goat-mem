@@ -711,3 +711,57 @@ describe("a project directory name with acronyms or digits does not cost a scan-
     expectRefused(result);
   });
 });
+
+describe("a restatement is screened as the whole fact it leaves stored", () => {
+  /** An obviously fake slash-bearing mixed-case token: only the credential word in the other field makes the screen entropy-check it. */
+  const FAKE_REF = "uH8pF2cQ7xV4mN9zB5rT1aL6sY0dE3gW/kJ8qR5v";
+
+  async function storedSourceRef(id: string): Promise<{ source_ref: string | null }> {
+    const listed = JSON.parse((await runCli(["list", "--json"])).stdout) as { facts: { id: string; source_ref: string | null }[] };
+    const row = listed.facts.find((fact) => fact.id === id);
+    expect(row, `fact ${id} listed`).toBeDefined();
+    return { source_ref: row?.source_ref ?? null };
+  }
+
+  it("refuses a restated source ref that the stored why turns into a credential context, and stores no ref", async () => {
+    const first = await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--why", "This is the production API key"]);
+    expect(first.exitCode, first.stderr).toBe(0);
+    const id = extractRememberedId(first);
+
+    const second = await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--source-ref", FAKE_REF]);
+    expectRefused(second);
+
+    const shown = await storedSourceRef(id);
+    expect(shown.source_ref).toBeNull();
+  });
+
+  it("refuses the same two fields given in one capture, with the same exit code", async () => {
+    const single = await runCli(["remember", "Keep other metadata", "--kind", "fact", "--why", "This is the production API key", "--source-ref", FAKE_REF]);
+    expectRefused(single);
+    const first = await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--why", "This is the production API key"]);
+    const second = await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--source-ref", FAKE_REF]);
+    expect(first.exitCode).toBe(0);
+    expect(second.exitCode).toBe(single.exitCode);
+  });
+
+  it("refuses a restated source ref that promoting a pending suggestion would pair with its why, leaving it pending", async () => {
+    const suggested = await runCli(["suggest", "Keep deployment metadata", "--kind", "fact", "--scope", "global", "--why", "This is the production API key"]);
+    expect(suggested.exitCode, suggested.stderr).toBe(0);
+    const id = extractSuggestedId(suggested);
+
+    expectRefused(await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--source-ref", FAKE_REF]));
+
+    const listed = JSON.parse((await runCli(["list", "--json", "--status", "pending"])).stdout) as { facts: { id: string; source_ref: string | null }[] };
+    const row = listed.facts.find((fact) => fact.id === id);
+    expect(row, `fact ${id} still pending`).toBeDefined();
+    expect(row?.source_ref ?? null).toBeNull();
+  });
+
+  it("still reaffirms a restatement whose merged fact is clean, replacing the source ref", async () => {
+    const id = extractRememberedId(await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--why", "Needed for rollbacks"]));
+    const second = await runCli(["remember", "Keep deployment metadata", "--kind", "fact", "--source-ref", FAKE_REF]);
+    expect(second.exitCode, second.stderr).toBe(0);
+    const shown = await storedSourceRef(id);
+    expect(shown.source_ref).toBe(FAKE_REF);
+  });
+});
