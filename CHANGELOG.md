@@ -4,6 +4,8 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-21
+
 ### Added
 
 - **`mem doctor` says how often hint runs ran out of time.** Every hint run (`mem hook session-start`, `mem hook user-prompt-submit` and `mem recall --hint-format`) appends one line recording how it ended (`ok`, `out-of-time`, `store-unreadable` or `internal-error`), its duration and how many anchor checks the retrieval budget cut short, to `hook-outcomes.log` beside the store. The file rotates to `hook-outcomes.log.1` at 256 KiB, and a write that fails never changes a hook's output or exit code. `mem doctor` reads both files and prints a `hint runs:` line with the run count, each outcome count, the cut-short anchor checks and the 95th-percentile duration; it warns when more than 1 run in 100 ran out of time. The programmatic `HintFormatResult` gained `outcome`, `elapsedMs` and `anchorBudgetHits`.
