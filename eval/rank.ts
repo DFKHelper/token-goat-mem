@@ -1,6 +1,6 @@
 /** The ranking stage under test, isolated from the rest of `retrieve()`'s correctness gate -- for three of this eval harness's four configurations. Phase 1 (this eval harness's original reason for existing) touched exactly two things: whether `--hint-format` threads a real query into BM25 at all (item 1), and whether BM25 stems its tokens (item 2). Neither touched anchor re-evaluation, contradiction resolution, RRF fusion, the entity/graph signals, or trust classification, so `"recency"`/`"query-no-stem"`/`"query-stem"` below reimplement only the ranking step -- scope filtering, BM25 scoring, the kind boost, and top-k selection -- to isolate items 1 and 2 from everything else `retrieve()` does. That justification does not extend to the fourth configuration. `"pipeline"` (see `eval/pipelineFixture.ts`) drives the real `retrieve()` directly instead of reimplementing any part of it -- RRF fusion, embeddings-off BM25, entity overlap, graph propagation, anchor re-evaluation, contradiction resolution, and trust classification all run for real. `rankFacts` below still only knows how to rank the first three; `harness.ts`'s `evaluateConfig` takes an injectable ranker precisely so `"pipeline"` can bypass this file entirely rather than being squeezed into its reduced model. The BM25 formula and constants (`K1`, `B`) and the kind boost mirror `src/retrieval.ts`'s `computeBm25Scores`/`applyKindBoost` exactly (same math, same constants); "stemmed" scoring reuses the *real*, exported `computeBm25Scores` from `src/retrieval.ts` directly (so item 2's actual shipped stemmer is what gets measured, not a reimplementation of it). "Unstemmed" scoring is a small local reimplementation of the pre-item-2 tokenizer, kept only because production code no longer has an unstemmed code path to compare against. */
 
-import { AGGRESSIVE_RECALL_BOOST, computeBm25Scores } from "../src/retrieval.js";
+import { AGGRESSIVE_RECALL_BOOST, compareFactIds, computeBm25Scores } from "../src/retrieval.js";
 import type { AnchorVerdict } from "../src/anchors.js";
 import type { EvalFact } from "./fixtures.js";
 
@@ -93,7 +93,7 @@ export function rankFacts(facts: readonly EvalFact[], query: string, root: strin
   const ranked = scoped.map((fact) => ({ fact, score: kindBoost(fact, scores.get(fact.id) ?? 0) }));
   ranked.sort((a, b) => {
     const delta = b.score - a.score;
-    return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at);
+    return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at) || compareFactIds(a.fact.id, b.fact.id);
   });
   return ranked;
 }

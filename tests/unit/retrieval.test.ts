@@ -1168,3 +1168,35 @@ describe("anchorRootsFor", () => {
     expect(roots).toContain(childPath);
   });
 });
+
+describe("ranking ties break by fact id", () => {
+  const PERMUTATIONS: ReadonlyArray<readonly [number, number, number]> = [
+    [0, 1, 2],
+    [0, 2, 1],
+    [1, 0, 2],
+    [1, 2, 0],
+    [2, 0, 1],
+    [2, 1, 0],
+  ];
+
+  async function recalledIds(query: string, order: readonly number[]): Promise<string[]> {
+    const stamp = "2026-03-01T00:00:00.000Z";
+    const facts = [
+      makeFact({ id: "fact-b", text: "chose Postgres over Mongo", kind: "decision", captured_at: stamp }),
+      makeFact({ id: "fact-c", text: "chose Postgres over Mongo", kind: "decision", captured_at: stamp }),
+      makeFact({ id: "fact-a", text: "chose Postgres over Mongo", kind: "decision", captured_at: stamp }),
+    ];
+    const { results } = await retrieve(order.map((index) => facts[index] as Fact), { query, root });
+    return results.map((result) => result.fact.id);
+  }
+
+  it.each([
+    ["a matching query (equal BM25 score)", "postgres"],
+    ["an empty query (no signal at all)", ""],
+  ])("returns one id order for %s whatever the insertion order", async (_label, query) => {
+    const orders = await Promise.all(PERMUTATIONS.map((order) => recalledIds(query, order)));
+    for (const ids of orders) {
+      expect(ids).toEqual(["fact-a", "fact-b", "fact-c"]);
+    }
+  });
+});

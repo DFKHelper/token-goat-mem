@@ -372,6 +372,11 @@ function expandNegatedContractions(text: string): string {
     .replace(/n't\b/gu, " not");
 }
 
+/** Plain code-unit order on fact ids, the last ranking sort key so equal-score, equal-captured_at facts recall in one order whatever the store order. Deliberately not localeCompare, which varies by locale. */
+export function compareFactIds(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 /** The lexical index's notion of a term: lowercase, split on non-alphanumerics, stopword-filtered, Porter-stemmed. Exported for `facets.ts`, whose `topic` facet has to be exactly this and not merely something like it -- a second tokenizer that must agree with this one would diverge on the first change to either. The import direction is one-way (facets -> retrieval) on purpose: this module stays a pure ranking/gating module with no knowledge of storage or facets. */
 export function tokenize(text: string): string[] {
   return expandNegatedContractions(text.toLowerCase())
@@ -461,7 +466,7 @@ function entityOverlapRanking(candidates: readonly Fact[], overlap: RetrievalOpt
     .filter((entry) => entry.count > 0);
   scored.sort((a, b) => {
     const byCount = b.count - a.count;
-    return byCount !== 0 ? byCount : b.fact.captured_at.localeCompare(a.fact.captured_at);
+    return byCount !== 0 ? byCount : b.fact.captured_at.localeCompare(a.fact.captured_at) || compareFactIds(a.fact.id, b.fact.id);
   });
   return scored.map((entry) => entry.fact.id);
 }
@@ -476,7 +481,7 @@ function graphScoreRanking(candidates: readonly Fact[], graphScores: RetrievalOp
     .filter((entry) => entry.score > 0);
   scored.sort((a, b) => {
     const byScore = b.score - a.score;
-    return byScore !== 0 ? byScore : b.fact.captured_at.localeCompare(a.fact.captured_at);
+    return byScore !== 0 ? byScore : b.fact.captured_at.localeCompare(a.fact.captured_at) || compareFactIds(a.fact.id, b.fact.id);
   });
   return scored.map((entry) => entry.fact.id);
 }
@@ -500,7 +505,7 @@ function usefulnessRanking(candidates: readonly Fact[], usefulness: RetrievalOpt
       return byUsed;
     }
     const bySurfaced = a.counts.surfaced - b.counts.surfaced;
-    return bySurfaced !== 0 ? bySurfaced : b.fact.captured_at.localeCompare(a.fact.captured_at);
+    return bySurfaced !== 0 ? bySurfaced : b.fact.captured_at.localeCompare(a.fact.captured_at) || compareFactIds(a.fact.id, b.fact.id);
   });
   return scored.map((entry) => entry.fact.id);
 }
@@ -847,7 +852,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   const bm25Scores = computeBm25Scores(filtered, options.query);
   const bm25Ranked = [...filtered].sort((a, b) => {
     const delta = (bm25Scores.get(b.id) ?? 0) - (bm25Scores.get(a.id) ?? 0);
-    return delta !== 0 ? delta : b.captured_at.localeCompare(a.captured_at);
+    return delta !== 0 ? delta : b.captured_at.localeCompare(a.captured_at) || compareFactIds(a.id, b.id);
   });
   // Only facts the query actually matched. The zero-score tail of `bm25Ranked` is pure recency order, and handing it to RRF made recency vote on relevance -- the same flaw the all-zero case below guards against, just hiding in the tail of an otherwise informative list. This mirrors `entityOverlapRanking` / `graphScoreRanking`, which only ever carry positive signals.
   const bm25RankIds = bm25Ranked.filter((fact) => (bm25Scores.get(fact.id) ?? 0) > 0).map((fact) => fact.id);
@@ -870,7 +875,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
           const comparable = embeddable.filter((fact) => fact.embedding.length === queryVector.length);
           embeddingDegraded = comparable.length === 0;
           const similarity = new Map<string, number>(comparable.map((fact) => [fact.id, cosineSimilarity(queryVector, fact.embedding)]));
-          embeddingRankIds = [...comparable].sort((a, b) => (similarity.get(b.id) ?? -1) - (similarity.get(a.id) ?? -1)).map((fact) => fact.id);
+          embeddingRankIds = [...comparable].sort((a, b) => (similarity.get(b.id) ?? -1) - (similarity.get(a.id) ?? -1) || compareFactIds(a.id, b.id)).map((fact) => fact.id);
         }
       }
     }
@@ -950,7 +955,7 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
       }
     }
     const delta = b.score - a.score;
-    return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at);
+    return delta !== 0 ? delta : b.fact.captured_at.localeCompare(a.fact.captured_at) || compareFactIds(a.fact.id, b.fact.id);
   });
 
   // Non-withheld results are capped at the effective limit; withheld results (pending/contested/ contradicted) are never subject to it -- a fact needing human attention must never be silently pushed off the end of the default result set by 20 unrelated clean facts outranking it. `superseded` is not listed: those facts were filtered out of the pool above and never get here.
