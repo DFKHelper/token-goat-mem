@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { _clearAnchorMemoForTests } from "../../src/anchors.js";
+import * as budgetClock from "../../src/budgetClock.js";
 import {
   _stemForTests,
   anchorRootsFor,
@@ -1197,6 +1198,69 @@ describe("ranking ties break by fact id", () => {
     const orders = await Promise.all(PERMUTATIONS.map((order) => recalledIds(query, order)));
     for (const ids of orders) {
       expect(ids).toEqual(["fact-a", "fact-b", "fact-c"]);
+    }
+  });
+});
+
+describe("retrieve evaluates freshness in rank order", () => {
+  /** A clock that advances one tick per read from a fixed origin, so a deadline of N ticks lets exactly the first reads through whatever the machine's speed. */
+  function tickingClock(): void {
+    let ticks = 0;
+    vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => 1e15 + ticks++);
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const IDS = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"];
+
+  /** `top` matches the query and its anchor fails; every other fact has a distinct present-file anchor, so an `unverified` verdict can only be a budget cut. Equal `captured_at` throughout: only the id breaks ties. */
+  function anchoredFacts(): Fact[] {
+    return IDS.map((id) => {
+      const present = id !== "h8";
+      if (present) {
+        writeFileSync(join(root, `${id}.txt`), "x");
+      }
+      return makeFact({
+        id,
+        text: id === "h8" ? "quartz is the one fact the query names" : `unrelated filler fact ${id}`,
+        anchor: id === "h8" ? "file-exists h8-missing.txt" : `file-exists ${id}.txt`,
+      });
+    });
+  }
+
+  const PERMUTATIONS: readonly (readonly number[])[] = [
+    [0, 1, 2, 3, 4, 5, 6, 7],
+    [7, 6, 5, 4, 3, 2, 1, 0],
+    [3, 7, 0, 5, 1, 6, 2, 4],
+    [4, 2, 7, 1, 6, 0, 3, 5],
+  ];
+
+  it("gives the same verdicts for any store order, cutting short only the lowest-ranked facts", async () => {
+    const facts = anchoredFacts();
+    const outcomes: { verdicts: string; hits: number }[] = [];
+    for (const order of PERMUTATIONS) {
+      _clearAnchorMemoForTests();
+      tickingClock();
+      const outcome = await retrieve(
+        order.map((index) => facts[index] as Fact),
+        { query: "quartz", root, poolIsInScope: true, anchorTimeBudgetMs: 6 }
+      );
+      vi.restoreAllMocks();
+      const byId = new Map(outcome.results.map((result) => [result.fact.id, result]));
+      // The top-ranked fact was evaluated first: its failing anchor reads contradicted and it is withheld, never left unverified by a cut.
+      expect(byId.get("h8")?.freshness, "top-ranked fact with a failing anchor").toBe("contradicted");
+      expect(byId.get("h8")?.trust).toBe("withheld");
+      const cut = [...byId.values()].filter((result) => result.freshness === "unverified").map((result) => result.fact.id);
+      expect(cut.length, "some low-ranked fact was cut short").toBeGreaterThan(0);
+      // Behind the top fact the filler ties on score and captured_at, so the id decides rank and the cut set is the suffix of the id order.
+      const filler = IDS.filter((id) => id !== "h8");
+      expect(cut.sort(), "cut-short facts are the highest-id fillers").toEqual(filler.slice(-cut.length));
+      outcomes.push({ verdicts: JSON.stringify([...byId].map(([id, result]) => [id, result.freshness]).sort()), hits: outcome.anchorBudgetHits });
+    }
+    for (const outcome of outcomes) {
+      expect(outcome).toEqual(outcomes[0]);
     }
   });
 });

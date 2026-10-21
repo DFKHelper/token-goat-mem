@@ -101,6 +101,19 @@ const RETRIEVAL_BUDGET_MS = 150;
 /** Minimum budget handed to `retrieve()`'s own anchor-evaluation deadline, even if most of the soft budget is already spent. */
 const MIN_ANCHOR_BUDGET_MS = 20;
 
+/** Time held back from the anchor deadline for the CPU-only steps after the anchor loop: 25 ms is about twice the measured worst case (retrieve's result build and sort took 2.6 ms at 5000 facts, the seam's cap, format and recording tail 5-9 ms). */
+export const POST_ANCHOR_RESERVE_MS = 25;
+
+/** The least tail left after the anchor deadline when little time remains: the `MIN_ANCHOR_BUDGET_MS` floor is taken out of the reserve down to this much, never out of what is already gone. */
+export const MIN_POST_ANCHOR_TAIL_MS = 10;
+
+/** Turns the soft budget still unspent into the anchor deadline `retrieve()` gets: all of it but `POST_ANCHOR_RESERVE_MS`, floored at `MIN_ANCHOR_BUDGET_MS` only while `MIN_POST_ANCHOR_TAIL_MS` still fits. So anchors plus the tail never exceed what remains, for any remaining value. */
+export function anchorBudgetFor(remainingMs: number): number {
+  const remaining = Math.max(0, remainingMs);
+  const floor = Math.min(MIN_ANCHOR_BUDGET_MS, Math.max(0, remaining - MIN_POST_ANCHOR_TAIL_MS));
+  return Math.max(floor, remaining - POST_ANCHOR_RESERVE_MS);
+}
+
 /** Fraction of the *remaining* soft budget an embedding round trip may spend, and the floor below which it is not attempted at all. The soft budget is a promise to token-goat, and blowing it returns an empty hint set -- so a slow endpoint must degrade this path to BM25 well before it costs the whole response, not after. A share of what is left (rather than the flat `DEFAULT_EMBEDDING_TIMEOUT_MS` the CLI uses) is what makes that automatic: the later in the budget the request would start, the less of it the request is allowed to take, and under `MIN_EMBEDDING_BUDGET_MS` there is no longer enough time for a round trip to be worth attempting. Anchors, gating, and formatting all still have to happen afterwards. */
 const EMBEDDING_BUDGET_SHARE = 0.4;
 const MIN_EMBEDDING_BUDGET_MS = 20;
@@ -308,7 +321,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   // Disconnected from storage by construction (see {@link BufferedAnchorCacheStore}): `retrieve()` below can read and write anchor verdicts through it without ever touching SQLite, so the connection this block already closed does not need to stay open for anchor evaluation to get the persistent-cache benefit.
   const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
 
-  const anchorTimeBudgetMs = Math.max(MIN_ANCHOR_BUDGET_MS, budgetMs - (budgetNow() - start));
+  const anchorTimeBudgetMs = anchorBudgetFor(budgetMs - (budgetNow() - start));
   const { results, withheldCount, zeroSignal, embeddingDegraded } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
@@ -332,12 +345,24 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
+  const recordEmission = (factIds: readonly string[]): void => {
+    if (sessionId !== undefined) {
+      // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction. `stable` is deliberately not consulted here: it is an output-ordering override, and a fact emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the consumer already holds and make `mem used` report them as never surfaced.
+      recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, factIds, now, anchorCacheStore.buffer);
+    } else {
+      // No session id to log a `recall_log` row against: still stamp the durable mark so stale-supersede never treats an emitted fact as never-surfaced.
+      markSurfaced(options.dbPath ?? resolveDbPath(), factIds, now, anchorCacheStore.buffer);
+    }
+  };
+
   const elapsed = budgetNow() - start;
   // `>=`, not `>`: a budget of N milliseconds is the time available, so having consumed all of it is already an overrun. The strict `>` made a zero budget mean "no budget, unless the work happened to finish inside a single millisecond" -- on a fast machine a 10-fact anchor-free retrieval does exactly that, `elapsed` reads 0, and `0 > 0` reported a healthy response from a caller that had allotted no time at all. That is not a rounding detail: it made the one deterministic handle callers have on this path (pass 0, get the exhausted contract) depend on the runner's clock, which is how it surfaced -- as an intermittent Linux-only CI failure of the very test written to pin the degradation contract "rather than inferred from a flake".
   const truncated = elapsed >= budgetMs;
   if (truncated) {
     // Empty, not a smaller slice: see RETRIEVAL_BUDGET_MS. A partial response is byte-indistinguishable from a complete one in TGMEM/2, so emitting one would hand the consumer a subset while its own contract says it received everything.
     logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning a budget-exhausted footer`);
+    // No fact ids, so nothing is marked surfaced, but the anchor verdicts this run already computed (cut-short ones never reach the buffer) are kept for the next run instead of paid for twice.
+    recordEmission([]);
     // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget exhaustion on that version is silently identical to an empty one -- the same limitation the other two failure branches in this file already accept for the same reason.
     return {
       header: tgmemHeaderFor(protocolVersion, delta),
@@ -397,13 +422,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
     lines.push(footer);
   }
 
-  if (sessionId !== undefined) {
-    // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction. `stable` is deliberately not consulted here: it is an output-ordering override, and a fact emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the consumer already holds and make `mem used` report them as never surfaced.
-    recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, emittedIds, now, anchorCacheStore.buffer);
-  } else {
-    // No session id to log a `recall_log` row against: still stamp the durable mark so stale-supersede never treats an emitted fact as never-surfaced.
-    markSurfaced(options.dbPath ?? resolveDbPath(), emittedIds, now, anchorCacheStore.buffer);
-  }
+  recordEmission(emittedIds);
 
   return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta };
 }

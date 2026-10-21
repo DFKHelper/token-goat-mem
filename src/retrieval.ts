@@ -915,12 +915,25 @@ export async function retrieve(facts: readonly Fact[], options: RetrievalOptions
   }
 
   let anchorBudgetHits = 0;
-  const results: RetrievedFact[] = filtered.map((fact) => {
+  // Pinned first, then by the score the final sort uses, then newest and id: when the shared anchor deadline runs out mid-loop, the facts cut short to `unverified` are the lowest-ranked ones, not whichever the store happened to list last. Only the evaluation order changes; `results` below is still built in `filtered` order.
+  const scoreOf = (fact: Fact): number => applyKindBoost(fact, fusedScores.get(fact.id) ?? 0);
+  const evaluationOrder = [...filtered].sort(
+    (a, b) =>
+      Number(b.status === "pinned") - Number(a.status === "pinned") ||
+      scoreOf(b) - scoreOf(a) ||
+      b.captured_at.localeCompare(a.captured_at) ||
+      compareFactIds(a.id, b.id)
+  );
+  const freshnessById = new Map<string, AnchorVerdict>();
+  for (const fact of evaluationOrder) {
     const budgetHit = { hit: false };
-    const freshness = evaluateFactFreshness(fact, options.root, anchorDeadline, budgetHit, options.anchorCacheStore);
+    freshnessById.set(fact.id, evaluateFactFreshness(fact, options.root, anchorDeadline, budgetHit, options.anchorCacheStore));
     if (budgetHit.hit) {
       anchorBudgetHits += 1;
     }
+  }
+  const results: RetrievedFact[] = filtered.map((fact) => {
+    const freshness = freshnessById.get(fact.id) ?? "unverified";
     const contradiction = contradictionFromStatus(fact.status);
     const trust = classifyTrust(fact, freshness, contradiction, now);
     return {

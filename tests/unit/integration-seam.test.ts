@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import * as budgetClock from "../../src/budgetClock.js";
 import { openDb } from "../../src/db.js";
 import { markRecallUsed, openStorage, setEmbeddingMeta, updateFact } from "../../src/storage.js";
 import { EMBED_MODEL_ENV, EMBED_URL_ENV } from "../../src/embeddings.js";
@@ -10,10 +11,13 @@ import { makeFact } from "../support/fact.js";
 import { openTemplateStore } from "../support/templateStore.js";
 import { AGGRESSIVE_RECALL_BOOST, retrieve, STOPWORDS } from "../../src/retrieval.js";
 import {
+  anchorBudgetFor,
   buildHintFormat,
   BUDGET_EXHAUSTED_FOOTER_LINE,
   HINT_LINE_CEILING,
   INTERNAL_ERROR_FOOTER_LINE,
+  MIN_POST_ANCHOR_TAIL_MS,
+  POST_ANCHOR_RESERVE_MS,
   STORE_UNREADABLE_FOOTER_LINE,
   TGMEM_FOOTER_LINE,
   TGMEM_HEADER,
@@ -1671,5 +1675,100 @@ describe("the elbow cutoff", () => {
     seedFacts(dbPath, [...seedHiGroup("decision", 2), ...seedLoGroup("decision", 1)]);
     const result = await buildHint({ root, dbPath, query: ELBOW_QUERY });
     expect(factLines(result)).toHaveLength(3);
+  });
+});
+
+describe("the anchor deadline leaves room for the steps after it", () => {
+  let workDir: string;
+  let root: string;
+  let dbPath: string;
+
+  beforeEach(() => {
+    workDir = mkdtempSync(join(tmpdir(), "mem-seam-reserve-"));
+    root = join(workDir, "project");
+    mkdirSync(root, { recursive: true });
+    dbPath = join(workDir, "mem.db");
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    rmSync(workDir, { recursive: true, force: true });
+  });
+
+  /** A clock read one `stepMs` later each time, from 0 and held at `ceilingMs`: a budget then runs out after a fixed number of reads on any machine, and the elapsed time the seam sees never passes the ceiling. */
+  function scriptedClock(stepMs: number, ceilingMs: number): void {
+    let reads = 0;
+    vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => Math.min(stepMs * reads++, ceilingMs));
+  }
+
+  /** `count` facts of `kind` in scope, each anchored `file-contains data.txt token-<i>` -- a predicate whose verdict goes to the persistent cache -- on a file holding every token. */
+  function seedAnchored(count: number, kind: Fact["kind"]): void {
+    writeFileSync(join(root, "data.txt"), Array.from({ length: count }, (_unused, index) => `token-${index}`).join(" "));
+    seedFacts(
+      dbPath,
+      Array.from({ length: count }, (_unused, index) => ({
+        id: `anch-${String(index).padStart(2, "0")}`,
+        text: `anchored fact ${index}`,
+        kind,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at: "2026-07-01T00:00:00.000Z",
+        anchor: `file-contains data.txt token-${index}`,
+        status: "active" as const,
+      }))
+    );
+  }
+
+  function cachedAnchors(): readonly string[] {
+    const db = openDb(dbPath);
+    try {
+      return db.prepare<[], { anchor: string }>("SELECT anchor FROM anchor_cache ORDER BY anchor").all().map((row) => row.anchor);
+    } finally {
+      db.close();
+    }
+  }
+
+  it("never lets the anchor budget and the minimum tail exceed what remains, for every remaining 0..150", () => {
+    for (let remaining = 0; remaining <= 150; remaining += 1) {
+      const anchorMs = anchorBudgetFor(remaining);
+      expect(anchorMs, `anchor budget at ${remaining} ms remaining`).toBeGreaterThanOrEqual(0);
+      expect(anchorMs + Math.min(remaining, MIN_POST_ANCHOR_TAIL_MS), `anchor budget plus tail at ${remaining} ms remaining`).toBeLessThanOrEqual(remaining);
+      if (remaining >= 2 * POST_ANCHOR_RESERVE_MS) {
+        expect(anchorMs, `reserve held back at ${remaining} ms remaining`).toBe(remaining - POST_ANCHOR_RESERVE_MS);
+      }
+    }
+    expect(anchorBudgetFor(-5)).toBe(0);
+    expect(anchorBudgetFor(150)).toBe(150 - POST_ANCHOR_RESERVE_MS);
+  });
+
+  it("cuts anchor checks short at the reserve and still returns the block, not the budget-exhausted footer", async () => {
+    seedAnchored(12, "preference");
+    scriptedClock(10, 140);
+    const result = await buildHintFormat({ root, dbPath, retrievalBudgetMs: 150 });
+    vi.restoreAllMocks();
+    expect(result.truncated).toBe(false);
+    expect(result.lines).not.toContain(BUDGET_EXHAUSTED_FOOTER_LINE);
+    const factLinesOut = factLines(result);
+    expect(factLinesOut.length, "the block is not empty").toBeGreaterThan(0);
+    expect(factLinesOut.some((line) => line.includes("fresh=affirmed")), "a checked anchor reads affirmed").toBe(true);
+    expect(factLinesOut.some((line) => line.includes("fresh=unverified")), "a cut-short anchor reads unverified").toBe(true);
+  });
+
+  it("keeps the verdicts a timed-out run computed, and none it cut short, for the next run", async () => {
+    seedAnchored(4, "decision");
+    scriptedClock(10, 1_000_000);
+    const timedOut = await buildHintFormat({ root, dbPath, sessionId: "reserve-session", retrievalBudgetMs: 100 });
+    vi.restoreAllMocks();
+    expect(timedOut.truncated).toBe(true);
+    expect(timedOut.lines).toEqual([BUDGET_EXHAUSTED_FOOTER_LINE]);
+    const kept = cachedAnchors();
+    expect(kept.length, "computed anchors were stored").toBeGreaterThan(0);
+    expect(kept.length, "cut-short anchors were not").toBeLessThan(4);
+
+    const next = await buildHintFormat({ root, dbPath, sessionId: "reserve-session-2", retrievalBudgetMs: NO_TRUNCATION_BUDGET_MS });
+    expect(next.truncated).toBe(false);
+    expect(factLines(next).filter((line) => line.includes("fresh=affirmed"))).toHaveLength(4);
+    expect(cachedAnchors()).toHaveLength(4);
+    expect(cachedAnchors()).toEqual(expect.arrayContaining([...kept]));
   });
 });
