@@ -6,8 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { extractRememberedId, runCli, type CliResult } from "./support/cli.js";
 import { findSupersedingFactId, insertAuditLog, resolveDbPath } from "../src/db.js";
+import * as storageNamespace from "../src/storage.js";
 import { insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
+import { findRelatedFacts } from "../src/related.js";
 
 
 let home: string;
@@ -758,6 +760,27 @@ describe("mem show --related", () => {
     const entityScore = byId.get(entityId)?.sharedTerms ?? 0;
     const pendingScore = byId.get(pendingId)?.sharedTerms ?? 0;
     expect(entityScore).toBeGreaterThan(pendingScore);
+  });
+
+  it("orders neighbours with equal score and equal capture time by fact id, whatever the insertion order", () => {
+    const db = openStorage(resolveDbPath());
+    try {
+      const base = { kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z" } as const;
+      const target = insertFact(db, { ...base, id: "target-fact", text: "src/shared.ts anchors the plan" });
+      insertFact(db, { ...base, id: "fact-c", text: "src/shared.ts changed" });
+      insertFact(db, { ...base, id: "fact-a", text: "src/shared.ts changed" });
+      insertFact(db, { ...base, id: "fact-b", text: "src/shared.ts changed" });
+
+      // The store's own row order happens to be id order today, so hand the ranker the counts in reverse id order, the way a different query plan could, to make the tie-break the only thing fixing the output order.
+      const realCounts = storageNamespace.getSharedTermCounts;
+      const countsSpy = vi.spyOn(storageNamespace, "getSharedTermCounts");
+      onTestFinished(() => countsSpy.mockRestore());
+      countsSpy.mockImplementation((handle, factId) => new Map([...realCounts(handle, factId)].reverse()));
+      const ids = findRelatedFacts(db, target, home).map((entry) => entry.fact.id);
+      expect(ids).toEqual(["fact-a", "fact-b", "fact-c"]);
+    } finally {
+      db.close();
+    }
   });
 });
 

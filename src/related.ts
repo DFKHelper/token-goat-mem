@@ -3,6 +3,7 @@
 import type Database from "better-sqlite3";
 
 import { isBoundToRoot } from "./projectIdentity.js";
+import { compareFactIds } from "./retrieval.js";
 import { getFactById, getSharedTermCounts } from "./storage.js";
 import type { Fact } from "./types.js";
 
@@ -31,6 +32,6 @@ export function findRelatedFacts(db: Database.Database, fact: Fact, root: string
     }
     related.push({ fact: candidate, score: count.entity * RELATED_ENTITY_WEIGHT + count.topic });
   }
-  related.sort((a, b) => b.score - a.score || b.fact.captured_at.localeCompare(a.fact.captured_at));
+  related.sort((a, b) => b.score - a.score || b.fact.captured_at.localeCompare(a.fact.captured_at) || compareFactIds(a.fact.id, b.fact.id));
   return related.slice(0, MAX_RELATED_FACTS);
 }

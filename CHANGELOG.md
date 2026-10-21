@@ -18,6 +18,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 ### Fixed
 
 - **Recall order is the same on every run.** Facts with equal scores and equal capture times were left in store order; ties now break on fact id, in plain code-unit order, so the same store always recalls in the same order.
+- **`mem show --related` lists equally related facts in one order.** Related facts with the same score and capture time were left in store order; ties now break on fact id, the same plain code-unit order recall uses.
 - **A hint run keeps time for the work after the anchor checks, and cuts the right facts when time runs out.** Anchor checks used the whole remaining budget and left nothing for ranking, formatting and recording the result, so a slow filesystem could push a run past its budget. A fixed 25 ms is now held back, and freshness is checked in rank order (pinned facts first), so the facts cut short to `unverified` are the lowest-ranked ones. A run that times out also keeps the anchor verdicts it had already computed instead of discarding them.
 
 ## [0.5.5] - 2026-10-16
