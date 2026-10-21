@@ -154,7 +154,15 @@ describe("buildHintFormat (integration seam)", () => {
     await expect(buildHint({ root, dbPath: brokenDbPath })).resolves.not.toThrow();
     const result = await buildHint({ root, dbPath: brokenDbPath });
 
-    expect(result).toEqual({ header: TGMEM_HEADER, lines: [STORE_UNREADABLE_FOOTER_LINE], truncated: false, delta: false });
+    expect(result).toEqual({
+      header: TGMEM_HEADER,
+      lines: [STORE_UNREADABLE_FOOTER_LINE],
+      truncated: false,
+      delta: false,
+      outcome: "store-unreadable",
+      elapsedMs: 0,
+      anchorBudgetHits: 0,
+    });
   });
 
   it("fails open when the resolved db path's parent cannot be created (permission/invalid-path style failure), and says the store could not be read", async () => {

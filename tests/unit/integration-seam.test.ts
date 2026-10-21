@@ -241,6 +241,59 @@ describe("buildHintFormat", () => {
     expect(result.header).toBe(TGMEM_HEADER);
     expect(result.lines).toEqual([INTERNAL_ERROR_FOOTER_LINE]);
     expect(result.lines).not.toEqual(emptyStore.lines);
+    expect(result.outcome).toBe("internal-error");
+    expect(result.anchorBudgetHits).toBe(0);
+    expect(emptyStore.outcome).toBe("ok");
+  });
+
+  it("reports every exit's outcome: ok, store-unreadable, and out-of-time", async () => {
+    expect((await buildHint({ root, dbPath })).outcome).toBe("ok");
+
+    const brokenDbPath = join(workDir, "not-a-sqlite-file-outcome");
+    mkdirSync(brokenDbPath);
+    expect((await buildHint({ root, dbPath: brokenDbPath })).outcome).toBe("store-unreadable");
+
+    const exhausted = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
+    expect(exhausted.truncated).toBe(true);
+    expect(exhausted.outcome).toBe("out-of-time");
+  });
+
+  it("reports elapsedMs from the budget clock", async () => {
+    // The run reads the clock once to start and sees 1000; everything after sees 1250.
+    let reads = 0;
+    const clock = vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => (++reads <= 1 ? 1000 : 1250));
+    try {
+      const result = await buildHint({ root, dbPath });
+      expect(result.outcome).toBe("ok");
+      expect(result.elapsedMs).toBe(250);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("reports how many anchor checks the retrieval budget cut short", async () => {
+    seedFacts(dbPath, [
+      {
+        id: "dec-cut",
+        text: "chose Postgres over Mongo",
+        kind: "decision",
+        scope: "global",
+        source_type: "user",
+        captured_at: "2026-01-01T00:00:00.000Z",
+        status: "active",
+        anchor: "file-exists schema.sql",
+      },
+    ]);
+    // A clock that advances a second per read: the anchor deadline `retrieve` builds is already behind the clock when the fact is checked.
+    let ticks = 0;
+    const clock = vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => ++ticks * 1000);
+    try {
+      const result = await buildHint({ root, dbPath, retrievalBudgetMs: 0 });
+      expect(result.outcome).toBe("out-of-time");
+      expect(result.anchorBudgetHits).toBe(1);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("TGMEM/1: an internal retrieval error carries no footer at all, same as an empty one", async () => {

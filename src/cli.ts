@@ -25,6 +25,7 @@ import { registerBackupCommands } from "./backupCommands.js";
 import { registerDoctorCommand } from "./doctor.js";
 import { createProbeBudget, wiringHomeFromEnv } from "./doctorWiring.js";
 import { registerHookCommand } from "./hookCommand.js";
+import { appendHookOutcome } from "./hookOutcomes.js";
 import { registerReflectCommand } from "./reflect.js";
 import { findRelatedFacts, type RelatedFact } from "./related.js";
 import { formatAuditLine, registerLogCommand } from "./timeline.js";
@@ -92,6 +93,7 @@ import {
   isForgetReason,
   lastStateChangingAuditRow,
   listAuditLogForFact,
+  resolveDbPath,
   SUPERSEDED_AS_DUPLICATE_PREFIX,
   SUPERSEDED_BY_FACT_PREFIX,
 } from "./db.js";
@@ -1930,6 +1932,19 @@ export function buildProgram(): Command {
           process.stdout.write(`${result.header}\n`);
           for (const line of result.lines) {
             process.stdout.write(`${line}\n`);
+          }
+          // After the output is written, and never allowed to change it or the exit code: the log is a diagnostic, and a failure to write it is not worth a hook's run.
+          try {
+            appendHookOutcome(resolveDbPath(), {
+              v: 1,
+              at: new Date().toISOString(),
+              hook: options.hookStdin !== true ? "other" : options.delta === true ? "prompt" : "session-start",
+              outcome: result.outcome,
+              ms: Math.round(result.elapsedMs),
+              cut: result.anchorBudgetHits,
+            });
+          } catch {
+            // Fail open, like the rest of the seam.
           }
           return;
         }

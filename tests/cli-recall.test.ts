@@ -1,10 +1,13 @@
 /** End-to-end CLI tests for recall: ordering, hint formats and the fail-open seam, epoch windows, and the usefulness feedback loop. Each test gets an isolated `TOKEN_GOAT_MEM_HOME` (a fresh temp dir), re-applied per test so facts written by one test can never leak into another. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { extractRememberedId, runCli } from "./support/cli.js";
+import * as budgetClock from "../src/budgetClock.js";
+import { primeHookStdin } from "../src/hook-envelope.js";
+import { HOOK_OUTCOMES_FILE, type HookOutcomeRecord } from "../src/hookOutcomes.js";
 import { insertAuditLog, openDb, resolveDbPath } from "../src/db.js";
 import { deleteFact, insertFact, openStorage } from "../src/storage.js";
 
@@ -738,5 +741,111 @@ describe("recall's follow-up line names only the commands that apply", () => {
     await runCli(["suggest", "always vacuum the analytics table weekly", "--kind", "preference"]);
     const queued = await runCli(["recall", "vacuum"]);
     expect(queued.stdout).toContain("mem show <id> for detail; mem review to resolve contested/pending");
+  });
+});
+
+describe("--hint-format records each run's outcome for mem doctor", () => {
+  const envelope = (event: string): string => JSON.stringify({ session_id: "s-outcome", hook_event_name: event, cwd: home });
+  const logPath = (): string => join(dirname(resolveDbPath()), HOOK_OUTCOMES_FILE);
+
+  function outcomes(): HookOutcomeRecord[] {
+    return readFileSync(logPath(), "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as HookOutcomeRecord);
+  }
+
+  function labels(): string[][] {
+    return outcomes().map((record) => [record.hook, record.outcome]);
+  }
+
+  async function seedFact(): Promise<void> {
+    const remembered = await runCli(["remember", "the zebra deploy token lives in vault", "--kind", "fact", "--scope", "project", "--root", home]);
+    expect(remembered.exitCode ?? 0).toBe(0);
+  }
+
+  it("the UserPromptSubmit hook command appends exactly one prompt/ok line, the SessionStart one exactly one session-start/ok line", async () => {
+    await seedFact();
+    vi.stubEnv("CLAUDE_PROJECT_DIR", home);
+
+    primeHookStdin(envelope("UserPromptSubmit"));
+    const prompt = await runCli(["hook", "user-prompt-submit"]);
+    expect(prompt.exitCode ?? 0).toBe(0);
+    expect(prompt.stdout.startsWith("TGMEM/2  delta=1\n")).toBe(true);
+    expect(labels()).toEqual([["prompt", "ok"]]);
+
+    primeHookStdin(envelope("SessionStart"));
+    const start = await runCli(["hook", "session-start"]);
+    expect(start.exitCode ?? 0).toBe(0);
+    expect(start.stdout).toContain("zebra deploy token");
+    expect(labels()).toEqual([
+      ["prompt", "ok"],
+      ["session-start", "ok"],
+    ]);
+  });
+
+  it("the flag strings an older install wrote label the same way, and a plain recall --hint-format is other", async () => {
+    await seedFact();
+
+    primeHookStdin(envelope("UserPromptSubmit"));
+    await runCli(["recall", "--hint-format", "--hook-stdin", "--delta", "--root", home]);
+    primeHookStdin(envelope("SessionStart"));
+    await runCli(["recall", "--hint-format", "--hook-stdin", "--root", home]);
+    await runCli(["recall", "zebra", "--hint-format", "--root", home]);
+
+    expect(labels()).toEqual([
+      ["prompt", "ok"],
+      ["session-start", "ok"],
+      ["other", "ok"],
+    ]);
+    expect(outcomes().every((record) => record.v === 1 && record.ms === 0 && record.cut === 0)).toBe(true);
+  });
+
+  it("an unreadable store records store-unreadable", async () => {
+    // A directory where `mem.db` belongs makes `openStorage` throw while the home directory, and so the log beside it, stays writable.
+    mkdirSync(resolveDbPath());
+    const result = await runCli(["recall", "--hint-format", "--root", home]);
+
+    expect(result.exitCode ?? 0).toBe(0);
+    expect(result.stdout).toBe("TGMEM/2\nfooter  store could not be read; mem doctor shows the underlying error\n");
+    expect(result.stderr).toBe("");
+    expect(labels()).toEqual([["other", "store-unreadable"]]);
+  });
+
+  it("a budget that runs out records out-of-time with the elapsed time and the anchor checks cut short", async () => {
+    const remembered = await runCli(["remember", "the zebra deploy token lives in vault", "--kind", "decision", "--scope", "global", "--anchor", "file-exists schema.sql"]);
+    expect(remembered.exitCode ?? 0).toBe(0);
+    vi.stubEnv("TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS", "1");
+    // A clock that advances a second per read: the 1 ms budget is spent, and the anchor deadline is behind the clock when the fact is checked.
+    let ticks = 0;
+    const clock = vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => ++ticks * 1000);
+    try {
+      const result = await runCli(["recall", "--hint-format", "--root", home]);
+      expect(result.exitCode ?? 0).toBe(0);
+      expect(result.stdout).toContain("ran out of its time budget");
+    } finally {
+      clock.mockRestore();
+    }
+
+    const records = outcomes();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.outcome).toBe("out-of-time");
+    expect(records[0]?.ms).toBeGreaterThan(0);
+    expect(records[0]?.cut).toBe(1);
+  });
+
+  it("a log that cannot be written changes neither stdout, stderr nor the exit code", async () => {
+    await seedFact();
+    const baseline = await runCli(["recall", "zebra", "--hint-format", "--root", home]);
+    expect(baseline.stdout).toContain("zebra deploy token");
+
+    // A directory where the log file belongs makes the append throw inside `appendHookOutcome`.
+    rmSync(logPath(), { force: true });
+    mkdirSync(logPath());
+    const blocked = await runCli(["recall", "zebra", "--hint-format", "--root", home]);
+
+    expect(blocked.exitCode).toBe(baseline.exitCode);
+    expect(blocked.stdout).toBe(baseline.stdout);
+    expect(blocked.stderr).toBe(baseline.stderr);
   });
 });

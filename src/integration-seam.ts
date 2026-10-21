@@ -23,6 +23,7 @@ import {
 import { resolveDbPath } from "./db.js";
 import { getGraphScoresForQuery } from "./factgraph.js";
 import { planEmbeddingRanking } from "./embeddings.js";
+import type { HookOutcomeKind } from "./hookOutcomes.js";
 import { isInsideOrEqual, normalizePath } from "./pathUtils.js";
 import { identityMatches } from "./projectIdentity.js";
 import { anchorRootsFor, retrieve, DEFAULT_EMBEDDING_TIMEOUT_MS, type EmbeddingBackend, type RetrievedFact } from "./retrieval.js";
@@ -208,6 +209,12 @@ export interface HintFormatResult {
   readonly truncated: boolean;
   /** True when this response was filtered against the session's recall log (header carries `delta=1`). */
   readonly delta: boolean;
+  /** How this run ended, for the hook outcome log: `ok`, `out-of-time` (the soft budget was exceeded, i.e. `truncated`), `store-unreadable`, or `internal-error`. */
+  readonly outcome: HookOutcomeKind;
+  /** Milliseconds this run took on the budget clock, whichever way it ended. */
+  readonly elapsedMs: number;
+  /** How many facts had their anchor check cut short by the retrieval time budget (reported as unverified); 0 when retrieval never ran. */
+  readonly anchorBudgetHits: number;
 }
 
 /** Resolves the effective protocol version for a call: exactly `1` selects TGMEM/1; anything else (including `undefined`) is the current default. Never throws on a bad value -- fail-open. */
@@ -252,22 +259,39 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
   const protocolVersion = resolveProtocolVersion(options.protocolVersion);
   const delta = options.delta === true && typeof options.sessionId === "string" && options.sessionId.length > 0;
   const header = tgmemHeaderFor(protocolVersion, delta);
+  // Read once here and handed down, so the failure branches below report the same elapsed time the success path does without the run reading the clock a second time.
+  const start = budgetNow();
   try {
-    return await buildHintFormatUnsafe(options);
+    return await buildHintFormatUnsafe(options, start);
   } catch (error) {
     if (error instanceof StorageUnreadableError) {
       logWarning(`hint-format could not open the store, returning an unreadable-store footer: ${error.message}`);
       // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an unreadable store on that version is silently identical to an empty one -- the same limitation the internal-failure branch below already accepts for the same reason.
-      return { header, lines: protocolVersion === 2 ? [STORE_UNREADABLE_FOOTER_LINE] : [], truncated: false, delta };
+      return {
+        header,
+        lines: protocolVersion === 2 ? [STORE_UNREADABLE_FOOTER_LINE] : [],
+        truncated: false,
+        delta,
+        outcome: "store-unreadable",
+        elapsedMs: budgetNow() - start,
+        anchorBudgetHits: 0,
+      };
     }
     logWarning(`hint-format failed internally, returning an internal-error footer: ${errorMessage(error)}`);
     // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so an internal failure on that version is silently identical to an empty one -- the same limitation the unreadable-store branch above already accepts for the same reason.
-    return { header, lines: protocolVersion === 2 ? [INTERNAL_ERROR_FOOTER_LINE] : [], truncated: false, delta };
+    return {
+      header,
+      lines: protocolVersion === 2 ? [INTERNAL_ERROR_FOOTER_LINE] : [],
+      truncated: false,
+      delta,
+      outcome: "internal-error",
+      elapsedMs: budgetNow() - start,
+      anchorBudgetHits: 0,
+    };
   }
 }
 
-async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFormatResult> {
-  const start = budgetNow();
+async function buildHintFormatUnsafe(options: HintFormatOptions, start: number): Promise<HintFormatResult> {
   // Anchor verdicts are memoized for the lifetime of the process, which is exactly one query for the `mem` CLI but unbounded for an embedder holding this module across calls -- there, a first-ever verdict would be served forever no matter what changed on disk. One logical hint-format query is the correct cache lifetime, so each call starts from a clean slate.
   clearAnchorCaches();
   const root = resolvePath(options.root);
@@ -328,7 +352,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
   const anchorCacheStore = createBufferedAnchorCacheStore(anchorCacheSnapshot);
 
   const anchorTimeBudgetMs = anchorBudgetFor(budgetMs - (budgetNow() - start));
-  const { results, withheldCount, zeroSignal, embeddingDegraded } = await retrieve(scoped, {
+  const { results, withheldCount, zeroSignal, embeddingDegraded, anchorBudgetHits } = await retrieve(scoped, {
     query: options.query ?? "",
     root,
     poolIsInScope: true,
@@ -381,6 +405,9 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
             : [BUDGET_EXHAUSTED_FOOTER_LINE],
       truncated: true,
       delta,
+      outcome: "out-of-time",
+      elapsedMs: elapsed,
+      anchorBudgetHits,
     };
   }
 
@@ -430,7 +457,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions): Promise<HintFo
 
   recordEmission(emittedIds);
 
-  return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta };
+  return { header: tgmemHeaderFor(protocolVersion, delta), lines, truncated, delta, outcome: "ok", elapsedMs: elapsed, anchorBudgetHits };
 }
 
 /** Best-effort write of the emitted fact ids to `recall_log`, plus a flush of any anchor verdicts `retrieve()` computed this query (`anchorVerdicts`, drained from the disconnected store built above) -- on the same connection, not a second `openStorage`, for the same reason the pre-retrieve reads share one. Any failure -- a read-only store, a locked database, a schema this build does not expect -- is logged to stderr and otherwise ignored: the recall already succeeded, and a bookkeeping failure must not turn it into a failure. */

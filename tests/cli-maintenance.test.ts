@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:http";
 import { extractRememberedId, runCli } from "./support/cli.js";
+import * as budgetClock from "../src/budgetClock.js";
 import { openDb, resolveDbPath } from "../src/db.js";
 import { getFactById, insertFact, listSourcesForFact, openStorage } from "../src/storage.js";
 import { MAX_SOURCE_EXCERPT_LENGTH } from "../src/capture.js";
@@ -1154,5 +1155,34 @@ describe("mem backup --list --json", () => {
       throw new Error("expected at least one listed snapshot");
     }
     expect(new Date(newest.takenAt).toISOString()).toBe(newest.takenAt);
+  });
+});
+
+describe("mem doctor summarizes the recorded hint runs", () => {
+  it("prints no prompt hints line before any hint run, then counts the runs and the out-of-time one after", async () => {
+    const root = mkdtempSync(join(tmpdir(), "mem-doctor-root-"));
+    try {
+      const remembered = await runCli(["remember", "the zebra deploy token lives in vault", "--kind", "decision", "--scope", "global", "--anchor", "file-exists schema.sql"]);
+      expect(remembered.exitCode ?? 0).toBe(0);
+      expect((await runCli(["doctor"])).stdout).not.toContain("prompt hints:");
+
+      expect((await runCli(["recall", "--hint-format", "--root", root])).exitCode ?? 0).toBe(0);
+      expect((await runCli(["recall", "--hint-format", "--root", root])).exitCode ?? 0).toBe(0);
+      expect((await runCli(["doctor"])).stdout).toContain("prompt hints: 2 runs, 0 out of time, 0 store unreadable, 0 internal errors, 0 anchor checks cut short");
+
+      vi.stubEnv("TOKEN_GOAT_MEM_RETRIEVAL_BUDGET_MS", "1");
+      // A clock that advances a second per read: the 1 ms budget is spent, and the anchor deadline is behind the clock when the fact is checked.
+      let ticks = 0;
+      const clock = vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => ++ticks * 1000);
+      try {
+        expect((await runCli(["recall", "--hint-format", "--root", root])).exitCode ?? 0).toBe(0);
+      } finally {
+        clock.mockRestore();
+      }
+      const doctor = await runCli(["doctor"]);
+      expect(doctor.stdout).toContain("prompt hints: 3 runs, 1 out of time, 0 store unreadable, 0 internal errors, 1 anchor check cut short");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
