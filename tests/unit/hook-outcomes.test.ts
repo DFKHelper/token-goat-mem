@@ -1,5 +1,5 @@
 /** Tests for the hook outcome log (src/hookOutcomes.ts) and the `mem doctor` line built from it. Every timestamp and duration is passed in, so nothing here reads a clock. The doctor cases run through the real `run()` in an isolated temp home. */
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,12 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+// A scripted process table: only a pid listed here is alive, so no real pid is ever probed or signalled.
+const processTable = vi.hoisted(() => ({ alive: new Set<number>() }));
+vi.mock("../../src/processAlive.js", () => ({
+  processIsAlive: (pid: number): boolean => processTable.alive.has(pid),
+}));
+
 let home: string;
 let dbPath: string;
 
@@ -48,6 +54,7 @@ beforeEach(() => {
 
 afterEach(() => {
   fsHooks.afterStat = null;
+  processTable.alive.clear();
   rmSync(home, { recursive: true, force: true });
 });
 
@@ -93,6 +100,52 @@ describe("appendHookOutcome", () => {
     const live = readFileSync(livePath(), "utf8").split("\n").filter((line) => line.length > 0);
     expect(live.map((line) => (JSON.parse(line) as HookOutcomeRecord).ms), "both fresh lines are in the live file, nothing lost").toEqual([1, 2]);
     expect(readdirSync(home).sort(), "no private rotation file is left behind").toEqual([HOOK_OUTCOMES_FILE, HOOK_OUTCOMES_ROTATED_FILE]);
+  });
+
+  it("still appends the record when the live file vanishes between the size check and the claim", () => {
+    writeFileSync(livePath(), "x".repeat(HOOK_OUTCOMES_MAX_BYTES));
+    fsHooks.afterStat = () => {
+      unlinkSync(livePath());
+    };
+    appendHookOutcome(dbPath, record({ ms: 3 }));
+    expect(readFileSync(livePath(), "utf8"), "the caller's own record is not lost to a skipped rotation").toBe(`${JSON.stringify(record({ ms: 3 }))}\n`);
+  });
+
+  describe("a rotation a killed process left half done", () => {
+    const DEAD_PID = 2147483646;
+    const LIVE_PID = 2147483645;
+    const orphanPath = (pid: number): string => join(home, `${HOOK_OUTCOMES_ROTATED_FILE}.${pid}.tmp`);
+
+    it("folds a dead process's claimed file back into the live log on the next rotation", () => {
+      writeFileSync(join(home, HOOK_OUTCOMES_ROTATED_FILE), "stale\n");
+      writeFileSync(orphanPath(DEAD_PID), "orphan history\n");
+      writeFileSync(livePath(), "x".repeat(HOOK_OUTCOMES_MAX_BYTES));
+      appendHookOutcome(dbPath, record({ ms: 4 }));
+      expect(readFileSync(livePath(), "utf8"), "orphan bytes then the new record").toBe(`orphan history\n${JSON.stringify(record({ ms: 4 }))}\n`);
+      expect(readFileSync(join(home, HOOK_OUTCOMES_ROTATED_FILE), "utf8")).toBe("x".repeat(HOOK_OUTCOMES_MAX_BYTES));
+      expect(readdirSync(home).sort(), "the orphan is gone").toEqual([HOOK_OUTCOMES_FILE, HOOK_OUTCOMES_ROTATED_FILE]);
+    });
+
+    it("moves it to the rotated name when none exists", () => {
+      writeFileSync(orphanPath(DEAD_PID), "orphan history\n");
+      writeFileSync(livePath(), "x".repeat(HOOK_OUTCOMES_MAX_BYTES));
+      // Another process shrinks the live file after the size check, so this rotation is skipped and no rotated file is ever written.
+      fsHooks.afterStat = () => {
+        writeFileSync(livePath(), "small\n");
+      };
+      appendHookOutcome(dbPath, record({ ms: 5 }));
+      expect(readFileSync(join(home, HOOK_OUTCOMES_ROTATED_FILE), "utf8")).toBe("orphan history\n");
+      expect(readdirSync(home).sort()).toEqual([HOOK_OUTCOMES_FILE, HOOK_OUTCOMES_ROTATED_FILE]);
+    });
+
+    it("never touches the claimed file of a process that is still alive", () => {
+      processTable.alive.add(LIVE_PID);
+      writeFileSync(orphanPath(LIVE_PID), "mid-rotation\n");
+      writeFileSync(livePath(), "x".repeat(HOOK_OUTCOMES_MAX_BYTES));
+      appendHookOutcome(dbPath, record({ ms: 6 }));
+      expect(readFileSync(orphanPath(LIVE_PID), "utf8")).toBe("mid-rotation\n");
+      expect(readFileSync(livePath(), "utf8")).toBe(`${JSON.stringify(record({ ms: 6 }))}\n`);
+    });
   });
 
   it("does not rotate a file one byte under the cap", () => {

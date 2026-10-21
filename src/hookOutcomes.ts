@@ -1,9 +1,10 @@
 /** The hook outcome log: a tiny, best-effort JSONL file beside the store that records how each hook run ended, so `mem doctor` can say how often a hook ran out of time, met an unreadable store, or failed inside. A file rather than a table on purpose: a hook must never wait on the store's busy timeout, and an unreadable store cannot be written at all. A record holds no query, fact id, or session id. */
 
-import { appendFileSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, constants, copyFileSync, existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { MEM_DB_MODE } from "./fileUtils.js";
+import { processIsAlive } from "./processAlive.js";
 
 export const HOOK_OUTCOME_HOOKS = ["prompt", "session-start", "other"] as const;
 export const HOOK_OUTCOME_KINDS = ["ok", "out-of-time", "store-unreadable", "internal-error"] as const;
@@ -39,6 +40,39 @@ function rotateLive(dir: string, live: string): void {
   unlinkSync(claimed);
 }
 
+/** A claimed rotation file (`.1.<pid>.tmp`) or a claimed orphan being folded back (`.1.<pid>.fold.tmp`): the pid is the process that created it. */
+const CLAIMED_FILE_PATTERN = /^hook-outcomes\.log\.1\.(\d+)(?:\.fold)?\.tmp$/;
+
+/** Folds back every claimed file whose process no longer exists: a process hard-killed between claiming the live log and moving or appending it leaves its history in a private file nothing reads. Each orphan is first claimed under this process's own name so two processes folding at once never both append it, then moved to the rotated name when none exists (exclusive create, so it never replaces one) and otherwise appended to the live file. A file whose process is alive, or this one, is never touched. Best effort per file: one that cannot be folded is left for the next rotation. */
+function foldBackOrphans(dir: string, live: string): void {
+  const rotated = join(dir, HOOK_OUTCOMES_ROTATED_FILE);
+  for (const name of readdirSync(dir)) {
+    const match = CLAIMED_FILE_PATTERN.exec(name);
+    const pid = match === null ? Number.NaN : Number(match[1]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid || processIsAlive(pid)) {
+      continue;
+    }
+    const mine = join(dir, `${HOOK_OUTCOMES_ROTATED_FILE}.${process.pid}.fold.tmp`);
+    try {
+      if (existsSync(mine)) {
+        return;
+      }
+      renameSync(join(dir, name), mine);
+      try {
+        copyFileSync(mine, rotated, constants.COPYFILE_EXCL);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+          throw error;
+        }
+        appendFileSync(live, readFileSync(mine), { mode: MEM_DB_MODE });
+      }
+      unlinkSync(mine);
+    } catch {
+      // Left in place, still matched by the pattern, for the next rotation to retry.
+    }
+  }
+}
+
 /** Appends one record next to the store at `dbPath`. Never throws and never logs: a hook has a hard time budget, and a log that cannot be written (missing directory, read-only disk, a rename lost to another process) is not worth failing it for. */
 export function appendHookOutcome(dbPath: string, record: HookOutcomeRecord): void {
   try {
@@ -51,7 +85,13 @@ export function appendHookOutcome(dbPath: string, record: HookOutcomeRecord): vo
       // No live file yet: nothing to rotate.
     }
     if (size >= HOOK_OUTCOMES_MAX_BYTES) {
-      rotateLive(dir, live);
+      // A rotation that fails (the live file vanished before the claim, a rename lost to another process) is skipped, never the caller's own record.
+      try {
+        rotateLive(dir, live);
+        foldBackOrphans(dir, live);
+      } catch {
+        // The next append past the cap rotates again.
+      }
     }
     appendFileSync(live, `${JSON.stringify(record)}\n`, { mode: MEM_DB_MODE });
   } catch {
