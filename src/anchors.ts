@@ -1008,7 +1008,7 @@ function evaluateFileContainsRaw(
 const ROOTLESS_PREDICATES = ["valid-until"] as const;
 
 /** Whether `path` is a directory that exists right now. `statSync` throws for a missing path rather than reporting it, and a broken symlink or a plain file standing where a root should be is just as unusable as nothing at all, so both collapse to false. */
-function isExistingDirectory(path: string): boolean {
+export function isExistingDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
   } catch {
@@ -1016,8 +1016,8 @@ function isExistingDirectory(path: string): boolean {
   }
 }
 
-/** Why a verdict is `unverified`: the fact has no anchor, its root directory is gone, the predicate could not decide (a tool missing, an unreadable input), or the evaluation ran out of time. */
-export type UnverifiedReason = "no-anchor" | "root-missing" | "undecidable" | "out-of-time";
+/** Why a verdict is `unverified`: the fact has no anchor, its root directory is gone, the query root does not cover the fact's root so the anchor cannot be checked from there, the predicate could not decide (a tool missing, an unreadable input), or the evaluation ran out of time. */
+export type UnverifiedReason = "no-anchor" | "root-missing" | "out-of-scope" | "undecidable" | "out-of-time";
 
 /** Out-parameter a caller passes to learn why a verdict is `unverified`; written only for an `unverified` verdict and left untouched for `affirmed`/`contradicted`. */
 export interface UnverifiedReasonOut {

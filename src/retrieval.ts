@@ -2,7 +2,7 @@
 
 import { resolve as resolvePath } from "node:path";
 
-import { evaluateAnchor, setUnverifiedReason, type AnchorCacheStore, type AnchorVerdict, type UnverifiedReasonOut } from "./anchors.js";
+import { evaluateAnchor, isExistingDirectory, setUnverifiedReason, type AnchorCacheStore, type AnchorVerdict, type UnverifiedReason, type UnverifiedReasonOut } from "./anchors.js";
 import { budgetNow } from "./budgetClock.js";
 import { armBudgetTimer } from "./budgetTimer.js";
 import { screenForSecrets } from "./capture.js";
@@ -735,6 +735,17 @@ export function anchorRootsFor(facts: readonly Fact[], queryRoot: string): strin
 }
 
 
+/** Why `anchorRootFor` returned null for `fact`: no anchor at all, a capture root that is no longer a directory (`root-missing`), or a root that exists but that the query root does not cover (`out-of-scope`, including a `path` fact whose capture root is unknown). */
+function unverifiedReasonWithoutRoot(fact: Fact): UnverifiedReason {
+  if (fact.anchor === null || fact.anchor.trim().length === 0) {
+    return "no-anchor";
+  }
+  if (typeof fact.captureRoot === "string" && fact.captureRoot.trim().length > 0 && !isExistingDirectory(resolvePath(fact.captureRoot))) {
+    return "root-missing";
+  }
+  return "out-of-scope";
+}
+
 /** Evaluates `fact`'s anchor against the root it was actually captured under, rather than a bare caller-supplied root. Wraps `anchorRootFor` + `evaluateAnchor` so the one place that knows how to turn "capture root unknown" into `unverified` (rather than handing `evaluateAnchor` a fabricated root, or a `null` it does not accept) is not re-derived at each of this function's three callers (`retrieve` below, `mem review`'s `formatReview`, and `mem show`, all in cli.ts/retrieval.ts). */
 export function evaluateFactFreshness(
   fact: Fact,
@@ -746,7 +757,7 @@ export function evaluateFactFreshness(
 ): AnchorVerdict {
   const root = anchorRootFor(fact, queryRoot);
   if (root === null) {
-    setUnverifiedReason(reasonOut, fact.anchor === null || fact.anchor.trim().length === 0 ? "no-anchor" : "root-missing");
+    setUnverifiedReason(reasonOut, unverifiedReasonWithoutRoot(fact));
     return "unverified";
   }
   return evaluateAnchor(fact.anchor, root, deadlineMs, budgetHit, cacheStore, reasonOut);

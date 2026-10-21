@@ -1062,6 +1062,23 @@ describe("mem show says why a fact is unverified", () => {
     expect(envelope.freshnessReason).toBe("root-missing");
   });
 
+  it("prints out-of-scope, not root-missing, for a path fact shown from an unrelated directory while its root exists", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "mem-show-root-"));
+    const otherRoot = mkdtempSync(join(tmpdir(), "mem-show-other-"));
+    onTestFinished(() => {
+      rmSync(projectRoot, { recursive: true, force: true });
+      rmSync(otherRoot, { recursive: true, force: true });
+    });
+    writeFileSync(join(projectRoot, "pin.txt"), "x");
+    const id = extractRememberedId(
+      await runCli(["remember", "pin file exists", "--kind", "fact", "--scope", "path", "--path", "pin.txt", "--root", projectRoot, "--anchor", "file-exists pin.txt"])
+    );
+    expect((await runCli(["show", id, "--root", otherRoot])).stdout).toContain("freshness=unverified (out-of-scope)");
+    const envelope = JSON.parse((await runCli(["show", id, "--root", otherRoot, "--json"])).stdout) as { freshnessReason?: string };
+    expect(envelope.freshnessReason).toBe("out-of-scope");
+    expect((await runCli(["show", id, "--root", projectRoot])).stdout).toContain("freshness=affirmed");
+  });
+
   it("omits freshnessReason for an affirmed fact", async () => {
     const projectRoot = mkdtempSync(join(tmpdir(), "mem-show-root-"));
     onTestFinished(() => rmSync(projectRoot, { recursive: true, force: true }));
