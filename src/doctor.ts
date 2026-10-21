@@ -131,7 +131,7 @@ export function describeHookOutcomes(summary: HookOutcomeSummary): Finding[] {
   if (runs === 0) {
     return [];
   }
-  const line = `prompt hints: ${runs} run${runs === 1 ? "" : "s"}, ${outOfTime} out of time, ${storeUnreadable} store unreadable, ${internalErrors} internal error${internalErrors === 1 ? "" : "s"}, ${cut} anchor check${cut === 1 ? "" : "s"} cut short, p95 about ${Math.round(p95Ms)} ms`;
+  const line = `hint runs: ${runs} run${runs === 1 ? "" : "s"}, ${outOfTime} out of time, ${storeUnreadable} store unreadable, ${internalErrors} internal error${internalErrors === 1 ? "" : "s"}, ${cut} anchor check${cut === 1 ? "" : "s"} cut short, p95 about ${Math.round(p95Ms)} ms`;
   return outOfTime * 100 > runs ? [finding("hints", "warn", `${line} (more than 1 run in 100 ran out of time)`)] : [finding("hints", "ok", line)];
 }
 

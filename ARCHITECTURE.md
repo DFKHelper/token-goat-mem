@@ -53,7 +53,7 @@ budget-exhausted check reads as `unverified`, which classifies as `hint` rather 
 outright, so a slow filesystem never silently drops a fact from view. Anchors are evaluated in rank
 order (pinned facts first), so when the shared deadline runs out mid-loop the facts cut short to
 `unverified` are the lowest-ranked ones. An `unverified` verdict also carries a reason, one of
-`no-anchor`, `root-missing`, `undecidable` or `out-of-time` (`UnverifiedReason` in `src/anchors.ts`),
+`no-anchor`, `root-missing`, `out-of-scope`, `undecidable` or `out-of-time` (`UnverifiedReason` in `src/anchors.ts`),
 which `mem show` and `mem review` print and `mem show --json` exposes as `freshnessReason`.
 
 Verdicts persist in `anchor_cache`, keyed by `(root, anchor)` and carrying a `witness` (an mtime, a
@@ -62,8 +62,8 @@ hash, a git ref) so a later evaluation can treat a mismatch as a miss rather tha
 sessions. Which roots get prefetched is not a free choice: `anchorRootsFor` derives them from the
 same `anchorRootFor` the evaluation itself uses, because a root computed any other way produces a
 key the lookup never hits -- a silent, verdict-correct miss that re-evaluates every anchor while
-every test still passes. `mem epoch --gc` deletes cache rows older than 90 days or stamped in the
-future; a deleted verdict costs one re-evaluation, never a wrong answer, since a row is reused only
+every test still passes. `mem epoch --gc` deletes cache rows older than 90 days or stamped more
+than a day in the future; a deleted verdict costs one re-evaluation, never a wrong answer, since a row is reused only
 when its witness still matches.
 
 Facts of kind `preference` decay on a 180-day half-life computed fresh from `captured_at` on every

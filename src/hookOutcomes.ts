@@ -60,7 +60,6 @@ export interface HookOutcomeTally {
 
 export interface HookOutcomeSummary {
   readonly total: HookOutcomeTally;
-  readonly byHook: Readonly<Record<HookOutcomeHook, HookOutcomeTally>>;
 }
 
 function isHook(value: unknown): value is HookOutcomeHook {
@@ -121,12 +120,5 @@ export function summarizeHookOutcomes(home: string): HookOutcomeSummary {
   const records = [...readLines(join(home, HOOK_OUTCOMES_ROTATED_FILE)), ...readLines(join(home, HOOK_OUTCOMES_FILE))]
     .map((line) => parseRecord(line))
     .filter((record): record is HookOutcomeRecord => record !== null);
-  return {
-    total: tally(records),
-    byHook: {
-      prompt: tally(records.filter((record) => record.hook === "prompt")),
-      "session-start": tally(records.filter((record) => record.hook === "session-start")),
-      other: tally(records.filter((record) => record.hook === "other")),
-    },
-  };
+  return { total: tally(records) };
 }

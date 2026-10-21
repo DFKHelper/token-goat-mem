@@ -83,10 +83,10 @@ describe("summarizeHookOutcomes", () => {
   it("reads as empty when neither file exists", () => {
     const summary = summarizeHookOutcomes(home);
     expect(summary.total).toEqual({ runs: 0, ok: 0, outOfTime: 0, storeUnreadable: 0, internalErrors: 0, cut: 0, p95Ms: 0 });
-    expect(summary.byHook.prompt.runs).toBe(0);
+    expect(Object.keys(summary)).toEqual(["total"]);
   });
 
-  it("counts per hook and outcome across the rotated and the live file, skipping malformed lines", () => {
+  it("counts every hook and outcome across the rotated and the live file, skipping malformed lines", () => {
     const rotated = [JSON.stringify(record({ ms: 5 })), "not json", JSON.stringify(record({ outcome: "store-unreadable", ms: 9 }))].join("\n");
     const live = [
       JSON.stringify(record({ hook: "session-start", outcome: "out-of-time", ms: 150, cut: 3 })),
@@ -106,9 +106,7 @@ describe("summarizeHookOutcomes", () => {
     writeFileSync(livePath(), live);
     const summary = summarizeHookOutcomes(home);
     expect(summary.total).toMatchObject({ runs: 4, ok: 1, outOfTime: 1, storeUnreadable: 1, internalErrors: 1, cut: 3 });
-    expect(summary.byHook.prompt.runs).toBe(2);
-    expect(summary.byHook["session-start"].outOfTime).toBe(1);
-    expect(summary.byHook.other.internalErrors).toBe(1);
+    expect(summary.total.p95Ms).toBe(150);
   });
 
   it("takes the p95 as the nearest rank", () => {
@@ -147,7 +145,7 @@ describe("describeHookOutcomes", () => {
   it("is ok at exactly 1 run in 100 out of time", () => {
     const outcomes: HookOutcomeKind[] = ["out-of-time", ...Array.from({ length: 99 }, (): HookOutcomeKind => "ok")];
     expect(describeHookOutcomes(summaryFor(outcomes))).toEqual([
-      { check: "hints", status: "ok", message: "prompt hints: 100 runs, 1 out of time, 0 store unreadable, 0 internal errors, 1 anchor check cut short, p95 about 95 ms" },
+      { check: "hints", status: "ok", message: "hint runs: 100 runs, 1 out of time, 0 store unreadable, 0 internal errors, 1 anchor check cut short, p95 about 95 ms" },
     ]);
   });
 
@@ -171,19 +169,19 @@ describe("mem doctor hook outcomes", () => {
     vi.unstubAllEnvs();
   });
 
-  async function promptHintsLine(): Promise<string | undefined> {
+  async function hintRunsLine(): Promise<string | undefined> {
     const result = await runCli(["doctor", "--root", home]);
     expect(result.exitCode).toBe(0);
-    return result.stdout.split("\n").find((line) => line.startsWith("prompt hints:"));
+    return result.stdout.split("\n").find((line) => line.startsWith("hint runs:"));
   }
 
   it("prints the line when the log exists", async () => {
     appendHookOutcome(dbPath, record({ ms: 30 }));
     appendHookOutcome(dbPath, record({ outcome: "store-unreadable", ms: 50 }));
-    expect(await promptHintsLine()).toBe("prompt hints: 2 runs, 0 out of time, 1 store unreadable, 0 internal errors, 0 anchor checks cut short, p95 about 50 ms");
+    expect(await hintRunsLine()).toBe("hint runs: 2 runs, 0 out of time, 1 store unreadable, 0 internal errors, 0 anchor checks cut short, p95 about 50 ms");
   });
 
   it("prints no line without the log", async () => {
-    expect(await promptHintsLine()).toBeUndefined();
+    expect(await hintRunsLine()).toBeUndefined();
   });
 });
