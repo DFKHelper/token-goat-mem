@@ -203,6 +203,19 @@ describe("recall --stable (deterministic id-sorted ordering, strictly additive)"
     expect(ids).toEqual([idEarlier, idLater].sort());
   });
 
+  it("orders ids by code unit, not by locale", async () => {
+    const db = openStorage(resolveDbPath());
+    insertFact(db, { id: "a-lower", text: "lowercase id fact", kind: "fact", scope: "global", source_type: "user" });
+    insertFact(db, { id: "B-upper", text: "uppercase id fact", kind: "fact", scope: "global", source_type: "user" });
+    db.close();
+
+    const lines = (await runCli(["recall", "--stable"])).stdout.split("\n");
+    const upper = lines.findIndex((line) => line.includes("uppercase id fact"));
+    const lower = lines.findIndex((line) => line.includes("lowercase id fact"));
+    expect(upper).toBeGreaterThanOrEqual(0);
+    expect(upper).toBeLessThan(lower);
+  });
+
   it("does not print an anchor-budget note for an ordinary small-store `mem recall`", async () => {
     // The message text itself (and the count) is covered directly against `retrieve()`'s `anchorBudgetHits` in tests/unit/retrieval.test.ts, since there is no CLI flag to force the anchor deadline low enough to reproduce a real budget hit here. This only pins the negative: a normal store small enough to finish every anchor within the default budget stays silent.
     await runCli(["remember", "captured just now", "--kind", "fact"]);

@@ -1186,3 +1186,28 @@ describe("mem doctor summarizes the recorded hint runs", () => {
     }
   });
 });
+
+describe("gc superseded cap order", () => {
+  it("keeps the lowest fact ids when more than the row cap were superseded at the same instant", async () => {
+    const db = openStorage(resolveDbPath());
+    const changedAt = new Date().toISOString();
+    const ids = Array.from({ length: 1001 }, (_, index) => `s-${String(1000 - index).padStart(4, "0")}`);
+    db.transaction(() => {
+      for (const id of ids) {
+        insertFact(db, { id, text: `superseded fact ${id}`, kind: "fact", scope: "global", source_type: "user" });
+      }
+      db.prepare("UPDATE facts SET status = 'superseded', prior_status = 'active', status_changed_at = ?").run(changedAt);
+    }).immediate();
+    db.close();
+
+    expect((await runCli(["epoch", "--gc"])).exitCode).toBe(0);
+
+    const check = openStorage(resolveDbPath());
+    try {
+      expect(getFactById(check, "s-0000")).toBeDefined();
+      expect(getFactById(check, "s-1000")).toBeUndefined();
+    } finally {
+      check.close();
+    }
+  });
+});

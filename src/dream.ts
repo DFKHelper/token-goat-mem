@@ -1,6 +1,7 @@
 /** Cross-fact inference ("dreaming"): propose facts that follow from several stored facts but that nobody stated outright. Everything else in this codebase is deterministic. This is not, and that is the point: merging near-duplicates, resolving contradictions, and decaying old preferences are all mechanical, and none of them can notice that three separate facts about deploy steps add up to "deploys are manual". That inference is the one capability a rule cannot reach. **This module writes nothing.** It is an evaluation surface, deliberately: the open question is whether a model's inferences over a real store are good enough to be worth a review queue, and that is answerable by reading them. Building the storage, review, and hook machinery first would be building the expensive half against an assumption. If the output proves worth keeping, the shape it must take is already fixed by the rest of the system -- `captureSuggested`, so every candidate lands `pending` with `source_type: "derived"` and reaches recall only through an explicit `mem review --promote`. A fact nobody said must never be surfaced as if somebody had. **It is off unless configured, and once configured it sends stored fact text off the machine.** `TOKEN_GOAT_MEM_DREAM_URL` + `TOKEN_GOAT_MEM_DREAM_MODEL` name an OpenAI-compatible chat-completions endpoint, matching the opt-in shape src/embeddings.ts already established -- that other opt-in path sends fact/query text of its own, to a separate endpoint, when configured. Unset, `mem dream` says so and does nothing. Point it at a local endpoint if the store holds anything you would not paste into a hosted API. **Store content is data, not instruction.** Facts reach the store from files and transcripts via `mem import`/`mem scan-session`, so a fact's text can contain anything -- including text aimed at whatever model reads it next. Two things bound that: nothing in the reply is used except a `candidates` array, and every element of it is shape-checked and range-checked here before it becomes a candidate -- any other key, and any prose around the JSON, is discarded, so the model cannot make this module do anything other than emit candidates; and no candidate is written anywhere, so the worst a hostile fact achieves is a bad suggestion in a list a human is already reading critically. */
 
 import type { Fact } from "./types.js";
+import { compareFactIds } from "./retrieval.js";
 import { normalizeFactText } from "./storage.js";
 
 /** Environment variable naming the full chat-completions endpoint (e.g. `https://api.example.com/v1/chat/completions`). Unset disables `mem dream` entirely. */
@@ -191,7 +192,7 @@ export async function dream(
   options: DreamOptions = {}
 ): Promise<DreamResult> {
   const label = dreamEndpointLabel(config.url);
-  const ordered = [...facts].sort((a, b) => b.captured_at.localeCompare(a.captured_at));
+  const ordered = [...facts].sort((a, b) => b.captured_at.localeCompare(a.captured_at) || compareFactIds(a.id, b.id));
   const sent = ordered.slice(0, MAX_DREAM_FACTS);
   if (sent.length < MIN_SUPPORTING_FACTS) {
     // Nothing to cross-reference. Reported as an empty result rather than a request the endpoint would be paid for and could only answer with an empty list.

@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { extractRememberedId, extractSuggestedId, runCli } from "./support/cli.js";
 import { writeCheckout } from "./support/gitCheckout.js";
 import { openDb, resolveDbPath } from "../src/db.js";
-import { openStorage } from "../src/storage.js";
+import { insertFact, openStorage } from "../src/storage.js";
 import { captureSuggested } from "../src/capture.js";
 
 
@@ -1441,5 +1441,22 @@ describe("mem review --undo", () => {
     const result = await runCli(["review", "--promote", "abc", "--undo", "def"]);
     expect(result.exitCode).toBe(1);
     expect(`${result.stdout}${result.stderr}`).toContain("cannot be used together");
+  });
+});
+
+describe("review pending bucket order", () => {
+  it("lists pending facts with equal sightings and capture time in fact id order, whatever order they were stored in", async () => {
+    const db = openStorage(resolveDbPath());
+    const tied = "2026-01-01T00:00:00.000Z";
+    insertFact(db, { id: "z-pending", text: "zulu pending fact", kind: "fact", scope: "global", source_type: "user", status: "pending", captured_at: tied });
+    insertFact(db, { id: "a-pending", text: "alpha pending fact", kind: "fact", scope: "global", source_type: "user", status: "pending", captured_at: tied });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    const alpha = review.stdout.indexOf("alpha pending fact");
+    const zulu = review.stdout.indexOf("zulu pending fact");
+    expect(alpha).toBeGreaterThanOrEqual(0);
+    expect(alpha).toBeLessThan(zulu);
   });
 });

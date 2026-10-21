@@ -133,6 +133,7 @@ import { fileTranscriptSuggestions } from "./sessionCapture.js";
 import {
   anchorRootFor,
   anchorRootsFor,
+  compareFactIds,
   decayedConfidence,
   evaluateFactFreshness,
   isDecayedBelowGroundTruth,
@@ -907,8 +908,10 @@ const UNANCHORED_ELIGIBLE_KINDS: ReadonlySet<FactKind> = new Set<FactKind>(["dec
 /** Builds the `mem review` listing: pending facts (never auto-promoted, S9), contested facts (deterministic contradiction detection re-run fresh over the live active/pinned pool, never trusting a possibly-stale `status` column -- same discipline as retrieval.ts), anchor-contradicted facts (including pins -- S8: a pin is exempt from decay, never from contradiction/anchor suppression), pins overdue for re-confirmation, and unanchored-but-checkable facts (ground-truth facts carrying no anchor whose text names a path/URL/config file an anchor could be written against -- the one bucket that is a nudge rather than a pending decision). `options.sinceEpoch` restricts every bucket to facts with `epoch > sinceEpoch` (applied at the source -- pending/groundTruth queries -- so contested/contradicted/pins, which are derived from groundTruth, inherit the filter automatically). `options.section` restricts the output to one bucket. `options.summary` prints per-bucket counts instead of full listings. */
 function formatReview(db: Database.Database, root: string, options: ReviewOptions = {}): string {
   const epochFilter: FactFilter = options.sinceEpoch !== undefined ? { epochAfter: options.sinceEpoch } : {};
-  // Most-restated first, ties broken by `listFacts`'s own `captured_at DESC` -- `Array.prototype.sort` is stable, so re-sorting an already-ordered array by sightings alone preserves that secondary order for every tie exactly as `listFacts` produced it, with no second query needed to express it.
-  const pending = [...listFacts(db, { status: "pending", ...epochFilter })].sort((a, b) => (b.sightings ?? 0) - (a.sightings ?? 0));
+  // Most-restated first, then newest captured, then fact id: `listFacts` orders by `captured_at DESC` alone, so equal-timestamp rows would otherwise print in store order.
+  const pending = [...listFacts(db, { status: "pending", ...epochFilter })].sort(
+    (a, b) => (b.sightings ?? 0) - (a.sightings ?? 0) || b.captured_at.localeCompare(a.captured_at) || compareFactIds(a.id, b.id)
+  );
   // Persisted-`contested` facts are part of the detection pool, not just live ground truth. Querying only active/pinned meant a fact `mem epoch --gc` had already marked contested vanished from the one bucket that exists to surface it: `mem review --summary` reported `contested: 0` while `mem recall` was still withholding that fact as contested, and `--promote` refused to touch it. The epoch window is deliberately NOT applied here. `detectContradictions` decides by comparing rivals, so a pool narrowed to one epoch reports a survivor whose rival fell outside the window as uncontested -- `mem review --since-epoch N` would call clean exactly the fact `mem recall` is still withholding. The window narrows what the user is asked to review, not what the detector is allowed to see, so it is applied to the derived buckets at display time instead.
   const detectionPool = listFacts(db, { status: ["active", "pinned", "contested"] });
 
@@ -1017,7 +1020,7 @@ function runRetentionPass(db: Database.Database): string {
   const supersededCutoff = daysAgoIso(GC_SUPERSEDED_MAX_AGE_DAYS, now);
   // Ordered and cut by when each fact *became* superseded, not when it was captured. Keying the 90-day window on `captured_at` deleted a fact superseded yesterday purely because it had been captured 91 days ago -- destroying the audit trail the soft delete exists to preserve -- and made the 1000-row cap keep the most recently *authored* facts rather than the most recently superseded ones.
   const superseded = [...listFacts(db, { status: "superseded" })].sort((a, b) =>
-    statusChangedAt(b).localeCompare(statusChangedAt(a))
+    statusChangedAt(b).localeCompare(statusChangedAt(a)) || compareFactIds(a.id, b.id)
   );
   let prunedFacts = 0;
   let supersededOrdinal = 0;
@@ -2014,7 +2017,7 @@ export function buildProgram(): Command {
           return;
         }
         // --stable is a strictly-additive output-ordering override: same facts, same caps, just a deterministic id order instead of the default relevance/recency order.
-        const ordered = options.stable === true ? [...results].sort((a, b) => a.fact.id.localeCompare(b.fact.id)) : results;
+        const ordered = options.stable === true ? [...results].sort((a, b) => compareFactIds(a.fact.id, b.fact.id)) : results;
         // Best-effort durability stamp: plain `mem recall` has no session id to log a `recall_log` row against, so stamp `facts.last_surfaced_at` directly for the facts actually shown -- otherwise a fact recalled only this way stays eligible for stale-supersede forever, however often it is actually surfaced. A stamping failure must never fail the recall.
         try {
           await withDb((db) => {

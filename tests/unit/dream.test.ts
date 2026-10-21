@@ -79,6 +79,13 @@ describe("dream", () => {
     expect(result.candidates[0]?.supports).toEqual(["f1", "f2"]);
   });
 
+  it("orders facts captured at the same instant by fact id, whatever order they arrive in", async () => {
+    const result = await dream([dreamFact("f3", "third"), dreamFact("f1", "first"), dreamFact("f2", "second")], CONFIG, {
+      fetchImpl: replyWith(candidatesJson([])),
+    });
+    expect(result.sent.map((fact) => fact.id)).toEqual(["f1", "f2", "f3"]);
+  });
+
   it("sends no request at all when there is nothing to cross-reference", async () => {
     // One fact cannot produce a cross-fact inference, so calling the endpoint would be paying for an answer that can only be empty.
     let called = false;

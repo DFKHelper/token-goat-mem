@@ -809,6 +809,15 @@ describe("buildHintFormat", () => {
     expect(result.lines[0]).toBe('dec  fresh=affirmed  id=dec-v1  display="decision: chose Postgres over Mongo — mem show dec-v1"');
   });
 
+  it("--stable orders ids by code unit, not by locale", async () => {
+    seedFacts(dbPath, [
+      { id: "a-lower", text: "lowercase id", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-01T00:00:00.000Z", status: "active" },
+      { id: "B-upper", text: "uppercase id", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-02T00:00:00.000Z", status: "active" },
+    ]);
+    const stableOrder = await buildHint({ root, dbPath, stable: true });
+    expect(factLines(stableOrder).map((line) => line.split("  ")[2])).toEqual(["id=B-upper", "id=a-lower"]);
+  });
+
   it("--stable sorts fact-lines by id ascending, independent of relevance/recency order", async () => {
     seedFacts(dbPath, [
       {
