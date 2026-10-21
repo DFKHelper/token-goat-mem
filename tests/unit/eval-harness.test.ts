@@ -7,7 +7,7 @@ import { rankFacts } from "../../eval/rank.js";
 import { ANCHOR_TEMPLATES, generateCorpus, PROJECT_ROOTS, type EvalFact } from "../../eval/fixtures.js";
 import { validateAnchorSyntax } from "../../src/capture.js";
 import { generateScenarios } from "../../eval/queries.js";
-import { evaluateConfig } from "../../eval/harness.js";
+import { checkAgainstExpected, evaluateConfig, parseExpected, toExpected, WRITE_EXPECTED_COMMAND, type ConfigReport, type ExpectedReports } from "../../eval/harness.js";
 import { mulberry32, pick, pickN, chance } from "../../eval/prng.js";
 import { makeFact } from "../support/fact.js";
 
@@ -232,5 +232,89 @@ describe("eval fixture anchors", () => {
       expect(typeof fact.captureRoot).toBe("string");
       expect((fact.captureRoot ?? "").length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("eval/harness.ts expected-number check", () => {
+  const K = 8;
+  const JUDGED = 10;
+  const MARGIN = 1 / (2 * K * JUDGED);
+
+  function report(config: ConfigReport["config"], overrides: Partial<ConfigReport> = {}): ConfigReport {
+    return {
+      config,
+      meanPrecisionAtK: 0.5,
+      meanNdcgAtK: 0.6,
+      judgedScenarioCount: JUDGED,
+      totalDuplicateSubjectPairs: 0,
+      totalTokensEmitted: 0,
+      noMatchNeverFiltered: true,
+      anchorAffirmedRate: NaN,
+      wallTimeMs: 1,
+      ...overrides,
+    };
+  }
+
+  const committed = (): ExpectedReports => toExpected([report("recency"), report("pipeline")]);
+  const actual = (overrides: Partial<ConfigReport> = {}): ConfigReport[] => [report("recency", overrides), report("pipeline")];
+
+  it("passes when the numbers match exactly and reports no improvement", () => {
+    expect(checkAgainstExpected(actual(), committed(), K)).toEqual({ failures: [], improved: false });
+  });
+
+  it("fails a p@k drop beyond the margin, naming the config and the measure", () => {
+    const outcome = checkAgainstExpected(actual({ meanPrecisionAtK: 0.5 - MARGIN * 1.5 }), committed(), K);
+    expect(outcome.failures).toHaveLength(1);
+    expect(outcome.failures[0]).toMatch(/^recency: p@k dropped to /);
+  });
+
+  it("fails an ndcg@k drop beyond the margin, naming the config and the measure", () => {
+    const outcome = checkAgainstExpected(actual({ meanNdcgAtK: 0.6 - MARGIN * 1.5 }), committed(), K);
+    expect(outcome.failures).toHaveLength(1);
+    expect(outcome.failures[0]).toMatch(/^recency: ndcg@k dropped to /);
+  });
+
+  it("passes a drop within the margin without calling it an improvement", () => {
+    const outcome = checkAgainstExpected(actual({ meanPrecisionAtK: 0.5 - MARGIN / 2, meanNdcgAtK: 0.6 - MARGIN / 2 }), committed(), K);
+    expect(outcome).toEqual({ failures: [], improved: false });
+  });
+
+  it("passes an improvement and flags it so the file can be refreshed", () => {
+    const outcome = checkAgainstExpected(actual({ meanPrecisionAtK: 0.7 }), committed(), K);
+    expect(outcome).toEqual({ failures: [], improved: true });
+  });
+
+  it("fails a changed judged count with both numbers in the message", () => {
+    const outcome = checkAgainstExpected(actual({ judgedScenarioCount: JUDGED + 1 }), committed(), K);
+    expect(outcome.failures).toEqual([`recency: judged scenario count is ${JUDGED + 1}, expected ${JUDGED}`]);
+  });
+
+  it("fails a config the harness runs but the file lacks, naming the write-expected command", () => {
+    const outcome = checkAgainstExpected(actual(), toExpected([report("recency")]), K);
+    expect(outcome.failures).toHaveLength(1);
+    expect(outcome.failures[0]).toContain("not committed: pipeline");
+    expect(outcome.failures[0]).toContain(WRITE_EXPECTED_COMMAND);
+  });
+
+  it("fails a committed config the harness no longer runs, naming the write-expected command", () => {
+    const outcome = checkAgainstExpected([report("recency")], committed(), K);
+    expect(outcome.failures).toHaveLength(1);
+    expect(outcome.failures[0]).toContain("no longer run: pipeline");
+    expect(outcome.failures[0]).toContain(WRITE_EXPECTED_COMMAND);
+  });
+
+  it("round-trips through JSON without changing a number", () => {
+    const original = toExpected([report("recency", { meanPrecisionAtK: 1 / 3, meanNdcgAtK: 2 / 7 })]);
+    expect(parseExpected(JSON.stringify(original))).toEqual(original);
+  });
+
+  it("rejects an unreadable or malformed file with the write-expected command named", () => {
+    expect(() => parseExpected("{not json")).toThrow(WRITE_EXPECTED_COMMAND);
+    expect(() => parseExpected("[]")).toThrow(WRITE_EXPECTED_COMMAND);
+    expect(() => parseExpected(JSON.stringify({ recency: { pAtK: 1 } }))).toThrow(/malformed entry for "recency"/);
+  });
+
+  it("refuses to commit a config with no judged scenarios", () => {
+    expect(() => toExpected([report("recency", { meanPrecisionAtK: NaN, meanNdcgAtK: NaN, judgedScenarioCount: 0 })])).toThrow(/no judged scenarios/);
   });
 });

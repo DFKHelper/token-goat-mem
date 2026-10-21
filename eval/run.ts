@@ -1,14 +1,19 @@
 /** `npm run eval` -- prints before/after retrieval-quality numbers for four configurations. Items 1 and 2 are what `"recency"`, `"query-no-stem"`, and `"query-stem"` exist to move between: today's recency-only baseline, query-on (BM25 without stemming), and query+stemming (today's shipped BM25 state) -- all three measured by `rank.ts`'s reduced reimplementation of `retrieve()`'s ranking step. `"pipeline"` (item 4) instead drives the real `retrieve()` end to end -- RRF fusion, entity overlap, graph propagation, anchor re-evaluation, contradiction resolution, and trust classification all run for real, against a real (temp) filesystem and SQLite store built and torn down for this run only (see `eval/pipelineFixture.ts`). Deliberately not part of `npm test`: this generates a 400-fact corpus and 40+ scenarios and ranks all of them four times over -- the `"pipeline"` pass alone does real anchor filesystem I/O and a real SQLite round trip per scenario -- which is unnecessary weight for the correctness gate every commit runs. `tests/unit/eval-harness.test.ts` covers the harness's own correctness (precision/nDCG math, duplicate counting, the no-match-never-filters invariant) on a small fixed input, fast enough to run in the normal suite, and never exercises `"pipeline"`. */
 
-import { join } from "node:path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { generateCorpus } from "./fixtures.js";
 import { generateScenarios } from "./queries.js";
-import { evaluateConfig, type ConfigReport } from "./harness.js";
+import { checkAgainstExpected, evaluateConfig, parseExpected, toExpected, WRITE_EXPECTED_COMMAND, type ConfigReport, type ExpectedReports } from "./harness.js";
 import { buildFsFixture, buildPipelineContext } from "./pipelineFixture.js";
 import type { RankConfig } from "./rank.js";
 
 const K = 8;
+
+/** The committed numbers `--check` compares against and `--write-expected` regenerates. */
+const EXPECTED_PATH = join(dirname(fileURLToPath(import.meta.url)), "expected.json");
 
 /** Fixed clock for the `"pipeline"` configuration's decay/freshness math, alongside `EVAL_SEED` (`fixtures.ts`) as the other source of this run's determinism. Set after the corpus's newest `captured_at` (`generateCorpus`'s dates run up to 2032-08-26 for the default seed/count) so no fact is ever "captured in the future" relative to it. */
 const PIPELINE_NOW = new Date("2033-01-01T00:00:00.000Z");
@@ -33,6 +38,7 @@ function print(line: string): void {
 }
 
 async function main(): Promise<void> {
+  const mode = parseMode(process.argv.slice(2));
   const facts = generateCorpus();
   const scenarios = generateScenarios(facts);
 
@@ -51,9 +57,12 @@ async function main(): Promise<void> {
     )
   );
 
+  const reports: ConfigReport[] = [];
   const baselineConfigs: readonly RankConfig[] = ["recency", "query-no-stem", "query-stem"];
   for (const config of baselineConfigs) {
-    print(formatRow(await evaluateConfig(facts, scenarios, config, K)));
+    const report = await evaluateConfig(facts, scenarios, config, K);
+    reports.push(report);
+    print(formatRow(report));
   }
 
   // The real pipeline needs a resolvable filesystem (anchors) and a real SQLite store (entity/graph signals) -- both built fresh for this run and torn down in `finally`, whatever the outcome.
@@ -61,13 +70,48 @@ async function main(): Promise<void> {
   try {
     const pipelineContext = buildPipelineContext(join(fsFixture.baseDir, "eval.db"), facts, fsFixture.rootMap, PIPELINE_NOW);
     try {
-      print(formatRow(await evaluateConfig(facts, scenarios, "pipeline", K, pipelineContext.rankScenario)));
+      const report = await evaluateConfig(facts, scenarios, "pipeline", K, pipelineContext.rankScenario);
+      reports.push(report);
+      print(formatRow(report));
     } finally {
       pipelineContext.cleanup();
     }
   } finally {
     fsFixture.cleanup();
   }
+
+  if (mode === "write-expected") {
+    writeFileSync(EXPECTED_PATH, `${JSON.stringify(toExpected(reports), null, 2)}\n`, "utf8");
+    print(`\nwrote ${EXPECTED_PATH}`);
+  } else if (mode === "check") {
+    let expected: ExpectedReports;
+    try {
+      expected = parseExpected(readFileSync(EXPECTED_PATH, "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new Error(`eval/expected.json is missing; create it with \`${WRITE_EXPECTED_COMMAND}\``, { cause: error });
+      }
+      throw error;
+    }
+    const outcome = checkAgainstExpected(reports, expected, K);
+    if (outcome.failures.length > 0) {
+      throw new Error(`ranking regression against eval/expected.json:\n${outcome.failures.map((line) => `  ${line}`).join("\n")}`);
+    }
+    print(`\ncheck: ok (${reports.length} configs match eval/expected.json)`);
+    if (outcome.improved) {
+      print(`check: a mean improved; run \`${WRITE_EXPECTED_COMMAND}\` to commit the new numbers`);
+    }
+  }
+}
+
+/** Reads `--check` / `--write-expected` from argv; naming both, or anything else, is an error rather than a silently ignored flag. */
+function parseMode(args: readonly string[]): "report" | "check" | "write-expected" {
+  const flags = new Set(args);
+  const unknown = args.filter((arg) => arg !== "--check" && arg !== "--write-expected");
+  if (unknown.length > 0 || (flags.has("--check") && flags.has("--write-expected"))) {
+    throw new Error("usage: npm run eval -- [--check | --write-expected]");
+  }
+  return flags.has("--check") ? "check" : flags.has("--write-expected") ? "write-expected" : "report";
 }
 
 main().catch((error: unknown) => {

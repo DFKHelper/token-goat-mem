@@ -106,6 +106,8 @@ export function buildPipelineContext(dbPath: string, facts: readonly EvalFact[],
       restrictToRoot: true,
       hintFormat: false,
       now,
+      // The default anchor budget is wall-clock: a slow run would force later anchors to "unverified" and move the committed ranking numbers, so the eval is unbounded.
+      anchorTimeBudgetMs: Number.POSITIVE_INFINITY,
       anchorCacheStore,
       factEntityKeys,
       ...(entityOverlap.size > 0 ? { entityOverlap } : {}),

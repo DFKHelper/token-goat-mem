@@ -74,3 +74,7 @@ jobs:
       # vitest.config.ts, so a chunk of src/ losing its tests fails here instead of silently.
       - name: Test
         run: npm run test:coverage
+
+      # Fails when ranking quality drops against the numbers committed in eval/expected.json.
+      - name: Ranking regression check
+        run: npm run eval -- --check

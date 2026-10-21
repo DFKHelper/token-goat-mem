@@ -114,3 +114,94 @@ export async function evaluateConfig(
     wallTimeMs,
   };
 }
+
+/** One configuration's committed numbers in `eval/expected.json`: the two ranking means and the judged-scenario count they were taken over. */
+export interface ExpectedConfig {
+  readonly pAtK: number;
+  readonly ndcgAtK: number;
+  readonly judged: number;
+}
+
+/** `eval/expected.json`'s content: one entry per configuration the harness runs, keyed by config name. */
+export type ExpectedReports = Readonly<Record<string, ExpectedConfig>>;
+
+/** The command that regenerates `eval/expected.json`, named in every error that says the file is out of step with the harness. */
+export const WRITE_EXPECTED_COMMAND = "npm run eval -- --write-expected";
+
+/** What `checkAgainstExpected` found: `failures` fail the run, `improved` means at least one mean went up (a hint to refresh the file, never a failure). */
+export interface ExpectedCheckOutcome {
+  readonly failures: readonly string[];
+  readonly improved: boolean;
+}
+
+/** Projects reports onto the committed shape. Throws on a non-finite mean (no judged scenarios), which JSON cannot hold and which would make a later check vacuous. */
+export function toExpected(reports: readonly ConfigReport[]): ExpectedReports {
+  const expected: Record<string, ExpectedConfig> = {};
+  for (const report of reports) {
+    if (!Number.isFinite(report.meanPrecisionAtK) || !Number.isFinite(report.meanNdcgAtK)) {
+      throw new Error(`toExpected: config "${report.config}" has no judged scenarios, so it has no numbers to commit`);
+    }
+    expected[report.config] = { pAtK: report.meanPrecisionAtK, ndcgAtK: report.meanNdcgAtK, judged: report.judgedScenarioCount };
+  }
+  return expected;
+}
+
+/** Parses `eval/expected.json` text, throwing a message that names {@link WRITE_EXPECTED_COMMAND} when it is not the committed shape. */
+export function parseExpected(text: string): ExpectedReports {
+  const bad = (why: string): Error => new Error(`eval/expected.json ${why}; regenerate it with \`${WRITE_EXPECTED_COMMAND}\``);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw bad("is not valid JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw bad("is not an object keyed by config");
+  }
+  const expected: Record<string, ExpectedConfig> = {};
+  for (const [config, entry] of Object.entries(parsed)) {
+    const candidate = entry as Partial<Record<keyof ExpectedConfig, unknown>> | null;
+    if (typeof candidate?.pAtK !== "number" || typeof candidate.ndcgAtK !== "number" || typeof candidate.judged !== "number") {
+      throw bad(`has a malformed entry for "${config}"`);
+    }
+    expected[config] = { pAtK: candidate.pAtK, ndcgAtK: candidate.ndcgAtK, judged: candidate.judged };
+  }
+  return expected;
+}
+
+/** Compares `reports` (taken at depth `k`) with the committed numbers. A mean may fall by at most 1/(2*k*judged) -- half of one relevant hit in one scenario, the smallest real change -- an improvement passes, and a changed judged count or config set fails. Anchor-ok and time are not compared. */
+export function checkAgainstExpected(reports: readonly ConfigReport[], expected: ExpectedReports, k: number): ExpectedCheckOutcome {
+  const failures: string[] = [];
+  let improved = false;
+  const actualConfigs: readonly string[] = reports.map((report) => report.config);
+  const missing = actualConfigs.filter((config) => !(config in expected));
+  const extra = Object.keys(expected).filter((config) => !actualConfigs.includes(config));
+  if (missing.length > 0 || extra.length > 0) {
+    failures.push(
+      `config set differs from eval/expected.json (not committed: ${missing.join(", ") || "none"}; no longer run: ${extra.join(", ") || "none"}); run \`${WRITE_EXPECTED_COMMAND}\``
+    );
+  }
+  for (const report of reports) {
+    const committed = expected[report.config];
+    if (committed === undefined) {
+      continue;
+    }
+    if (report.judgedScenarioCount !== committed.judged) {
+      failures.push(`${report.config}: judged scenario count is ${report.judgedScenarioCount}, expected ${committed.judged}`);
+      continue;
+    }
+    const margin = 1 / (2 * k * committed.judged);
+    const measures: readonly (readonly [string, number, number])[] = [
+      ["p@k", report.meanPrecisionAtK, committed.pAtK],
+      ["ndcg@k", report.meanNdcgAtK, committed.ndcgAtK],
+    ];
+    for (const [name, actual, wanted] of measures) {
+      if (!(actual >= wanted - margin)) {
+        failures.push(`${report.config}: ${name} dropped to ${actual} from ${wanted} (allowed drop ${margin})`);
+      } else if (actual > wanted) {
+        improved = true;
+      }
+    }
+  }
+  return { failures, improved };
+}
