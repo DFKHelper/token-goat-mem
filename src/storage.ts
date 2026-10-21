@@ -967,6 +967,11 @@ export function listStaleUnsurfacedFacts(db: Db, beforeIso: string): Fact[] {
   return rows.map(rowToFact);
 }
 
+/** GC primitive: deletes `anchor_cache` rows verified before `beforeIso` or after `afterIso` (ISO 8601; the latter reaches rows stamped in the future, which an age cutoff never does). Safe to prune: a cached verdict is reused only when its witness still matches, never by age, so a deleted row costs one recompute. Returns the number of rows deleted. */
+export function deleteAnchorCacheOlderThan(db: Db, beforeIso: string, afterIso: string): number {
+  return db.prepare("DELETE FROM anchor_cache WHERE verified_at < ? OR verified_at > ?").run(beforeIso, afterIso).changes;
+}
+
 /** GC primitive: deletes recall-log rows surfaced before `beforeIso` (ISO 8601). Returns the number of rows deleted. */
 export function deleteRecallLogOlderThan(db: Db, beforeIso: string): number {
   return db.prepare("DELETE FROM recall_log WHERE surfaced_at < ?").run(beforeIso).changes;

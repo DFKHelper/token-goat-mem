@@ -145,6 +145,7 @@ import {
   createAnchorCacheStore,
   createBufferedAnchorCacheStore,
   deleteFact,
+  deleteAnchorCacheOlderThan,
   deleteRecallLogOlderThan,
   deleteSourcesOlderThan,
   getEmbeddingMeta,
@@ -988,6 +989,8 @@ const GC_AUDIT_LOG_MAX_AGE_DAYS = 180;
 const GC_AUDIT_LOG_MAX_FUTURE_DAYS = 1;
 /** The recall log (`recall_log`: which facts were surfaced to which hook session) is session bookkeeping, not history, but it has two live readers, not zero: a `--delta` recall filters against rows for the *same* session id (`listSurfacedFactIds`), and `getUsefulnessCounts` groups every row store-wide, on both recall paths, to feed the usefulness rank list `mem used` confirms into. A coding-tool session does not live for weeks, so the `--delta` reader stops caring about a row long before this window closes; the usefulness reader keeps caring for as long as the row exists, which is exactly what this window bounds. Same age-only shape as the audit-log window above, with a shorter horizon. */
 const GC_RECALL_LOG_MAX_AGE_DAYS = 30;
+/** Cached anchor verdicts (`anchor_cache`) are reused by witness, never by age, so an old row only costs one recompute; the same 90 days as the superseded and sources bounds, and the same one-day future margin as the audit log. */
+const GC_ANCHOR_CACHE_MAX_AGE_DAYS = 90;
 
 /** Runs the retention/GC pass (design plan Section 6): persists deterministic contradiction resolutions over the live ground-truth pool (pinned facts included -- S8), reports (never rewrites) preference decay, prunes superseded facts and offloaded sources past their GC bounds, and rotates the audit log. Gated behind `mem epoch --gc` rather than running on every plain `mem epoch` call: the design plan's Section 4 explicitly defines `mem epoch` as token-goat's cheap, frequently-polled fallback-cache-invalidation read ("a monotonic mem epoch ... readable via `mem epoch`") -- doing write-heavy GC work on every read would defeat that contract. */
 function runRetentionPass(db: Database.Database): string {
@@ -1030,12 +1033,16 @@ function runRetentionPass(db: Database.Database): string {
   const recallLogCutoff = daysAgoIso(GC_RECALL_LOG_MAX_AGE_DAYS, now);
   const prunedRecallLogRows = deleteRecallLogOlderThan(db, recallLogCutoff);
 
+  const anchorCacheCutoff = daysAgoIso(GC_ANCHOR_CACHE_MAX_AGE_DAYS, now);
+  const anchorCacheFutureCutoff = daysAgoIso(-GC_AUDIT_LOG_MAX_FUTURE_DAYS, now);
+  const prunedAnchorCacheRows = deleteAnchorCacheOlderThan(db, anchorCacheCutoff, anchorCacheFutureCutoff);
+
   const epoch = getEpoch(db);
   const remedyNote = decayedCount > 0 ? `  (mem show <id> to inspect; mem remember to refresh or mem pin to exempt)` : "";
   return (
     `epoch=${epoch}  contradictions_resolved=${updates.length}  preferences_decayed_below_floor=${decayedCount}${remedyNote}  ` +
     `pruned_superseded_facts=${prunedFacts}  pruned_sources=${prunedSources}  pruned_audit_log_rows=${prunedAuditRows}  ` +
-    `pruned_recall_log_rows=${prunedRecallLogRows}`
+    `pruned_recall_log_rows=${prunedRecallLogRows}  pruned_anchor_cache_rows=${prunedAnchorCacheRows}`
   );
 }
 
@@ -2544,7 +2551,7 @@ export function buildProgram(): Command {
   program
     .command("epoch")
     .description("Print the current write epoch (monotonic, bumped on every store write; covers store state only for efficient polling)")
-    .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log/recall bookkeeping, report preference decay")
+    .option("--gc", "Run the retention pass first: persist contradiction resolutions, prune superseded facts/sources/audit log/recall bookkeeping/old anchor verdicts, report preference decay")
     .option("--json", "Output machine-readable JSON (unstable, pre-1.0)")
     .action(
       guard(async (options: EpochCliOptions) => {

@@ -796,6 +796,43 @@ describe("mem epoch --gc prunes audit rows stamped in the future", () => {
   });
 });
 
+describe("mem epoch --gc prunes old and future-stamped anchor verdicts", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function seedAnchorRow(anchor: string, offsetMs: number): void {
+    const db = openDb(resolveDbPath());
+    try {
+      db.prepare("INSERT INTO anchor_cache (root, anchor, verdict, verified_at, witness) VALUES (?, ?, 'affirmed', ?, NULL)").run(
+        "seed-root",
+        anchor,
+        new Date(Date.now() + offsetMs).toISOString()
+      );
+    } finally {
+      db.close();
+    }
+  }
+
+  function seededAnchors(): string[] {
+    const db = openDb(resolveDbPath());
+    try {
+      return (db.prepare("SELECT anchor FROM anchor_cache WHERE root = 'seed-root' ORDER BY anchor").all() as { anchor: string }[]).map((row) => row.anchor);
+    } finally {
+      db.close();
+    }
+  }
+
+  it("removes a 91-day-old row and a row stamped 2 days ahead, keeps a 1-day-old row, and reports the count", async () => {
+    seedAnchorRow("seed-91-days-old", -91 * DAY_MS);
+    seedAnchorRow("seed-1-day-old", -1 * DAY_MS);
+    seedAnchorRow("seed-2-days-ahead", 2 * DAY_MS);
+
+    const gc = await runCli(["epoch", "--gc"]);
+    expect(gc.exitCode, gc.stderr).toBe(0);
+    expect(gc.stdout).toMatch(/pruned_anchor_cache_rows=2\b/u);
+    expect(seededAnchors()).toEqual(["seed-1-day-old"]);
+  });
+});
+
 describe("mem dream", () => {
   const URL_ENV = "TOKEN_GOAT_MEM_DREAM_URL";
   const MODEL_ENV = "TOKEN_GOAT_MEM_DREAM_MODEL";
