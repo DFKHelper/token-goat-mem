@@ -296,6 +296,11 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
   }
 }
 
+/** The `stable` ordering for every emitted fact-line, the time-out path's pins included: by fact id when `stable`, otherwise the order given. */
+function inStableOrder(results: readonly RetrievedFact[], stable: boolean): RetrievedFact[] {
+  return stable ? [...results].sort((a, b) => compareFactIds(a.fact.id, b.fact.id)) : [...results];
+}
+
 async function buildHintFormatUnsafe(options: HintFormatOptions, start: number): Promise<HintFormatResult> {
   // Anchor verdicts are memoized for the lifetime of the process, which is exactly one query for the `mem` CLI but unbounded for an embedder holding this module across calls -- there, a first-ever verdict would be served forever no matter what changed on disk. One logical hint-format query is the correct cache lifetime, so each call starts from a clean slate.
   clearAnchorCaches();
@@ -396,7 +401,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions, start: number):
   if (truncated) {
     // Only the pinned reserve, not a smaller slice of the ranked facts: see RETRIEVAL_BUDGET_MS. The footer-line is what tells the consumer the rest was cut, so a response that carries pins always carries it; TGMEM/1 has no footer-line to say so, which is why it stays empty there.
     logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning a budget-exhausted footer`);
-    const pins = protocolVersion === 2 ? wireSafeOnly(pinnedReserveOf(results)) : [];
+    const pins = protocolVersion === 2 ? wireSafeOnly(inStableOrder(pinnedReserveOf(results), stable)) : [];
     // With no pin this records no fact ids, so nothing is marked surfaced, but the anchor verdicts this run already computed (cut-short ones never reach the buffer) are kept for the next run instead of paid for twice. The budget is already spent, so this write must not queue behind another writer: with no wait a locked store fails the write at once, `recordSurfaced`/`markSurfaced` swallow that, and the unflushed verdicts are simply recomputed next run.
     recordEmission(pins.map((result) => result.fact.id), { busyTimeoutMs: TIMED_OUT_WRITE_BUSY_TIMEOUT_MS });
     // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget exhaustion on that version is silently identical to an empty one -- the same limitation the other two failure branches in this file already accept for the same reason.
@@ -429,10 +434,7 @@ async function buildHintFormatUnsafe(options: HintFormatOptions, start: number):
   const aggressive = applyElbowCutoff(contested.filter((result) => AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, AGGRESSIVE_CAP));
   const precision = applyElbowCutoff(contested.filter((result) => !AGGRESSIVE_KINDS.has(result.fact.kind)).slice(0, PRECISION_CAP));
 
-  const ordered = [...reserved, ...aggressive, ...precision];
-  if (stable) {
-    ordered.sort((a, b) => compareFactIds(a.fact.id, b.fact.id));
-  }
+  const ordered = inStableOrder([...reserved, ...aggressive, ...precision], stable);
 
   const emittable = wireSafeOnly(ordered);
 

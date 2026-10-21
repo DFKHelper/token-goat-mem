@@ -1905,6 +1905,34 @@ describe("the anchor deadline leaves room for the steps after it", () => {
     expect(cachedAnchors()).toEqual(expect.arrayContaining([...kept]));
   });
 
+  it("--stable orders the pins a timed-out run emits by fact id, as a healthy run does", async () => {
+    seedAnchored(4, "decision");
+    seedFacts(
+      dbPath,
+      [
+        { id: "pin-b", captured_at: "2026-07-02T00:00:00.000Z" },
+        { id: "pin-a", captured_at: "2026-07-01T00:00:00.000Z" },
+      ].map(({ id, captured_at }) => ({
+        id,
+        text: `pinned fact ${id}`,
+        kind: "preference" as const,
+        scope: "global" as const,
+        source_type: "user" as const,
+        captured_at,
+        status: "pinned" as const,
+      }))
+    );
+    const pinIds = (result: HintFormatResult): string[] => factLines(result).map((line) => line.split("  ")[2] ?? "");
+    scriptedClock(10, 1_000_000);
+    const ranked = await buildHintFormat({ root, dbPath, retrievalBudgetMs: 100 });
+    const stable = await buildHintFormat({ root, dbPath, retrievalBudgetMs: 100, stable: true });
+    vi.restoreAllMocks();
+    expect(ranked.truncated).toBe(true);
+    expect(stable.truncated).toBe(true);
+    expect(pinIds(ranked), "without --stable the time-out keeps rank order, newest pin first").toEqual(["id=pin-b", "id=pin-a"]);
+    expect(pinIds(stable), "--stable sorts the time-out pins by fact id").toEqual(["id=pin-a", "id=pin-b"]);
+  });
+
   it("keeps the pinned reserve when the run times out, behind a footer saying the rest was cut for time", async () => {
     seedAnchored(4, "decision");
     seedFacts(
