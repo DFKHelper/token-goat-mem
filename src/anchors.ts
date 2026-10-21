@@ -1,5 +1,6 @@
 /** Anchor evaluation (design plan P3, Section 3, review S1/S4). An anchor is a read-only predicate string stored on a `Fact` that tests the fact's *proposition* against real filesystem/git state — never a proxy for it (S1: "package-lock.json exists" does not verify "uses npm", because a stale lockfile lingering after a switch is exactly the bug an anchor must catch). Evaluation is three-valued, never a bare boolean: - `affirmed`     — the predicate positively confirms the proposition. Ground-truth eligible. - `unverified`    — the predicate cannot confirm or deny (missing files, no git repo, malformed anchor, budget exceeded, or `anchor === null`). Hint-to-verify only. - `contradicted` — the predicate positively denies the proposition. Suppressed from ground truth. v1 supports filesystem/git predicates only (S4) — no "command output contains" / arbitrary-shell anchors, and (deliberately stricter than the plan's minimum) no subprocess execution of any kind: this module never shells out to `git` or anything else. `git-branch-is` and `git-tracked` are answered by reading `.git/HEAD` and parsing `.git/index` directly, so anchor evaluation has zero dependency on an external binary being installed, on PATH, or behaving a particular way across versions — it is pure, synchronous, and bounded by nothing but disk I/O. Every predicate evaluates against an explicit `root` (never ambient `process.cwd()`), and every path argument is resolved and must stay within `root` (no traversal, no symlink escapes) — root-containment alone does not stop a symlink *inside* `root` from pointing *outside* it, so every path-based predicate additionally refuses to follow a symlink at the target path or at any directory component between `root` and the target (`glob-exists` does this by skipping symlinked entries during its directory walk; every other path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`, `package-version`, `file-newer-than`, `newest-of` — does it via an explicit `lstatSync`-based check before any `statSync`/`readFileSync` of the resolved path(s)) — an anchor string can originate from a `derived` (lower-trust) fact, so a malformed or adversarial anchor is rejected as unverified. A detected symlink escape is uniformly `unverified` across every path-based predicate — `file-exists`, `file-absent`, `file-contains`/`file-not-contains`, `file-newer-than`, `newest-of`, and `package-version` alike (Fix 3). A symlink means mem cannot safely resolve or read the path, so it can assert neither presence/absence, the substring's presence/absence, nor the result of a comparison it never actually performed. An earlier version of this policy returned `contradicted` for `file-newer-than`/`newest-of`/`package-version` on the reasoning that none of the three has a negated *predicate name* that `contradicted` could turn into "exactly the lie" the other predicates avoid — but the absence of a negated predicate name doesn't make a negated *verdict* honest: `file-newer-than` contradicted still asserts "a is not newer than b", `newest-of` contradicted still asserts "the expected file is not the newest", and `package-version` contradicted still asserts "the manifest does not declare that version" — each a positive claim about the filesystem derived from a comparison mem refused to perform, which is P3's exact prohibition regardless of whether the predicate has a negated name. Predicates: `file-exists <path>`, `file-absent <path>`, `file-newer-than <a> <b>`, `file-contains <path> <substring...>`, `file-not-contains <path> <substring...>`, `newest-of <expected> <candidate...>` (the direct implementation of the plan's P3 headline example, "the newest lockfile is pnpm-lock.yaml"), `glob-exists <pattern>` (Section 3's "glob match"), `git-branch-is <branch>`, `git-tracked <path>`, `package-version <path> <name>@<expected>` (declared-manifest check only — see that predicate's own doc comment for the deliberate fence against real semver-range-satisfaction or lockfile parsing). mem is a short-lived, single-shot CLI process (Section 3) — there is no cross-process cache to invalidate. The in-memory memoization here exists only to avoid re-stat'ing / re-reading / re-parsing shared inputs (a fact's full anchor result, a repo's parsed `.git/index`, a resolved `.git` dir) for the common case of many facts sharing one root or one anchor within a single `mem` invocation; it is safe precisely because the process does not live long enough for the underlying mtimes to change under it. */
 
+import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -90,11 +91,26 @@ function mtimeOrNull(path: string): number | StatOutcome {
   }
 }
 
+/** The stat part of a persistent-cache witness: mtime and size plus ctime and inode, so a rewrite that restores the mtime still moves ctime on a filesystem whose ctime ticks finely enough. Not sufficient alone where ctime ticks coarsely (measured on Windows NTFS: two rewrites inside one tick share a ctime), so a predicate that reads the content adds a hash of it ({@link readWithContentWitness}). A witness in the older `f:<mtime>:<size>` shape never equals this one, so an old cache row is a miss. */
+function fileStatWitness(stat: { mtimeMs: number; size: number; ctimeMs: number; ino: number }): string {
+  return `f:${stat.mtimeMs}:${stat.size}:${stat.ctimeMs}:${stat.ino}`;
+}
+
+/** Reads a file whose content a predicate evaluates and returns the bytes with the witness to cache their verdict under: the stat witness plus a SHA-256 of the bytes, because ctime only moves with the filesystem clock tick, so two rewrites inside one tick with the same size and a restored mtime would otherwise share a witness and the second would reuse the first's verdict. The bytes are read once and evaluated, so the witness always describes the content the verdict is computed from. `null` when the file cannot be read: no witness, no caching, and the caller reports `unverified`. */
+function readWithContentWitness(path: string, stat: { mtimeMs: number; size: number; ctimeMs: number; ino: number }): { bytes: Buffer; witness: string } | null {
+  try {
+    const bytes = readFileSync(path);
+    return { bytes, witness: `${fileStatWitness(stat)}:${createHash("sha256").update(bytes).digest("hex")}` };
+  } catch {
+    return null;
+  }
+}
+
 /** A cheap, deterministic fingerprint of `path` for the persistent anchor cache (mtime + size, not mtime alone -- two edits landing in the same millisecond with the same byte count is the only gap mtime alone would miss, and size is free once `statSync` has already run). `"absent"` when the path genuinely does not exist (itself a valid, cacheable witness: an anchor that reads "no such file" today reads the same tomorrow unless something is created there). `null` when the state could not be determined for any other reason ({@link isGenuineAbsence}) -- not a sound basis for either reusing or writing a cached verdict, same reasoning as the missing-root check in {@link evaluateAnchor}. */
 function statWitness(path: string): string | null {
   try {
     const stat = statSync(path);
-    return `f:${stat.mtimeMs}:${stat.size}`;
+    return fileStatWitness(stat);
   } catch (error) {
     return isGenuineAbsence(error) ? "absent" : null;
   }
@@ -208,15 +224,19 @@ function evaluateFileContains(
   if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
     return "unverified";
   }
-  // Persistent cache: reusing this file's `statWitness` costs one syscall this function already paid for above, and spares the read + full-content scan below -- the actual expense this predicate exists to bound (`MAX_CONTENT_READ_BYTES`). `file-exists`/`file-absent` get no equivalent treatment because for them the predicate *is* the stat above; there is nothing left to spare by caching.
-  const witness = `f:${stat.mtimeMs}:${stat.size}`;
+  // Persistent cache: the witness hashes the bytes read (bounded by `MAX_CONTENT_READ_BYTES`), so a hit spares only the decode and scan below; reusing a verdict for changed content is the defect this witness exists to prevent. `file-exists`/`file-absent` get no equivalent treatment because for them the predicate *is* the stat above.
+  const read = readWithContentWitness(path, stat);
+  if (read === null) {
+    return "unverified";
+  }
+  const witness = read.witness;
   const cached = tryPersistentCache(cacheStore, root, anchor, witness);
   if (cached !== undefined) {
     return cached;
   }
   let content: string;
   try {
-    content = new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path));
+    content = new TextDecoder("utf-8", { fatal: true }).decode(read.bytes);
   } catch {
     return "unverified";
   }
@@ -251,13 +271,7 @@ function comparePackageVersion(declared: string, expected: string): AnchorVerdic
 }
 
 /** The post-stat body of `evaluatePackageVersion`, split out so the cache check below it has a single verdict to persist rather than one for each of this function's several early returns. */
-function evaluatePackageVersionContent(path: string, name: string, version: string): AnchorVerdict {
-  let content: string;
-  try {
-    content = readFileSync(path, "utf8");
-  } catch {
-    return "unverified";
-  }
+function evaluatePackageVersionContent(content: string, name: string, version: string): AnchorVerdict {
   let manifest: unknown;
   try {
     manifest = JSON.parse(content);
@@ -309,13 +323,17 @@ function evaluatePackageVersion(
   if (!stat.isFile() || stat.size > MAX_CONTENT_READ_BYTES) {
     return "unverified";
   }
-  // Persistent cache: this predicate reads and JSON-parses the whole manifest -- materially dearer than the stat above, which is all `evaluatePackageVersionContent` would otherwise cost to redo on every call for an unchanged manifest.
-  const witness = `f:${stat.mtimeMs}:${stat.size}`;
+  // Persistent cache: the witness hashes the manifest bytes read (bounded by `MAX_CONTENT_READ_BYTES`), so a hit spares only the JSON parse below.
+  const read = readWithContentWitness(path, stat);
+  if (read === null) {
+    return "unverified";
+  }
+  const witness = read.witness;
   const cached = tryPersistentCache(cacheStore, root, anchor, witness);
   if (cached !== undefined) {
     return cached;
   }
-  const verdict = evaluatePackageVersionContent(path, name, version);
+  const verdict = evaluatePackageVersionContent(read.bytes.toString("utf8"), name, version);
   persistVerdict(cacheStore, root, anchor, verdict, witness);
   return verdict;
 }

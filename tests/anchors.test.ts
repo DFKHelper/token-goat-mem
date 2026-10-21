@@ -618,6 +618,32 @@ describe("evaluateAnchor", () => {
       expect(recorded?.verdict).toBe("contradicted");
     });
 
+    it("re-evaluates when the content is replaced at the same size and a restored mtime", () => {
+      const store = new FakeAnchorCacheStore();
+      const file = join(root, "mode.txt");
+      writeFileSync(file, "enabled");
+      touch(file, "2020-01-01");
+      expect(evaluateAnchor("file-contains mode.txt enabled", root, undefined, undefined, store)).toBe("affirmed");
+
+      writeFileSync(file, "disable");
+      touch(file, "2020-01-01");
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("file-contains mode.txt enabled", root, undefined, undefined, store)).toBe("contradicted");
+    });
+
+    it("re-evaluates a package-version manifest replaced at the same size and a restored mtime", () => {
+      const store = new FakeAnchorCacheStore();
+      const file = join(root, "package.json");
+      writeFileSync(file, JSON.stringify({ dependencies: { react: "18.2.0" } }));
+      touch(file, "2020-01-01");
+      expect(evaluateAnchor("package-version package.json react@18", root, undefined, undefined, store)).toBe("affirmed");
+
+      writeFileSync(file, JSON.stringify({ dependencies: { react: "19.2.0" } }));
+      touch(file, "2020-01-01");
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("package-version package.json react@18", root, undefined, undefined, store)).toBe("contradicted");
+    });
+
     it("caches package-version and git-tracked the same way (witness-gated reuse)", () => {
       const store = new FakeAnchorCacheStore();
       writeFileSync(join(root, "package.json"), JSON.stringify({ dependencies: { react: "18.2.0" } }));

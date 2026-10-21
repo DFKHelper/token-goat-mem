@@ -17,6 +17,7 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ### Fixed
 
+- **A file rewritten at the same size and mtime no longer keeps its cached verdict.** The cache witness for `file-contains`, `file-not-contains` and `package-version` now includes a hash of the bytes evaluated, and the witness for the git index also includes ctime and inode, so content replaced with the same size and a restored mtime is re-checked instead of surfacing the old `affirmed`.
 - **Recall order is the same on every run.** Facts with equal scores and equal capture times were left in store order; ties now break on fact id, in plain code-unit order, so the same store always recalls in the same order.
 - **`mem show --related` lists equally related facts in one order.** Related facts with the same score and capture time were left in store order; ties now break on fact id, the same plain code-unit order recall uses.
 - **`mem dream`, `mem review` and `mem epoch --gc` order equal facts the same way on every run.** Facts with the same capture time (or, for `--gc`, the same time they were superseded) were left in store order, which decided which facts `mem dream` sent, how `mem review` listed pending facts, and which superseded facts the row cap removed; ties now break on fact id. `--stable` output (`mem recall` and the hint format) now sorts ids in plain code-unit order, the same as recall, instead of by locale.
