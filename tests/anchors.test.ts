@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -657,12 +657,39 @@ describe("evaluateAnchor", () => {
       );
 
       copyTrackedTemplate(root);
+      touch(join(root, ".git", "index"), "2020-01-01");
       expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("affirmed");
       const gitKey = store.get(root, "git-tracked tracked.txt");
       expect(gitKey).toBeDefined();
       store.set(root, "git-tracked tracked.txt", "contradicted", gitKey?.witness ?? null);
       _clearAnchorMemoForTests();
       expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("contradicted");
+    });
+
+    it("re-evaluates a git-tracked verdict whose index was rewritten inside the racy window", () => {
+      const store = new FakeAnchorCacheStore();
+      copyTrackedTemplate(root);
+      const indexPath = join(root, ".git", "index");
+      const original = readFileSync(indexPath);
+      const futureMtime = new Date(Date.now() + 3_600_000);
+      utimesSync(indexPath, futureMtime, futureMtime);
+      expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("affirmed");
+      expect(store.get(root, "git-tracked tracked.txt")).toBeUndefined();
+      const rewritten = Buffer.from(original.toString("latin1").replace("tracked.txt", "trackex.txt"), "latin1");
+      expect(rewritten.length).toBe(original.length);
+      writeFileSync(indexPath, rewritten);
+      utimesSync(indexPath, futureMtime, futureMtime);
+      _clearAnchorMemoForTests();
+      expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("contradicted");
+    });
+
+    it("reuses a git-tracked verdict once the index is older than the racy window", () => {
+      const store = new FakeAnchorCacheStore();
+      copyTrackedTemplate(root);
+      const indexPath = join(root, ".git", "index");
+      touch(indexPath, "2020-01-01");
+      expect(evaluateAnchor("git-tracked tracked.txt", root, undefined, undefined, store)).toBe("affirmed");
+      expect(store.get(root, "git-tracked tracked.txt")?.verdict).toBe("affirmed");
     });
 
     it("never persists a budget-exhausted unverified verdict", () => {

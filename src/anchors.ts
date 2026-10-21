@@ -106,16 +106,6 @@ function readWithContentWitness(path: string, stat: { mtimeMs: number; size: num
   }
 }
 
-/** A cheap, deterministic fingerprint of `path` for the persistent anchor cache (mtime + size, not mtime alone -- two edits landing in the same millisecond with the same byte count is the only gap mtime alone would miss, and size is free once `statSync` has already run). `"absent"` when the path genuinely does not exist (itself a valid, cacheable witness: an anchor that reads "no such file" today reads the same tomorrow unless something is created there). `null` when the state could not be determined for any other reason ({@link isGenuineAbsence}) -- not a sound basis for either reusing or writing a cached verdict, same reasoning as the missing-root check in {@link evaluateAnchor}. */
-function statWitness(path: string): string | null {
-  try {
-    const stat = statSync(path);
-    return fileStatWitness(stat);
-  } catch (error) {
-    return isGenuineAbsence(error) ? "absent" : null;
-  }
-}
-
 /** Returns `true` if `target` itself, or any directory component between `root` and `target`, is a symlink. Root-containment (`resolveWithinRoot`) only guarantees the *resolved* path stays inside `root` — it says nothing about whether a symlink somewhere along that path hops outside `root` before the filesystem gets there, so this is a separate, additional check. Mirrors `glob-exists`'s own symlink refusal (it skips any `entry.isSymbolicLink()` encountered while walking, at every directory level and for the final matched entry) for callers that stat/read a single resolved path directly instead of walking a directory tree: every path component from `root` down to `target` is `lstatSync`'d in turn, so a symlink anywhere in the chain — not just at the final component — is caught. A missing component (nothing to detect, nothing to leak) is treated as "no symlink found" and left for the caller's own `statSync`/`readFileSync` to report as missing. */
 function containsSymlink(root: string, target: string): boolean {
   const rel = relative(root, target);
@@ -751,6 +741,19 @@ function evaluateGitTrackedUncached(root: string, resolvedPath: string, gitDir: 
   return complete ? "contradicted" : "unverified";
 }
 
+/** Timestamp granularity assumed when judging whether an index is racy: the coarsest filesystem timestamp tick in use (FAT's two seconds). */
+const RACY_INDEX_WINDOW_MS = 2000;
+
+/** The persistent-cache witness for `.git/index` plus whether it is settled, git's own "racy" rule applied on the write side: an index whose mtime is within {@link RACY_INDEX_WINDOW_MS} of now (or in the future) may be rewritten again inside the same tick with the same size and an unmoved ctime, so a verdict computed from it is not persisted. Once the index is older than the window any later rewrite carries a later mtime, so the stat witness alone is sound. The `g:` prefix keeps a row stored under the earlier unprefixed shape from matching. `null` witness when the state cannot be determined. */
+function gitIndexWitness(indexPath: string, now: number = Date.now()): { witness: string | null; settled: boolean } {
+  try {
+    const stat = statSync(indexPath);
+    return { witness: `g:${fileStatWitness(stat)}`, settled: now - stat.mtimeMs > RACY_INDEX_WINDOW_MS };
+  } catch (error) {
+    return { witness: isGenuineAbsence(error) ? "absent" : null, settled: true };
+  }
+}
+
 /** `git-tracked <path>` — parses `.git/index` directly (no `git` subprocess). `path` may name a tracked file directly, or a directory that contains at least one tracked path — the index has no entry for a directory itself, so treating a directory target as "never tracked" would contradict the README's own promise that `git-tracked <dir>` works. Affirmed if `path` (relative to `root`) appears in the index's entry table, or some entry lives under it as a directory; unverified if `root` is not a git working tree, the index cannot be confidently parsed (e.g. index format version 4, corrupt header), or `path` is absent from the entry table but the index carries a mandatory extension this parser cannot account for ({@link GitIndexParseResult.complete}) — a split index's `link` extension means the main index's entry table omits paths unchanged since the last split, and a sparse index's `sdir` extension means an entire directory outside the sparse-checkout cone collapses into one entry, so a path under it never appears individually; either way, "not listed" is not "not tracked" and asserting `contradicted` here would be exactly the fabrication P3 forbids. Only when the entry table is the *complete* set of tracked paths does an absence become `contradicted`. */
 function evaluateGitTracked(root: string, resolvedPath: string, anchor: string, cacheStore: AnchorCacheStore | undefined): AnchorVerdict {
   const gitDir = resolveGitDir(root);
@@ -758,13 +761,14 @@ function evaluateGitTracked(root: string, resolvedPath: string, anchor: string, 
     return "unverified";
   }
   // Persistent cache: `.git/index`'s own stat is the witness, never `resolvedPath`'s -- whether a path is tracked is entirely a property of the index's contents, and the target file's own mtime is irrelevant to that (`git add`/`git rm` changes the index without touching the target file at all, and renaming a tracked path in the index changes nothing about the file on disk). An unchanged index stat means the parsed path set -- and therefore this verdict, for any path -- provably cannot have changed; this is also materially dearer to skip than a stat: parsing `.git/index` reads and walks its whole entry table (`readGitIndexPathsUncached`), which the in-process `gitIndexCache` already spares within one process but not across new ones.
-  const witness = statWitness(join(gitDir, "index"));
+  const { witness, settled } = gitIndexWitness(join(gitDir, "index"));
   const cached = tryPersistentCache(cacheStore, root, anchor, witness);
   if (cached !== undefined) {
     return cached;
   }
   const verdict = evaluateGitTrackedUncached(root, resolvedPath, gitDir);
-  persistVerdict(cacheStore, root, anchor, verdict, witness);
+  // A verdict computed from an index still inside the racy window is never stored: a rewrite in the same timestamp tick can keep this witness.
+  persistVerdict(cacheStore, root, anchor, verdict, settled ? witness : null);
   return verdict;
 }
 
