@@ -471,7 +471,7 @@ export function registerDoctorCommand(program: Command): void {
     .command("doctor")
     .description(
       "Environment/DB health check that changes no fact or file: db path, WAL mode, foreign keys, schema tables and pending migrations, integrity, epoch, fact counts by status, source and audit_log row counts, " +
-        "embedding configuration and coverage, dream configuration, how many decisions and corrections carry a why, term coverage, how much of the store fits in one recall block, when recall last surfaced a fact, " +
+        "embedding configuration and coverage, dream configuration, how many decisions and corrections carry a why, term coverage, how much of the store fits in one recall block, when recall last surfaced a fact, how recorded prompt-hint runs ended (out of time, store unreadable, internal error), " +
         "project/path-scoped facts whose root is gone, backup snapshots, installed Claude Code hooks (can the mem on PATH run each one, is a hook in the legacy shape that `mem init claude-code` rewrites to `mem hook <event>`, " +
         "or did a probe of that mem time out), project-versus-user hook divergence, mem launch time, and wiring drift per tool. " +
         "The one network call is --probe-embeddings, which makes a single embed request to the configured embedding endpoint. " +

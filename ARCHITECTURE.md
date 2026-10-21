@@ -27,7 +27,9 @@ Ranking is hybrid: BM25 over Porter-stemmed, stopword-filtered text, fused by re
 An auxiliary list contributes only when it is non-empty, and the BM25 list only when some score in
 it is above zero: an all-zero BM25 list is a ranking, but not a signal -- its sort has fallen through
 to the `captured_at` tie-break, and feeding that pure recency order into RRF let recency outvote a
-real embedding match.
+real embedding match. Every ranking sort ends on the same two keys, newest `captured_at` and then
+fact id (plain code-unit order, `compareFactIds`), so facts with equal scores recall in one order
+whatever order the store lists them in.
 
 The graph signal (`src/factgraph.ts`) propagates score across the co-occurrence edges between facts
 that share entity vocabulary, so a fact the query never mentions can surface on the strength of its
@@ -48,7 +50,11 @@ is what keeps the ranking module free of any knowledge of storage or facet extra
 Trust (`ground-truth`, `hint`, or `withheld`) is computed per query and never stored. Anchors --
 read-only predicates attached to a `Fact` -- are re-evaluated on every recall under a time budget; a
 budget-exhausted check reads as `unverified`, which classifies as `hint` rather than being suppressed
-outright, so a slow filesystem never silently drops a fact from view.
+outright, so a slow filesystem never silently drops a fact from view. Anchors are evaluated in rank
+order (pinned facts first), so when the shared deadline runs out mid-loop the facts cut short to
+`unverified` are the lowest-ranked ones. An `unverified` verdict also carries a reason, one of
+`no-anchor`, `root-missing`, `undecidable` or `out-of-time` (`UnverifiedReason` in `src/anchors.ts`),
+which `mem show` and `mem review` print and `mem show --json` exposes as `freshnessReason`.
 
 Verdicts persist in `anchor_cache`, keyed by `(root, anchor)` and carrying a `witness` (an mtime, a
 hash, a git ref) so a later evaluation can treat a mismatch as a miss rather than trusting a stale
@@ -56,7 +62,9 @@ hash, a git ref) so a later evaluation can treat a mismatch as a miss rather tha
 sessions. Which roots get prefetched is not a free choice: `anchorRootsFor` derives them from the
 same `anchorRootFor` the evaluation itself uses, because a root computed any other way produces a
 key the lookup never hits -- a silent, verdict-correct miss that re-evaluates every anchor while
-every test still passes.
+every test still passes. `mem epoch --gc` deletes cache rows older than 90 days or stamped in the
+future; a deleted verdict costs one re-evaluation, never a wrong answer, since a row is reused only
+when its witness still matches.
 
 Facts of kind `preference` decay on a 180-day half-life computed fresh from `captured_at` on every
 read and never persisted back to storage. Decay can demote a fact from `ground-truth` to `hint`, and
@@ -96,6 +104,20 @@ caller like token-goat to consume via `mem recall --hint-format`. Line shape, fi
 and the closed tag/verdict sets are version-committed; the footer's prose is explicitly not, so it can
 change without bumping the wire version.
 
+A hint run spends its soft budget in two parts: the anchor checks get all of it but a fixed
+`POST_ANCHOR_RESERVE_MS` (25 ms), which is kept for ranking, formatting and recording the result. A
+run that still runs out of time emits only the pinned reserve followed by its own footer line
+(`BUDGET_EXHAUSTED_PINNED_FOOTER_LINE`), or the older empty-set footer when nothing is pinned, and
+keeps the anchor verdicts it had already computed for the next run. `TGMEM/1` has no footer line, so
+it still gets nothing.
+
+Each hint run ends by appending one JSON line to `hook-outcomes.log` beside the store
+(`src/hookOutcomes.ts`): hook, outcome (`ok`, `out-of-time`, `store-unreadable`, `internal-error`),
+duration and the number of anchor checks the budget cut short. The log rotates to `.log.1` at 256 KiB
+and every failure to write it is swallowed, since a diagnostic must not cost a hook its budget or
+change its output. `mem doctor` summarizes both files from the file system rather than the store, so
+it still counts the runs that met an unreadable store.
+
 ## Measuring ranking (`eval/`)
 
 `eval/` is a ranking-quality harness, not a test: `npm run eval` runs it, and `npm test` deliberately
@@ -120,6 +142,10 @@ scope-eligible count instead charges the result limit, unconditional superseded-
 
 `eval/` sits outside `.arch-doc-sync.json`'s roots, so the generated table below does not cover it --
 which is exactly why it is described here.
+
+`npm run eval -- --check` compares the four configurations' means against the committed
+`eval/expected.json` and fails on a regression (an improvement only hints to refresh the file);
+`npm run eval -- --write-expected` regenerates it after an intended ranking change. CI runs the check.
 
 ## Keeping this map current
 
