@@ -225,16 +225,55 @@ function lockIsStale(lockPath: string, holder: number | undefined): boolean {
   }
 }
 
+/** Creates the takeover lock at `takeoverPath` and returns true, or returns false when a live taker holds it. A takeover lock whose holder is gone is cleared once and the create tried again, so a taker killed mid-takeover never wedges every later writer. */
+function acquireTakeoverLock(takeoverPath: string): boolean {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      createLockFile(takeoverPath, undefined);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
+        throw error;
+      }
+    }
+    if (!clearStaleTakeoverLock(takeoverPath)) {
+      return false;
+    }
+  }
+  return false;
+}
+
+/** Removes the takeover lock at `takeoverPath` if its holder is gone, by renaming it to a unique name and judging the renamed file again, and returns whether it was removed. */
+function clearStaleTakeoverLock(takeoverPath: string): boolean {
+  if (!lockIsStale(takeoverPath, readLockPid(takeoverPath))) {
+    return false;
+  }
+  const aside = `${takeoverPath}.stale-${process.pid}-${randomUUID()}`;
+  try {
+    // Atomic: of several clearers one rename succeeds and the rest see ENOENT, and none touches the main lock; any failure only means this taker waits, and the budget error then names the file.
+    renameSync(takeoverPath, aside);
+  } catch {
+    return false;
+  }
+  if (lockIsStale(aside, readLockPid(aside))) {
+    rmSync(aside, { force: true });
+    return true;
+  }
+  // The file moved was a live taker's, created after the first judgement: put it back (never over another file) and leave it be.
+  try {
+    linkSync(aside, takeoverPath);
+  } catch {
+    // Another taker already created a new one; the moved file is released with its holder.
+  }
+  rmSync(aside, { force: true });
+  return false;
+}
+
 /** Removes the lock at `lockPath` if it is stale, as the one taker holding the sibling `.takeover` lock, and returns whether it held that lock (false means another taker is mid-takeover, so nothing was touched). The lock is judged again once the takeover lock is held, and removed only if it is still stale: a lock a rival created after the first judgement is live, so it is left alone, and since no other taker can remove or replace the lock while this one holds the takeover lock, nothing sits between that judgement and the removal. A lock is never moved aside, so no writer's lock is ever absent from its path for another to acquire in. */
 function takeOverStaleLock(lockPath: string): boolean {
   const takeoverPath = `${lockPath}.takeover`;
-  try {
-    createLockFile(takeoverPath, undefined);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      return false;
-    }
-    throw error;
+  if (!acquireTakeoverLock(takeoverPath)) {
+    return false;
   }
   try {
     if (lockIsStale(lockPath, readLockPid(lockPath))) {
@@ -246,7 +285,7 @@ function takeOverStaleLock(lockPath: string): boolean {
   }
 }
 
-/** Creates `<path>.token-goat-mem.lock` exclusively, recording this process's pid, and returns the function that removes it. A lock held by a live process is waited for within the budget; one whose recorded pid no process holds was left by a crash and is taken over, by liveness and not by age; one with no readable pid is held while fresh and taken over once `PIDLESS_LOCK_STALE_MS` old. A takeover re-judges the lock under a sibling `.takeover` lock and removes it only if it is still stale, so a live lock a rival just created is never removed and one taker at a time removes a stale one. A pid reused by an unrelated live process keeps its dead owner's lock held until that process ends, since telling them apart needs a platform process query. Past the budget it throws `WiringLockError` rather than write without the lock. Creates the parent directory, since the lock sits beside a file that may not exist yet. */
+/** Creates `<path>.token-goat-mem.lock` exclusively, recording this process's pid, and returns the function that removes it. A lock held by a live process is waited for within the budget; one whose recorded pid no process holds was left by a crash and is taken over, by liveness and not by age; one with no readable pid is held while fresh and taken over once `PIDLESS_LOCK_STALE_MS` old. A takeover re-judges the lock under a sibling `.takeover` lock and removes it only if it is still stale, so a live lock a rival just created is never removed and one taker at a time removes a stale one; a takeover lock left by a dead taker is cleared by a unique-name rename that is judged again, so only one clearer wins and a live taker's lock is put back. A pid reused by an unrelated live process keeps its dead owner's lock held until that process ends, since telling them apart needs a platform process query. Past the budget it throws `WiringLockError` rather than write without the lock. Creates the parent directory, since the lock sits beside a file that may not exist yet. */
 function acquireManagedFileLock(path: string, options: ManagedFileLockOptions | undefined): () => void {
   const lockPath = `${path}${MANAGED_FILE_LOCK_SUFFIX}`;
   const waitMs = options?.waitMs ?? DEFAULT_LOCK_WAIT_MS;
@@ -272,8 +311,10 @@ function acquireManagedFileLock(path: string, options: ManagedFileLockOptions | 
       }
     }
     if (waitedMs >= waitMs) {
+      const takeoverPath = `${lockPath}.takeover`;
+      const takeoverNote = existsSync(takeoverPath) ? `; ${takeoverPath} is also present, delete it as well if no mem is running` : "";
       throw new WiringLockError(
-        `${lockPath} is held${holder === undefined ? "" : ` by process ${holder}`}, and the write to ${path} was not made after waiting ${waitMs} ms; re-run once the other mem process finishes, or delete the lock file if no mem is running`
+        `${lockPath} is held${holder === undefined ? "" : ` by process ${holder}`}, and the write to ${path} was not made after waiting ${waitMs} ms; re-run once the other mem process finishes, or delete the lock file if no mem is running${takeoverNote}`
       );
     }
     pause(LOCK_POLL_MS);

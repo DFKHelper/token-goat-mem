@@ -84,4 +84,49 @@ describe("stale lock takeover", () => {
     expect(readFileSync(target, "utf8")).toBe("changed\n");
     expect(readdirSync(dir).filter((name) => name.endsWith(".lock") || name.endsWith(".takeover"))).toEqual([]);
   });
+
+  it("clears a takeover lock its dead holder left behind and takes the stale main lock over", () => {
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, String(DEAD_PID), "utf8");
+    const takeoverPath = `${lockPath}.takeover`;
+    writeFileSync(takeoverPath, String(DEAD_PID), "utf8");
+    const pauses: number[] = [];
+
+    const change = writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 1_000, pause: (ms) => pauses.push(ms) } });
+
+    expect(change.action).toBe("update");
+    expect(pauses, "a dead taker's lock is cleared without waiting").toEqual([]);
+    expect(readFileSync(target, "utf8")).toBe("changed\n");
+    expect(readdirSync(dir).filter((name) => name.includes(".lock") || name.includes(".takeover"))).toEqual([]);
+  });
+
+  it("leaves a live taker's takeover lock in place and names it when the wait runs out", () => {
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, String(DEAD_PID), "utf8");
+    const takeoverPath = `${lockPath}.takeover`;
+    writeFileSync(takeoverPath, String(LIVE_HOLDER_PID), "utf8");
+
+    let message = "";
+    try {
+      writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0 } });
+    } catch (error) {
+      expect(error).toBeInstanceOf(WiringLockError);
+      message = (error as Error).message;
+    }
+
+    expect(message, "the error names the takeover lock a user would have to delete").toContain(takeoverPath);
+    expect(readFileSync(takeoverPath, "utf8"), "the live taker's lock is untouched").toBe(String(LIVE_HOLDER_PID));
+    expect(readFileSync(lockPath, "utf8")).toBe(String(DEAD_PID));
+    expect(readFileSync(target, "utf8")).toBe("original\n");
+    expect(readdirSync(dir).filter((name) => name.includes(".stale-"))).toEqual([]);
+  });
+
+  it("keeps the plain contended message unchanged when no takeover lock stands", () => {
+    writeFileSync(target, "original\n", "utf8");
+    writeFileSync(lockPath, String(LIVE_HOLDER_PID), "utf8");
+
+    expect(() => writeManagedFile({ path: target, transform: () => "changed\n" }, { lock: { waitMs: 0 } })).toThrow(
+      `${lockPath} is held by process ${LIVE_HOLDER_PID}, and the write to ${target} was not made after waiting 0 ms; re-run once the other mem process finishes, or delete the lock file if no mem is running`
+    );
+  });
 });
