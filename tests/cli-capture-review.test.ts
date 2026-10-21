@@ -778,6 +778,16 @@ describe("review shows a pending fact's newest source excerpt", () => {
     expect(review.stdout).toContain(fact.id);
     expect(review.stdout).not.toContain("source:");
   });
+
+  it("says why an unanchored pending fact is unverified", async () => {
+    const db = openStorage(resolveDbPath());
+    captureSuggested(db, { text: "internal service Y owns queues", kind: "fact", root: home });
+    db.close();
+
+    const review = await runCli(["review", "--section", "pending"]);
+    expect(review.exitCode).toBe(0);
+    expect(review.stdout).toContain("freshness: unverified (no-anchor)");
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────── review names what a pending correction may contradict ───────────────────────────────────────────────────────────────────────────

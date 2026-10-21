@@ -1039,3 +1039,40 @@ describe("mem show and mem log hide the stamped-ref audit marker from text", () 
     expect(log.stdout).not.toContain("[stamped_ref=");
   });
 });
+
+describe("mem show says why a fact is unverified", () => {
+  it("prints no-anchor for an unanchored fact and carries freshnessReason in --json", async () => {
+    const id = extractRememberedId(await runCli(["remember", "plain unanchored note", "--kind", "fact"]));
+    expect((await runCli(["show", id])).stdout).toContain("freshness=unverified (no-anchor)");
+    const envelope = JSON.parse((await runCli(["show", id, "--json"])).stdout) as { freshness: string; freshnessReason?: string };
+    expect(envelope.freshness).toBe("unverified");
+    expect(envelope.freshnessReason).toBe("no-anchor");
+  });
+
+  it("prints root-missing for a fact whose root directory was deleted", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "mem-show-root-"));
+    onTestFinished(() => rmSync(projectRoot, { recursive: true, force: true }));
+    writeFileSync(join(projectRoot, "pin.txt"), "x");
+    const id = extractRememberedId(
+      await runCli(["remember", "pin file exists", "--kind", "fact", "--scope", "project", "--root", projectRoot, "--anchor", "file-exists pin.txt"])
+    );
+    rmSync(projectRoot, { recursive: true, force: true });
+    expect((await runCli(["show", id, "--root", projectRoot])).stdout).toContain("freshness=unverified (root-missing)");
+    const envelope = JSON.parse((await runCli(["show", id, "--root", projectRoot, "--json"])).stdout) as { freshnessReason?: string };
+    expect(envelope.freshnessReason).toBe("root-missing");
+  });
+
+  it("omits freshnessReason for an affirmed fact", async () => {
+    const projectRoot = mkdtempSync(join(tmpdir(), "mem-show-root-"));
+    onTestFinished(() => rmSync(projectRoot, { recursive: true, force: true }));
+    writeFileSync(join(projectRoot, "pin.txt"), "x");
+    const id = extractRememberedId(
+      await runCli(["remember", "pin file exists", "--kind", "fact", "--scope", "project", "--root", projectRoot, "--anchor", "file-exists pin.txt"])
+    );
+    const shown = await runCli(["show", id, "--root", projectRoot]);
+    expect(shown.stdout).toContain("freshness=affirmed");
+    const envelope = JSON.parse((await runCli(["show", id, "--root", projectRoot, "--json"])).stdout) as Record<string, unknown>;
+    expect(envelope["freshness"]).toBe("affirmed");
+    expect(envelope).not.toHaveProperty("freshnessReason");
+  });
+});

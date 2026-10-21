@@ -11,6 +11,7 @@ import {
   mentionsAnchorableTarget,
   type AnchorCacheStore,
   type AnchorVerdict,
+  type UnverifiedReasonOut,
 } from "../src/anchors.js";
 import { budgetNow } from "../src/budgetClock.js";
 
@@ -715,5 +716,38 @@ describe("mentionsAnchorableTarget", () => {
     ["whitespace only", "   "],
   ])("does not nominate %s", (_label, text) => {
     expect(mentionsAnchorableTarget(text)).toBe(false);
+  });
+});
+
+describe("evaluateAnchor reasonOut", () => {
+  const reasonFor = (anchor: string | null, anchorRoot: string, deadlineMs?: number): { verdict: AnchorVerdict; reason: string | undefined } => {
+    const out: UnverifiedReasonOut = {};
+    const verdict = evaluateAnchor(anchor, anchorRoot, deadlineMs, undefined, undefined, out);
+    return { verdict, reason: out.reason };
+  };
+
+  it("reports no-anchor for a null or blank anchor", () => {
+    expect(reasonFor(null, root)).toEqual({ verdict: "unverified", reason: "no-anchor" });
+    expect(reasonFor("   ", root)).toEqual({ verdict: "unverified", reason: "no-anchor" });
+  });
+
+  it("reports root-missing when the root directory is gone", () => {
+    expect(reasonFor("file-exists a.txt", join(root, "gone"))).toEqual({ verdict: "unverified", reason: "root-missing" });
+  });
+
+  it("reports undecidable when the predicate cannot decide, on a fresh and a memoized call", () => {
+    expect(reasonFor("file-exists", root)).toEqual({ verdict: "unverified", reason: "undecidable" });
+    expect(reasonFor("file-exists", root)).toEqual({ verdict: "unverified", reason: "undecidable" });
+  });
+
+  it("reports out-of-time when the deadline has already passed", () => {
+    writeFileSync(join(root, "a.txt"), "a");
+    expect(reasonFor("file-exists a.txt", root, budgetNow() - 1)).toEqual({ verdict: "unverified", reason: "out-of-time" });
+  });
+
+  it("leaves the out-param unset for affirmed and contradicted verdicts", () => {
+    writeFileSync(join(root, "a.txt"), "a");
+    expect(reasonFor("file-exists a.txt", root)).toEqual({ verdict: "affirmed", reason: undefined });
+    expect(reasonFor("file-exists nope.txt", root)).toEqual({ verdict: "contradicted", reason: undefined });
   });
 });

@@ -2,7 +2,7 @@
 
 import { resolve as resolvePath } from "node:path";
 
-import { evaluateAnchor, type AnchorCacheStore, type AnchorVerdict } from "./anchors.js";
+import { evaluateAnchor, setUnverifiedReason, type AnchorCacheStore, type AnchorVerdict, type UnverifiedReasonOut } from "./anchors.js";
 import { budgetNow } from "./budgetClock.js";
 import { armBudgetTimer } from "./budgetTimer.js";
 import { screenForSecrets } from "./capture.js";
@@ -741,13 +741,15 @@ export function evaluateFactFreshness(
   queryRoot: string,
   deadlineMs?: number,
   budgetHit?: { hit: boolean },
-  cacheStore?: AnchorCacheStore
+  cacheStore?: AnchorCacheStore,
+  reasonOut?: UnverifiedReasonOut
 ): AnchorVerdict {
   const root = anchorRootFor(fact, queryRoot);
   if (root === null) {
+    setUnverifiedReason(reasonOut, fact.anchor === null || fact.anchor.trim().length === 0 ? "no-anchor" : "root-missing");
     return "unverified";
   }
-  return evaluateAnchor(fact.anchor, root, deadlineMs, budgetHit, cacheStore);
+  return evaluateAnchor(fact.anchor, root, deadlineMs, budgetHit, cacheStore, reasonOut);
 }
 
 

@@ -1016,18 +1016,36 @@ function isExistingDirectory(path: string): boolean {
   }
 }
 
+/** Why a verdict is `unverified`: the fact has no anchor, its root directory is gone, the predicate could not decide (a tool missing, an unreadable input), or the evaluation ran out of time. */
+export type UnverifiedReason = "no-anchor" | "root-missing" | "undecidable" | "out-of-time";
+
+/** Out-parameter a caller passes to learn why a verdict is `unverified`; written only for an `unverified` verdict and left untouched for `affirmed`/`contradicted`. */
+export interface UnverifiedReasonOut {
+  reason?: UnverifiedReason;
+}
+
+/** Writes `reason` into an optional {@link UnverifiedReasonOut}; a no-op when the caller passed none. */
+export function setUnverifiedReason(out: UnverifiedReasonOut | undefined, reason: UnverifiedReason): void {
+  if (out) {
+    out.reason = reason;
+  }
+}
+
 /** Evaluates a fact's anchor predicate against `root`. `anchor === null` is always `unverified` (P3: no predicate means the proposition can neither be confirmed nor denied — a hint-to-verify, never ground truth). `deadlineMs`, if given, is an absolute deadline on the budget clock (`budgetNow`); once passed, evaluation stops attempting further work and returns `unverified` — the safe direction (never fabricate `affirmed`, never falsely claim `contradicted`) rather than risk an unbounded directory walk or index parse in the recall hot path. `budgetHit`, if given, is an out-parameter: set to `true` when the returned `"unverified"` is a "ran out of time this call" bailout rather than a genuine predicate outcome (mirrors the internal `BudgetState` this function already threads through `evaluateFileContainsRaw`/`evaluateTokens`, surfaced here so a caller iterating many facts under one shared deadline -- `retrieve`'s `anchorTimeBudgetMs` -- can count how many verdicts are budget artifacts rather than real ones, instead of every caller having to duplicate the "already expired on entry" / cache-hit reasoning needed to infer it from the outside. Left untouched (`false` is never written back) when the verdict is genuine, including a memo hit -- a budget-limited verdict is never memoized (see below), so a cache hit can only ever be a real one. */
 export function evaluateAnchor(
   anchor: string | null,
   root: string,
   deadlineMs?: number,
   budgetHit?: { hit: boolean },
-  cacheStore?: AnchorCacheStore
+  cacheStore?: AnchorCacheStore,
+  reasonOut?: UnverifiedReasonOut
 ): AnchorVerdict {
   if (anchor === null || anchor.trim().length === 0) {
+    setUnverifiedReason(reasonOut, "no-anchor");
     return "unverified";
   }
   if (budgetExceeded(deadlineMs)) {
+    setUnverifiedReason(reasonOut, "out-of-time");
     // Already-expired deadline on entry: never a genuine predicate outcome, so never memoized — there is nothing to cache under `key` since we return before ever reading/writing `memo`. A persistent `cacheStore` is never touched for the same reason, with more force: writing this here would poison every future *process's* first call for this anchor+root too, not just this one's remaining budget.
     if (budgetHit) {
       budgetHit.hit = true;
@@ -1038,12 +1056,16 @@ export function evaluateAnchor(
   const resolvedRoot = resolve(root);
   const trimmed = anchor.trim();
   if (!ROOTLESS_PREDICATES.some((name) => trimmed === name || trimmed.startsWith(`${name} `)) && !isExistingDirectory(resolvedRoot)) {
+    setUnverifiedReason(reasonOut, "root-missing");
     // Every predicate below asks a question *about a tree*, and a root that is not there answers none of them: `file-absent` would affirm because nothing is absent from a directory that does not exist, and `file-exists` would contradict for the same empty reason -- a confident verdict read off nothing at all. That happens whenever a project is moved or deleted, whenever a fact is imported from another machine and keeps its foreign root, and whenever a host hands the hook a `--root` that has since gone away. `git-tracked` already answered `unverified` here (its own command fails), so the predicates disagreed with each other about the same absence. Deliberately not memoized: unlike a predicate outcome, this is a statement about the root rather than the anchor, and a directory that is missing now may be present later. Never written to `cacheStore` either, with more force than the in-process memo: a persistent verdict outlives this process, so writing "unverified, root missing" here would keep asserting it in every later invocation too, long after the root reappears -- the memo at least clears itself the moment the process exits.
     return "unverified";
   }
   const key = `${resolvedRoot} ${trimmed}`;
   const cached = memo.get(key);
   if (cached !== undefined) {
+    if (cached === "unverified") {
+      setUnverifiedReason(reasonOut, "undecidable");
+    }
     return cached;
   }
 
@@ -1055,6 +1077,9 @@ export function evaluateAnchor(
     memo.set(key, verdict);
   } else if (budgetHit) {
     budgetHit.hit = true;
+  }
+  if (verdict === "unverified") {
+    setUnverifiedReason(reasonOut, budgetState.hit ? "out-of-time" : "undecidable");
   }
   return verdict;
 }

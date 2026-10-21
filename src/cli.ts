@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import type Database from "better-sqlite3";
 
-import { anchorPathWithinRoot, evaluateAnchor, extractAnchorableTargets, mentionsAnchorableTarget, type AnchorVerdict } from "./anchors.js";
+import { anchorPathWithinRoot, evaluateAnchor, extractAnchorableTargets, mentionsAnchorableTarget, type AnchorVerdict, type UnverifiedReason, type UnverifiedReasonOut } from "./anchors.js";
 import {
   captureExplicit,
   captureSuggested,
@@ -473,6 +473,12 @@ interface FactDetailOptions {
   readonly history?: readonly AuditLogRow[];
   readonly related?: readonly RelatedFact[] | null;
   readonly forgetReason?: ForgetReason | null;
+  readonly freshnessReason?: UnverifiedReason;
+}
+
+/** A verdict as printed: an `unverified` one carries its reason in parentheses, any other prints bare. */
+function formatVerdict(verdict: AnchorVerdict, reason: UnverifiedReason | undefined): string {
+  return verdict === "unverified" && reason !== undefined ? `${verdict} (${reason})` : verdict;
 }
 
 function formatFactDetail(
@@ -480,7 +486,7 @@ function formatFactDetail(
   freshness: AnchorVerdict,
   sources: readonly Source[],
   edge: SupersessionEdge | null,
-  { history = [], related = null, forgetReason = null }: FactDetailOptions = {}
+  { history = [], related = null, forgetReason = null, freshnessReason }: FactDetailOptions = {}
 ): string {
   const scopeRoot = fact.scopeRoot ?? null;
   const confidenceLine = (() => {
@@ -510,7 +516,7 @@ function formatFactDetail(
     `source_ref: ${fact.source_ref ?? "(none)"}`,
     `why: ${fact.why ?? "(none)"}`,
     `captured_at: ${fact.captured_at}`,
-    `anchor: ${fact.anchor ?? "(none)"}  freshness=${freshness}`,
+    `anchor: ${fact.anchor ?? "(none)"}  freshness=${formatVerdict(freshness, freshnessReason)}`,
     confidenceLine,
   ];
   const supersession = formatSupersessionLine(fact, edge);
@@ -951,7 +957,10 @@ function formatReview(db: Database.Database, root: string, options: ReviewOption
 
   const detailFor: Partial<Record<ReviewSection, (fact: Fact) => string | null>> = {
     pending: (fact) => {
+      const reasonOut: UnverifiedReasonOut = {};
+      const verdict = evaluateFactFreshness(fact, root, undefined, undefined, undefined, reasonOut);
       const lines = [
+        verdict === "unverified" ? `    freshness: ${formatVerdict(verdict, reasonOut.reason)}` : null,
         formatPendingSightingsLine(fact),
         formatPendingSourceLine(db, fact),
         formatPendingContradictionLine(db, fact, root),
@@ -2096,7 +2105,9 @@ export function buildProgram(): Command {
           const fact = resolveIdArgOrThrow(db, id);
           // `evaluateFactFreshness` rather than a bare `?? fact.scopeRoot` fallback. `scopeRoot` is documented as an absolute project root only for `scope="project"`; for `scope="path"` it holds a file, and handing a file path to an anchor predicate as its root is (in retrieval.ts's own words) strictly worse than the status quo. The old fallback did exactly that, so `mem show` and `mem recall` could report different freshness for the same fact -- on the surface the recall footer points the user to for detail. Falling back further to the fact's persisted `captureRoot` (and to `unverified` when that too is unknown, or when the query root does not exactly match it) is what keeps `mem show` from asserting a decisive verdict from an unrelated directory for a `path`-scoped fact.
           const root = resolveRoot(options.root);
-          const freshness = evaluateFactFreshness(fact, root);
+          const freshnessReasonOut: UnverifiedReasonOut = {};
+          const freshness = evaluateFactFreshness(fact, root, undefined, undefined, undefined, freshnessReasonOut);
+          const freshnessReason = freshness === "unverified" ? freshnessReasonOut.reason : undefined;
           const sources = listSourcesForFact(db, fact.id);
           const history = listAuditLogForFact(db, fact.id);
           // Only for a superseded fact: the audit log's most recent row for an active fact says something else entirely (a promotion, a pin), and reading a winner id out of it would be reporting an edge that does not exist.
@@ -2112,6 +2123,7 @@ export function buildProgram(): Command {
               // Reuses `winnerId` (computed above for the top-level `supersededBy` field) rather than a second `findSupersedingFactId` lookup for the same fact.
               fact: factToExportJson(fact, { includeEmbedding: false, supersededBy: winnerId }),
               freshness,
+              ...(freshnessReason !== undefined ? { freshnessReason } : {}),
               sources,
               history,
               // null covers both "not superseded" and "superseded with no successor"; the fact's own status distinguishes them, so this stays one nullable field rather than two.
@@ -2136,7 +2148,12 @@ export function buildProgram(): Command {
             };
             return formatJson(envelope);
           }
-          return formatFactDetail(fact, freshness, sources, edge, { history, related, forgetReason });
+          return formatFactDetail(fact, freshness, sources, edge, {
+            history,
+            related,
+            forgetReason,
+            ...(freshnessReason !== undefined ? { freshnessReason } : {}),
+          });
         });
         process.stdout.write(`${output}\n`);
       })
