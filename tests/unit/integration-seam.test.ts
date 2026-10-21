@@ -30,6 +30,8 @@ import type { HintFormatOptions, HintFormatResult } from "../../src/integration-
 type StorageOverride = ((real: (...args: unknown[]) => unknown, ...args: unknown[]) => unknown) | null;
 const storageOverrides = vi.hoisted(() => ({
   getUsefulnessCounts: null as StorageOverride,
+  openStorageOptions: [] as unknown[],
+  afterOpenStorage: null as (() => void) | null,
 }));
 
 vi.mock("../../src/storage.js", async (importOriginal) => {
@@ -40,6 +42,12 @@ vi.mock("../../src/storage.js", async (importOriginal) => {
       storageOverrides.getUsefulnessCounts
         ? storageOverrides.getUsefulnessCounts(actual.getUsefulnessCounts as (...a: unknown[]) => unknown, ...args)
         : (actual.getUsefulnessCounts as (...a: unknown[]) => unknown)(...args),
+    openStorage: (...args: Parameters<typeof actual.openStorage>) => {
+      storageOverrides.openStorageOptions.push(args[1]);
+      const opened = actual.openStorage(...args);
+      storageOverrides.afterOpenStorage?.();
+      return opened;
+    },
   };
 });
 
@@ -130,6 +138,8 @@ describe("buildHintFormat", () => {
       await openServers.pop()?.close();
     }
     storageOverrides.getUsefulnessCounts = null;
+    storageOverrides.openStorageOptions = [];
+    storageOverrides.afterOpenStorage = null;
     rmSync(workDir, { recursive: true, force: true });
   });
 
@@ -1443,6 +1453,65 @@ describe("buildHintFormat", () => {
     expect(emittedIds(result)).toEqual(["fact-a", "fact-b", "fact-c"]);
     expect(loggedIds("sess-1")).toEqual([]);
     expect(warnings.some((line) => line.includes("could not record surfaced facts") && line.includes("recall_log is read-only in this test"))).toBe(true);
+  });
+
+  it("a timed-out run writes its bookkeeping with no wait on the store lock, and the normal path keeps the default wait", async () => {
+    seedFacts(dbPath, [
+      { id: "pin-a", text: "pinned fact about apples", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "pinned" },
+    ]);
+    storageOverrides.openStorageOptions = [];
+    const timedOut = await buildHintFormat({ root, dbPath, sessionId: "sess-1", retrievalBudgetMs: 0 });
+    expect(timedOut.outcome).toBe("out-of-time");
+    expect(storageOverrides.openStorageOptions.at(-1)).toEqual({ busyTimeoutMs: 0 });
+
+    storageOverrides.openStorageOptions = [];
+    const normal = await buildHint({ root, dbPath, sessionId: "sess-2" });
+    expect(normal.outcome).toBe("ok");
+    expect(storageOverrides.openStorageOptions.at(-1)).toEqual({});
+  });
+
+  it("a timed-out run against a store another connection holds locked returns its normal output and swallows the busy error", async () => {
+    seedFacts(dbPath, [
+      { id: "pin-a", text: "pinned fact about apples", kind: "fact", scope: "global", source_type: "user", captured_at: "2026-01-03T00:00:00.000Z", status: "pinned" },
+    ]);
+    const unlocked = await buildHintFormat({ root, dbPath, sessionId: "sess-free", retrievalBudgetMs: 0 });
+    const holder = openDb(dbPath);
+    holder.exec("BEGIN IMMEDIATE");
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    let locked: HintFormatResult;
+    let warnings: string[];
+    try {
+      locked = await buildHintFormat({ root, dbPath, sessionId: "sess-locked", retrievalBudgetMs: 0 });
+      warnings = warnSpy.mock.calls.map((call) => String(call[0]));
+    } finally {
+      warnSpy.mockRestore();
+      holder.exec("ROLLBACK");
+      holder.close();
+    }
+    expect(locked.outcome).toBe("out-of-time");
+    expect({ header: locked.header, lines: locked.lines }).toEqual({ header: unlocked.header, lines: unlocked.lines });
+    expect(warnings.some((line) => line.includes("could not record surfaced facts") && line.includes("locked"))).toBe(true);
+    expect(loggedIds("sess-locked")).toEqual([]);
+  });
+
+  it("elapsedMs covers the bookkeeping write the run makes, not only the retrieval before it", async () => {
+    threeGlobalFacts();
+    let now = 1000;
+    const clock = vi.spyOn(budgetClock, "budgetNow").mockImplementation(() => now);
+    let opens = 0;
+    // The first open is the run's read; any later one is the recording, which takes 100 ms on the scripted clock.
+    storageOverrides.afterOpenStorage = () => {
+      if (++opens > 1) {
+        now += 100;
+      }
+    };
+    try {
+      const result = await buildHint({ root, dbPath, sessionId: "sess-1" });
+      expect(result.outcome).toBe("ok");
+      expect(result.elapsedMs).toBe(100);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("a fact-empty (budget-exhausted) response logs nothing, so the session is not marked as having seen facts it never received", async () => {

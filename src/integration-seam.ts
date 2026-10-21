@@ -20,7 +20,7 @@ import {
   unpackEmbedding,
   type BufferedAnchorVerdict,
 } from "./storage.js";
-import { resolveDbPath } from "./db.js";
+import { resolveDbPath, type OpenDbOptions } from "./db.js";
 import { getGraphScoresForQuery } from "./factgraph.js";
 import { planEmbeddingRanking } from "./embeddings.js";
 import type { HookOutcomeKind } from "./hookOutcomes.js";
@@ -98,6 +98,9 @@ function tgmemHeaderFor(protocolVersion: number, delta = false): string {
 
 /** Self-imposed soft time budget (ms) for a hint-format retrieval (design plan Section 4: the token-goat side applies its own ~150ms hard timeout around the whole subprocess call; this is mem's internal budget for the work it does, so it degrades gracefully well before that outer timeout would fire). Once exceeded, this module stops ranking and returns only the user's pinned reserve (the same `PINNED_RESERVE` selection the normal path makes) behind a footer-line saying in prose that the rest was cut for time, or just that footer-line when nothing is pinned. It does not return a smaller slice of the ranked facts: the line grammar is closed (an off-grammar line is dropped by a conforming consumer, and adding one bumps the version), so a reduced slice would be indistinguishable from a complete one, but the footer-line is free prose and can already say partial. Pins are the exception worth keeping because the user said they must always be present, and the footer-line is what keeps the response self-caveating. */
 const RETRIEVAL_BUDGET_MS = 150;
+
+/** Busy timeout (ms) for the bookkeeping write a timed-out run still makes: zero, so a store another writer holds fails that write at once instead of stalling the hook for the full store busy timeout. */
+const TIMED_OUT_WRITE_BUSY_TIMEOUT_MS = 0;
 
 /** Minimum budget handed to `retrieve()`'s own anchor-evaluation deadline, even if most of the soft budget is already spent. */
 const MIN_ANCHOR_BUDGET_MS = 20;
@@ -262,7 +265,9 @@ export async function buildHintFormat(options: HintFormatOptions): Promise<HintF
   // Read once here and handed down, so the failure branches below report the same elapsed time the success path does without the run reading the clock a second time.
   const start = budgetNow();
   try {
-    return await buildHintFormatUnsafe(options, start);
+    const result = await buildHintFormatUnsafe(options, start);
+    // Read after the bookkeeping write the run did, so the hook outcome log's elapsed time covers everything the hook spent rather than stopping at the retrieval.
+    return { ...result, elapsedMs: budgetNow() - start };
   } catch (error) {
     if (error instanceof StorageUnreadableError) {
       logWarning(`hint-format could not open the store, returning an unreadable-store footer: ${error.message}`);
@@ -375,13 +380,13 @@ async function buildHintFormatUnsafe(options: HintFormatOptions, start: number):
     ...(options.hintStyle !== undefined ? { hintStyle: options.hintStyle } : {}),
   });
 
-  const recordEmission = (factIds: readonly string[]): void => {
+  const recordEmission = (factIds: readonly string[], openOptions: OpenDbOptions = {}): void => {
     if (sessionId !== undefined) {
       // Logs to `recall_log` and stamps `facts.last_surfaced_at` together, in one transaction. `stable` is deliberately not consulted here: it is an output-ordering override, and a fact emitted under it was emitted -- suppressing the log would make `--delta` repeat facts the consumer already holds and make `mem used` report them as never surfaced.
-      recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, factIds, now, anchorCacheStore.buffer);
+      recordSurfaced(options.dbPath ?? resolveDbPath(), sessionId, factIds, now, anchorCacheStore.buffer, openOptions);
     } else {
       // No session id to log a `recall_log` row against: still stamp the durable mark so stale-supersede never treats an emitted fact as never-surfaced.
-      markSurfaced(options.dbPath ?? resolveDbPath(), factIds, now, anchorCacheStore.buffer);
+      markSurfaced(options.dbPath ?? resolveDbPath(), factIds, now, anchorCacheStore.buffer, openOptions);
     }
   };
 
@@ -392,8 +397,8 @@ async function buildHintFormatUnsafe(options: HintFormatOptions, start: number):
     // Only the pinned reserve, not a smaller slice of the ranked facts: see RETRIEVAL_BUDGET_MS. The footer-line is what tells the consumer the rest was cut, so a response that carries pins always carries it; TGMEM/1 has no footer-line to say so, which is why it stays empty there.
     logWarning(`hint-format exceeded its ${budgetMs}ms soft budget (took ${elapsed}ms); returning a budget-exhausted footer`);
     const pins = protocolVersion === 2 ? wireSafeOnly(pinnedReserveOf(results)) : [];
-    // With no pin this records no fact ids, so nothing is marked surfaced, but the anchor verdicts this run already computed (cut-short ones never reach the buffer) are kept for the next run instead of paid for twice.
-    recordEmission(pins.map((result) => result.fact.id));
+    // With no pin this records no fact ids, so nothing is marked surfaced, but the anchor verdicts this run already computed (cut-short ones never reach the buffer) are kept for the next run instead of paid for twice. The budget is already spent, so this write must not queue behind another writer: with no wait a locked store fails the write at once, `recordSurfaced`/`markSurfaced` swallow that, and the unflushed verdicts are simply recomputed next run.
+    recordEmission(pins.map((result) => result.fact.id), { busyTimeoutMs: TIMED_OUT_WRITE_BUSY_TIMEOUT_MS });
     // TGMEM/1 carries no footer-line at all (see the wire-format doc comment above), so budget exhaustion on that version is silently identical to an empty one -- the same limitation the other two failure branches in this file already accept for the same reason.
     return {
       header: tgmemHeaderFor(protocolVersion, delta),
@@ -466,13 +471,14 @@ function recordSurfaced(
   sessionId: string,
   factIds: readonly string[],
   now: Date,
-  anchorVerdicts: ReadonlyMap<string, BufferedAnchorVerdict>
+  anchorVerdicts: ReadonlyMap<string, BufferedAnchorVerdict>,
+  openOptions: OpenDbOptions
 ): void {
   if (factIds.length === 0 && anchorVerdicts.size === 0) {
     return;
   }
   try {
-    const db = openStorage(dbPath);
+    const db = openStorage(dbPath, openOptions);
     try {
       insertRecallLog(db, sessionId, factIds, now.toISOString());
       persistAnchorVerdicts(db, anchorVerdicts);
@@ -489,13 +495,14 @@ function markSurfaced(
   dbPath: string,
   factIds: readonly string[],
   now: Date,
-  anchorVerdicts: ReadonlyMap<string, BufferedAnchorVerdict>
+  anchorVerdicts: ReadonlyMap<string, BufferedAnchorVerdict>,
+  openOptions: OpenDbOptions
 ): void {
   if (factIds.length === 0 && anchorVerdicts.size === 0) {
     return;
   }
   try {
-    const db = openStorage(dbPath);
+    const db = openStorage(dbPath, openOptions);
     try {
       markFactsSurfaced(db, factIds, now.toISOString());
       persistAnchorVerdicts(db, anchorVerdicts);

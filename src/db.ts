@@ -89,6 +89,8 @@ CREATE TABLE IF NOT EXISTS meta (
 export interface OpenDbOptions {
   /** Whether opening an existing store may take its automatic snapshot (src/backup.ts's `snapshotOnOpen`). Default true. src/restore.ts turns it off: a restore takes its own pre-restore snapshot, migrates a staging copy that is nobody's store, and must not prune the auto snapshot it may be restoring from. */
   autoSnapshot?: boolean;
+  /** How long this connection waits on another writer's lock before failing with `SQLITE_BUSY`, in milliseconds. Default {@link BUSY_TIMEOUT_MS}. Only a best-effort write that must never stall its caller (the hook seam's bookkeeping after a time-out) lowers it. */
+  busyTimeoutMs?: number;
 }
 
 /** Creates the store at `dbPath` already in WAL mode, or leaves whichever store a concurrent creator published first. Converting a fresh file in place (`PRAGMA journal_mode = WAL` on the shared path) fails at once with "database is locked" when another connection holds the write lock at that moment, because SQLite upgrades that statement's read transaction to a write one without consulting the busy handler, so no busy timeout can absorb the first-open race between concurrent `mem` processes. The conversion therefore happens on a private seed file, and `linkSync` publishes it at `dbPath` only if nothing is there yet (an existing target is `EEXIST`, so exactly one creator wins and the shared path never exists in rollback-journal mode). Every later `journal_mode = WAL` is then a no-op on a store that is already WAL. A filesystem that cannot hard-link falls through to the in-place conversion, which is the behaviour before this existed. */
@@ -159,7 +161,7 @@ export function openDb(dbPath: string = resolveDbPath(), options: OpenDbOptions 
   if (!existed) {
     publishFreshStore(dbPath);
   }
-  const db = new Database(dbPath, { timeout: BUSY_TIMEOUT_MS });
+  const db = new Database(dbPath, { timeout: options.busyTimeoutMs ?? BUSY_TIMEOUT_MS });
   // Everything past construction is closed on failure. `new Database` connects lazily, so the first statement is what surfaces a damaged file (`SQLITE_NOTADB` on a truncated or non-sqlite path) -- and an escaping error would otherwise leave this handle open with no reference to close it by, which on Windows holds an exclusive lock on the file. That turns a recoverable "your store is corrupt" into an unrecoverable one: the user cannot delete or replace their own database without killing the process, and `mem doctor` -- whose whole job is diagnosing this -- opens through the same path and hangs on the same lock.
   try {
     // Order matters: SQLite creates the `-wal` and `-shm` sidecars with the database file's own permissions, so the database has to already be 0600 when the WAL pragma runs or the sidecars -- which hold the same fact rows -- are born world-readable.
