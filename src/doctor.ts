@@ -3,6 +3,7 @@
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
 import { existsSync } from "node:fs";
+import { dirname } from "node:path";
 
 import { AUTO_SNAPSHOT_INTERVAL_MS, listSnapshots } from "./backup.js";
 import { EXIT_USER_ERROR, extractErrorMessage, guard, writeOutput } from "./cliRuntime.js";
@@ -10,6 +11,7 @@ import { openDbReadOnly, resolveBackupDir, resolveDbPath } from "./db.js";
 import { MIGRATIONS } from "./migrations.js";
 import { DREAM_MODEL_ENV, DREAM_URL_ENV, dreamEndpointLabel, readDreamConfig } from "./dream.js";
 import { EMBED_MODEL_ENV, EMBED_URL_ENV, endpointLabelFor, readEmbeddingConfig, createHttpEmbeddingBackend, type EmbeddingConfig, type EmbeddingMeta } from "./embeddings.js";
+import { summarizeHookOutcomes, type HookOutcomeSummary } from "./hookOutcomes.js";
 import { HINT_LINE_CEILING, HINT_PINNED_RESERVE } from "./integration-seam.js";
 import { countEmbeddedFacts, countFacts, countFactsWithTerms, countRationaleCoverage, getEmbeddingMeta, getEpoch } from "./storage.js";
 import { formatAge, MS_PER_DAY, parseStrictIsoTimestamp } from "./timeUtils.js";
@@ -121,6 +123,16 @@ function describeHintBudget(recallable: number, pinned: number): Finding[] {
     return [finding("hints", "warn", `${line} (pin the facts that must always arrive: \`mem pin <id>\`)`, "mem pin <id>")];
   }
   return [finding("hints", "ok", line)];
+}
+
+/** `mem doctor`'s hook-outcome line: how the recorded hook runs ended (the log is `hook-outcomes.log` beside the store). A hook that runs out of time only ever logged a warning, so nothing else says how often it happens; this warns when more than 1 run in 100 ran out of time. No log, or one with no readable record, prints nothing. */
+export function describeHookOutcomes(summary: HookOutcomeSummary): Finding[] {
+  const { runs, outOfTime, storeUnreadable, internalErrors, cut, p95Ms } = summary.total;
+  if (runs === 0) {
+    return [];
+  }
+  const line = `prompt hints: ${runs} run${runs === 1 ? "" : "s"}, ${outOfTime} out of time, ${storeUnreadable} store unreadable, ${internalErrors} internal error${internalErrors === 1 ? "" : "s"}, ${cut} anchor check${cut === 1 ? "" : "s"} cut short, p95 about ${Math.round(p95Ms)} ms`;
+  return outOfTime * 100 > runs ? [finding("hints", "warn", `${line} (more than 1 run in 100 ran out of time)`)] : [finding("hints", "ok", line)];
 }
 
 /** `mem doctor`'s scope-placement line: project- and path-scoped facts whose `scope_root` is gone. A fact bound to a directory that has since been renamed, moved, or deleted is not stale, contested, or decayed -- every status column calls it healthy. Nothing else in `doctor` would show it: the status counts include it as active, and term coverage and embedding coverage both count it as covered. `relocated*` counts the subset that still carries a `scope_repo`: recall binds a project fact by `scope_root` OR repository identity (`retrieval.ts`'s `identityMatches`), so these are still reachable from any checkout of that repository -- the directory moved or was re-cloned, not lost. `unreachable*` is the rest: a root-less fact with no `scope_repo`, which is genuinely unreachable from anywhere, because no session will ever run with that root again. Re-scoping is a human decision (the fact may belong to the moved directory's new path or may have been about the old one), so this names `mem list --scope` to find them and leaves the call to the user rather than guessing a root. */
@@ -553,6 +565,8 @@ export function registerDoctorCommand(program: Command): void {
           ...probe,
           ...dream,
           ...inspection.trailing,
+          // Read from the file beside the store, not the store, so an unreadable store still shows how many hook runs met it.
+          ...describeHookOutcomes(summarizeHookOutcomes(dirname(dbPath))),
           checkBackups(resolveBackupDir(), inspection.epoch, new Date()),
           ...hooks,
         ];
