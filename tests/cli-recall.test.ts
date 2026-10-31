@@ -862,3 +862,71 @@ describe("--hint-format records each run's outcome for mem doctor", () => {
     expect(blocked.stderr).toBe(baseline.stderr);
   });
 });
+
+// --- the UserPromptSubmit block goes out once per context window, not on every prompt ---
+describe("the UserPromptSubmit memory block is sent once per context window (session start or compaction)", () => {
+  // HAND-DERIVED: the keys src/hook-envelope.ts reads (session_id, cwd, transcript_path, prompt); the event names and the SessionStart `source` value are what Claude Code sends, and mem ignores `source`, so the reset is pinned by the event alone.
+  const SESSION = "tgmem-resend-session";
+  const envelopeFor = (fields: Record<string, string>, sessionId: string): string =>
+    JSON.stringify({ session_id: sessionId, cwd: home, transcript_path: join(home, "transcript.jsonl"), ...fields });
+  const sessionStart = (source: string): Record<string, string> => ({ hook_event_name: "SessionStart", source });
+  const prompt = (text: string): Record<string, string> => ({ hook_event_name: "UserPromptSubmit", prompt: text });
+  const preCompact: Record<string, string> = { hook_event_name: "PreCompact", trigger: "auto" };
+
+  async function runHook(slug: string, fields: Record<string, string>, sessionId: string = SESSION): Promise<{ stdout: string }> {
+    primeHookStdin(envelopeFor(fields, sessionId));
+    return runCli(["hook", slug]);
+  }
+
+  beforeEach(async () => {
+    await runCli(["remember", "the zebra deploy token lives in vault", "--kind", "fact", "--scope", "project", "--root", home]);
+    writeFileSync(join(home, "transcript.jsonl"), "");
+    vi.stubEnv("CLAUDE_PROJECT_DIR", home);
+  });
+
+  it("sends the block on the first prompt after a session start or a compaction, and on no prompt in between", async () => {
+    const start = await runHook("session-start", sessionStart("startup"));
+    expect(start.stdout.startsWith("TGMEM/2\n")).toBe(true);
+    expect(start.stdout).toContain("zebra deploy token");
+
+    const first = await runHook("user-prompt-submit", prompt("zebra deploy token"));
+    expect(first.stdout.startsWith("TGMEM/2  delta=1\n")).toBe(true);
+    expect(first.stdout).toContain("zebra deploy token");
+
+    const second = await runHook("user-prompt-submit", prompt("zebra deploy token again"));
+    expect(second.stdout, "second prompt in the same window emits no bytes").toBe("");
+    const third = await runHook("user-prompt-submit", prompt("where is the zebra vault token"));
+    expect(third.stdout, "third prompt in the same window emits no bytes").toBe("");
+
+    const compacting = await runHook("pre-compact", preCompact);
+    expect(compacting.stdout).toBe("");
+    const resumed = await runHook("session-start", sessionStart("compact"));
+    expect(resumed.stdout.startsWith("TGMEM/2\n"), "session start after compaction sends the full block").toBe(true);
+
+    const afterCompact = await runHook("user-prompt-submit", prompt("zebra deploy token"));
+    expect(afterCompact.stdout.startsWith("TGMEM/2  delta=1\n"), "first prompt after compaction sends the block").toBe(true);
+    const afterCompactRepeat = await runHook("user-prompt-submit", prompt("zebra deploy token"));
+    expect(afterCompactRepeat.stdout, "repeat prompt after compaction emits no bytes").toBe("");
+  });
+
+  it("a compaction alone opens a new window, so the next prompt sends the block again", async () => {
+    await runHook("session-start", sessionStart("startup"));
+    const first = await runHook("user-prompt-submit", prompt("zebra deploy token"));
+    expect(first.stdout.startsWith("TGMEM/2  delta=1\n")).toBe(true);
+    const repeat = await runHook("user-prompt-submit", prompt("zebra deploy token"));
+    expect(repeat.stdout, "repeat prompt before compaction emits no bytes").toBe("");
+
+    await runHook("pre-compact", preCompact);
+    const afterCompact = await runHook("user-prompt-submit", prompt("zebra deploy token"));
+    expect(afterCompact.stdout.startsWith("TGMEM/2  delta=1\n"), "first prompt after pre-compact sends the block").toBe(true);
+  });
+
+  it("a session id that is not a plain token keeps the old behaviour: the block on every prompt", async () => {
+    // Unsafe for a file name, so no marker can be kept for it; the hook fails open to sending.
+    await runHook("session-start", sessionStart("startup"), "../escape");
+    const first = await runHook("user-prompt-submit", prompt("zebra deploy token"), "../escape");
+    const second = await runHook("user-prompt-submit", prompt("zebra deploy token"), "../escape");
+    expect(first.stdout.startsWith("TGMEM/2  delta=1\n")).toBe(true);
+    expect(second.stdout.startsWith("TGMEM/2  delta=1\n"), "second prompt sends the block again").toBe(true);
+  });
+});

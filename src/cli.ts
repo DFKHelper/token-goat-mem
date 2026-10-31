@@ -129,6 +129,7 @@ import {
   type HintFormatOptions,
 } from "./integration-seam.js";
 import { readHookEnvelope, type HookEnvelope } from "./hook-envelope.js";
+import { markPromptBlockSent, promptBlockSent, resetPromptBlock } from "./promptBlockState.js";
 import { fileTranscriptSuggestions } from "./sessionCapture.js";
 import {
   anchorRootFor,
@@ -1931,10 +1932,29 @@ export function buildProgram(): Command {
             ...(sessionId !== undefined ? { sessionId } : {}),
             ...(options.delta === true && sessionId !== undefined ? { delta: true } : {}),
           };
+          // The hook path sends the memory block once per context window: a session start or a compaction opens one, its first prompt sends the block, and later prompts send nothing because the block is already in the host's context.
+          const promptWindow = options.hookStdin === true && sessionId !== undefined ? { dbPath: resolveDbPath(), sessionId } : undefined;
+          if (promptWindow !== undefined && options.delta !== true) {
+            try {
+              resetPromptBlock(promptWindow.dbPath, promptWindow.sessionId);
+            } catch {
+              // A marker this reset could not remove holds the block back until a later reset succeeds.
+            }
+          }
+          if (promptWindow !== undefined && options.delta === true && promptBlockSent(promptWindow.dbPath, promptWindow.sessionId)) {
+            return;
+          }
           const result = await buildHintFormat(hintOptions);
           process.stdout.write(`${result.header}\n`);
           for (const line of result.lines) {
             process.stdout.write(`${line}\n`);
+          }
+          if (promptWindow !== undefined && options.delta === true && result.outcome === "ok") {
+            try {
+              markPromptBlockSent(promptWindow.dbPath, promptWindow.sessionId);
+            } catch {
+              // Fail open: without the marker the next prompt in this window sends the block again.
+            }
           }
           // After the output is written, and never allowed to change it or the exit code: the log is a diagnostic, and a failure to write it is not worth a hook's run.
           try {
@@ -2191,6 +2211,14 @@ export function buildProgram(): Command {
     .action(
       guard(async (options: ScanSessionCliOptions) => {
         const envelope = options.hookStdin === true ? await readHookEnvelope() : {};
+        // The PreCompact hook runs this: a compaction opens a new context window, so the next prompt sends the memory block again.
+        if (options.hookStdin === true && envelope.sessionId !== undefined) {
+          try {
+            resetPromptBlock(resolveDbPath(), envelope.sessionId);
+          } catch {
+            // A session start resets the window too, so a failed reset only delays the block until then.
+          }
+        }
         const transcriptPath = options.transcript ?? envelope.transcriptPath;
         if (transcriptPath === undefined) {
           throw new UsageError("scan-session needs a transcript: pass --transcript <path> or --hook-stdin");

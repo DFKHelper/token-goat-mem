@@ -4,6 +4,10 @@ All notable changes to Token-Goat Mem are documented in this file. **This file i
 
 ## [Unreleased]
 
+### Changed
+
+- **The hook sends the memory block once per context window, not on every prompt.** `mem hook user-prompt-submit` sends the block on the first prompt after a session start or a compaction and nothing on the prompts after it, since the block is already in the host's context. A session start, or the PreCompact hook, opens a new window. A session id that is not a plain token keeps the old behaviour of sending it on every prompt.
+
 ## [0.6.0] - 2026-10-21
 
 ### Added
